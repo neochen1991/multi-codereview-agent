@@ -1,0 +1,293 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Avatar, Button, Empty, Tag, Typography } from "antd";
+
+import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services/api";
+
+const { Paragraph, Text } = Typography;
+
+export type ReviewDialogueViewMessage = {
+  id: string;
+  timeText: string;
+  agentName: string;
+  side: "agent" | "system";
+  isMainAgent?: boolean;
+  messageKind: "chat" | "tool" | "command" | "status";
+  phase: string;
+  eventType: string;
+  status: "streaming" | "done" | "error";
+  summary: string;
+  detail: string;
+  metadata: Record<string, unknown>;
+  headerNote?: string;
+};
+
+type Props = {
+  messages: ConversationMessage[];
+  review?: ReviewSummary | null;
+  events?: ReviewEvent[];
+};
+
+const normalizeText = (value: string): string =>
+  value
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.replace(/^\s{0,3}#{1,6}\s+/, "").replace(/^\s*[-*]\s+/, "• "))
+    .join("\n");
+
+const buildCompactDetail = (value: string): { text: string; truncated: boolean } => {
+  const normalized = normalizeText(value || "");
+  const lines = normalized.split("\n").map((line) => line.trim()).filter(Boolean);
+  const compact = lines.slice(0, 3).join("\n");
+  if (compact.length > 220) return { text: `${compact.slice(0, 220).trim()}...`, truncated: true };
+  return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
+};
+
+const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => {
+  const metadata = message.metadata || {};
+  const eventType = message.message_type;
+  let messageKind: ReviewDialogueViewMessage["messageKind"] = "chat";
+  if (eventType === "main_agent_command") messageKind = "command";
+  if (eventType === "judge_summary" || eventType === "main_agent_summary") messageKind = "status";
+  if (eventType === "expert_tool_call" || eventType === "expert_skill_call" || String(metadata.tool_name || "")) messageKind = "tool";
+  const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
+  const lineStart = typeof metadata.line_start === "number" ? metadata.line_start : 0;
+  const targetExpertId = typeof metadata.target_expert_id === "string" ? metadata.target_expert_id : "";
+  const targetExpertName = typeof metadata.target_expert_name === "string" ? metadata.target_expert_name : "";
+  const replyToExpertId = typeof metadata.reply_to_expert_id === "string" ? metadata.reply_to_expert_id : "";
+  const model = typeof metadata.model === "string" ? metadata.model : "";
+  const mode = typeof metadata.mode === "string" ? metadata.mode : "";
+  const summaryParts: string[] = [];
+  if (eventType === "main_agent_command") {
+    summaryParts.push(`主Agent 点名 ${targetExpertName || targetExpertId} 处理这段代码`);
+  } else if (eventType === "expert_ack") {
+    summaryParts.push(`${message.expert_id} 已接单，准备开始分析`);
+  } else if (eventType === "expert_analysis") {
+    summaryParts.push(`${message.expert_id} 已提交首轮分析`);
+  } else if (eventType === "expert_tool_call") {
+    summaryParts.push(`${message.expert_id} 正在调用工具 ${String(metadata.tool_name || "")}`);
+  } else if (eventType === "expert_skill_call") {
+    summaryParts.push(`${message.expert_id} 正在调用技能 ${String(metadata.skill_name || "")}`);
+  } else if (eventType === "debate_message") {
+    summaryParts.push(`${message.expert_id} 正在回应 ${replyToExpertId || "上一位专家"}`);
+  } else if (eventType === "judge_summary") {
+    summaryParts.push("Judge 正在收敛本轮议题");
+  } else if (eventType === "main_agent_summary") {
+    summaryParts.push("主Agent 已输出最终收敛播报");
+  }
+  if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
+  if (filePath) summaryParts.push(`定位：${filePath}${lineStart ? `:${lineStart}` : ""}`);
+  const messageStatus =
+    mode === "pending" ? "streaming" : mode === "fallback" ? "error" : "done";
+  const detail = buildInvocationDetail(eventType, message.content, metadata);
+  return {
+    id: message.message_id,
+    timeText: new Date(message.created_at).toLocaleString("zh-CN"),
+    agentName: message.expert_id,
+    side: message.expert_id === "main_agent" || message.expert_id === "judge" ? "system" : "agent",
+    isMainAgent: message.expert_id === "main_agent",
+    messageKind,
+    phase: String(metadata.phase || (message.expert_id === "judge" ? "judge" : "review")),
+    eventType,
+    status: messageStatus,
+    summary: summaryParts.join(" · ") || message.content.trim(),
+    detail,
+    metadata,
+    headerNote:
+      eventType === "main_agent_command"
+        ? `派工给 ${targetExpertName || targetExpertId || "指定专家"}`
+        : replyToExpertId
+          ? `回应 ${replyToExpertId}`
+          : undefined,
+  };
+};
+
+const buildInvocationDetail = (
+  eventType: string,
+  content: string,
+  metadata: Record<string, unknown>,
+): string => {
+  if (eventType === "expert_tool_call") {
+    const toolName = typeof metadata.tool_name === "string" ? metadata.tool_name : "tool";
+    const toolResult = metadata.tool_result;
+    return formatInvocationDetail(`工具 ${toolName}`, content, toolResult);
+  }
+  if (eventType === "expert_skill_call") {
+    const skillName = typeof metadata.skill_name === "string" ? metadata.skill_name : "skill";
+    const skillResult = metadata.skill_result;
+    return formatInvocationDetail(`技能 ${skillName}`, content, skillResult);
+  }
+  return content;
+};
+
+const formatInvocationDetail = (label: string, summary: string, result: unknown): string => {
+  const lines = [summary];
+  if (result && typeof result === "object") {
+    const payload = result as Record<string, unknown>;
+    Object.entries(payload).forEach(([key, value]) => {
+      if (key === "summary" || value == null) return;
+      if (typeof value === "string") {
+        lines.push(`${key}: ${value}`);
+        return;
+      }
+      if (Array.isArray(value)) {
+        lines.push(`${key}: ${value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(" | ")}`);
+        return;
+      }
+      lines.push(`${key}: ${JSON.stringify(value)}`);
+    });
+  }
+  return `${label}\n${lines.join("\n")}`;
+};
+
+const buildLiveWaitingRow = (
+  review?: ReviewSummary | null,
+  events?: ReviewEvent[],
+): ReviewDialogueViewMessage | null => {
+  if (!review || !["pending", "running"].includes(review.status)) return null;
+  const latestEvent = events && events.length > 0 ? events[events.length - 1] : null;
+  const phase = String(review.phase || latestEvent?.phase || "intake");
+  const createdAt = latestEvent?.created_at || review.updated_at || review.created_at || new Date().toISOString();
+  let summary = "主Agent 正在读取本次变更并拆解专家任务";
+  let detail =
+    "系统已启动实时审核，正在拉取 diff、识别关键文件，并为第一位专家生成带文件和行号的审查指令。";
+  if (phase === "coordination") {
+    summary = "主Agent 正在整理首轮派工";
+    detail = "主Agent 正在根据改动文件、风险提示和专家职责生成首批派工消息，首条对话会在模型返回后立即显示。";
+  } else if (phase === "expert_review") {
+    summary = "首位专家已进入审查，正在等待第一条分析回复";
+    detail = "系统已经完成派工并收到专家接单，当前正在等待首位专家返回结构化分析结果。";
+  } else if (phase === "queued") {
+    summary = "审核任务已进入执行队列，准备启动主Agent";
+    detail = "系统正在初始化实时审核上下文，马上会进入主Agent 拆解任务和派工阶段。";
+  }
+  return {
+    id: "system-live-waiting",
+    timeText: new Date(createdAt).toLocaleString("zh-CN"),
+    agentName: "system",
+    side: "system",
+    isMainAgent: false,
+    messageKind: "status",
+    phase,
+    eventType: "system_waiting",
+    status: "streaming",
+    summary,
+    detail,
+    metadata: {
+      phase,
+      mode: "pending",
+    },
+    headerNote: "实时运行中",
+  };
+};
+
+const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }) => {
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rows = useMemo(
+    () =>
+      messages
+        .slice()
+        .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+        .map(mapMessage),
+    [messages],
+  );
+  const liveWaitingRow = useMemo(() => buildLiveWaitingRow(review, events), [events, review]);
+  const displayRows = rows.length === 0 && liveWaitingRow ? [liveWaitingRow] : rows;
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+  }, [displayRows.length]);
+
+  if (displayRows.length === 0) {
+    return <Empty description="暂无专家对话流。" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+  }
+
+  return (
+    <div ref={scrollRef} className="dialogue-stream dialogue-stream-scroll discord-thread">
+      {displayRows.map((row) => {
+        const compact = buildCompactDetail(row.detail);
+        const isExpanded = Boolean(expandedIds[row.id]);
+        const filePath = typeof row.metadata.file_path === "string" ? row.metadata.file_path : "";
+        const lineStart = typeof row.metadata.line_start === "number" ? row.metadata.line_start : 0;
+        const targetExpertId = typeof row.metadata.target_expert_id === "string" ? row.metadata.target_expert_id : "";
+        const targetExpertName = typeof row.metadata.target_expert_name === "string" ? row.metadata.target_expert_name : "";
+        const replyToExpertId = typeof row.metadata.reply_to_expert_id === "string" ? row.metadata.reply_to_expert_id : "";
+        const toolName = typeof row.metadata.tool_name === "string" ? row.metadata.tool_name : "";
+        const skillName = typeof row.metadata.skill_name === "string" ? row.metadata.skill_name : "";
+        const provider = typeof row.metadata.provider === "string" ? row.metadata.provider : "";
+        const model = typeof row.metadata.model === "string" ? row.metadata.model : "";
+        const mode = typeof row.metadata.mode === "string" ? row.metadata.mode : "";
+        const lineLabel = lineStart ? `L${lineStart}` : "";
+        return (
+          <div
+            key={row.id}
+            className={`dialogue-row dialogue-row-${row.messageKind} ${row.side === "agent" ? "dialogue-row-agent" : "dialogue-row-system"} ${
+              row.isMainAgent ? "dialogue-row-main-agent" : ""
+            }`}
+          >
+            <Avatar size="small" className={`dialogue-avatar dialogue-avatar-${row.messageKind}`}>
+              {row.agentName.slice(0, 1).toUpperCase()}
+            </Avatar>
+            <div className={`dialogue-message dialogue-status-${row.status}`}>
+              <div className="dialogue-meta">
+                <Text className="dialogue-username">{row.agentName}</Text>
+                {row.isMainAgent ? <Tag className="dialogue-main-badge">主Agent</Tag> : null}
+                <Text className="dialogue-time">{row.timeText}</Text>
+                <Tag className={`dialogue-kind-tag dialogue-kind-tag-${row.messageKind}`}>
+                  {row.messageKind === "command" ? "派工" : row.messageKind === "status" ? "收敛" : row.messageKind === "tool" ? "工具" : "对话"}
+                </Tag>
+                {row.headerNote ? <Tag className="dialogue-tag dialogue-tag-focus">{row.headerNote}</Tag> : null}
+                <Tag className="dialogue-tag">{row.eventType}</Tag>
+                {targetExpertId ? <Tag className="dialogue-tag dialogue-tag-target">{`to ${targetExpertName || targetExpertId}`}</Tag> : null}
+                {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`reply ${replyToExpertId}`}</Tag> : null}
+                {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${toolName}`}</Tag> : null}
+                {skillName ? <Tag className="dialogue-tag dialogue-tag-target">{`skill ${skillName}`}</Tag> : null}
+                {filePath ? <Tag className="dialogue-tag">{filePath}</Tag> : null}
+                {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
+                {model ? <Tag className="dialogue-tag dialogue-tag-model">{model}</Tag> : null}
+                {provider ? <Tag className="dialogue-tag">{provider}</Tag> : null}
+                {mode ? (
+                  <Tag
+                    className={`dialogue-tag ${
+                      mode === "fallback"
+                        ? "dialogue-tag-fallback"
+                        : mode === "pending"
+                          ? "dialogue-tag-pending"
+                          : "dialogue-tag-live"
+                    }`}
+                  >
+                    {mode}
+                  </Tag>
+                ) : null}
+              </div>
+              <Paragraph className="dialogue-summary">{row.summary}</Paragraph>
+              <pre className={`dialogue-content dialogue-content-${row.messageKind}`}>
+                {isExpanded ? row.detail : compact.text || "暂无更多上下文"}
+              </pre>
+              {(compact.truncated || row.detail.length > compact.text.length) && (
+                <Button
+                  type="link"
+                  size="small"
+                  className="dialogue-expand-btn"
+                  style={{ paddingInline: 0, marginTop: 6 }}
+                  onClick={() =>
+                    setExpandedIds((prev) => ({
+                      ...prev,
+                      [row.id]: !prev[row.id],
+                    }))
+                  }
+                >
+                  {isExpanded ? "收起详情" : "展开详情"}
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+export default ReviewDialogueStream;

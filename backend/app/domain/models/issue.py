@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def build_issue_id() -> str:
+    return f"iss_{uuid4().hex[:12]}"
+
+
+class DebateIssue(BaseModel):
+    issue_id: str = Field(default_factory=build_issue_id)
+    review_id: str
+    title: str
+    summary: str
+    file_path: str = ""
+    line_start: int = 1
+    status: str = "open"
+    severity: str = "medium"
+    confidence: float = 0.72
+    finding_ids: list[str] = Field(default_factory=list)
+    participant_expert_ids: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    needs_human: bool = False
+    verified: bool = False
+    needs_debate: bool = False
+    verifier_name: str = ""
+    tool_name: str = ""
+    tool_verified: bool = False
+    human_decision: str = "pending"
+    resolution: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
