@@ -592,6 +592,15 @@ class ReviewRunner:
             allow_fallback=self._allow_llm_fallback(runtime_settings),
             timeout_seconds=float(llm_request_options["timeout_seconds"]),
             max_attempts=int(llm_request_options["max_attempts"]),
+            log_context={
+                "review_id": review.review_id,
+                "issue_id": "review_orchestration",
+                "expert_id": expert.expert_id,
+                "phase": "expert_review",
+                "analysis_mode": analysis_mode,
+                "file_path": file_path,
+                "line_start": line_start,
+            },
         )
         parsed = self._parse_expert_analysis(
             llm_result.text,
@@ -746,6 +755,16 @@ class ReviewRunner:
                     allow_fallback=self._allow_llm_fallback(runtime_settings),
                     timeout_seconds=float(llm_request_options["timeout_seconds"]),
                     max_attempts=int(llm_request_options["max_attempts"]),
+                    log_context={
+                        "review_id": review.review_id,
+                        "issue_id": issue.issue_id,
+                        "expert_id": participant_id,
+                        "phase": "debate",
+                        "analysis_mode": analysis_mode,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "debate_turn": index + 1,
+                    },
                 )
                 self.message_repo.append(
                     ConversationMessage(

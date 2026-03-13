@@ -152,6 +152,12 @@ class MainAgentService:
             allow_fallback=self._allow_fallback(runtime_settings),
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
+            log_context={
+                "review_id": review.review_id,
+                "agent_id": self.agent_id,
+                "phase": "final_summary",
+                "analysis_mode": review.analysis_mode,
+            },
         )
         return result.text.strip(), self._llm_metadata(result)
 
