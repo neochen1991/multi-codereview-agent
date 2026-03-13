@@ -124,6 +124,9 @@ class MainAgentService:
         review: ReviewTask,
         issues: list[DebateIssue],
         runtime_settings: RuntimeSettings,
+        *,
+        timeout_seconds: float = 60.0,
+        max_attempts: int = 3,
     ) -> tuple[str, dict[str, object]]:
         blocker_count = len([issue for issue in issues if issue.severity in {"blocker", "critical"}])
         pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
@@ -147,6 +150,8 @@ class MainAgentService:
             runtime_settings=runtime_settings,
             fallback_text=fallback_text,
             allow_fallback=self._allow_fallback(runtime_settings),
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
         )
         return result.text.strip(), self._llm_metadata(result)
 

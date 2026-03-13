@@ -21,9 +21,17 @@
   },
   "runtime": {
     "default_target_branch": "develop",
+    "default_analysis_mode": "standard",
     "allow_llm_fallback": false,
     "allow_human_gate": true,
-    "default_max_debate_rounds": 3
+    "default_max_debate_rounds": 3,
+    "standard_llm_timeout_seconds": 60,
+    "standard_llm_retry_count": 3,
+    "standard_max_parallel_experts": 4,
+    "light_llm_timeout_seconds": 180,
+    "light_llm_retry_count": 2,
+    "light_max_parallel_experts": 1,
+    "light_max_debate_rounds": 1
   },
   "network": {
     "verify_ssl": true,

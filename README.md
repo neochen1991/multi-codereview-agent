@@ -68,6 +68,14 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .
 ```
 
+Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `httpx>=0.27`。如果依赖缺失或版本过旧，会自动执行：
+
+```bat
+.venv\Scripts\python.exe -m pip install -e .
+```
+
+这可以直接修复类似 `unexpected keyword argument verify` 这种由旧版 `httpx` 引起的问题。
+
 ## 统一配置
 
 项目根目录提供一份用户可直接编辑的配置文件：

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
+from typing import Literal
 
 import app.services.review_service as review_service_module
 
@@ -10,6 +11,7 @@ router = APIRouter()
 
 class CreateReviewRequest(BaseModel):
     subject_type: str
+    analysis_mode: Literal["standard", "light"] = "standard"
     repo_id: str = ""
     project_id: str = ""
     source_ref: str = ""

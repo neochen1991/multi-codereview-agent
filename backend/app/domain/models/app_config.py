@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -32,9 +34,17 @@ class CodeRepoConfig(BaseModel):
 
 class RuntimeConfig(BaseModel):
     default_target_branch: str = "main"
+    default_analysis_mode: Literal["standard", "light"] = "standard"
     allow_llm_fallback: bool = False
     allow_human_gate: bool = True
     default_max_debate_rounds: int = 2
+    standard_llm_timeout_seconds: int = 60
+    standard_llm_retry_count: int = 3
+    standard_max_parallel_experts: int = 4
+    light_llm_timeout_seconds: int = 120
+    light_llm_retry_count: int = 2
+    light_max_parallel_experts: int = 1
+    light_max_debate_rounds: int = 1
 
 
 class NetworkConfig(BaseModel):
@@ -86,9 +96,17 @@ class AppConfig(BaseModel):
             ),
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
+                default_analysis_mode=runtime.default_analysis_mode,
                 allow_llm_fallback=runtime.allow_llm_fallback,
                 allow_human_gate=runtime.allow_human_gate,
                 default_max_debate_rounds=runtime.default_max_debate_rounds,
+                standard_llm_timeout_seconds=runtime.standard_llm_timeout_seconds,
+                standard_llm_retry_count=runtime.standard_llm_retry_count,
+                standard_max_parallel_experts=runtime.standard_max_parallel_experts,
+                light_llm_timeout_seconds=runtime.light_llm_timeout_seconds,
+                light_llm_retry_count=runtime.light_llm_retry_count,
+                light_max_parallel_experts=runtime.light_max_parallel_experts,
+                light_max_debate_rounds=runtime.light_max_debate_rounds,
             ),
             network=NetworkConfig(
                 verify_ssl=runtime.verify_ssl,
@@ -106,6 +124,7 @@ class AppConfig(BaseModel):
     def to_runtime_settings(self) -> RuntimeSettings:
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
+            default_analysis_mode=self.runtime.default_analysis_mode,
             code_repo_clone_url=self.code_repo.clone_url,
             code_repo_local_path=self.code_repo.local_path,
             code_repo_default_branch=self.code_repo.default_branch,
@@ -117,6 +136,13 @@ class AppConfig(BaseModel):
             agent_allowlist=list(self.allowlist.agents),
             allow_human_gate=self.runtime.allow_human_gate,
             default_max_debate_rounds=self.runtime.default_max_debate_rounds,
+            standard_llm_timeout_seconds=self.runtime.standard_llm_timeout_seconds,
+            standard_llm_retry_count=self.runtime.standard_llm_retry_count,
+            standard_max_parallel_experts=self.runtime.standard_max_parallel_experts,
+            light_llm_timeout_seconds=self.runtime.light_llm_timeout_seconds,
+            light_llm_retry_count=self.runtime.light_llm_retry_count,
+            light_max_parallel_experts=self.runtime.light_max_parallel_experts,
+            light_max_debate_rounds=self.runtime.light_max_debate_rounds,
             default_llm_provider=self.llm.default_provider,
             default_llm_base_url=self.llm.default_base_url,
             default_llm_model=self.llm.default_model,

@@ -1,5 +1,5 @@
 import React from "react";
-import { Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Row, Switch, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Row, Select, Switch, Typography, message } from "antd";
 
 import { expertApi, settingsApi, type ExpertProfile, type RuntimeSettings } from "@/services/api";
 
@@ -74,6 +74,7 @@ const SettingsPage: React.FC = () => {
             try {
               await settingsApi.updateRuntime({
                 default_target_branch: values.default_target_branch,
+                default_analysis_mode: values.default_analysis_mode || "standard",
                 code_repo_clone_url: values.code_repo_clone_url || "",
                 code_repo_local_path: values.code_repo_local_path || "",
                 code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
@@ -85,6 +86,13 @@ const SettingsPage: React.FC = () => {
                 agent_allowlist: parseList(String(values.agent_allowlist || "")),
                 allow_human_gate: Boolean(values.allow_human_gate),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
+                standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
+                standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
+                standard_max_parallel_experts: Number(values.standard_max_parallel_experts || 4),
+                light_llm_timeout_seconds: Number(values.light_llm_timeout_seconds || 120),
+                light_llm_retry_count: Number(values.light_llm_retry_count || 2),
+                light_max_parallel_experts: Number(values.light_max_parallel_experts || 1),
+                light_max_debate_rounds: Number(values.light_max_debate_rounds || 1),
                 default_llm_provider: values.default_llm_provider || "dashscope-openai-compatible",
                 default_llm_base_url: values.default_llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
                 default_llm_model: values.default_llm_model || "kimi-k2.5",
@@ -107,6 +115,14 @@ const SettingsPage: React.FC = () => {
         >
           <Form.Item name="default_target_branch" label="默认目标分支">
             <Input placeholder="main" />
+          </Form.Item>
+          <Form.Item name="default_analysis_mode" label="默认审核模式">
+            <Select
+              options={[
+                { label: "标准模式", value: "standard" },
+                { label: "轻量模式", value: "light" },
+              ]}
+            />
           </Form.Item>
           <Form.Item name="code_repo_clone_url" label="代码仓 Git 地址">
             <Input placeholder="https://github.com/org/repo.git" />
@@ -166,6 +182,27 @@ const SettingsPage: React.FC = () => {
           </Form.Item>
           <Form.Item name="default_max_debate_rounds" label="默认辩论轮次">
             <InputNumber min={1} max={6} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="standard_llm_timeout_seconds" label="标准模式 LLM 超时（秒）">
+            <InputNumber min={10} max={300} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="standard_llm_retry_count" label="标准模式 LLM 重试次数">
+            <InputNumber min={1} max={5} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="standard_max_parallel_experts" label="标准模式最大并发专家数">
+            <InputNumber min={1} max={8} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="light_llm_timeout_seconds" label="轻量模式 LLM 超时（秒）">
+            <InputNumber min={10} max={600} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="light_llm_retry_count" label="轻量模式 LLM 重试次数">
+            <InputNumber min={1} max={5} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="light_max_parallel_experts" label="轻量模式最大并发专家数">
+            <InputNumber min={1} max={4} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="light_max_debate_rounds" label="轻量模式最大辩论轮次">
+            <InputNumber min={1} max={3} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item name="default_llm_provider" label="默认 LLM Provider">
             <Input placeholder="dashscope-openai-compatible" />

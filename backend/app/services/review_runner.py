@@ -6,6 +6,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from app.config import settings
@@ -103,15 +104,22 @@ class ReviewRunner:
         )
 
         runtime_settings = self.runtime_settings_service.get()
+        analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
+        effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
+        llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
         selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
         enabled_experts = self.registry.list_enabled()
         experts = [expert for expert in enabled_experts if expert.expert_id in selected_ids]
         logger.info(
-            "review execution review_id=%s selected_experts=%s enabled_experts=%s matched_experts=%s",
+            "review execution review_id=%s analysis_mode=%s selected_experts=%s enabled_experts=%s matched_experts=%s llm_timeout=%s llm_retries=%s max_parallel=%s",
             review.review_id,
+            analysis_mode,
             selected_ids,
             [expert.expert_id for expert in enabled_experts],
             [expert.expert_id for expert in experts],
+            llm_request_options["timeout_seconds"],
+            llm_request_options["max_attempts"],
+            self._max_parallel_experts(effective_runtime_settings, analysis_mode),
         )
         if not experts:
             reason = (
@@ -155,7 +163,7 @@ class ReviewRunner:
             command = self.main_agent_service.build_command(
                 review.subject,
                 expert,
-                runtime_settings,
+                effective_runtime_settings,
             )
             expert_id = expert.expert_id
             file_path = str(command.get("file_path") or self._pick_file_path(review.subject, expert_id))
@@ -239,12 +247,14 @@ class ReviewRunner:
                     "command_message": command_message,
                     "file_path": file_path,
                     "line_start": line_start,
-                    "runtime_settings": runtime_settings,
+                    "runtime_settings": effective_runtime_settings,
+                    "analysis_mode": analysis_mode,
+                    "llm_request_options": llm_request_options,
                     "finding_payloads": finding_payloads,
                 }
             )
 
-        self._execute_expert_jobs(expert_jobs)
+        self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
         if not expert_jobs:
             reason = "未获取到真实 diff 或有效变更文件，无法启动专家分析。"
             logger.error(
@@ -283,6 +293,7 @@ class ReviewRunner:
                 "review_id": review_id,
                 "phase": "ingest",
                 "subject_type": review.subject.subject_type,
+                "analysis_mode": analysis_mode,
                 "changed_files": review.subject.changed_files,
                 "unified_diff": review.subject.unified_diff,
                 "selected_experts": selected_ids,
@@ -325,7 +336,9 @@ class ReviewRunner:
                 review=review,
                 issue=issue,
                 experts_by_id=experts_by_id,
-                runtime_settings=runtime_settings,
+                runtime_settings=effective_runtime_settings,
+                analysis_mode=analysis_mode,
+                llm_request_options=llm_request_options,
             )
 
         pending_human_issue_ids = [issue.issue_id for issue in issues if issue.needs_human]
@@ -373,7 +386,9 @@ class ReviewRunner:
         final_summary, final_llm = self.main_agent_service.build_final_summary(
             review,
             issues,
-            runtime_settings,
+            effective_runtime_settings,
+            timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            max_attempts=int(llm_request_options["max_attempts"]),
         )
         self.message_repo.append(
             ConversationMessage(
@@ -417,14 +432,19 @@ class ReviewRunner:
         self.artifact_service.publish(review, issues)
         return review
 
-    def _execute_expert_jobs(self, expert_jobs: list[dict[str, object]]) -> None:
+    def _execute_expert_jobs(
+        self,
+        expert_jobs: list[dict[str, object]],
+        runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+    ) -> None:
         if not expert_jobs:
             return
         if os.getenv("PYTEST_CURRENT_TEST") or len(expert_jobs) <= 1:
             for job in expert_jobs:
                 self._run_expert_from_command(**job)
             return
-        max_workers = min(4, len(expert_jobs))
+        max_workers = min(self._max_parallel_experts(runtime_settings, analysis_mode), len(expert_jobs))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(self._run_expert_from_command, **job) for job in expert_jobs]
             for future in futures:
@@ -439,6 +459,8 @@ class ReviewRunner:
         file_path: str,
         line_start: int,
         runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+        llm_request_options: dict[str, int | float],
         finding_payloads: list[dict[str, object]],
     ) -> None:
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
@@ -568,6 +590,8 @@ class ReviewRunner:
             runtime_settings=runtime_settings,
             fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
             allow_fallback=self._allow_llm_fallback(runtime_settings),
+            timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            max_attempts=int(llm_request_options["max_attempts"]),
         )
         parsed = self._parse_expert_analysis(
             llm_result.text,
@@ -638,6 +662,7 @@ class ReviewRunner:
                     "finding_type": finding.finding_type,
                     "context_files": finding.context_files,
                     "assumptions": finding.assumptions,
+                    "analysis_mode": analysis_mode,
                     **self._llm_message_metadata(llm_result),
                 },
             )
@@ -660,6 +685,8 @@ class ReviewRunner:
         issue: DebateIssue,
         experts_by_id: dict[str, ExpertProfile],
         runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+        llm_request_options: dict[str, int | float],
     ) -> None:
         self.event_repo.append(
             ReviewEvent(
@@ -670,8 +697,10 @@ class ReviewRunner:
                 payload={"issue_id": issue.issue_id, "status": issue.status},
             )
         )
-        debate_participants = issue.participant_expert_ids[:2] or ["correctness_business", "architecture_design"]
+        max_debate_rounds = max(1, int(runtime_settings.default_max_debate_rounds or 1))
+        debate_participants = issue.participant_expert_ids[:max_debate_rounds] or ["correctness_business", "architecture_design"]
         debate_participants = [item for item in debate_participants if item in experts_by_id] or list(experts_by_id)[:2]
+        debate_participants = debate_participants[:max_debate_rounds]
         previous_expert_id = self.main_agent_service.agent_id
         issue_file_path = issue.file_path or self._pick_file_path(review.subject, debate_participants[0] if debate_participants else "correctness_business")
         issue_line_start = issue.line_start or self.diff_excerpt_service.find_nearest_line(
@@ -715,6 +744,8 @@ class ReviewRunner:
                         line_start,
                     ),
                     allow_fallback=self._allow_llm_fallback(runtime_settings),
+                    timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                    max_attempts=int(llm_request_options["max_attempts"]),
                 )
                 self.message_repo.append(
                     ConversationMessage(
@@ -731,6 +762,7 @@ class ReviewRunner:
                             "line_start": line_start,
                             "reply_to_expert_id": previous_expert_id,
                             "debate_turn": index + 1,
+                            "analysis_mode": analysis_mode,
                             **self._llm_message_metadata(llm_result),
                         },
                     )
@@ -1427,3 +1459,45 @@ class ReviewRunner:
 
     def _allow_llm_fallback(self, runtime_settings) -> bool:
         return bool(getattr(runtime_settings, "allow_llm_fallback", False) or os.getenv("PYTEST_CURRENT_TEST"))
+
+    def _resolve_analysis_mode(self, review: ReviewTask, runtime_settings) -> Literal["standard", "light"]:
+        mode = str(getattr(review, "analysis_mode", "") or getattr(runtime_settings, "default_analysis_mode", "") or "standard").strip().lower()
+        if mode not in {"standard", "light"}:
+            return "standard"
+        return mode  # type: ignore[return-value]
+
+    def _effective_runtime_settings(self, runtime_settings, analysis_mode: Literal["standard", "light"]):
+        if analysis_mode != "light":
+            return runtime_settings
+        return runtime_settings.model_copy(
+            update={
+                "default_max_debate_rounds": min(
+                    int(getattr(runtime_settings, "default_max_debate_rounds", 1) or 1),
+                    int(getattr(runtime_settings, "light_max_debate_rounds", 1) or 1),
+                ),
+            }
+        )
+
+    def _build_llm_request_options(
+        self,
+        runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+    ) -> dict[str, int | float]:
+        if analysis_mode == "light":
+            return {
+                "timeout_seconds": max(30, int(getattr(runtime_settings, "light_llm_timeout_seconds", 120) or 120)),
+                "max_attempts": max(1, int(getattr(runtime_settings, "light_llm_retry_count", 2) or 2)),
+            }
+        return {
+            "timeout_seconds": max(20, int(getattr(runtime_settings, "standard_llm_timeout_seconds", 60) or 60)),
+            "max_attempts": max(1, int(getattr(runtime_settings, "standard_llm_retry_count", 3) or 3)),
+        }
+
+    def _max_parallel_experts(
+        self,
+        runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+    ) -> int:
+        if analysis_mode == "light":
+            return max(1, int(getattr(runtime_settings, "light_max_parallel_experts", 1) or 1))
+        return max(1, int(getattr(runtime_settings, "standard_max_parallel_experts", 4) or 4))

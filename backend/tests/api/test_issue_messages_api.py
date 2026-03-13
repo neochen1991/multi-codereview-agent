@@ -2,7 +2,7 @@ def test_issue_messages_endpoint_returns_thread_messages(client):
     created = client.post(
         "/api/reviews",
         json={
-            "subject_type": "mr",
+            "subject_type": "branch",
             "repo_id": "repo_1",
             "project_id": "proj_1",
             "source_ref": "feature/demo",

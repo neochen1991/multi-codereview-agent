@@ -58,6 +58,9 @@ class ReviewService:
     def create_review(self, payload: dict[str, object]) -> ReviewTask:
         review_id = f"rev_{uuid4().hex[:8]}"
         runtime_settings = self.get_runtime_settings()
+        analysis_mode = str(payload.pop("analysis_mode", runtime_settings.default_analysis_mode or "standard")).strip()
+        if analysis_mode not in {"standard", "light"}:
+            analysis_mode = runtime_settings.default_analysis_mode or "standard"
         selected_experts = [
             str(expert_id).strip()
             for expert_id in payload.pop("selected_experts", []) or []
@@ -71,13 +74,15 @@ class ReviewService:
             subject=subject,
             status="pending",
             phase="pending",
+            analysis_mode=analysis_mode,
             selected_experts=selected_experts or settings.DEFAULT_EXPERT_IDS,
         )
         self.review_repo.save(task)
         logger.info(
-            "review created review_id=%s subject_type=%s mr_url=%s selected_experts=%s",
+            "review created review_id=%s subject_type=%s analysis_mode=%s mr_url=%s selected_experts=%s",
             review_id,
             task.subject.subject_type,
+            task.analysis_mode,
             task.subject.mr_url,
             task.selected_experts,
         )
@@ -120,9 +125,10 @@ class ReviewService:
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
         logger.info(
-            "review queued review_id=%s phase=%s selected_experts=%s",
+            "review queued review_id=%s phase=%s analysis_mode=%s selected_experts=%s",
             review_id,
             review.phase,
+            review.analysis_mode,
             review.selected_experts,
         )
         self.event_repo.append(

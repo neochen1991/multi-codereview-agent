@@ -6,6 +6,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
         "/api/settings/runtime",
         json={
             "default_target_branch": "develop",
+            "default_analysis_mode": "light",
             "code_repo_clone_url": "https://github.com/example/repo.git",
             "code_repo_local_path": "/tmp/example-repo",
             "code_repo_default_branch": "release",
@@ -17,6 +18,13 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "agent_allowlist": ["judge"],
             "allow_human_gate": True,
             "default_max_debate_rounds": 3,
+            "standard_llm_timeout_seconds": 75,
+            "standard_llm_retry_count": 4,
+            "standard_max_parallel_experts": 3,
+            "light_llm_timeout_seconds": 180,
+            "light_llm_retry_count": 2,
+            "light_max_parallel_experts": 1,
+            "light_max_debate_rounds": 1,
             "default_llm_provider": "dashscope-openai-compatible",
             "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
             "default_llm_model": "kimi-k2.5",
@@ -31,12 +39,20 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert update.status_code == 200
     payload = update.json()
     assert payload["default_target_branch"] == "develop"
+    assert payload["default_analysis_mode"] == "light"
     assert payload["code_repo_clone_url"] == "https://github.com/example/repo.git"
     assert payload["code_repo_local_path"] == "/tmp/example-repo"
     assert payload["code_repo_default_branch"] == "release"
     assert payload["code_repo_auto_sync"] is True
     assert payload["code_repo_access_token_configured"] is True
     assert payload["default_max_debate_rounds"] == 3
+    assert payload["standard_llm_timeout_seconds"] == 75
+    assert payload["standard_llm_retry_count"] == 4
+    assert payload["standard_max_parallel_experts"] == 3
+    assert payload["light_llm_timeout_seconds"] == 180
+    assert payload["light_llm_retry_count"] == 2
+    assert payload["light_max_parallel_experts"] == 1
+    assert payload["light_max_debate_rounds"] == 1
     assert "schema_diff" in payload["tool_allowlist"]
     assert "frontend-design" in payload["skill_allowlist"]
     assert payload["default_llm_model"] == "kimi-k2.5"

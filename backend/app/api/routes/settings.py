@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from app.config import settings
 import app.services.review_service as review_service_module
@@ -11,6 +12,7 @@ router = APIRouter()
 
 class RuntimeSettingsRequest(BaseModel):
     default_target_branch: str = "main"
+    default_analysis_mode: Literal["standard", "light"] = "standard"
     code_repo_clone_url: str = ""
     code_repo_local_path: str = ""
     code_repo_default_branch: str = "main"
@@ -22,6 +24,13 @@ class RuntimeSettingsRequest(BaseModel):
     agent_allowlist: list[str] = Field(default_factory=list)
     allow_human_gate: bool = True
     default_max_debate_rounds: int = 2
+    standard_llm_timeout_seconds: int = 60
+    standard_llm_retry_count: int = 3
+    standard_max_parallel_experts: int = 4
+    light_llm_timeout_seconds: int = 120
+    light_llm_retry_count: int = 2
+    light_max_parallel_experts: int = 1
+    light_max_debate_rounds: int = 1
     default_llm_provider: str = settings.DEFAULT_LLM_PROVIDER
     default_llm_base_url: str = settings.DEFAULT_LLM_BASE_URL
     default_llm_model: str = settings.DEFAULT_LLM_MODEL

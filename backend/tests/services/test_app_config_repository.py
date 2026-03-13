@@ -18,9 +18,12 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
         runtime.model_copy(
             update={
                 "default_target_branch": "develop",
+                "default_analysis_mode": "light",
                 "default_llm_model": "kimi-k2.5",
                 "default_llm_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
                 "code_repo_access_token": "ghp_repo_token",
+                "light_llm_timeout_seconds": 180,
+                "light_max_parallel_experts": 1,
                 "verify_ssl": False,
                 "use_system_trust_store": False,
                 "ca_bundle_path": "C:/certs/custom.pem",
@@ -30,9 +33,12 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
 
     reloaded = FileAppConfigRepository(config_path=config_path, storage_root=storage_root).get_runtime_settings()
     assert reloaded.default_target_branch == "develop"
+    assert reloaded.default_analysis_mode == "light"
     assert reloaded.default_llm_model == "kimi-k2.5"
     assert reloaded.default_llm_api_key == "sk-sp-18ef22cce0a24275a54eb6d97574c366"
     assert reloaded.code_repo_access_token == "ghp_repo_token"
+    assert reloaded.light_llm_timeout_seconds == 180
+    assert reloaded.light_max_parallel_experts == 1
     assert reloaded.verify_ssl is False
     assert reloaded.use_system_trust_store is False
     assert reloaded.ca_bundle_path == "C:/certs/custom.pem"
@@ -46,6 +52,7 @@ def test_app_config_repository_migrates_legacy_runtime_settings(tmp_path: Path):
         legacy_repository.get().model_copy(
             update={
                 "default_target_branch": "release",
+                "default_analysis_mode": "light",
                 "default_llm_model": "kimi-k2.5",
                 "code_repo_access_token": "ghp_from_legacy",
             }
@@ -56,6 +63,7 @@ def test_app_config_repository_migrates_legacy_runtime_settings(tmp_path: Path):
     migrated = repository.get_runtime_settings()
 
     assert migrated.default_target_branch == "release"
+    assert migrated.default_analysis_mode == "light"
     assert migrated.default_llm_model == "kimi-k2.5"
     assert migrated.code_repo_access_token == "ghp_from_legacy"
     assert config_path.exists()

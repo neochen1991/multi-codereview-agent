@@ -7,6 +7,7 @@ const { Text } = Typography;
 
 export type ReviewFormState = {
   subject_type: "mr" | "branch";
+  analysis_mode: "standard" | "light";
   mr_url: string;
   title: string;
   repo_id: string;
@@ -118,6 +119,18 @@ const ReviewOverviewPanel: React.FC<Props> = ({
             />
           </div>
           <div>
+            <Select
+              value={form.analysis_mode}
+              style={{ width: "100%" }}
+              disabled={readonly}
+              onChange={(value) => onChange({ analysis_mode: value })}
+              options={[
+                { label: "标准模式", value: "standard" },
+                { label: "轻量模式", value: "light" },
+              ]}
+            />
+          </div>
+          <div>
             <Input
               placeholder="Access Token（可选）"
               value={form.access_token}
@@ -177,6 +190,9 @@ const ReviewOverviewPanel: React.FC<Props> = ({
         <Divider style={{ margin: 0 }} />
         <Text type="secondary">
           主 Agent 会先根据 PR / MR / Commit 链接、改动文件和风险提示拆解任务，再向不同专家下发带文件/行号的审查指令。
+          {form.analysis_mode === "light"
+            ? " 当前为轻量模式：会提高 LLM 超时、降低并发和辩论轮次，更适合内网或 Windows 高延迟环境。"
+            : " 当前为标准模式：保留更完整的专家协作和深度分析。"}
         </Text>
 
         {readonly ? (

@@ -31,6 +31,7 @@ class ReviewTask(BaseModel):
     subject: ReviewSubject
     status: str
     phase: str = "pending"
+    analysis_mode: Literal["standard", "light"] = "standard"
     selected_experts: list[str] = Field(default_factory=list)
     human_review_status: str = "not_required"
     pending_human_issue_ids: list[str] = Field(default_factory=list)

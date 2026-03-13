@@ -38,6 +38,7 @@ const { Paragraph, Text, Title } = Typography;
 
 const defaultFormState: ReviewFormState = {
   subject_type: "mr",
+  analysis_mode: "standard",
   mr_url: "",
   title: "",
   repo_id: "",
@@ -92,6 +93,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setArtifacts(artifactBundle);
       setForm({
         subject_type: detail.subject.subject_type === "branch" ? "branch" : "mr",
+        analysis_mode: detail.analysis_mode === "light" ? "light" : "standard",
         mr_url: detail.subject.mr_url || "",
         title: detail.subject.title || "",
         repo_id: detail.subject.repo_id || "",
@@ -127,6 +129,7 @@ const ReviewWorkbenchPage: React.FC = () => {
         if (!reviewId) {
           setForm((current) => ({
             ...current,
+            analysis_mode: current.analysis_mode || runtime.default_analysis_mode || "standard",
             target_ref: current.target_ref || runtime.default_target_branch || "",
             selected_experts:
               current.selected_experts.length > 0 ? current.selected_experts : defaultFormState.selected_experts,
@@ -146,6 +149,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setArtifacts(null);
       setForm({
         ...defaultFormState,
+        analysis_mode: runtimeSettings?.default_analysis_mode || "standard",
         target_ref: runtimeSettings?.default_target_branch || "",
       });
       setKnowledgeDocs([]);
@@ -284,6 +288,7 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   const createPayload = (): Parameters<typeof reviewApi.create>[0] => ({
     subject_type: form.subject_type,
+    analysis_mode: form.analysis_mode,
     mr_url: form.mr_url.trim(),
     title: form.title.trim(),
     repo_id: form.repo_id.trim(),

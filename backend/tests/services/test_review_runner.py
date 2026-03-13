@@ -178,3 +178,28 @@ def test_review_runner_fails_when_remote_diff_is_missing(storage_root: Path):
     assert updated.status == "failed"
     assert updated.phase == "failed"
     assert "未获取到真实 diff" in (updated.failure_reason or "")
+
+
+def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.analysis_mode = "light"
+    runner.review_repo.save(review)
+
+    runtime = runner.runtime_settings_service.get().model_copy(
+        update={
+            "default_max_debate_rounds": 3,
+            "light_max_debate_rounds": 1,
+            "standard_max_parallel_experts": 4,
+            "light_max_parallel_experts": 1,
+        }
+    )
+
+    effective = runner._effective_runtime_settings(runtime, "light")
+    llm_options = runner._build_llm_request_options(runtime, "light")
+
+    assert effective.default_max_debate_rounds == 1
+    assert llm_options["timeout_seconds"] >= 120
+    assert runner._max_parallel_experts(runtime, "light") == 1

@@ -17,6 +17,13 @@ const formatDuration = (seconds?: number | null) => {
   return `${minutes}m ${remain}s`;
 };
 
+const formatAnalysisMode = (value?: string) => {
+  if (value === "light") {
+    return { label: "轻量模式", color: "gold" as const };
+  }
+  return { label: "标准模式", color: "blue" as const };
+};
+
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
@@ -64,6 +71,16 @@ const HistoryPage: React.FC = () => {
       key: "status",
       width: 120,
       render: (value: string) => <Tag>{value}</Tag>,
+    },
+    {
+      title: "模式",
+      dataIndex: "analysis_mode",
+      key: "analysis_mode",
+      width: 120,
+      render: (value?: string) => {
+        const mode = formatAnalysisMode(value);
+        return <Tag color={mode.color}>{mode.label}</Tag>;
+      },
     },
     {
       title: "人工裁决",

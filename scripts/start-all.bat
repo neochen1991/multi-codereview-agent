@@ -17,6 +17,7 @@ if not exist "%RUN_DIR%" mkdir "%RUN_DIR%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 call :check_python || exit /b 1
+call :ensure_backend_dependencies || exit /b 1
 call :check_node || exit /b 1
 call :ensure_frontend_dependencies || exit /b 1
 
@@ -59,6 +60,25 @@ if errorlevel 1 (
 where npm >nul 2>nul
 if errorlevel 1 (
   echo npm is not installed or not in PATH
+  exit /b 1
+)
+exit /b 0
+
+:ensure_backend_dependencies
+echo checking backend dependencies...
+"%VENV_PYTHON%" -c "import sys, httpx, fastapi, pydantic, yaml; parts = tuple(int(p) for p in httpx.__version__.split('.')[:2]); sys.exit(0 if parts >= (0, 27) else 1)" >nul 2>nul
+if not errorlevel 1 (
+  exit /b 0
+)
+
+echo backend dependencies missing or outdated, running pip install -e .
+pushd "%ROOT_DIR%" >nul
+call "%VENV_PYTHON%" -m pip install -e .
+set "PIP_EXIT=%ERRORLEVEL%"
+popd >nul
+
+if not "%PIP_EXIT%"=="0" (
+  echo backend dependency install failed
   exit /b 1
 )
 exit /b 0

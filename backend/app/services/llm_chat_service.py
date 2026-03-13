@@ -63,6 +63,8 @@ class LLMChatService:
         fallback_text: str,
         temperature: float = 0.2,
         allow_fallback: bool = False,
+        timeout_seconds: float = 60.0,
+        max_attempts: int = 3,
     ) -> LLMTextResult:
         api_key = (resolution.api_key or "").strip() or os.getenv(resolution.api_key_env, "").strip()
         if not api_key:
@@ -84,10 +86,12 @@ class LLMChatService:
         endpoint = resolution.base_url.rstrip("/") + "/chat/completions"
         payload = None
         last_error = ""
-        for attempt in range(1, 4):
+        safe_attempts = max(1, int(max_attempts or 1))
+        safe_timeout = max(10.0, float(timeout_seconds or 60.0))
+        for attempt in range(1, safe_attempts + 1):
             try:
                 with HttpClientFactory.create(
-                    timeout=httpx.Timeout(60.0, connect=10.0, read=60.0),
+                    timeout=httpx.Timeout(safe_timeout, connect=min(10.0, safe_timeout), read=safe_timeout),
                     runtime_settings=runtime_settings,
                 ) as client:
                     response = client.post(
@@ -103,12 +107,12 @@ class LLMChatService:
                     break
             except httpx.TimeoutException as exc:  # pragma: no cover - network dependent
                 last_error = f"request_timeout:{exc}"
-                if attempt < 3:
+                if attempt < safe_attempts:
                     time.sleep(1.5 * attempt)
                     continue
             except httpx.HTTPStatusError as exc:  # pragma: no cover - network dependent
                 last_error = f"http_status:{exc.response.status_code}"
-                if 500 <= exc.response.status_code < 600 and attempt < 3:
+                if 500 <= exc.response.status_code < 600 and attempt < safe_attempts:
                     time.sleep(1.5 * attempt)
                     continue
                 break

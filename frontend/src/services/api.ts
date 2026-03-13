@@ -9,6 +9,7 @@ export interface ReviewSummary {
   review_id: string;
   status: string;
   phase?: string;
+  analysis_mode?: "standard" | "light";
   failure_reason?: string;
   human_review_status?: string;
   pending_human_issue_ids?: string[];
@@ -184,6 +185,7 @@ export interface ExpertProfile {
 export interface RuntimeSettings {
   config_path?: string;
   default_target_branch: string;
+  default_analysis_mode: "standard" | "light";
   code_repo_clone_url: string;
   code_repo_local_path: string;
   code_repo_default_branch: string;
@@ -196,6 +198,13 @@ export interface RuntimeSettings {
   agent_allowlist: string[];
   allow_human_gate: boolean;
   default_max_debate_rounds: number;
+  standard_llm_timeout_seconds: number;
+  standard_llm_retry_count: number;
+  standard_max_parallel_experts: number;
+  light_llm_timeout_seconds: number;
+  light_llm_retry_count: number;
+  light_max_parallel_experts: number;
+  light_max_debate_rounds: number;
   default_llm_provider: string;
   default_llm_base_url: string;
   default_llm_model: string;
@@ -255,6 +264,7 @@ export interface ReviewArtifacts {
 export const reviewApi = {
   async create(payload: {
     subject_type: "mr" | "branch";
+    analysis_mode?: "standard" | "light";
     repo_id?: string;
     project_id?: string;
     source_ref?: string;
