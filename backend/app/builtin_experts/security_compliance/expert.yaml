@@ -1,0 +1,38 @@
+expert_id: security_compliance
+name: security-compliance
+name_zh: 安全与合规专家
+role: 关注权限、敏感信息和依赖风险
+enabled: true
+focus_areas:
+- 鉴权授权
+- 敏感数据
+- 输入校验
+activation_hints:
+- auth
+- security
+required_checks:
+- 权限边界是否被绕过
+out_of_scope:
+- 不要代替性能专家判断容量瓶颈
+preferred_artifacts:
+- diff hunk
+knowledge_sources:
+- security-review-checklist
+- auth-guideline
+tool_bindings:
+- local_diff
+mcp_tools: []
+skill_bindings:
+- knowledge_search
+- diff_inspector
+agent_bindings:
+- main_agent
+- judge
+max_tool_calls: 2
+max_debate_rounds: 3
+custom: false
+provider: null
+api_base_url: null
+api_key: null
+api_key_env: null
+model: null

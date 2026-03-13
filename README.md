@@ -78,6 +78,7 @@ py -3.11 -m venv .venv
 
 - 默认大模型配置
 - Git / 代码仓 Access Token
+- HTTPS 证书校验、系统证书库和 CA Bundle 路径
 - 代码仓 clone 地址、本地路径和目标分支
 - 工具、skill、agent allowlist
 - 默认辩论轮次和人工裁决开关
@@ -115,6 +116,11 @@ py -3.11 -m venv .venv
     "allow_human_gate": true,
     "default_max_debate_rounds": 2
   },
+  "network": {
+    "verify_ssl": true,
+    "use_system_trust_store": true,
+    "ca_bundle_path": ""
+  },
   "allowlist": {
     "tools": ["local_diff", "schema_diff", "coverage_diff"],
     "skills": [
@@ -129,6 +135,19 @@ py -3.11 -m venv .venv
   }
 }
 ```
+
+Windows 下如果访问 GitHub、DashScope 等 HTTPS 链接出现证书校验失败，优先在 `config.json` 或设置页里调整这 3 个字段：
+
+- `network.verify_ssl`
+- `network.use_system_trust_store`
+- `network.ca_bundle_path`
+
+推荐顺序是：
+
+- 先保持 `verify_ssl=true`
+- 再开启 `use_system_trust_store=true`
+- 如果是企业内网证书，再填写 `ca_bundle_path`
+- 只有排障时才临时把 `verify_ssl` 设为 `false`
 
 ## 后端单独启动
 

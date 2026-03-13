@@ -1,0 +1,32 @@
+expert_id: frontend_accessibility
+name: Frontend Accessibility Reviewer
+name_zh: 前端可访问性专家
+role: frontend ux / a11y
+enabled: true
+focus_areas:
+- accessibility
+- rendering
+- state management
+activation_hints: []
+required_checks: []
+out_of_scope: []
+preferred_artifacts: []
+knowledge_sources:
+- a11y-guidelines
+tool_bindings:
+- local_diff
+- coverage_diff
+mcp_tools:
+- playwright.snapshot
+skill_bindings:
+- frontend-design
+agent_bindings:
+- judge
+max_tool_calls: 4
+max_debate_rounds: 2
+custom: true
+provider: dashscope-openai-compatible
+api_base_url: https://coding.dashscope.aliyuncs.com/v1
+api_key: null
+api_key_env: DASHSCOPE_API_KEY
+model: kimi-k2.5

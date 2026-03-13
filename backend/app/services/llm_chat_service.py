@@ -9,6 +9,7 @@ import httpx
 from app.config import settings
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.http_client_factory import HttpClientFactory
 
 
 @dataclass
@@ -58,6 +59,7 @@ class LLMChatService:
         system_prompt: str,
         user_prompt: str,
         resolution: LLMResolution,
+        runtime_settings: RuntimeSettings | None = None,
         fallback_text: str,
         temperature: float = 0.2,
         allow_fallback: bool = False,
@@ -84,7 +86,10 @@ class LLMChatService:
         last_error = ""
         for attempt in range(1, 4):
             try:
-                with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0, read=60.0)) as client:
+                with HttpClientFactory.create(
+                    timeout=httpx.Timeout(60.0, connect=10.0, read=60.0),
+                    runtime_settings=runtime_settings,
+                ) as client:
                     response = client.post(
                         endpoint,
                         headers={

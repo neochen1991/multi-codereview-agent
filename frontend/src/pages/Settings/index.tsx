@@ -91,6 +91,9 @@ const SettingsPage: React.FC = () => {
                 default_llm_api_key_env: String(values.default_llm_api_key_env || "").trim() || undefined,
                 default_llm_api_key: String(values.default_llm_api_key || "").trim() || undefined,
                 allow_llm_fallback: Boolean(values.allow_llm_fallback),
+                verify_ssl: Boolean(values.verify_ssl),
+                use_system_trust_store: Boolean(values.use_system_trust_store),
+                ca_bundle_path: values.ca_bundle_path || "",
               });
               message.success("运行时设置已更新");
               form.setFieldValue("default_llm_api_key", "");
@@ -191,6 +194,15 @@ const SettingsPage: React.FC = () => {
           </Form.Item>
           <Form.Item name="allow_llm_fallback" label="允许 LLM Fallback" valuePropName="checked">
             <Switch />
+          </Form.Item>
+          <Form.Item name="verify_ssl" label="启用 HTTPS 证书校验" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="use_system_trust_store" label="优先使用系统证书库" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="ca_bundle_path" label="自定义 CA Bundle 路径">
+            <Input placeholder="C:\\certs\\corp-ca.pem" />
           </Form.Item>
           <Form.Item name="allow_human_gate" label="允许人工 Gate" valuePropName="checked">
             <Switch />

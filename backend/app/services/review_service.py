@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import os
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -31,6 +32,8 @@ from app.services.platform_adapter import PlatformAdapter
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_runner import ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewService:
@@ -62,7 +65,7 @@ class ReviewService:
         ]
         if not str(payload.get("access_token") or "").strip() and (runtime_settings.code_repo_access_token or "").strip():
             payload["access_token"] = runtime_settings.code_repo_access_token
-        subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload))
+        subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
         task = ReviewTask(
             review_id=review_id,
             subject=subject,
@@ -71,6 +74,13 @@ class ReviewService:
             selected_experts=selected_experts or settings.DEFAULT_EXPERT_IDS,
         )
         self.review_repo.save(task)
+        logger.info(
+            "review created review_id=%s subject_type=%s mr_url=%s selected_experts=%s",
+            review_id,
+            task.subject.subject_type,
+            task.subject.mr_url,
+            task.selected_experts,
+        )
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,
@@ -94,10 +104,12 @@ class ReviewService:
         if review is None:
             raise KeyError(review_id)
         if review.status in {"running", "waiting_human", "completed"}:
+            logger.info("review start skipped review_id=%s status=%s", review_id, review.status)
             return review
         with self._active_reviews_lock:
             if review_id in self._active_reviews:
                 refreshed = self.get_review(review_id)
+                logger.info("review already active review_id=%s", review_id)
                 return refreshed or review
             self._active_reviews.add(review_id)
 
@@ -107,6 +119,12 @@ class ReviewService:
             review.started_at = datetime.now(UTC)
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
+        logger.info(
+            "review queued review_id=%s phase=%s selected_experts=%s",
+            review_id,
+            review.phase,
+            review.selected_experts,
+        )
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,
@@ -118,12 +136,15 @@ class ReviewService:
 
         def _run_in_background() -> None:
             try:
+                logger.info("review background execution started review_id=%s", review_id)
                 self.runner.run_once(review_id)
             except Exception as exc:
+                logger.exception("review background execution failed review_id=%s error=%s", review_id, exc)
                 self._mark_failed(review_id, str(exc))
             finally:
                 with self._active_reviews_lock:
                     self._active_reviews.discard(review_id)
+                logger.info("review background execution finished review_id=%s", review_id)
 
         threading.Thread(target=_run_in_background, daemon=True).start()
         return review
@@ -142,6 +163,7 @@ class ReviewService:
         review.duration_seconds = self._duration_seconds(review.started_at, review.completed_at)
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
+        logger.error("review failed review_id=%s reason=%s", review_id, reason)
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,

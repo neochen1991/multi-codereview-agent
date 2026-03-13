@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
+from app.repositories.file_expert_repository import FileExpertRepository
 from app.services.review_runner import ReviewRunner
 
 
@@ -147,3 +148,18 @@ def test_review_runner_build_evidence_scopes_domain_hints_by_file(storage_root: 
     assert "database_migration" not in evidence
     assert "test_surface" not in evidence
     assert "transformer 未同步更新" in evidence
+
+
+def test_review_runner_fails_when_no_enabled_experts(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    repository = FileExpertRepository(storage_root / "experts")
+    for expert in repository.list():
+        repository.save(expert.model_copy(update={"enabled": False}))
+
+    review = runner.run_once(review_id)
+
+    assert review.status == "failed"
+    assert review.phase == "failed"
+    assert "没有可执行的专家" in (review.failure_reason or "")
+    assert any(event.event_type == "review_failed" for event in runner.list_events(review_id))

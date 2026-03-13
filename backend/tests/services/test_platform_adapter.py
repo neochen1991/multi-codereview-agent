@@ -51,7 +51,7 @@ def test_platform_adapter_normalizes_github_commit_url(monkeypatch):
     monkeypatch.setattr(
         adapter,
         "_fetch_remote_diff",
-        lambda review_url, access_token: (
+        lambda review_url, access_token, runtime_settings=None: (
             "diff --git a/backend/app/main.py b/backend/app/main.py\n"
             "--- a/backend/app/main.py\n"
             "+++ b/backend/app/main.py\n"
@@ -91,7 +91,7 @@ def test_platform_adapter_normalizes_github_pull_request_url(monkeypatch):
     monkeypatch.setattr(
         adapter,
         "_fetch_remote_diff",
-        lambda review_url, access_token: (
+        lambda review_url, access_token, runtime_settings=None: (
             "diff --git a/backend/app/api/orders.py b/backend/app/api/orders.py\n"
             "--- a/backend/app/api/orders.py\n"
             "+++ b/backend/app/api/orders.py\n"
@@ -159,7 +159,7 @@ def test_platform_adapter_fetch_remote_diff_follows_redirect(monkeypatch):
                 ),
             )
 
-    monkeypatch.setattr("app.services.platform_adapter.httpx.Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("app.services.platform_adapter.HttpClientFactory.create", lambda **kwargs: FakeClient())
 
     diff = adapter._fetch_remote_diff("https://github.com/example-org/payments-service/pull/128", "")
 
@@ -200,7 +200,7 @@ def test_platform_adapter_fetch_remote_diff_falls_back_to_diff_when_patch_fails(
                 ),
             )
 
-    monkeypatch.setattr("app.services.platform_adapter.httpx.Client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("app.services.platform_adapter.HttpClientFactory.create", lambda **kwargs: FakeClient())
 
     diff = adapter._fetch_remote_diff("https://github.com/example-org/payments-service/pull/128", "")
 

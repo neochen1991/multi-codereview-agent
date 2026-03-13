@@ -1,0 +1,40 @@
+expert_id: correctness_business
+name: correctness-business
+name_zh: 正确性与业务专家
+role: 关注业务正确性、边界条件和需求偏差
+enabled: true
+focus_areas:
+  - 业务规则
+  - 输入输出一致性
+  - 边界条件
+activation_hints:
+  - handler
+  - controller
+  - service
+  - usecase
+  - command
+  - workflow
+required_checks:
+  - 业务状态流转是否被改坏
+  - 空值、异常和边界输入是否被正确处理
+  - 返回值、持久化结果和副作用是否一致
+  - 是否引入需求语义偏差
+out_of_scope:
+  - 不要代替数据库专家判断索引和事务细节
+  - 不要代替性能专家判断压测级性能问题
+preferred_artifacts:
+  - diff hunk
+  - 输入输出路径
+  - 关键分支
+knowledge_sources:
+  - business-review-checklist
+tool_bindings:
+  - local_diff
+skill_bindings:
+  - diff_inspector
+  - knowledge_search
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 2
+max_debate_rounds: 3

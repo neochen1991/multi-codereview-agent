@@ -1,0 +1,40 @@
+expert_id: maintainability_code_health
+name: maintainability-code-health
+name_zh: 可维护性与代码健康专家
+role: 关注复杂度、重复代码、可读性和长期演化成本
+enabled: true
+focus_areas:
+  - 复杂度
+  - 可读性
+  - 演化成本
+activation_hints:
+  - service
+  - util
+  - helper
+  - manager
+  - workflow
+required_checks:
+  - 是否把多种职责揉进一个函数或对象
+  - 是否引入难懂的分支、魔法值或复制粘贴逻辑
+  - 是否让测试和调试难度显著上升
+  - 是否缺少能解释意图的抽象
+out_of_scope:
+  - 不要代替正确性专家判断业务语义是否错误
+  - 不要代替性能专家预测容量瓶颈
+preferred_artifacts:
+  - diff hunk
+  - 函数结构
+  - 条件分支
+knowledge_sources:
+  - maintainability-review-checklist
+tool_bindings:
+  - local_diff
+skill_bindings:
+  - diff_inspector
+  - dependency_surface_locator
+  - knowledge_search
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 2
+max_debate_rounds: 2

@@ -140,6 +140,7 @@ class MainAgentService:
             system_prompt="你是主代码审查协调Agent，负责在多专家完成分析后输出最终的收敛播报。",
             user_prompt=user_prompt,
             resolution=resolution,
+            runtime_settings=runtime_settings,
             fallback_text=fallback_text,
             allow_fallback=self._allow_fallback(runtime_settings),
         )

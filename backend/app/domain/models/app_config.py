@@ -37,6 +37,12 @@ class RuntimeConfig(BaseModel):
     default_max_debate_rounds: int = 2
 
 
+class NetworkConfig(BaseModel):
+    verify_ssl: bool = True
+    use_system_trust_store: bool = True
+    ca_bundle_path: str = ""
+
+
 class AllowlistConfig(BaseModel):
     tools: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     skills: list[str] = Field(
@@ -58,6 +64,7 @@ class AppConfig(BaseModel):
     git: GitConfig = Field(default_factory=GitConfig)
     code_repo: CodeRepoConfig = Field(default_factory=CodeRepoConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
     allowlist: AllowlistConfig = Field(default_factory=AllowlistConfig)
 
     @classmethod
@@ -82,6 +89,11 @@ class AppConfig(BaseModel):
                 allow_llm_fallback=runtime.allow_llm_fallback,
                 allow_human_gate=runtime.allow_human_gate,
                 default_max_debate_rounds=runtime.default_max_debate_rounds,
+            ),
+            network=NetworkConfig(
+                verify_ssl=runtime.verify_ssl,
+                use_system_trust_store=runtime.use_system_trust_store,
+                ca_bundle_path=runtime.ca_bundle_path,
             ),
             allowlist=AllowlistConfig(
                 tools=list(runtime.tool_allowlist),
@@ -111,4 +123,7 @@ class AppConfig(BaseModel):
             default_llm_api_key_env=self.llm.default_api_key_env,
             default_llm_api_key=self.llm.default_api_key,
             allow_llm_fallback=self.runtime.allow_llm_fallback,
+            verify_ssl=self.network.verify_ssl,
+            use_system_trust_store=self.network.use_system_trust_store,
+            ca_bundle_path=self.network.ca_bundle_path,
         )

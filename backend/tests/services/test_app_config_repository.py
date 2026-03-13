@@ -21,6 +21,9 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
                 "default_llm_model": "kimi-k2.5",
                 "default_llm_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
                 "code_repo_access_token": "ghp_repo_token",
+                "verify_ssl": False,
+                "use_system_trust_store": False,
+                "ca_bundle_path": "C:/certs/custom.pem",
             }
         )
     )
@@ -30,6 +33,9 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
     assert reloaded.default_llm_model == "kimi-k2.5"
     assert reloaded.default_llm_api_key == "sk-sp-18ef22cce0a24275a54eb6d97574c366"
     assert reloaded.code_repo_access_token == "ghp_repo_token"
+    assert reloaded.verify_ssl is False
+    assert reloaded.use_system_trust_store is False
+    assert reloaded.ca_bundle_path == "C:/certs/custom.pem"
 
 
 def test_app_config_repository_migrates_legacy_runtime_settings(tmp_path: Path):

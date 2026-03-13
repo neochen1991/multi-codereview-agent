@@ -153,6 +153,15 @@ const ExpertsPage: React.FC = () => {
                           <Tag>{item.api_key ? "已配置 API Key" : formatOptionalLlmValue(item.api_key_env)}</Tag>
                         </div>
                         {item.api_base_url ? <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>{item.api_base_url}</div> : null}
+                        <div style={{ marginTop: 8, color: "rgba(255,255,255,0.75)" }}>
+                          必查项：{item.required_checks.length ? item.required_checks.join(" / ") : "未配置"}
+                        </div>
+                        <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>
+                          产物偏好：{item.preferred_artifacts.length ? item.preferred_artifacts.join(" / ") : "未配置"}
+                        </div>
+                        <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>
+                          越界限制：{item.out_of_scope.length ? item.out_of_scope.join(" / ") : "未配置"}
+                        </div>
                         <div style={{ marginTop: 6 }}>
                           {item.tool_bindings.map((tool) => (
                             <Tag key={`${item.expert_id}_${tool}`} color="blue">{tool}</Tag>
@@ -167,6 +176,11 @@ const ExpertsPage: React.FC = () => {
                             <Tag key={`${item.expert_id}_${tool}`} color="cyan">{tool}</Tag>
                           ))}
                         </div>
+                        {item.system_prompt ? (
+                          <Paragraph style={{ marginTop: 10, marginBottom: 0 }} ellipsis={{ rows: 4, expandable: true, symbol: "展开提示词" }}>
+                            {item.system_prompt}
+                          </Paragraph>
+                        ) : null}
                       </div>
                     }
                   />

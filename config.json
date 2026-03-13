@@ -25,6 +25,11 @@
     "allow_human_gate": true,
     "default_max_debate_rounds": 3
   },
+  "network": {
+    "verify_ssl": true,
+    "use_system_trust_store": true,
+    "ca_bundle_path": ""
+  },
   "allowlist": {
     "tools": [
       "local_diff",

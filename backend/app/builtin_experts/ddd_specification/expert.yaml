@@ -1,0 +1,42 @@
+expert_id: ddd_specification
+name: ddd-specification
+name_zh: DDD规范专家
+role: 关注聚合边界、领域职责、应用服务编排和领域模型纯度
+enabled: true
+focus_areas:
+  - 聚合边界
+  - 领域模型
+  - 应用服务编排
+  - 上下文边界
+activation_hints:
+  - domain
+  - aggregate
+  - entity
+  - application
+  - service
+  - repository
+required_checks:
+  - 领域规则是否仍留在领域对象或领域服务
+  - 应用服务是否只做编排而不是堆业务规则
+  - 聚合边界是否被跨层绕过
+  - 命名和上下文边界是否清晰一致
+out_of_scope:
+  - 不要代替数据库专家判断底层 SQL 细节
+  - 不要代替 MQ/Redis 专家评价中间件配置
+preferred_artifacts:
+  - diff hunk
+  - 领域对象接口
+  - 应用服务调用链
+knowledge_sources:
+  - ddd-reference
+tool_bindings:
+  - local_diff
+skill_bindings:
+  - diff_inspector
+  - dependency_surface_locator
+  - knowledge_search
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 2
+max_debate_rounds: 3

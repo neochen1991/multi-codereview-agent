@@ -26,7 +26,7 @@ def test_platform_adapter_marks_commit_compare_mode(monkeypatch):
     monkeypatch.setattr(
         adapter,
         "_fetch_remote_diff",
-        lambda review_url, access_token: (
+        lambda review_url, access_token, runtime_settings=None: (
             "diff --git a/backend/app/main.py b/backend/app/main.py\n"
             "--- a/backend/app/main.py\n"
             "+++ b/backend/app/main.py\n"

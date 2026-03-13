@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 import httpx
 
 from app.domain.models.review import ReviewSubject
+from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.http_client_factory import HttpClientFactory
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,7 @@ class PlatformAdapter:
     GitHub/GitLab/自建平台的真实 diff 拉取器。
     """
 
-    def normalize(self, subject: ReviewSubject) -> ReviewSubject:
+    def normalize(self, subject: ReviewSubject, runtime_settings: RuntimeSettings | None = None) -> ReviewSubject:
         review_url = subject.mr_url or subject.repo_url
         review_mode = self._infer_review_mode(subject.subject_type, review_url)
         repo_project = self._infer_repo_project(subject.repo_url, review_url)
@@ -33,8 +35,15 @@ class PlatformAdapter:
         remote_diff_fetched = False
         unified_diff = subject.unified_diff
         if review_mode in {"commit_compare", "mr_compare"} and not unified_diff and review_url:
-            unified_diff = self._fetch_remote_diff(review_url, subject.access_token)
+            logger.info("normalizing remote review review_url=%s review_mode=%s", review_url, review_mode)
+            unified_diff = self._fetch_remote_diff(review_url, subject.access_token, runtime_settings)
             remote_diff_fetched = bool(unified_diff)
+            logger.info(
+                "remote diff normalization finished review_url=%s fetched=%s changed_files=%s",
+                review_url,
+                remote_diff_fetched,
+                len(self._infer_changed_files_from_diff(unified_diff)) if unified_diff else 0,
+            )
         if unified_diff and not changed_files:
             changed_files = self._infer_changed_files_from_diff(unified_diff)
         if not changed_files:
@@ -146,25 +155,35 @@ class PlatformAdapter:
             return "github"
         return "gitlab_like"
 
-    def _fetch_remote_diff(self, review_url: str, access_token: str) -> str:
+    def _fetch_remote_diff(
+        self,
+        review_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> str:
         if "github.com" not in review_url:
+            logger.info("skip remote diff fetch for non-github url=%s", review_url)
             return ""
         candidate_urls = self._build_remote_diff_candidates(review_url)
         if not candidate_urls:
+            logger.warning("no remote diff candidates built for url=%s", review_url)
             return ""
         headers: dict[str, str] = {}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
         headers["User-Agent"] = "multi-codereview-agent/1.0"
         try:
-            with httpx.Client(
+            with HttpClientFactory.create(
                 timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
+                runtime_settings=runtime_settings,
                 follow_redirects=False,
             ) as client:
                 for candidate_url in candidate_urls:
                     try:
+                        logger.info("attempt remote diff fetch review_url=%s candidate=%s", review_url, candidate_url)
                         diff_text = self._fetch_candidate_diff(client, candidate_url, headers)
                         if diff_text:
+                            logger.info("remote diff fetch succeeded review_url=%s candidate=%s", review_url, candidate_url)
                             return diff_text
                     except Exception as error:
                         logger.warning("remote diff candidate failed for %s via %s: %s", review_url, candidate_url, error)

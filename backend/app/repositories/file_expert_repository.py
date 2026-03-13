@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
 
 from app.domain.models.expert_profile import ExpertProfile
+
+logger = logging.getLogger(__name__)
 
 
 class FileExpertRepository:
@@ -14,12 +17,13 @@ class FileExpertRepository:
     def list(self) -> list[ExpertProfile]:
         items: list[ExpertProfile] = []
         roots = [self.root]
-        packaged_root = Path(__file__).resolve().parents[1] / "storage" / "experts"
+        packaged_root = Path(__file__).resolve().parents[1] / "builtin_experts"
         if packaged_root != self.root:
             roots.append(packaged_root)
         seen_ids: set[str] = set()
         for root in roots:
             if not root.exists():
+                logger.warning("expert root missing: %s", root)
                 continue
             for expert_yaml in sorted(root.glob("*/expert.yaml")):
                 payload = yaml.safe_load(expert_yaml.read_text(encoding="utf-8")) or {}
@@ -34,6 +38,7 @@ class FileExpertRepository:
                 items.append(ExpertProfile.model_validate(payload))
                 if expert_id:
                     seen_ids.add(expert_id)
+        logger.info("loaded %s experts from roots=%s", len(items), [str(root) for root in roots])
         return items
 
     def save(self, expert: ExpertProfile) -> ExpertProfile:

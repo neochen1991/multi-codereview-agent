@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ from app.services.main_agent_service import MainAgentService
 from app.services.orchestrator.graph import build_review_graph
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.skill_gateway import SkillGateway
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewRunner:
@@ -91,10 +94,29 @@ class ReviewRunner:
 
         runtime_settings = self.runtime_settings_service.get()
         selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
-        experts = [expert for expert in self.registry.list_enabled() if expert.expert_id in selected_ids]
+        enabled_experts = self.registry.list_enabled()
+        experts = [expert for expert in enabled_experts if expert.expert_id in selected_ids]
+        logger.info(
+            "review execution review_id=%s selected_experts=%s enabled_experts=%s matched_experts=%s",
+            review.review_id,
+            selected_ids,
+            [expert.expert_id for expert in enabled_experts],
+            [expert.expert_id for expert in experts],
+        )
         if not experts:
-            review.status = "completed"
-            review.phase = "completed"
+            reason = (
+                "没有可执行的专家，请检查预置专家是否已部署，或确认 selected_experts 与 enabled experts 是否匹配。"
+            )
+            logger.error(
+                "review has no executable experts review_id=%s selected_experts=%s enabled_experts=%s",
+                review.review_id,
+                selected_ids,
+                [expert.expert_id for expert in enabled_experts],
+            )
+            review.status = "failed"
+            review.phase = "failed"
+            review.failure_reason = reason
+            review.report_summary = reason
             review.completed_at = datetime.now(UTC)
             review.duration_seconds = max(
                 0.0,
@@ -102,6 +124,18 @@ class ReviewRunner:
             )
             review.updated_at = datetime.now(UTC)
             self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="review_failed",
+                    phase="failed",
+                    message=reason,
+                    payload={
+                        "selected_experts": selected_ids,
+                        "enabled_experts": [expert.expert_id for expert in enabled_experts],
+                    },
+                )
+            )
             return review
 
         experts_by_id = {expert.expert_id: expert for expert in experts}
@@ -330,6 +364,14 @@ class ReviewRunner:
         )
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
+        logger.info(
+            "review finished review_id=%s status=%s finding_count=%s issue_count=%s pending_human=%s",
+            review.review_id,
+            review.status,
+            len(finding_payloads),
+            len(issues),
+            len(pending_human_issue_ids),
+        )
         self.artifact_service.publish(review, issues)
         return review
 
@@ -481,6 +523,7 @@ class ReviewRunner:
                 list(command_message.metadata.get("expected_checks", []) or []),
             ),
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
+            runtime_settings=runtime_settings,
             fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
             allow_fallback=self._allow_llm_fallback(runtime_settings),
         )
@@ -621,6 +664,7 @@ class ReviewRunner:
                         line_start,
                     ),
                     resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
+                    runtime_settings=runtime_settings,
                     fallback_text=self._build_debate_fallback(
                         issue,
                         expert,

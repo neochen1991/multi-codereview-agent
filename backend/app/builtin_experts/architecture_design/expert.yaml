@@ -1,0 +1,42 @@
+expert_id: architecture_design
+name: architecture-design
+name_zh: 架构与设计专家
+role: 关注模块边界、依赖方向、抽象层级和设计退化
+enabled: true
+focus_areas:
+  - 模块边界
+  - 依赖方向
+  - 抽象层级
+activation_hints:
+  - service
+  - module
+  - runtime
+  - api
+  - orchestrator
+  - application
+required_checks:
+  - 是否出现跨层直连或边界绕过
+  - 是否把流程编排和领域规则揉进同一层
+  - 是否泄漏基础设施实现细节到高层模块
+  - 是否让未来扩展必须改动多个模块
+out_of_scope:
+  - 不要代替安全专家判断鉴权与注入问题
+  - 不要代替测试专家判断覆盖率是否充足
+preferred_artifacts:
+  - diff hunk
+  - 调用链
+  - 依赖方向
+  - 模块接口
+knowledge_sources:
+  - architecture-review-checklist
+tool_bindings:
+  - local_diff
+skill_bindings:
+  - diff_inspector
+  - dependency_surface_locator
+  - knowledge_search
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 2
+max_debate_rounds: 2

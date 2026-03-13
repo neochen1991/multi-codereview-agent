@@ -43,6 +43,8 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   onCreateOnly,
 }) => {
   const statusLabel = reviewId ? status || "pending" : "未开始";
+  const hasExperts = experts.length > 0;
+  const disableActions = loading || running || (!readonly && !hasExperts);
 
   return (
     <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
@@ -56,6 +58,14 @@ const ReviewOverviewPanel: React.FC<Props> = ({
               : "先输入 GitHub PR / GitLab MR / GitHub Commit 链接，选择参与专家，再启动审核。启动后去“审核过程”查看主 Agent 调度、专家发言和裁决收敛。"
           }
         />
+        {!hasExperts ? (
+          <Alert
+            type="error"
+            showIcon
+            message="当前没有可用的专家 agent"
+            description="请检查后端是否已加载预置专家，或先在专家中心创建/启用专家后再启动审核。"
+          />
+        ) : null}
 
         <div className="incident-overview-status-strip">
           <Tag color={reviewId ? "blue" : "default"}>
@@ -171,17 +181,17 @@ const ReviewOverviewPanel: React.FC<Props> = ({
         {readonly ? (
           status === "pending" ? (
             <Space>
-              <Button type="primary" loading={loading || running} onClick={onStart}>
+              <Button type="primary" loading={loading || running} disabled={!hasExperts} onClick={onStart}>
                 启动审核
               </Button>
             </Space>
           ) : null
         ) : (
           <Space>
-            <Button type="primary" loading={loading || running} onClick={onStart}>
+            <Button type="primary" loading={loading || running} disabled={disableActions} onClick={onStart}>
               创建并启动审核
             </Button>
-            <Button loading={loading} onClick={onCreateOnly}>
+            <Button loading={loading} disabled={disableActions} onClick={onCreateOnly}>
               仅创建审核
             </Button>
           </Space>

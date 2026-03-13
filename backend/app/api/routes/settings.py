@@ -28,6 +28,9 @@ class RuntimeSettingsRequest(BaseModel):
     default_llm_api_key_env: str | None = None
     default_llm_api_key: str | None = None
     allow_llm_fallback: bool = False
+    verify_ssl: bool = True
+    use_system_trust_store: bool = True
+    ca_bundle_path: str = ""
 
 
 @router.get("/settings/runtime")

@@ -203,6 +203,9 @@ export interface RuntimeSettings {
   default_llm_api_key?: string;
   default_llm_api_key_configured?: boolean;
   allow_llm_fallback: boolean;
+  verify_ssl: boolean;
+  use_system_trust_store: boolean;
+  ca_bundle_path: string;
 }
 
 export interface KnowledgeDocument {
