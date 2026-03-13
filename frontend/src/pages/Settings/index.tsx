@@ -39,8 +39,21 @@ const SettingsPage: React.FC = () => {
       <Card className="module-card">
         <Title level={3}>系统设置</Title>
         <Paragraph>
-          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、skill 和知识源绑定。设置页改动会直接影响审核 runtime。
+          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、skill 和知识源绑定。设置页改动会直接影响审核 runtime，并同步写入项目根目录 config.json。
         </Paragraph>
+        <Form.Item noStyle shouldUpdate>
+          {() =>
+            form.getFieldValue("config_path") ? (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+                message={`当前统一配置文件：${String(form.getFieldValue("config_path"))}`}
+                description="默认 LLM 配置、Git Access Token 和代码仓配置都统一保存在这份 config.json 中。"
+              />
+            ) : null
+          }
+        </Form.Item>
       </Card>
 
       <Card className="module-card" title="当前实现状态" style={{ marginTop: 16 }}>

@@ -38,4 +38,5 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert "frontend-design" in payload["skill_allowlist"]
     assert payload["default_llm_model"] == "kimi-k2.5"
     assert payload["default_llm_api_key_configured"] is True
+    assert payload["config_path"].endswith("config.json")
     assert "default_llm_api_key" not in payload

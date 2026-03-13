@@ -55,6 +55,68 @@ scripts\start-all.bat
 scripts\stop-all.bat
 ```
 
+## 统一配置
+
+项目根目录提供一份用户可直接编辑的配置文件：
+
+- [`config.json`](/Users/neochen/multi-codereview-agent/config.json)
+
+这份文件是当前默认的全局配置入口，主要包含：
+
+- 默认大模型配置
+- Git / 代码仓 Access Token
+- 代码仓 clone 地址、本地路径和目标分支
+- 工具、skill、agent allowlist
+- 默认辩论轮次和人工裁决开关
+- 前后端默认端口
+
+设置页 `/settings` 读写的也是这份 `config.json`。如果你想手工改配置，优先修改它，而不是去改散落的运行时文件。
+
+当前 `config.json` 结构示例：
+
+```json
+{
+  "server": {
+    "backend_port": 8011,
+    "frontend_port": 5174
+  },
+  "llm": {
+    "default_provider": "dashscope-openai-compatible",
+    "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+    "default_model": "kimi-k2.5",
+    "default_api_key_env": "DASHSCOPE_API_KEY",
+    "default_api_key": "your-api-key"
+  },
+  "git": {
+    "repo_access_token": "your-git-token"
+  },
+  "code_repo": {
+    "clone_url": "",
+    "local_path": "",
+    "default_branch": "main",
+    "auto_sync": false
+  },
+  "runtime": {
+    "default_target_branch": "main",
+    "allow_llm_fallback": false,
+    "allow_human_gate": true,
+    "default_max_debate_rounds": 2
+  },
+  "allowlist": {
+    "tools": ["local_diff", "schema_diff", "coverage_diff"],
+    "skills": [
+      "knowledge_search",
+      "diff_inspector",
+      "test_surface_locator",
+      "dependency_surface_locator",
+      "repo_context_search"
+    ],
+    "mcp": [],
+    "agents": []
+  }
+}
+```
+
 ## 后端单独启动
 
 ```bash

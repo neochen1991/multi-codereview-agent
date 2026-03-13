@@ -46,7 +46,7 @@ def test_custom_expert_without_llm_override_inherits_runtime_defaults(storage_ro
     assert resolution.api_key == "sk-sp-18ef22cce0a24275a54eb6d97574c366"
 
 
-def test_llm_chat_uses_runtime_api_key_when_env_is_missing(monkeypatch):
+def test_llm_chat_uses_runtime_api_key_when_env_is_missing(monkeypatch, tmp_path: Path):
     service = LLMChatService()
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
 
@@ -84,20 +84,20 @@ def test_llm_chat_uses_runtime_api_key_when_env_is_missing(monkeypatch):
 
     monkeypatch.setattr(httpx, "Client", DummyClient)
 
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
+        }
+    )
+
     result = service.complete_text(
         system_prompt="sys",
         user_prompt="user",
-        resolution=service.resolve_main_agent(
-            RuntimeSettingsService(Path("/tmp")).get().model_copy(
-                update={
-                    "default_llm_provider": "dashscope-openai-compatible",
-                    "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
-                    "default_llm_model": "kimi-k2.5",
-                    "default_llm_api_key_env": "DASHSCOPE_API_KEY",
-                    "default_llm_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
-                }
-            )
-        ),
+        resolution=service.resolve_main_agent(runtime),
         fallback_text="fallback",
         allow_fallback=False,
     )

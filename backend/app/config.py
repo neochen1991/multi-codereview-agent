@@ -15,6 +15,7 @@ class Settings(BaseModel):
     API_PREFIX: str = "/api"
     STORAGE_ROOT: Path = Field(default=PROJECT_ROOT / "backend/app/storage")
     LOGS_ROOT: Path = Field(default=PROJECT_ROOT / "logs")
+    CONFIG_PATH: Path = Field(default=PROJECT_ROOT / "config.json")
     DEFAULT_EXPERT_IDS: list[str] = Field(
         default_factory=lambda: [
             "correctness_business",
@@ -41,6 +42,9 @@ class Settings(BaseModel):
             ),
             LOGS_ROOT=Path(
                 os.getenv("LOGS_ROOT", str(cls.model_fields["LOGS_ROOT"].default))
+            ),
+            CONFIG_PATH=Path(
+                os.getenv("CONFIG_PATH", str(cls.model_fields["CONFIG_PATH"].default))
             ),
             DEFAULT_EXPERT_IDS=list(cls.model_fields["DEFAULT_EXPERT_IDS"].default_factory()),
             DEFAULT_LLM_PROVIDER=os.getenv(

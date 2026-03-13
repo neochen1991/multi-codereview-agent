@@ -36,6 +36,7 @@ def get_runtime_settings() -> dict[str, object]:
     payload = runtime.model_dump(mode="json", exclude={"default_llm_api_key", "code_repo_access_token"})
     payload["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     payload["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
+    payload["config_path"] = str(settings.CONFIG_PATH)
     return payload
 
 
@@ -45,4 +46,5 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     response = runtime.model_dump(mode="json", exclude={"default_llm_api_key", "code_repo_access_token"})
     response["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     response["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
+    response["config_path"] = str(settings.CONFIG_PATH)
     return response

@@ -1,0 +1,44 @@
+{
+  "server": {
+    "backend_port": 8011,
+    "frontend_port": 5174
+  },
+  "llm": {
+    "default_provider": "dashscope-openai-compatible",
+    "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+    "default_model": "kimi-k2.5",
+    "default_api_key_env": "DASHSCOPE_API_KEY",
+    "default_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366"
+  },
+  "git": {
+    "repo_access_token": "ghp_example"
+  },
+  "code_repo": {
+    "clone_url": "https://github.com/example/repo.git",
+    "local_path": "/tmp/example-repo",
+    "default_branch": "release",
+    "auto_sync": true
+  },
+  "runtime": {
+    "default_target_branch": "develop",
+    "allow_llm_fallback": false,
+    "allow_human_gate": true,
+    "default_max_debate_rounds": 3
+  },
+  "allowlist": {
+    "tools": [
+      "local_diff",
+      "schema_diff"
+    ],
+    "skills": [
+      "frontend-design"
+    ],
+    "mcp": [
+      "github.diff",
+      "playwright.snapshot"
+    ],
+    "agents": [
+      "judge"
+    ]
+  }
+}

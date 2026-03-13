@@ -182,6 +182,7 @@ export interface ExpertProfile {
 }
 
 export interface RuntimeSettings {
+  config_path?: string;
   default_target_branch: string;
   code_repo_clone_url: string;
   code_repo_local_path: string;

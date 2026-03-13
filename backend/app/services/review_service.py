@@ -54,11 +54,14 @@ class ReviewService:
 
     def create_review(self, payload: dict[str, object]) -> ReviewTask:
         review_id = f"rev_{uuid4().hex[:8]}"
+        runtime_settings = self.get_runtime_settings()
         selected_experts = [
             str(expert_id).strip()
             for expert_id in payload.pop("selected_experts", []) or []
             if str(expert_id).strip()
         ]
+        if not str(payload.get("access_token") or "").strip() and (runtime_settings.code_repo_access_token or "").strip():
+            payload["access_token"] = runtime_settings.code_repo_access_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload))
         task = ReviewTask(
             review_id=review_id,
