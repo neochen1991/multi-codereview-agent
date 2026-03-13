@@ -1,9 +1,7 @@
 import React, { useMemo, useState } from "react";
-import { Button, Card, Space, Table, Tag, Typography } from "antd";
+import { Button, Card, Space, Table, Tag } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
-
-const { Paragraph } = Typography;
 
 type FindingsPanelProps = {
   findings: ReviewFinding[];
@@ -133,13 +131,14 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       render: (value: string, item: StructuredFindingRow) => (
         <button
           type="button"
-          className="review-location-link"
+          className="review-location-link review-file-link"
           onClick={(event) => {
             event.stopPropagation();
             onSelectFinding?.(item.finding_id);
           }}
+          title={value || "-"}
         >
-          {value || "-"}
+          <span className="review-file-full">{value || "-"}</span>
         </button>
       ),
     },
@@ -218,12 +217,12 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       key: "issue_status",
       width: 180,
       render: (_: unknown, item: StructuredFindingRow) => (
-        <>
+        <div className="review-tag-stack">
           <Tag color={item.issueStatus === "resolved" ? "success" : item.needsHuman ? "error" : "processing"}>
             {item.issueStatus}
           </Tag>
           <Tag>{item.resolution}</Tag>
-        </>
+        </div>
       ),
     },
     {
@@ -238,18 +237,25 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       dataIndex: "recommendedAction",
       key: "recommendedAction",
       width: 180,
-      render: (value: string) => <Tag color="purple">{value}</Tag>,
+      render: (value: string) => (
+        <span className="review-action-chip" title={value}>
+          {value}
+        </span>
+      ),
     },
     {
       title: "问题摘要",
       dataIndex: "summary",
       key: "summary",
+      width: 320,
       render: (value: string, item: StructuredFindingRow) => (
-        <div>
-          <Paragraph style={{ marginBottom: 4, fontWeight: 600 }}>{item.title}</Paragraph>
-          <Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 2, expandable: true, symbol: "展开" }}>
+        <div className="review-summary-cell">
+          <div className="review-summary-title" title={item.title}>
+            {item.title}
+          </div>
+          <div className="review-summary-text" title={value}>
             {value}
-          </Paragraph>
+          </div>
         </div>
       ),
     },
@@ -263,8 +269,8 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   ];
 
   return (
-    <Card className="module-card" title="Code Review 问题清单">
-      <Space wrap style={{ marginBottom: 16 }}>
+    <Card className="module-card review-findings-card" title="Code Review 问题清单">
+      <Space wrap style={{ marginBottom: 6 }}>
         <Button type={activeGroup === "all" ? "primary" : "default"} onClick={() => setActiveGroup("all")}>
           全部 {rows.length}
         </Button>
@@ -311,6 +317,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           onClick: () => onSelectFinding?.(record.finding_id),
           style: { cursor: onSelectFinding ? "pointer" : "default" },
         })}
+        className="review-findings-table"
         locale={{ emptyText: "当前还没有问题结论，运行审核后这里会生成正式的 Code Review 问题清单。" }}
       />
     </Card>

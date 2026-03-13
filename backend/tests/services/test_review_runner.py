@@ -22,7 +22,10 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
           "finding_type": "risk_hypothesis",
           "context_files": ["packages/lib/schedules/getScheduleListItemData.ts"],
           "assumptions": ["当前只看到了局部 diff"],
-          "claim": "存在跨文件语义漂移风险"
+          "claim": "存在跨文件语义漂移风险",
+          "fix_strategy": "先统一 transformer 和输出 DTO",
+          "change_steps": ["补字段映射", "补回归测试"],
+          "suggested_code": "export function map() {}"
         }
         """,
         ReviewSubject(
@@ -47,6 +50,9 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     assert parsed["finding_type"] == "risk_hypothesis"
     assert parsed["context_files"] == ["packages/lib/schedules/getScheduleListItemData.ts"]
     assert parsed["assumptions"] == ["当前只看到了局部 diff"]
+    assert parsed["fix_strategy"] == "先统一 transformer 和输出 DTO"
+    assert parsed["change_steps"] == ["补字段映射", "补回归测试"]
+    assert parsed["suggested_code"] == "export function map() {}"
 
 
 def test_review_runner_merge_context_files_uses_repo_context_and_skill_hits(storage_root: Path):

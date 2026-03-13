@@ -61,8 +61,12 @@ export interface ReviewFinding {
   context_files?: string[];
   verification_needed?: boolean;
   verification_plan?: string;
+  remediation_strategy?: string;
   remediation_suggestion: string;
+  remediation_steps?: string[];
   code_excerpt: string;
+  suggested_code?: string;
+  suggested_code_language?: string;
   created_at: string;
 }
 

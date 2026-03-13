@@ -633,9 +633,17 @@ class ReviewRunner:
             ),
             verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
             verification_plan=str(parsed.get("verification_plan") or "").strip(),
+            remediation_strategy=str(
+                parsed.get("fix_strategy")
+                or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)
+            ),
             remediation_suggestion=str(
                 parsed.get("suggested_fix")
                 or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)
+            ),
+            remediation_steps=self._normalize_text_list(
+                parsed.get("change_steps"),
+                self._build_remediation_steps(review.subject, expert.expert_id, file_path),
             ),
             code_excerpt=self._build_code_excerpt(
                 review.subject,
@@ -643,6 +651,11 @@ class ReviewRunner:
                 parsed_line_start,
                 expert.expert_id,
             ),
+            suggested_code=str(
+                parsed.get("suggested_code")
+                or self._build_suggested_code(review.subject, file_path, parsed_line_start, expert.expert_id)
+            ),
+            suggested_code_language=self._infer_code_language(file_path),
         )
         self.finding_repo.save(review.review_id, finding)
         self.message_repo.append(
@@ -1034,6 +1047,69 @@ class ReviewRunner:
             return f"把 {file_path} 中的条件分支和魔法值提取成独立函数或策略对象，降低后续维护成本。"
         return f"重构 {file_path} 的当前实现，补充边界保护与必要注释，并为关键路径增加测试。"
 
+    def _build_remediation_strategy(
+        self,
+        subject: ReviewSubject,
+        expert_id: str,
+        file_path: str,
+    ) -> str:
+        if expert_id == "security_compliance":
+            return f"先把 {file_path} 的权限边界前置，再把失败分支和敏感字段保护收紧到主流程入口。"
+        if expert_id == "performance_reliability":
+            return f"围绕 {file_path} 先收敛慢路径、回滚和资源释放，再考虑继续扩展功能。"
+        if expert_id == "database_analysis":
+            return f"对 {file_path} 采用兼容性优先的数据库变更策略，先保证线上安全，再收紧约束。"
+        if expert_id == "redis_analysis":
+            return f"围绕 {file_path} 先固定 key/TTL/失效顺序，再补缓存一致性和热点保护。"
+        if expert_id == "mq_analysis":
+            return f"在 {file_path} 先明确幂等、重试、死信策略，再落消费逻辑调整。"
+        if expert_id == "ddd_specification":
+            return f"把 {file_path} 的领域规则、应用编排和基础设施访问重新拆层，先收回职责边界。"
+        if expert_id == "test_verification":
+            return f"先补测试锁住 {file_path} 当前风险，再根据断言结果决定是否继续改实现。"
+        if expert_id == "architecture_design":
+            return f"把 {file_path} 的流程控制和业务规则拆开，保留单一入口，避免跨层耦合继续扩散。"
+        if expert_id == "maintainability_code_health":
+            return f"先把 {file_path} 的重复判断和复杂分支提炼掉，再补命名和注释，降低维护成本。"
+        return f"围绕 {file_path} 先缩小修改面、拉直主流程，再用更清晰的代码结构替换当前实现。"
+
+    def _build_remediation_steps(
+        self,
+        subject: ReviewSubject,
+        expert_id: str,
+        file_path: str,
+    ) -> list[str]:
+        common_steps = [
+            f"先定位 {file_path} 中这次问题对应的主流程入口，只修改当前风险真正命中的代码路径。",
+            "把条件判断、字段处理或依赖调用拆成更明确的步骤，避免一个分支同时承担多种职责。",
+            "补一组与当前风险直接对应的回归测试，至少覆盖正常路径、失败路径和边界输入。",
+        ]
+        if expert_id == "security_compliance":
+            return [
+                f"在 {file_path} 的入口先增加显式权限判断，未通过时立刻返回受控失败结果。",
+                "把敏感字段访问和业务执行分开，避免先执行后校验。",
+                "补充拒绝场景测试，确认越权请求不会继续走到后续逻辑。",
+            ]
+        if expert_id == "performance_reliability":
+            return [
+                f"把 {file_path} 中可能耗时的操作拆到独立步骤，补上超时、批量或短路控制。",
+                "为失败路径补充回滚/释放逻辑，避免资源泄漏或半成功状态。",
+                "补一条慢路径或异常路径测试，确认高负载下仍然可恢复。",
+            ]
+        if expert_id == "database_analysis":
+            return [
+                f"把 {file_path} 对应的 schema/migration 改成兼容性优先的两阶段变更，而不是一次性强收敛。",
+                "先加默认值/可空兜底或回填步骤，再做非空、索引或约束收紧。",
+                "补充回滚脚本和变更验证 SQL，确保线上执行失败时可恢复。",
+            ]
+        if expert_id == "test_verification":
+            return [
+                f"围绕 {file_path} 先补一个最小回归测试，锁住这次缺陷触发条件。",
+                "再补失败路径和边界条件断言，避免后续重构把问题重新引入。",
+                "如果改动跨文件，再补一个集成级测试，验证最终输出没有漂移。",
+            ]
+        return common_steps
+
     def _build_code_excerpt(
         self,
         subject: ReviewSubject,
@@ -1088,6 +1164,145 @@ class ReviewRunner:
             ]
         return f"# {file_path}\n" + "\n".join(lines)
 
+    def _build_suggested_code(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        expert_id: str,
+    ) -> str:
+        language = self._infer_code_language(file_path)
+        if language == "sql":
+            return (
+                f"-- Suggested fix for {file_path}\n"
+                "BEGIN;\n"
+                "-- Step 1: add compatible defaults first\n"
+                "ALTER TABLE target_table\n"
+                "  ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW(),\n"
+                "  ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT NOW();\n\n"
+                "-- Step 2: backfill historical rows before tightening constraints\n"
+                "UPDATE target_table\n"
+                "SET updated_at = COALESCE(updated_at, created_at, NOW())\n"
+                "WHERE updated_at IS NULL;\n\n"
+                "COMMIT;"
+            )
+        if language == "prisma":
+            return (
+                "model ExampleEntity {\n"
+                "  id         Int      @id @default(autoincrement())\n"
+                "  createdAt  DateTime @default(now())\n"
+                "  updatedAt  DateTime @updatedAt\n"
+                "}\n"
+            )
+        if expert_id == "test_verification":
+            if language in {"typescript", "tsx", "javascript", "jsx"}:
+                return (
+                    "describe(\"review flow\", () => {\n"
+                    "  it(\"rejects invalid input\", async () => {\n"
+                    "    const result = await executeReview({ enabled: false });\n"
+                    "    expect(result.allowed).toBe(false);\n"
+                    "  });\n\n"
+                    "  it(\"keeps the success path stable\", async () => {\n"
+                    "    const result = await executeReview({ enabled: true });\n"
+                    "    expect(result.allowed).toBe(true);\n"
+                    "  });\n"
+                    "});"
+                )
+            return (
+                "def test_review_guard_rejects_invalid_payload():\n"
+                "    assert review_guard({\"enabled\": False}, user=build_user()) is False\n\n"
+                "def test_review_guard_allows_valid_payload():\n"
+                "    assert review_guard({\"enabled\": True}, user=build_user(can_review=True)) is True\n"
+            )
+        if language in {"typescript", "tsx", "javascript", "jsx"}:
+            if expert_id == "security_compliance":
+                return (
+                    "export function reviewGuard(payload: ReviewPayload, currentUser: CurrentUser): boolean {\n"
+                    "  if (!currentUser.permissions.includes(\"review:write\")) {\n"
+                    "    return false;\n"
+                    "  }\n\n"
+                    "  if (!payload.enabled) {\n"
+                    "    return false;\n"
+                    "  }\n\n"
+                    "  return true;\n"
+                    "}\n"
+                )
+            if expert_id == "architecture_design":
+                return (
+                    "function shouldEnableReview(payload: ReviewPayload): boolean {\n"
+                    "  return Boolean(payload.enabled);\n"
+                    "}\n\n"
+                    "export function reviewGuard(payload: ReviewPayload, deps: { policy: ReviewPolicy }): boolean {\n"
+                    "  if (!shouldEnableReview(payload)) {\n"
+                    "    return false;\n"
+                    "  }\n\n"
+                    "  return deps.policy.allow(payload);\n"
+                    "}\n"
+                )
+            return (
+                "export function reviewGuard(payload: ReviewPayload): boolean {\n"
+                "  const enabled = Boolean(payload.enabled);\n"
+                "  if (!enabled) {\n"
+                "    return false;\n"
+                "  }\n\n"
+                "  return true;\n"
+                "}\n"
+            )
+        if language == "python":
+            if expert_id == "security_compliance":
+                return (
+                    "def review_guard(payload: dict, user: User) -> bool:\n"
+                    "    if not user.can(\"review:write\"):\n"
+                    "        return False\n"
+                    "    if not payload.get(\"enabled\"):\n"
+                    "        return False\n"
+                    "    return True\n"
+                )
+            if expert_id == "architecture_design":
+                return (
+                    "def should_enable_review(payload: dict) -> bool:\n"
+                    "    return bool(payload.get(\"enabled\"))\n\n"
+                    "def review_guard(payload: dict, policy: ReviewPolicy) -> bool:\n"
+                    "    if not should_enable_review(payload):\n"
+                    "        return False\n"
+                    "    return policy.allow(payload)\n"
+                )
+            return (
+                "def review_guard(payload: dict) -> bool:\n"
+                "    enabled = bool(payload.get(\"enabled\"))\n"
+                "    if not enabled:\n"
+                "        return False\n"
+                "    return True\n"
+            )
+        return (
+            f"# Suggested rewrite for {file_path}\n"
+            "# 1. Separate validation from execution\n"
+            "# 2. Return early on invalid input\n"
+            "# 3. Keep the happy path flat and testable\n"
+        )
+
+    def _infer_code_language(self, file_path: str) -> str:
+        lowered = file_path.lower()
+        if lowered.endswith(".tsx"):
+            return "tsx"
+        if lowered.endswith(".ts"):
+            return "typescript"
+        if lowered.endswith(".jsx"):
+            return "jsx"
+        if lowered.endswith(".js"):
+            return "javascript"
+        if lowered.endswith(".py"):
+            return "python"
+        if lowered.endswith(".sql"):
+            return "sql"
+        if lowered.endswith(".prisma"):
+            return "prisma"
+        if lowered.endswith(".java"):
+            return "java"
+        if lowered.endswith(".go"):
+            return "go"
+        return "text"
+
     def _build_expert_prompt(
         self,
         subject: ReviewSubject,
@@ -1125,7 +1340,7 @@ class ReviewRunner:
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
             f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
             f"JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","suggested_fix":"可执行修复建议","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
     def _build_expert_system_prompt(self, expert: ExpertProfile) -> str:
@@ -1137,7 +1352,8 @@ class ReviewRunner:
             f"2. 结论必须绑定具体文件和代码行，禁止泛化空谈。\n"
             f"3. 没有代码证据时，只能提出“需要验证”，不能伪造确定性结论。\n"
             f"4. 修复建议必须可执行，不能只写“建议优化”。\n"
-            f"5. 输出必须遵守 JSON contract。"
+            f"5. 必须讲清楚怎么改，并给出建议修改后的完整代码片段。\n"
+            f"6. 输出必须遵守 JSON contract。"
         )
 
     def _parse_expert_analysis(
@@ -1165,8 +1381,12 @@ class ReviewRunner:
             "assumptions": [],
             "context_files": [],
             "why_it_matters": self._extract_structured_field(text, "证据诉求"),
+            "fix_strategy": self._extract_structured_field(text, "修改思路")
+            or self._build_remediation_strategy(subject, expert.expert_id, file_path),
             "suggested_fix": self._extract_structured_field(text, "修复建议")
             or self._build_remediation_suggestion(subject, expert.expert_id, file_path),
+            "change_steps": self._build_remediation_steps(subject, expert.expert_id, file_path),
+            "suggested_code": self._build_suggested_code(subject, file_path, line_start, expert.expert_id),
             "confidence": 0.0,
             "verification_needed": True,
             "verification_plan": "需要补充关联上下文、调用链和测试证据。",
@@ -1460,6 +1680,14 @@ class ReviewRunner:
         except Exception:
             return fallback
         return min(0.99, max(0.01, parsed))
+
+    def _normalize_text_list(self, value: object, fallback: list[str]) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            chunks = [item.strip() for item in value.split("\n") if item.strip()]
+            return chunks or [str(item).strip() for item in fallback if str(item).strip()]
+        return [str(item).strip() for item in fallback if str(item).strip()]
 
     def _normalize_line_start(self, value: object, fallback: int) -> int:
         try:

@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
+import { Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
 
@@ -69,6 +69,14 @@ const renderCodeLines = (
     </div>
   );
 };
+
+const renderSuggestedCode = (code: string) => (
+  <div className="review-suggested-code-frame">
+    <pre className="review-suggested-code-pre">
+      <code>{code}</code>
+    </pre>
+  </div>
+);
 
 const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToProcess }) => {
   const lineRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
@@ -166,6 +174,13 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
       </div>
 
       <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修改思路</Paragraph>
+        <Paragraph style={{ marginBottom: 0 }}>
+          {finding.remediation_strategy || "当前还没有给出更具体的修改思路。"}
+        </Paragraph>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修复建议</Paragraph>
         <Paragraph style={{ marginBottom: 0 }}>
           {finding.remediation_suggestion || "当前还没有给出修复建议。"}
@@ -173,12 +188,44 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题代码</Paragraph>
-        {renderCodeLines(
-          finding.code_excerpt || `${finding.file_path}:${finding.line_start}`,
-          finding.line_start,
-          lineRefs,
-        )}
+        <Paragraph style={{ marginBottom: 10, fontWeight: 600 }}>建议修改步骤</Paragraph>
+        <ol className="review-remediation-steps">
+          {(finding.remediation_steps || []).length ? (
+            (finding.remediation_steps || []).map((step, index) => <li key={`${index}-${step}`}>{step}</li>)
+          ) : (
+            <li>先补足定位证据，再按建议修复并补回归测试。</li>
+          )}
+        </ol>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 10, fontWeight: 600 }}>建议代码修改方案</Paragraph>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} xl={12}>
+            <div className="review-code-panel">
+              <div className="review-code-panel-header">
+                <span>当前代码</span>
+                <Tag>{finding.file_path}:{finding.line_start}</Tag>
+              </div>
+              {renderCodeLines(
+                finding.code_excerpt || `${finding.file_path}:${finding.line_start}`,
+                finding.line_start,
+                lineRefs,
+              )}
+            </div>
+          </Col>
+          <Col xs={24} xl={12}>
+            <div className="review-code-panel">
+              <div className="review-code-panel-header">
+                <span>建议修改后代码</span>
+                {finding.suggested_code_language ? <Tag color="blue">{finding.suggested_code_language}</Tag> : null}
+              </div>
+              {renderSuggestedCode(
+                finding.suggested_code || "// 当前还没有生成建议修改代码，请先补充更多上下文后重试。"
+              )}
+            </div>
+          </Col>
+        </Row>
       </div>
 
       <div style={{ marginTop: 16 }}>

@@ -580,7 +580,7 @@ const ReviewWorkbenchPage: React.FC = () => {
               open={findingModalOpen}
               onCancel={() => setFindingModalOpen(false)}
               footer={null}
-              width={980}
+              width={1240}
               destroyOnClose={false}
             >
               <CodeReviewConclusionPanel

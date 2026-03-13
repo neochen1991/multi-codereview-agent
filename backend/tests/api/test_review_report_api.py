@@ -21,6 +21,9 @@ def test_review_report_endpoint_returns_structured_payload(client):
     assert "confidence_summary" in payload
     assert "human_review_status" in payload
     assert "summary" in payload
+    assert payload["findings"][0]["remediation_strategy"]
     assert payload["findings"][0]["remediation_suggestion"]
+    assert payload["findings"][0]["remediation_steps"]
     assert payload["findings"][0]["code_excerpt"]
+    assert payload["findings"][0]["suggested_code"]
     assert payload["findings"][0]["file_path"] in payload["findings"][0]["code_excerpt"]

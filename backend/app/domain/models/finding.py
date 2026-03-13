@@ -31,6 +31,10 @@ class ReviewFinding(BaseModel):
     context_files: list[str] = Field(default_factory=list)
     verification_needed: bool = True
     verification_plan: str = ""
+    remediation_strategy: str = ""
     remediation_suggestion: str = ""
+    remediation_steps: list[str] = Field(default_factory=list)
     code_excerpt: str = ""
+    suggested_code: str = ""
+    suggested_code_language: str = ""
     created_at: datetime = Field(default_factory=utc_now)
