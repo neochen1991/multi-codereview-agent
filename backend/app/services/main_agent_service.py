@@ -32,7 +32,11 @@ class MainAgentService:
         repository_service = self._build_repository_service(runtime_settings)
         target_focus = self._pick_target_focus(subject, expert, repository_service)
         file_path = str(target_focus.get("file_path") or self._pick_file_path(subject, expert))
-        line_start = int(target_focus.get("line_start") or self._pick_line_start(subject, expert.expert_id, file_path))
+        line_start = (
+            int(target_focus.get("line_start") or self._pick_line_start(subject, expert.expert_id, file_path))
+            if file_path
+            else 0
+        )
         target_hunk = dict(target_focus.get("target_hunk") or {})
         related_files = self._build_expert_related_files(subject, expert, file_path, change_chain["related_files"])
         routing_repo_excerpt = self._format_repo_matches(dict(target_focus.get("repo_hits") or {}))
@@ -203,7 +207,7 @@ class MainAgentService:
     def _pick_file_path(self, subject: ReviewSubject, expert: ExpertProfile) -> str:
         changed_files = list(subject.changed_files)
         if not changed_files:
-            return "src/review/runtime.py"
+            return ""
         ranked = sorted(
             changed_files,
             key=lambda item: self._capability_service.score_file_relevance(expert, item),
@@ -249,6 +253,8 @@ class MainAgentService:
         repository_service: RepositoryContextService,
     ) -> dict[str, object]:
         changed_files = [item for item in subject.changed_files if item]
+        if not changed_files:
+            return {}
         if expert.expert_id == "correctness_business":
             preferred = self._pick_correctness_chain_focus(subject, repository_service)
             if preferred:
@@ -346,6 +352,8 @@ class MainAgentService:
         return sorted(changed_files, key=priority)
 
     def _pick_line_start(self, subject: ReviewSubject, expert_id: str, file_path: str) -> int:
+        if not file_path:
+            return 0
         preferred_line = 12
         if expert_id == "security_compliance":
             preferred_line = 18
@@ -377,6 +385,8 @@ class MainAgentService:
         file_path: str,
         related_files: list[str],
     ) -> list[str]:
+        if not file_path:
+            return []
         if expert.expert_id != "correctness_business":
             return related_files
         chain_tokens = ("transform", "output", "service", "schema", "migration")
@@ -398,6 +408,8 @@ class MainAgentService:
         target_focus: dict[str, object],
         file_path: str,
     ) -> tuple[bool, str]:
+        if not str(file_path).strip():
+            return False, "未获取到真实 diff，无法为该专家定位待审查代码"
         score = int(target_focus.get("score") or 0)
         target_hunk = dict(target_focus.get("target_hunk") or {})
         import_only = self._is_import_only_hunk(str(target_hunk.get("excerpt") or ""))
@@ -451,6 +463,14 @@ class MainAgentService:
         related_files: list[str],
         repo_hits: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        if not str(file_path).strip():
+            return {
+                "summary": "未获取到真实 diff，暂无代码仓上下文",
+                "primary_context": {},
+                "related_contexts": [],
+                "search_matches": [],
+                "context_files": [],
+            }
         if not service.is_ready():
             return {
                 "summary": "代码仓上下文未配置或本地仓不可用",

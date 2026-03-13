@@ -163,3 +163,18 @@ def test_review_runner_fails_when_no_enabled_experts(storage_root: Path):
     assert review.phase == "failed"
     assert "没有可执行的专家" in (review.failure_reason or "")
     assert any(event.event_type == "review_failed" for event in runner.list_events(review_id))
+
+
+def test_review_runner_fails_when_remote_diff_is_missing(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.subject = review.subject.model_copy(update={"changed_files": [], "unified_diff": ""})
+    runner.review_repo.save(review)
+
+    updated = runner.run_once(review_id)
+
+    assert updated.status == "failed"
+    assert updated.phase == "failed"
+    assert "未获取到真实 diff" in (updated.failure_reason or "")

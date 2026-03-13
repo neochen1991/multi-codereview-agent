@@ -63,6 +63,16 @@ class ReviewRunner:
                 source_ref="feature/demo",
                 target_ref="main",
                 title="Demo review",
+                changed_files=["backend/app/main.py"],
+                unified_diff=(
+                    "diff --git a/backend/app/main.py b/backend/app/main.py\n"
+                    "--- a/backend/app/main.py\n"
+                    "+++ b/backend/app/main.py\n"
+                    "@@ -1,2 +1,3 @@\n"
+                    " from fastapi import FastAPI\n"
+                    "+from fastapi.middleware.cors import CORSMiddleware\n"
+                    " app = FastAPI()\n"
+                ),
             ),
             selected_experts=settings.DEFAULT_EXPERT_IDS,
         )
@@ -235,6 +245,38 @@ class ReviewRunner:
             )
 
         self._execute_expert_jobs(expert_jobs)
+        if not expert_jobs:
+            reason = "未获取到真实 diff 或有效变更文件，无法启动专家分析。"
+            logger.error(
+                "review has no executable expert jobs review_id=%s changed_files=%s remote_diff_available=%s",
+                review.review_id,
+                list(review.subject.changed_files),
+                bool(review.subject.unified_diff),
+            )
+            review.status = "failed"
+            review.phase = "failed"
+            review.failure_reason = reason
+            review.report_summary = reason
+            review.completed_at = datetime.now(UTC)
+            review.duration_seconds = max(
+                0.0,
+                round((review.completed_at - (review.started_at or review.created_at)).total_seconds(), 3),
+            )
+            review.updated_at = datetime.now(UTC)
+            self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="review_failed",
+                    phase="failed",
+                    message=reason,
+                    payload={
+                        "changed_files": list(review.subject.changed_files),
+                        "remote_diff_available": bool(review.subject.unified_diff),
+                    },
+                )
+            )
+            return review
 
         graph_result = self.graph.invoke(
             {

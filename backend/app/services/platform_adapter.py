@@ -38,11 +38,21 @@ class PlatformAdapter:
             logger.info("normalizing remote review review_url=%s review_mode=%s", review_url, review_mode)
             unified_diff = self._fetch_remote_diff(review_url, subject.access_token, runtime_settings)
             remote_diff_fetched = bool(unified_diff)
+            if unified_diff:
+                changed_preview = self._infer_changed_files_from_diff(unified_diff)
+                diff_preview = "\n".join(unified_diff.splitlines()[:20])
+                logger.info(
+                    "github diff payload review_url=%s file_count=%s changed_files=%s diff_preview=\n%s",
+                    review_url,
+                    len(changed_preview),
+                    changed_preview,
+                    diff_preview,
+                )
             logger.info(
                 "remote diff normalization finished review_url=%s fetched=%s changed_files=%s",
                 review_url,
                 remote_diff_fetched,
-                len(self._infer_changed_files_from_diff(unified_diff)) if unified_diff else 0,
+                self._infer_changed_files_from_diff(unified_diff) if unified_diff else [],
             )
         if unified_diff and not changed_files:
             changed_files = self._infer_changed_files_from_diff(unified_diff)

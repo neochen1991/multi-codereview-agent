@@ -63,6 +63,34 @@ def test_main_agent_command_exposes_disallowed_inference():
     assert "目标专家" in command["summary"]
 
 
+def test_main_agent_does_not_fallback_to_runtime_file_without_changed_files():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="mr/1",
+        target_ref="main",
+        changed_files=[],
+        unified_diff="",
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务规则"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["file_path"] == ""
+    assert command["routeable"] is False
+    assert "未获取到真实 diff" in command["skip_reason"]
+
+
 def test_main_agent_command_includes_repository_context_when_repo_is_ready(tmp_path: Path):
     repo_root = tmp_path / "repo"
     target = repo_root / "packages" / "lib" / "schedules" / "getScheduleListItemData.ts"
