@@ -66,8 +66,11 @@ class ReviewService:
             for expert_id in payload.pop("selected_experts", []) or []
             if str(expert_id).strip()
         ]
-        if not str(payload.get("access_token") or "").strip() and (runtime_settings.code_repo_access_token or "").strip():
-            payload["access_token"] = runtime_settings.code_repo_access_token
+        if not str(payload.get("access_token") or "").strip():
+            review_url = str(payload.get("mr_url") or payload.get("repo_url") or "")
+            configured_token = self._resolve_git_access_token(review_url, runtime_settings)
+            if configured_token:
+                payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
         task = ReviewTask(
             review_id=review_id,
@@ -154,6 +157,16 @@ class ReviewService:
 
         threading.Thread(target=_run_in_background, daemon=True).start()
         return review
+
+    def _resolve_git_access_token(self, review_url: str, runtime_settings: RuntimeSettings) -> str:
+        lowered = review_url.lower()
+        if "github.com" in lowered:
+            return str(runtime_settings.github_access_token or runtime_settings.code_repo_access_token or "").strip()
+        if "gitlab" in lowered:
+            return str(runtime_settings.gitlab_access_token or runtime_settings.code_repo_access_token or "").strip()
+        if "codehub" in lowered:
+            return str(runtime_settings.codehub_access_token or runtime_settings.code_repo_access_token or "").strip()
+        return str(runtime_settings.code_repo_access_token or "").strip()
 
     def _mark_failed(self, review_id: str, reason: str) -> ReviewTask:
         review = self.get_review(review_id)

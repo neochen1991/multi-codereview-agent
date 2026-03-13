@@ -20,6 +20,12 @@ class RuntimeSettingsService:
             payload = {key: value for key, value in payload.items() if key != "default_llm_api_key"}
         if payload.get("code_repo_access_token") in (None, ""):
             payload = {key: value for key, value in payload.items() if key != "code_repo_access_token"}
+        if payload.get("github_access_token") in (None, ""):
+            payload = {key: value for key, value in payload.items() if key != "github_access_token"}
+        if payload.get("gitlab_access_token") in (None, ""):
+            payload = {key: value for key, value in payload.items() if key != "gitlab_access_token"}
+        if payload.get("codehub_access_token") in (None, ""):
+            payload = {key: value for key, value in payload.items() if key != "codehub_access_token"}
         updated = current.model_copy(update=payload)
         return self._repository.save_runtime_settings(updated)
 

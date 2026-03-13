@@ -11,6 +11,9 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "code_repo_local_path": "/tmp/example-repo",
             "code_repo_default_branch": "release",
             "code_repo_access_token": "ghp_example",
+            "github_access_token": "ghp_github",
+            "gitlab_access_token": "glpat_gitlab",
+            "codehub_access_token": "codehub_token",
             "code_repo_auto_sync": True,
             "tool_allowlist": ["local_diff", "schema_diff"],
             "mcp_allowlist": ["github.diff", "playwright.snapshot"],
@@ -45,6 +48,9 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["code_repo_default_branch"] == "release"
     assert payload["code_repo_auto_sync"] is True
     assert payload["code_repo_access_token_configured"] is True
+    assert payload["github_access_token_configured"] is True
+    assert payload["gitlab_access_token_configured"] is True
+    assert payload["codehub_access_token_configured"] is True
     assert payload["default_max_debate_rounds"] == 3
     assert payload["standard_llm_timeout_seconds"] == 75
     assert payload["standard_llm_retry_count"] == 4

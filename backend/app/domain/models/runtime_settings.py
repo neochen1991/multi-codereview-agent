@@ -14,6 +14,9 @@ class RuntimeSettings(BaseModel):
     code_repo_local_path: str = ""
     code_repo_default_branch: str = "main"
     code_repo_access_token: str | None = None
+    github_access_token: str | None = None
+    gitlab_access_token: str | None = None
+    codehub_access_token: str | None = None
     code_repo_auto_sync: bool = False
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)

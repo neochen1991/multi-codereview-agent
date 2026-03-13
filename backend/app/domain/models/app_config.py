@@ -23,6 +23,9 @@ class LlmConfig(BaseModel):
 
 class GitConfig(BaseModel):
     repo_access_token: str | None = None
+    github_access_token: str | None = None
+    gitlab_access_token: str | None = None
+    codehub_access_token: str | None = None
 
 
 class CodeRepoConfig(BaseModel):
@@ -87,7 +90,12 @@ class AppConfig(BaseModel):
                 default_api_key_env=runtime.default_llm_api_key_env,
                 default_api_key=runtime.default_llm_api_key,
             ),
-            git=GitConfig(repo_access_token=runtime.code_repo_access_token),
+            git=GitConfig(
+                repo_access_token=runtime.code_repo_access_token,
+                github_access_token=runtime.github_access_token,
+                gitlab_access_token=runtime.gitlab_access_token,
+                codehub_access_token=runtime.codehub_access_token,
+            ),
             code_repo=CodeRepoConfig(
                 clone_url=runtime.code_repo_clone_url,
                 local_path=runtime.code_repo_local_path,
@@ -129,6 +137,9 @@ class AppConfig(BaseModel):
             code_repo_local_path=self.code_repo.local_path,
             code_repo_default_branch=self.code_repo.default_branch,
             code_repo_access_token=self.git.repo_access_token,
+            github_access_token=self.git.github_access_token or self.git.repo_access_token,
+            gitlab_access_token=self.git.gitlab_access_token or self.git.repo_access_token,
+            codehub_access_token=self.git.codehub_access_token or self.git.repo_access_token,
             code_repo_auto_sync=self.code_repo.auto_sync,
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),

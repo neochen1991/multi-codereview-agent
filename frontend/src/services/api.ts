@@ -191,6 +191,12 @@ export interface RuntimeSettings {
   code_repo_default_branch: string;
   code_repo_access_token?: string;
   code_repo_access_token_configured?: boolean;
+  github_access_token?: string;
+  github_access_token_configured?: boolean;
+  gitlab_access_token?: string;
+  gitlab_access_token_configured?: boolean;
+  codehub_access_token?: string;
+  codehub_access_token_configured?: boolean;
   code_repo_auto_sync: boolean;
   tool_allowlist: string[];
   mcp_allowlist: string[];

@@ -22,6 +22,9 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
                 "default_llm_model": "kimi-k2.5",
                 "default_llm_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
                 "code_repo_access_token": "ghp_repo_token",
+                "github_access_token": "ghp_github_token",
+                "gitlab_access_token": "glpat_gitlab_token",
+                "codehub_access_token": "codehub_token",
                 "light_llm_timeout_seconds": 180,
                 "light_max_parallel_experts": 1,
                 "verify_ssl": False,
@@ -37,6 +40,9 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
     assert reloaded.default_llm_model == "kimi-k2.5"
     assert reloaded.default_llm_api_key == "sk-sp-18ef22cce0a24275a54eb6d97574c366"
     assert reloaded.code_repo_access_token == "ghp_repo_token"
+    assert reloaded.github_access_token == "ghp_github_token"
+    assert reloaded.gitlab_access_token == "glpat_gitlab_token"
+    assert reloaded.codehub_access_token == "codehub_token"
     assert reloaded.light_llm_timeout_seconds == 180
     assert reloaded.light_max_parallel_experts == 1
     assert reloaded.verify_ssl is False
@@ -66,4 +72,7 @@ def test_app_config_repository_migrates_legacy_runtime_settings(tmp_path: Path):
     assert migrated.default_analysis_mode == "light"
     assert migrated.default_llm_model == "kimi-k2.5"
     assert migrated.code_repo_access_token == "ghp_from_legacy"
+    assert migrated.github_access_token == "ghp_from_legacy"
+    assert migrated.gitlab_access_token == "ghp_from_legacy"
+    assert migrated.codehub_access_token == "ghp_from_legacy"
     assert config_path.exists()

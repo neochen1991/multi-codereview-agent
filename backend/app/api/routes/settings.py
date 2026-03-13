@@ -17,6 +17,9 @@ class RuntimeSettingsRequest(BaseModel):
     code_repo_local_path: str = ""
     code_repo_default_branch: str = "main"
     code_repo_access_token: str | None = None
+    github_access_token: str | None = None
+    gitlab_access_token: str | None = None
+    codehub_access_token: str | None = None
     code_repo_auto_sync: bool = False
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)
@@ -45,9 +48,21 @@ class RuntimeSettingsRequest(BaseModel):
 @router.get("/settings/runtime")
 def get_runtime_settings() -> dict[str, object]:
     runtime = review_service_module.review_service.get_runtime_settings()
-    payload = runtime.model_dump(mode="json", exclude={"default_llm_api_key", "code_repo_access_token"})
+    payload = runtime.model_dump(
+        mode="json",
+        exclude={
+            "default_llm_api_key",
+            "code_repo_access_token",
+            "github_access_token",
+            "gitlab_access_token",
+            "codehub_access_token",
+        },
+    )
     payload["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     payload["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
+    payload["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())
+    payload["gitlab_access_token_configured"] = bool((runtime.gitlab_access_token or "").strip())
+    payload["codehub_access_token_configured"] = bool((runtime.codehub_access_token or "").strip())
     payload["config_path"] = str(settings.CONFIG_PATH)
     return payload
 
@@ -55,8 +70,20 @@ def get_runtime_settings() -> dict[str, object]:
 @router.put("/settings/runtime")
 def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object]:
     runtime = review_service_module.review_service.update_runtime_settings(payload.model_dump())
-    response = runtime.model_dump(mode="json", exclude={"default_llm_api_key", "code_repo_access_token"})
+    response = runtime.model_dump(
+        mode="json",
+        exclude={
+            "default_llm_api_key",
+            "code_repo_access_token",
+            "github_access_token",
+            "gitlab_access_token",
+            "codehub_access_token",
+        },
+    )
     response["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     response["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
+    response["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())
+    response["gitlab_access_token_configured"] = bool((runtime.gitlab_access_token or "").strip())
+    response["codehub_access_token_configured"] = bool((runtime.codehub_access_token or "").strip())
     response["config_path"] = str(settings.CONFIG_PATH)
     return response

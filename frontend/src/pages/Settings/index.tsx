@@ -79,6 +79,9 @@ const SettingsPage: React.FC = () => {
                 code_repo_local_path: values.code_repo_local_path || "",
                 code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
                 code_repo_access_token: String(values.code_repo_access_token || "").trim() || undefined,
+                github_access_token: String(values.github_access_token || "").trim() || undefined,
+                gitlab_access_token: String(values.gitlab_access_token || "").trim() || undefined,
+                codehub_access_token: String(values.codehub_access_token || "").trim() || undefined,
                 code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
@@ -106,6 +109,9 @@ const SettingsPage: React.FC = () => {
               message.success("运行时设置已更新");
               form.setFieldValue("default_llm_api_key", "");
               form.setFieldValue("code_repo_access_token", "");
+              form.setFieldValue("github_access_token", "");
+              form.setFieldValue("gitlab_access_token", "");
+              form.setFieldValue("codehub_access_token", "");
             } catch (error: any) {
               message.error(error?.message || "更新设置失败");
             } finally {
@@ -144,6 +150,54 @@ const SettingsPage: React.FC = () => {
                   showIcon
                   style={{ marginBottom: 16 }}
                   message="当前已在配置文件中保存代码仓 Access Token"
+                  description="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+                />
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item name="github_access_token" label="GitHub Token">
+            <Input.Password placeholder="优先用于 github.com 链接" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate>
+            {() =>
+              Boolean(form.getFieldValue("github_access_token_configured")) ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="当前已在配置文件中保存 GitHub Token"
+                  description="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+                />
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item name="gitlab_access_token" label="GitLab Token">
+            <Input.Password placeholder="优先用于 gitlab 链接" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate>
+            {() =>
+              Boolean(form.getFieldValue("gitlab_access_token_configured")) ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="当前已在配置文件中保存 GitLab Token"
+                  description="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+                />
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item name="codehub_access_token" label="CodeHub Token">
+            <Input.Password placeholder="优先用于 codehub 链接" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate>
+            {() =>
+              Boolean(form.getFieldValue("codehub_access_token_configured")) ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="当前已在配置文件中保存 CodeHub Token"
                   description="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
                 />
               ) : null

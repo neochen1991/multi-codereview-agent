@@ -11,7 +11,10 @@
     "default_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366"
   },
   "git": {
-    "repo_access_token": "ghp_example"
+    "repo_access_token": "ghp_example",
+    "github_access_token": "ghp_example",
+    "gitlab_access_token": "glpat_example",
+    "codehub_access_token": "codehub_example"
   },
   "code_repo": {
     "clone_url": "https://github.com/example/repo.git",
