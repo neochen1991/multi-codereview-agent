@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
@@ -12,6 +13,145 @@ from app.services.http_client_factory import HttpClientFactory
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ReviewPlatformProvider:
+    platform_kind: str
+
+    def supports(self, review_url: str) -> bool:
+        raise NotImplementedError
+
+    def fetch_remote_diff(
+        self,
+        review_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> str:
+        raise NotImplementedError
+
+    def build_remote_diff_candidates(self, review_url: str) -> list[str]:
+        raise NotImplementedError
+
+    def build_headers(self, access_token: str) -> dict[str, str]:
+        headers = {"User-Agent": "multi-codereview-agent/1.0"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        return headers
+
+    def fetch_candidate_diff(
+        self,
+        client: httpx.Client,
+        candidate_url: str,
+        headers: dict[str, str],
+    ) -> str:
+        current_url = candidate_url
+        for _ in range(3):
+            response = client.get(current_url, headers=headers)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location", "").strip()
+                if not location:
+                    return ""
+                current_url = location
+                continue
+            response.raise_for_status()
+            text = response.text
+            if "diff --git " in text:
+                return text
+            return ""
+        return ""
+
+
+class GitHubReviewProvider(ReviewPlatformProvider):
+    def __init__(self) -> None:
+        super().__init__(platform_kind="github")
+
+    def supports(self, review_url: str) -> bool:
+        return "github.com" in review_url
+
+    def fetch_remote_diff(
+        self,
+        review_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> str:
+        candidate_urls = self.build_remote_diff_candidates(review_url)
+        if not candidate_urls:
+            logger.warning("no remote diff candidates built for url=%s", review_url)
+            return ""
+        headers = self.build_headers(access_token)
+        try:
+            with HttpClientFactory.create(
+                timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
+                runtime_settings=runtime_settings,
+                follow_redirects=False,
+            ) as client:
+                for candidate_url in candidate_urls:
+                    try:
+                        logger.info("attempt remote diff fetch review_url=%s candidate=%s", review_url, candidate_url)
+                        diff_text = self.fetch_candidate_diff(client, candidate_url, headers)
+                        if diff_text:
+                            logger.info("remote diff fetch succeeded review_url=%s candidate=%s", review_url, candidate_url)
+                            return diff_text
+                    except Exception as error:
+                        logger.warning("remote diff candidate failed for %s via %s: %s", review_url, candidate_url, error)
+        except Exception as error:
+            logger.warning("remote diff fetch failed for %s: %s", review_url, error)
+        return ""
+
+    def build_remote_diff_candidates(self, review_url: str) -> list[str]:
+        if "/commit/" in review_url or "/pull/" in review_url:
+            return [f"{review_url}.patch", f"{review_url}.diff"]
+        return []
+
+
+class GitLabReviewProvider(ReviewPlatformProvider):
+    def __init__(self) -> None:
+        super().__init__(platform_kind="gitlab_like")
+
+    def supports(self, review_url: str) -> bool:
+        return "merge_requests" in review_url or "/-/commit/" in review_url or "/commit/" in review_url
+
+    def fetch_remote_diff(
+        self,
+        review_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> str:
+        candidate_urls = self.build_remote_diff_candidates(review_url)
+        if not candidate_urls:
+            logger.info("skip remote diff fetch for unsupported gitlab-like url=%s", review_url)
+            return ""
+        headers = self.build_headers(access_token)
+        if access_token:
+            headers["PRIVATE-TOKEN"] = access_token
+        try:
+            with HttpClientFactory.create(
+                timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
+                runtime_settings=runtime_settings,
+                follow_redirects=False,
+            ) as client:
+                for candidate_url in candidate_urls:
+                    try:
+                        logger.info("attempt remote diff fetch review_url=%s candidate=%s", review_url, candidate_url)
+                        diff_text = self.fetch_candidate_diff(client, candidate_url, headers)
+                        if diff_text:
+                            logger.info("remote diff fetch succeeded review_url=%s candidate=%s", review_url, candidate_url)
+                            return diff_text
+                    except Exception as error:
+                        logger.warning("remote diff candidate failed for %s via %s: %s", review_url, candidate_url, error)
+        except Exception as error:
+            logger.warning("remote diff fetch failed for %s: %s", review_url, error)
+        return ""
+
+    def build_remote_diff_candidates(self, review_url: str) -> list[str]:
+        parsed = urlparse(review_url)
+        path = parsed.path.rstrip("/")
+        if "/-/merge_requests/" in path:
+            return [f"{review_url}.patch", f"{review_url}.diff"]
+        if "/-/commit/" in path or "/commit/" in path:
+            return [f"{review_url}.patch", f"{review_url}.diff"]
+        return []
+
+
 class PlatformAdapter:
     """Platform-neutral review subject normalizer.
 
@@ -19,9 +159,16 @@ class PlatformAdapter:
     GitHub/GitLab/自建平台的真实 diff 拉取器。
     """
 
+    def __init__(self, providers: list[ReviewPlatformProvider] | None = None) -> None:
+        self.providers = providers or [
+            GitHubReviewProvider(),
+            GitLabReviewProvider(),
+        ]
+
     def normalize(self, subject: ReviewSubject, runtime_settings: RuntimeSettings | None = None) -> ReviewSubject:
         review_url = subject.mr_url or subject.repo_url
         review_mode = self._infer_review_mode(subject.subject_type, review_url)
+        provider = self._resolve_provider(review_url)
         repo_project = self._infer_repo_project(subject.repo_url, review_url)
         mr_id = self._infer_merge_request_id(review_url)
         commit_sha = self._infer_commit_sha(review_url)
@@ -68,7 +215,8 @@ class PlatformAdapter:
         metadata.setdefault("normalized_from", "platform_adapter")
         metadata.setdefault("review_mode", subject.subject_type)
         metadata.setdefault("compare_mode", review_mode)
-        metadata.setdefault("platform_kind", self._infer_platform_kind(review_url))
+        metadata.setdefault("platform_kind", provider.platform_kind if provider else self._infer_platform_kind(review_url))
+        metadata.setdefault("platform_provider", provider.__class__.__name__ if provider else "")
         metadata.setdefault("trigger_source", "manual")
         metadata.setdefault("remote_diff_fetched", remote_diff_fetched)
         metadata.setdefault("remote_diff_available", bool(unified_diff))
@@ -162,6 +310,9 @@ class PlatformAdapter:
         return f"{source_ref} -> {target_ref}"
 
     def _infer_platform_kind(self, review_url: str) -> str:
+        provider = self._resolve_provider(review_url)
+        if provider is not None:
+            return provider.platform_kind
         if "github.com" in review_url:
             return "github"
         return "gitlab_like"
@@ -172,39 +323,16 @@ class PlatformAdapter:
         access_token: str,
         runtime_settings: RuntimeSettings | None = None,
     ) -> str:
-        if "github.com" not in review_url:
-            logger.info("skip remote diff fetch for non-github url=%s", review_url)
+        provider = self._resolve_provider(review_url)
+        if provider is None:
+            logger.info("skip remote diff fetch for unsupported url=%s", review_url)
             return ""
-        candidate_urls = self._build_remote_diff_candidates(review_url)
-        if not candidate_urls:
-            logger.warning("no remote diff candidates built for url=%s", review_url)
-            return ""
-        headers: dict[str, str] = {}
-        if access_token:
-            headers["Authorization"] = f"Bearer {access_token}"
-        headers["User-Agent"] = "multi-codereview-agent/1.0"
-        try:
-            with HttpClientFactory.create(
-                timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
-                runtime_settings=runtime_settings,
-                follow_redirects=False,
-            ) as client:
-                for candidate_url in candidate_urls:
-                    try:
-                        logger.info("attempt remote diff fetch review_url=%s candidate=%s", review_url, candidate_url)
-                        diff_text = self._fetch_candidate_diff(client, candidate_url, headers)
-                        if diff_text:
-                            logger.info("remote diff fetch succeeded review_url=%s candidate=%s", review_url, candidate_url)
-                            return diff_text
-                    except Exception as error:
-                        logger.warning("remote diff candidate failed for %s via %s: %s", review_url, candidate_url, error)
-        except Exception as error:
-            logger.warning("remote diff fetch failed for %s: %s", review_url, error)
-        return ""
+        return provider.fetch_remote_diff(review_url, access_token, runtime_settings)
 
     def _build_remote_diff_candidates(self, review_url: str) -> list[str]:
-        if "/commit/" in review_url or "/pull/" in review_url:
-            return [f"{review_url}.patch", f"{review_url}.diff"]
+        provider = self._resolve_provider(review_url)
+        if provider is not None:
+            return provider.build_remote_diff_candidates(review_url)
         return []
 
     def _fetch_candidate_diff(
@@ -213,21 +341,18 @@ class PlatformAdapter:
         candidate_url: str,
         headers: dict[str, str],
     ) -> str:
-        current_url = candidate_url
-        for _ in range(3):
-            response = client.get(current_url, headers=headers)
-            if response.status_code in {301, 302, 303, 307, 308}:
-                location = response.headers.get("Location", "").strip()
-                if not location:
-                    return ""
-                current_url = location
-                continue
-            response.raise_for_status()
-            text = response.text
-            if "diff --git " in text:
-                return text
-            return ""
+        provider = self._resolve_provider(candidate_url)
+        if provider is not None:
+            return provider.fetch_candidate_diff(client, candidate_url, headers)
         return ""
+
+    def _resolve_provider(self, review_url: str) -> ReviewPlatformProvider | None:
+        if not review_url:
+            return None
+        for provider in self.providers:
+            if provider.supports(review_url):
+                return provider
+        return None
 
     def _infer_changed_files_from_diff(self, unified_diff: str) -> list[str]:
         changed_files: list[str] = []

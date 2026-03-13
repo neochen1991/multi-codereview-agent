@@ -230,3 +230,48 @@ def test_platform_adapter_fetch_remote_diff_falls_back_to_diff_when_patch_fails(
     diff = adapter._fetch_remote_diff("https://github.com/example-org/payments-service/pull/128", "")
 
     assert "diff --git a/backend/app/api/orders.py" in diff
+
+
+def test_platform_adapter_exposes_gitlab_provider_candidates():
+    adapter = PlatformAdapter()
+
+    candidates = adapter._build_remote_diff_candidates(
+        "https://gitlab.example.com/platform/payments/-/merge_requests/128"
+    )
+
+    assert candidates == [
+        "https://gitlab.example.com/platform/payments/-/merge_requests/128.patch",
+        "https://gitlab.example.com/platform/payments/-/merge_requests/128.diff",
+    ]
+
+
+def test_platform_adapter_marks_gitlab_provider_metadata(monkeypatch):
+    adapter = PlatformAdapter()
+
+    monkeypatch.setattr(
+        adapter,
+        "_fetch_remote_diff",
+        lambda review_url, access_token, runtime_settings=None: (
+            "diff --git a/backend/app/api/orders.py b/backend/app/api/orders.py\n"
+            "--- a/backend/app/api/orders.py\n"
+            "+++ b/backend/app/api/orders.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            "+return persist_order(payload)\n"
+        ),
+    )
+
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="",
+        project_id="",
+        source_ref="",
+        target_ref="",
+        mr_url="https://gitlab.example.com/platform/payments/-/merge_requests/128",
+        title="",
+    )
+
+    normalized = adapter.normalize(subject)
+
+    assert normalized.metadata["platform_kind"] == "gitlab_like"
+    assert normalized.metadata["platform_provider"] == "GitLabReviewProvider"
+    assert normalized.changed_files == ["backend/app/api/orders.py"]

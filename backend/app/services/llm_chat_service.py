@@ -136,7 +136,10 @@ class LLMChatService:
                         response_preview,
                     )
                     try:
-                        payload = response.json()
+                        payload = self._decode_payload(
+                            response_text=response_text,
+                            content_type=content_type,
+                        )
                     except ValueError as exc:
                         last_error = (
                             "invalid_json_response:"
@@ -211,7 +214,7 @@ class LLMChatService:
                 allow_fallback=allow_fallback,
             )
         message = choices[0].get("message") or {}
-        content = str(message.get("content") or "").strip()
+        content = self._extract_content(message.get("content")).strip()
         if not content:
             return self._handle_failure(
                 resolution=resolution,
@@ -282,6 +285,104 @@ class LLMChatService:
         if len(text) <= max_length:
             return text
         return f"{text[:max_length]}...<truncated>"
+
+    def _decode_payload(self, *, response_text: str, content_type: str) -> dict[str, object]:
+        cleaned = response_text.lstrip("\ufeff").strip()
+        if not cleaned:
+            raise ValueError("empty_response_body")
+        lower_content_type = content_type.lower()
+        if "text/event-stream" in lower_content_type or cleaned.startswith("data:"):
+            logger.info("llm response parser selected parser=sse")
+            return self._decode_sse_payload(cleaned)
+        logger.info("llm response parser selected parser=json")
+        payload = json.loads(cleaned)
+        if not isinstance(payload, dict):
+            raise ValueError("json_payload_not_object")
+        return payload
+
+    def _decode_sse_payload(self, response_text: str) -> dict[str, object]:
+        chunks: list[dict[str, object]] = []
+        accumulated_text_parts: list[str] = []
+        for raw_line in response_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data:
+                continue
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            if isinstance(chunk, dict):
+                chunks.append(chunk)
+                chunk_text = self._extract_text_from_chunk(chunk)
+                if chunk_text:
+                    accumulated_text_parts.append(chunk_text)
+        if not chunks:
+            raise ValueError("sse_no_data_chunks")
+        for chunk in reversed(chunks):
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            message = choices[0].get("message") or {}
+            content = self._extract_content(message.get("content")).strip()
+            if content:
+                return chunk
+        accumulated_text = "".join(accumulated_text_parts).strip()
+        if accumulated_text:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": accumulated_text,
+                        }
+                    }
+                ]
+            }
+        raise ValueError("sse_no_message_content")
+
+    def _extract_text_from_chunk(self, chunk: dict[str, object]) -> str:
+        choices = chunk.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = choice.get("message") or {}
+        message_content = self._extract_content(message.get("content"))
+        if message_content:
+            return message_content
+        delta = choice.get("delta") or {}
+        return self._extract_content(delta.get("content"))
+
+    def _extract_content(self, content: object) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        parts.append(str(item["text"]))
+                        continue
+                    if isinstance(item.get("content"), str):
+                        parts.append(str(item["content"]))
+                        continue
+                    if isinstance(item.get("delta"), str):
+                        parts.append(str(item["delta"]))
+                        continue
+            return "".join(parts)
+        if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                return str(content["text"])
+            if isinstance(content.get("content"), str):
+                return str(content["content"])
+        return str(content)
 
     def _fallback(
         self,

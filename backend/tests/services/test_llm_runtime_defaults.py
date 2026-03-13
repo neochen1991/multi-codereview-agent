@@ -224,3 +224,112 @@ def test_llm_chat_raises_clear_error_for_invalid_json_response(monkeypatch, tmp_
     message = str(exc_info.value)
     assert "invalid_json_response" in message
     assert "content_type=text/plain" in message
+
+
+def test_llm_chat_accepts_sse_chunks(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "text/event-stream"}
+        text = (
+            'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"world"}}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    result = service.complete_text(
+        system_prompt="system prompt",
+        user_prompt="user prompt",
+        resolution=service.resolve_main_agent(runtime),
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"review_id": "rev_sse"},
+    )
+
+    assert result.mode == "live"
+    assert result.text == "hello world"
+
+
+def test_llm_chat_accepts_json_with_list_content_blocks(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = (
+            '{"choices":[{"message":{"content":['
+            '{"type":"text","text":"first "},'
+            '{"type":"text","text":"second"}'
+            ']}}]}'
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    result = service.complete_text(
+        system_prompt="system prompt",
+        user_prompt="user prompt",
+        resolution=service.resolve_main_agent(runtime),
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"review_id": "rev_blocks"},
+    )
+
+    assert result.mode == "live"
+    assert result.text == "first second"
