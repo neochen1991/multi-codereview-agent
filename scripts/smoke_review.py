@@ -6,8 +6,8 @@ import urllib.error
 import urllib.request
 
 
-API_BASE = "http://127.0.0.1:8000/api"
-FRONTEND_URL = "http://127.0.0.1:4173/"
+API_BASE = "http://127.0.0.1:8011/api"
+FRONTEND_URL = "http://127.0.0.1:5174/"
 
 
 def request_json(method: str, url: str, payload: dict[str, object] | None = None) -> dict[str, object] | list[object]:
@@ -28,7 +28,7 @@ def request_text(url: str) -> str:
 
 
 def main() -> int:
-    health = request_json("GET", "http://127.0.0.1:8000/health")
+    health = request_json("GET", "http://127.0.0.1:8011/health")
     assert isinstance(health, dict) and health.get("status") == "ok"
 
     index_html = request_text(FRONTEND_URL)

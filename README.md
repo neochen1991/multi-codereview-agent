@@ -48,11 +48,18 @@ bash scripts/start-all.sh
 bash scripts/stop-all.sh
 ```
 
+Windows:
+
+```bat
+scripts\start-all.bat
+scripts\stop-all.bat
+```
+
 ## 后端单独启动
 
 ```bash
 .venv/bin/pytest backend/tests -q
-.venv/bin/uvicorn app.main:app --app-dir backend --reload --port 8000
+.venv/bin/uvicorn app.main:app --app-dir backend --reload --port 8011
 ```
 
 ## 前端启动
@@ -63,7 +70,7 @@ npm install
 npm run dev
 ```
 
-默认前端通过 Vite 代理把 `/api/*` 指向 `http://localhost:8000`。
+默认前端运行在 `http://127.0.0.1:5174`，并通过 Vite 代理把 `/api/*` 指向 `http://localhost:8011`。
 
 ## 已验证
 
