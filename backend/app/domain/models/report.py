@@ -12,6 +12,10 @@ class ConfidenceSummary(BaseModel):
     debated_issue_count: int = 0
     needs_human_count: int = 0
     verified_issue_count: int = 0
+    direct_defect_count: int = 0
+    risk_hypothesis_count: int = 0
+    test_gap_count: int = 0
+    design_concern_count: int = 0
 
 
 class ReviewReport(BaseModel):

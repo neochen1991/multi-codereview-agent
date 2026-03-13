@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from app.domain.models.knowledge import KnowledgeDocument
 from app.repositories.file_knowledge_repository import FileKnowledgeRepository
@@ -12,10 +13,14 @@ class KnowledgeRetrievalService:
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
         self._repository = FileKnowledgeRepository(root)
+        self._cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[KnowledgeDocument]] = {}
 
     def retrieve(
         self, expert_id: str, review_context: dict[str, object]
     ) -> list[KnowledgeDocument]:
+        cache_key = self._build_cache_key(expert_id, review_context)
+        if cache_key in self._cache:
+            return [item.model_copy() for item in self._cache[cache_key]]
         candidates = [doc for doc in self._repository.list() if doc.expert_id == expert_id]
         if not candidates:
             return []
@@ -27,16 +32,20 @@ class KnowledgeRetrievalService:
         filtered = [doc for doc in candidates if self._matches_bound_sources(doc, bound_sources)] if bound_sources else candidates
         query_terms = self._build_query_terms(review_context)
         if not query_terms:
+            self._cache[cache_key] = [item.model_copy() for item in filtered]
             return filtered
         matched = self._rg_search(filtered, query_terms)
         if matched:
+            self._cache[cache_key] = [item.model_copy() for item in matched]
             return matched
         contextual = [
             doc
             for doc in filtered
             if any(term in doc.content.lower() or term in doc.title.lower() for term in query_terms)
         ]
-        return contextual or filtered
+        result = contextual or filtered
+        self._cache[cache_key] = [item.model_copy() for item in result]
+        return result
 
     def _matches_bound_sources(self, document: KnowledgeDocument, bound_sources: set[str]) -> bool:
         if not bound_sources:
@@ -105,3 +114,12 @@ class KnowledgeRetrievalService:
                 )
             )
         return matched_documents
+
+    def _build_cache_key(
+        self,
+        expert_id: str,
+        review_context: dict[str, object],
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        changed_files = tuple(sorted(str(item).strip() for item in review_context.get("changed_files", []) or [] if str(item).strip()))
+        query_terms = tuple(sorted(self._build_query_terms(review_context)))
+        return (str(expert_id).strip(), changed_files, query_terms)

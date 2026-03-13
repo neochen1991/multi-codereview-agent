@@ -11,13 +11,8 @@ def evidence_verification(state: ReviewState) -> ReviewState:
     verified_issues: list[dict[str, object]] = []
     risk_hints = set(next_state.get("risk_hints", []))
     for issue in next_state.get("issues", []):
-        strategy = "local_diff"
+        strategy = _pick_verification_strategy(issue)
         topic = str(issue.get("topic", ""))
-        evidence_blob = " ".join(str(item).lower() for item in issue.get("evidence", []))
-        if topic == "database" or any(token in evidence_blob for token in ["migration", ".sql", "schema"]):
-            strategy = "schema_diff"
-        elif topic == "test":
-            strategy = "coverage_diff"
         verification_result = verifier.verify(
             issue_id=str(issue.get("issue_id", "")),
             strategy=strategy,
@@ -45,3 +40,22 @@ def evidence_verification(state: ReviewState) -> ReviewState:
         verified_issues.append(next_issue)
     next_state["issues"] = verified_issues
     return next_state
+
+
+def _pick_verification_strategy(issue: dict[str, object]) -> str:
+    finding_type = str(issue.get("finding_type") or "risk_hypothesis")
+    file_path = str(issue.get("file_path") or "").lower()
+    topic = str(issue.get("topic") or "").lower()
+    participants = [str(item).lower() for item in list(issue.get("participant_expert_ids") or []) if str(item).strip()]
+    evidence_blob = " ".join(str(item).lower() for item in issue.get("evidence", []))
+
+    if finding_type == "test_gap" or any(token in f"{file_path} {topic} {evidence_blob}" for token in ["test", "spec", "jest", "vitest", "playwright"]):
+        return "coverage_diff"
+
+    if any(
+        token in f"{file_path} {topic} {evidence_blob}"
+        for token in ["migration", ".sql", "schema", "repository", "db"]
+    ) or any(expert in {"database_analysis", "performance_reliability"} for expert in participants):
+        return "schema_diff"
+
+    return "local_diff"

@@ -56,6 +56,11 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   const replyToExpertId = typeof metadata.reply_to_expert_id === "string" ? metadata.reply_to_expert_id : "";
   const model = typeof metadata.model === "string" ? metadata.model : "";
   const mode = typeof metadata.mode === "string" ? metadata.mode : "";
+  const targetHunk =
+    metadata.target_hunk && typeof metadata.target_hunk === "object"
+      ? (metadata.target_hunk as Record<string, unknown>)
+      : null;
+  const hunkHeader = typeof targetHunk?.hunk_header === "string" ? targetHunk.hunk_header : "";
   const summaryParts: string[] = [];
   if (eventType === "main_agent_command") {
     summaryParts.push(`主Agent 点名 ${targetExpertName || targetExpertId} 处理这段代码`);
@@ -76,6 +81,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   }
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
   if (filePath) summaryParts.push(`定位：${filePath}${lineStart ? `:${lineStart}` : ""}`);
+  if (hunkHeader) summaryParts.push(`Hunk：${hunkHeader}`);
   const messageStatus =
     mode === "pending" ? "streaming" : mode === "fallback" ? "error" : "done";
   const detail = buildInvocationDetail(eventType, message.content, metadata);
@@ -219,6 +225,11 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
         const provider = typeof row.metadata.provider === "string" ? row.metadata.provider : "";
         const model = typeof row.metadata.model === "string" ? row.metadata.model : "";
         const mode = typeof row.metadata.mode === "string" ? row.metadata.mode : "";
+        const targetHunk =
+          row.metadata.target_hunk && typeof row.metadata.target_hunk === "object"
+            ? (row.metadata.target_hunk as Record<string, unknown>)
+            : null;
+        const hunkHeader = typeof targetHunk?.hunk_header === "string" ? targetHunk.hunk_header : "";
         const lineLabel = lineStart ? `L${lineStart}` : "";
         return (
           <div
@@ -246,6 +257,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 {skillName ? <Tag className="dialogue-tag dialogue-tag-target">{`skill ${skillName}`}</Tag> : null}
                 {filePath ? <Tag className="dialogue-tag">{filePath}</Tag> : null}
                 {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
+                {hunkHeader ? <Tag className="dialogue-tag">{hunkHeader}</Tag> : null}
                 {model ? <Tag className="dialogue-tag dialogue-tag-model">{model}</Tag> : null}
                 {provider ? <Tag className="dialogue-tag">{provider}</Tag> : null}
                 {mode ? (

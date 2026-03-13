@@ -20,11 +20,17 @@ class ReviewFinding(BaseModel):
     expert_id: str
     title: str
     summary: str
+    finding_type: str = "risk_hypothesis"
     severity: str = "medium"
     confidence: float = 0.72
     file_path: str = "src/example.ts"
     line_start: int = 1
     evidence: list[str] = Field(default_factory=list)
+    cross_file_evidence: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    context_files: list[str] = Field(default_factory=list)
+    verification_needed: bool = True
+    verification_plan: str = ""
     remediation_suggestion: str = ""
     code_excerpt: str = ""
     created_at: datetime = Field(default_factory=utc_now)

@@ -25,5 +25,5 @@ def test_start_review_creates_debate_issue_and_human_gate(storage_root: Path):
 
     assert updated.human_review_status == "not_required"
     assert issues
-    assert any(issue.verified for issue in issues)
-    assert all(issue.status == "resolved" for issue in issues)
+    assert all(issue.tool_name for issue in issues)
+    assert all(issue.status in {"resolved", "needs_verification", "comment"} for issue in issues)

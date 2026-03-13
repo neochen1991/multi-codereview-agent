@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -105,6 +106,7 @@ class ReviewRunner:
 
         experts_by_id = {expert.expert_id: expert for expert in experts}
         finding_payloads: list[dict[str, object]] = []
+        expert_jobs: list[dict[str, object]] = []
         for expert in experts:
             command = self.main_agent_service.build_command(
                 review.subject,
@@ -116,6 +118,39 @@ class ReviewRunner:
             line_start = int(command.get("line_start") or 1)
             summary = str(command.get("summary") or "")
             llm_metadata = dict(command.get("llm") or {})
+            if not bool(command.get("routeable", True)):
+                skip_reason = str(command.get("skip_reason") or "当前变更未命中该专家的有效审查线索")
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review_id,
+                        event_type="expert_skipped",
+                        phase="coordination",
+                        message=f"{expert.name_zh} 已跳过本轮审查",
+                        payload={
+                            "expert_id": expert_id,
+                            "file_path": file_path,
+                            "line_start": line_start,
+                            "reason": skip_reason,
+                        },
+                    )
+                )
+                self.message_repo.append(
+                    ConversationMessage(
+                        review_id=review_id,
+                        issue_id="review_orchestration",
+                        expert_id=expert_id,
+                        message_type="expert_skipped",
+                        content=f"{expert.name_zh} 已跳过本轮审查：{skip_reason}",
+                        metadata={
+                            "phase": "coordination",
+                            "file_path": file_path,
+                            "line_start": line_start,
+                            "reason": skip_reason,
+                            **llm_metadata,
+                        },
+                    )
+                )
+                continue
             command_message = self.message_repo.append(
                 ConversationMessage(
                     review_id=review_id,
@@ -129,6 +164,11 @@ class ReviewRunner:
                         "target_expert_name": expert.name_zh,
                         "file_path": file_path,
                         "line_start": line_start,
+                        "related_files": command.get("related_files", []),
+                        "target_hunk": command.get("target_hunk", {}),
+                        "repository_context": command.get("repository_context", {}),
+                        "expected_checks": command.get("expected_checks", []),
+                        "disallowed_inference": command.get("disallowed_inference", []),
                         **llm_metadata,
                     },
                 )
@@ -144,18 +184,23 @@ class ReviewRunner:
                         "target_expert_name": expert.name_zh,
                         "file_path": file_path,
                         "line_start": line_start,
+                        "related_files": command.get("related_files", []),
                     },
                 )
             )
-            self._run_expert_from_command(
-                review=review,
-                expert=expert,
-                command_message=command_message,
-                file_path=file_path,
-                line_start=line_start,
-                runtime_settings=runtime_settings,
-                finding_payloads=finding_payloads,
+            expert_jobs.append(
+                {
+                    "review": review,
+                    "expert": expert,
+                    "command_message": command_message,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "runtime_settings": runtime_settings,
+                    "finding_payloads": finding_payloads,
+                }
             )
+
+        self._execute_expert_jobs(expert_jobs)
 
         graph_result = self.graph.invoke(
             {
@@ -175,6 +220,7 @@ class ReviewRunner:
                 issue_id=str(item.get("issue_id") or f"iss_{uuid4().hex[:12]}"),
                 title=str(item.get("title") or "待裁决议题"),
                 summary=str(item.get("summary") or ""),
+                finding_type=str(item.get("finding_type") or "risk_hypothesis"),
                 file_path=str(item.get("file_path") or ""),
                 line_start=int(item.get("line_start") or 1),
                 status=str(item.get("status") or "open"),
@@ -183,6 +229,10 @@ class ReviewRunner:
                 finding_ids=[str(value) for value in item.get("finding_ids", [])],
                 participant_expert_ids=[str(value) for value in item.get("participant_expert_ids", [])],
                 evidence=[str(value) for value in item.get("evidence", [])],
+                cross_file_evidence=[str(value) for value in item.get("cross_file_evidence", [])],
+                assumptions=[str(value) for value in item.get("assumptions", [])],
+                context_files=[str(value) for value in item.get("context_files", [])],
+                direct_evidence=bool(item.get("direct_evidence")),
                 needs_human=bool(item.get("needs_human")),
                 verified=bool(item.get("verified")),
                 needs_debate=bool(item.get("needs_debate")),
@@ -283,6 +333,19 @@ class ReviewRunner:
         self.artifact_service.publish(review, issues)
         return review
 
+    def _execute_expert_jobs(self, expert_jobs: list[dict[str, object]]) -> None:
+        if not expert_jobs:
+            return
+        if os.getenv("PYTEST_CURRENT_TEST") or len(expert_jobs) <= 1:
+            for job in expert_jobs:
+                self._run_expert_from_command(**job)
+            return
+        max_workers = min(4, len(expert_jobs))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self._run_expert_from_command, **job) for job in expert_jobs]
+            for future in futures:
+                future.result()
+
     def _run_expert_from_command(
         self,
         *,
@@ -301,7 +364,10 @@ class ReviewRunner:
             runtime_settings,
             file_path=file_path,
             line_start=line_start,
+            related_files=list(command_message.metadata.get("related_files", []) or []),
         )
+        repository_context = dict(command_message.metadata.get("repository_context") or {})
+        target_hunk = dict(command_message.metadata.get("target_hunk") or {})
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
             self.message_repo.append(
@@ -349,6 +415,11 @@ class ReviewRunner:
                     "allowed_tools": expert.tool_bindings,
                     "allowed_skills": expert.skill_bindings,
                     "knowledge_sources": expert.knowledge_sources,
+                    "related_files": command_message.metadata.get("related_files", []),
+                    "target_hunk": target_hunk,
+                    "repository_context": repository_context,
+                    "expected_checks": command_message.metadata.get("expected_checks", []),
+                    "disallowed_inference": command_message.metadata.get("disallowed_inference", []),
                     "skill_results": skill_results,
                     **self._expert_llm_metadata(expert, runtime_settings),
                 },
@@ -379,6 +450,7 @@ class ReviewRunner:
                         "line_start": line_start,
                         "skill_result": skill_result,
                         "tool_name": skill_name,
+                        "target_hunk": target_hunk,
                         **self._expert_llm_metadata(expert, runtime_settings),
                     },
                 )
@@ -403,6 +475,10 @@ class ReviewRunner:
                 line_start,
                 tool_evidence,
                 skill_results,
+                repository_context,
+                target_hunk,
+                list(command_message.metadata.get("disallowed_inference", []) or []),
+                list(command_message.metadata.get("expected_checks", []) or []),
             ),
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
             fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
@@ -415,6 +491,7 @@ class ReviewRunner:
             file_path,
             line_start,
         )
+        parsed = self._stabilize_expert_analysis(parsed, file_path, line_start, target_hunk)
         severity = self._normalize_severity(parsed.get("severity"), severity)
         confidence = self._normalize_confidence(parsed.get("confidence"), confidence)
         parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
@@ -423,11 +500,21 @@ class ReviewRunner:
             expert_id=expert.expert_id,
             title=str(parsed.get("title") or self._build_finding_title(expert)),
             summary=str(parsed.get("claim") or self._build_finding_summary(review.subject, expert.expert_id)),
+            finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
             severity=severity,
             confidence=confidence,
             file_path=file_path,
             line_start=parsed_line_start,
-            evidence=self._build_evidence(review.subject, expert, tool_evidence, parsed),
+            evidence=self._build_evidence(review.subject, expert, file_path, tool_evidence, parsed),
+            cross_file_evidence=[str(item).strip() for item in parsed.get("cross_file_evidence", []) if str(item).strip()],
+            assumptions=[str(item).strip() for item in parsed.get("assumptions", []) if str(item).strip()],
+            context_files=self._merge_context_files(
+                parsed.get("context_files", []),
+                repository_context,
+                skill_results,
+            ),
+            verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
+            verification_plan=str(parsed.get("verification_plan") or "").strip(),
             remediation_suggestion=str(
                 parsed.get("suggested_fix")
                 or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)
@@ -461,6 +548,11 @@ class ReviewRunner:
                     "knowledge_sources": expert.knowledge_sources,
                     "tool_evidence": tool_evidence,
                     "skill_results": skill_results,
+                    "target_hunk": target_hunk,
+                    "repository_context": repository_context,
+                    "finding_type": finding.finding_type,
+                    "context_files": finding.context_files,
+                    "assumptions": finding.assumptions,
                     **self._llm_message_metadata(llm_result),
                 },
             )
@@ -704,6 +796,7 @@ class ReviewRunner:
         self,
         subject: ReviewSubject,
         expert: ExpertProfile,
+        file_path: str,
         tool_evidence: list[dict[str, object]],
         parsed: dict[str, object],
     ) -> list[str]:
@@ -712,12 +805,18 @@ class ReviewRunner:
             text = str(item).strip()
             if text:
                 evidence.append(text)
-        file_blob = " ".join(subject.changed_files).lower()
-        if any(token in file_blob for token in ["migration", ".sql", "db"]):
+        lowered_file_path = file_path.lower()
+        if expert.expert_id in {"database_analysis", "performance_reliability"} or any(
+            token in lowered_file_path for token in ["migration", ".sql", "schema", "db", "repository"]
+        ):
             evidence.append("database_migration")
-        if any(token in file_blob for token in ["auth", "security", "permission", "token"]):
+        if expert.expert_id == "security_compliance" or any(
+            token in lowered_file_path for token in ["auth", "security", "permission", "token", "secret"]
+        ):
             evidence.append("security_surface")
-        if any(token in file_blob for token in ["test", "spec", "jest", "vitest", "playwright"]):
+        if expert.expert_id == "test_verification" or any(
+            token in lowered_file_path for token in ["test", "spec", "jest", "vitest", "playwright"]
+        ):
             evidence.append("test_surface")
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
@@ -860,10 +959,16 @@ class ReviewRunner:
         line_start: int,
         tool_evidence: list[dict[str, object]],
         skill_results: list[dict[str, object]],
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+        disallowed_inference: list[str],
+        expected_checks: list[str],
     ) -> str:
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
         skill_summary = self._build_skill_summary(skill_results)
+        repository_context_summary = self._build_repository_context_summary(repository_context, skill_results)
+        hunk_summary = self._build_hunk_summary(target_hunk)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
@@ -872,12 +977,18 @@ class ReviewRunner:
             f"目标行号: {line_start}\n"
             f"变更文件: {', '.join(subject.changed_files[:5]) or '未提供'}\n"
             f"能力约束:\n{capability_summary}\n"
+            f"目标 hunk:\n{hunk_summary}\n"
             f"Skill 调用结果:\n{skill_summary}\n"
+            f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
+            f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
+            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
             f"请基于真实 diff 做审查，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
+            f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
+            f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
             f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
             f"JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"evidence":["至少2条具体代码证据"],"why_it_matters":"影响说明","suggested_fix":"可执行修复建议","confidence":0.0,"needs_verification":true}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","suggested_fix":"可执行修复建议","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
     def _build_expert_system_prompt(self, expert: ExpertProfile) -> str:
@@ -908,16 +1019,79 @@ class ReviewRunner:
             "title": self._extract_structured_field(text, "问题标题") or self._build_finding_title(expert),
             "claim": self._extract_structured_field(text, "风险结论")
             or self._build_finding_summary(subject, expert.expert_id),
+            "finding_type": "risk_hypothesis",
             "severity": "",
             "line_start": line_start,
             "line_end": line_start,
             "evidence": [self._extract_structured_field(text, "代码证据")] if self._extract_structured_field(text, "代码证据") else [],
+            "cross_file_evidence": [],
+            "assumptions": [],
+            "context_files": [],
             "why_it_matters": self._extract_structured_field(text, "证据诉求"),
             "suggested_fix": self._extract_structured_field(text, "修复建议")
             or self._build_remediation_suggestion(subject, expert.expert_id, file_path),
             "confidence": 0.0,
-            "needs_verification": True,
+            "verification_needed": True,
+            "verification_plan": "需要补充关联上下文、调用链和测试证据。",
         }
+
+    def _stabilize_expert_analysis(
+        self,
+        parsed: dict[str, object],
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object],
+    ) -> dict[str, object]:
+        result = dict(parsed)
+        text_blob = "\n".join(
+            [
+                str(result.get("title") or ""),
+                str(result.get("claim") or ""),
+                *[str(item) for item in list(result.get("evidence") or [])],
+                *[str(item) for item in list(result.get("assumptions") or [])],
+            ]
+        )
+        excerpt = str(target_hunk.get("excerpt") or "")
+        normalized_excerpt_lines = []
+        for line in excerpt.splitlines():
+            cleaned = line
+            if "|" in cleaned:
+                cleaned = cleaned.split("|", 1)[1]
+            cleaned = cleaned.strip()
+            normalized_excerpt_lines.append(cleaned)
+        import_only_excerpt = bool(excerpt) and all(
+            line.startswith(("+import", "-import", "import ")) or not line
+            for line in normalized_excerpt_lines
+        )
+        speculative_tokens = ["未显示", "未看到", "可能", "若", "如果", "假设", "推测"]
+        import_inference_tokens = ["constructor", "注入", "依赖缺失", "未注入", "Cannot resolve dependency"]
+        has_speculative_language = any(token in text_blob for token in speculative_tokens)
+        has_import_inference = any(token in text_blob for token in import_inference_tokens)
+        if import_only_excerpt and has_import_inference:
+            result["finding_type"] = "risk_hypothesis"
+            result["verification_needed"] = True
+            result["verification_plan"] = (
+                str(result.get("verification_plan") or "").strip()
+                or "需要检查完整类定义和 constructor 注入，不能仅凭 import 变化下结论。"
+            )
+            assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+            assumption = "当前结论基于 import 变化推断，尚未看到完整类定义与 constructor。"
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+            result["assumptions"] = assumptions
+            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.45)
+            if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
+                result["severity"] = "medium"
+        elif has_speculative_language and str(result.get("finding_type") or "") == "direct_defect":
+            result["finding_type"] = "risk_hypothesis"
+            result["verification_needed"] = True
+            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.6)
+
+        result["line_start"] = self._normalize_line_start(result.get("line_start"), line_start)
+        result["line_end"] = self._normalize_line_start(result.get("line_end"), int(result["line_start"]))
+        result["context_files"] = [str(item).strip() for item in list(result.get("context_files") or []) if str(item).strip()]
+        result["evidence"] = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        return result
 
     def _build_expert_fallback(
         self,
@@ -955,6 +1129,113 @@ class ReviewRunner:
                         snippet = str(match.get("snippet") or "").strip()
                         lines.append(f"  * {title}: {snippet[:160]}")
         return "\n".join(lines)
+
+    def _build_repository_context_summary(
+        self,
+        repository_context: dict[str, object],
+        skill_results: list[dict[str, object]],
+    ) -> str:
+        lines: list[str] = []
+        if repository_context:
+            summary = str(repository_context.get("summary") or "").strip()
+            if summary:
+                lines.append(f"- 主Agent上下文: {summary}")
+            primary_context = repository_context.get("primary_context")
+            if isinstance(primary_context, dict) and primary_context.get("snippet"):
+                lines.append(f"- 目标文件: {primary_context.get('path')}")
+            related_contexts = repository_context.get("related_contexts")
+            if isinstance(related_contexts, list) and related_contexts:
+                related_paths = [
+                    str(item.get("path") or "").strip()
+                    for item in related_contexts
+                    if isinstance(item, dict) and str(item.get("path") or "").strip()
+                ]
+                if related_paths:
+                    lines.append(f"- 关联文件: {' / '.join(related_paths[:4])}")
+            symbol_contexts = repository_context.get("symbol_contexts")
+            if isinstance(symbol_contexts, list) and symbol_contexts:
+                for item in symbol_contexts[:2]:
+                    if not isinstance(item, dict):
+                        continue
+                    symbol = str(item.get("symbol") or "").strip()
+                    definition_count = len(list(item.get("definitions") or []))
+                    reference_count = len(list(item.get("references") or []))
+                    if symbol:
+                        lines.append(f"- 符号上下文: {symbol} · 定义 {definition_count} · 引用 {reference_count}")
+        for item in skill_results:
+            if str(item.get("skill_name") or "") != "repo_context_search":
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                lines.append(f"- Repo skill: {summary}")
+            context_files = [
+                str(value).strip()
+                for value in list(item.get("context_files") or [])
+                if str(value).strip()
+            ]
+            if context_files:
+                lines.append(f"- Repo 引用文件: {' / '.join(context_files[:4])}")
+            matches = item.get("matches")
+            if isinstance(matches, list) and matches:
+                formatted = []
+                for match in matches[:3]:
+                    if isinstance(match, dict):
+                        path = str(match.get("path") or "").strip()
+                        line_number = match.get("line_number")
+                        if path:
+                            formatted.append(f"{path}:{line_number}")
+                if formatted:
+                    lines.append(f"- 代码仓命中: {' / '.join(formatted)}")
+            symbol_contexts = item.get("symbol_contexts")
+            if isinstance(symbol_contexts, list) and symbol_contexts:
+                for symbol_context in symbol_contexts[:2]:
+                    if not isinstance(symbol_context, dict):
+                        continue
+                    symbol = str(symbol_context.get("symbol") or "").strip()
+                    if not symbol:
+                        continue
+                    lines.append(
+                        f"- Repo 符号: {symbol} · 定义 {len(list(symbol_context.get('definitions') or []))} · "
+                        f"引用 {len(list(symbol_context.get('references') or []))}"
+                    )
+        return "\n".join(lines) if lines else "未补充代码仓上下文。"
+
+    def _build_hunk_summary(self, target_hunk: dict[str, object]) -> str:
+        if not target_hunk:
+            return "未定位到明确 hunk，请结合当前代码片段谨慎判断。"
+        header = str(target_hunk.get("hunk_header") or "").strip()
+        excerpt = str(target_hunk.get("excerpt") or "").strip()
+        lines = []
+        if header:
+            lines.append(header)
+        if excerpt:
+            excerpt_lines = excerpt.splitlines()
+            lines.extend(excerpt_lines[:8])
+        return "\n".join(lines) if lines else "未定位到明确 hunk，请结合当前代码片段谨慎判断。"
+
+    def _merge_context_files(
+        self,
+        parsed_context_files: object,
+        repository_context: dict[str, object],
+        skill_results: list[dict[str, object]],
+    ) -> list[str]:
+        merged: list[str] = []
+        for item in list(parsed_context_files or []):
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+        for item in list(repository_context.get("context_files", []) or []):
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+        for result in skill_results:
+            if str(result.get("skill_name") or "") != "repo_context_search":
+                continue
+            for item in list(result.get("context_files", []) or []):
+                text = str(item).strip()
+                if text and text not in merged:
+                    merged.append(text)
+        return merged[:6]
 
     def _build_debate_prompt(
         self,

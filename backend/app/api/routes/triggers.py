@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
-from app.services.review_service import review_service
+import app.services.review_service as review_service_module
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class WebhookTriggerRequest(BaseModel):
 
 @router.post("/triggers/manual", status_code=status.HTTP_201_CREATED)
 def manual_trigger(payload: ManualTriggerRequest) -> dict[str, object]:
-    review = review_service.create_review(
+    review = review_service_module.review_service.create_review(
         payload.model_dump()
         | {
             "metadata": {
@@ -49,7 +49,7 @@ def manual_trigger(payload: ManualTriggerRequest) -> dict[str, object]:
 def webhook_trigger(payload: WebhookTriggerRequest) -> dict[str, object]:
     repository = payload.repository
     merge_request = payload.merge_request
-    review = review_service.create_review(
+    review = review_service_module.review_service.create_review(
         {
             "subject_type": "mr" if payload.event_type == "merge_request" else "branch",
             "repo_id": str(repository.get("repo_id", "")),

@@ -1,13 +1,15 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
 
-import type { ReviewFinding, ReviewReport } from "@/services/api";
+import type { DebateIssue, ReviewFinding, ReviewReport } from "@/services/api";
 
 const { Paragraph } = Typography;
 
 type ReportSummaryPanelProps = {
   report: ReviewReport | null;
   findings: ReviewFinding[];
+  issues: DebateIssue[];
+  className?: string;
 };
 
 const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]): string => {
@@ -31,6 +33,20 @@ const getOverallPriority = (findings: ReviewFinding[]): string => {
   if (findings.some((item) => item.severity === "medium")) return "P2";
   if (findings.length > 0) return "P3";
   return "无";
+};
+
+const getHumanReviewTone = (status: string): { color: string; label: string } => {
+  if (status === "requested") return { color: "error", label: "人工裁决中" };
+  if (status === "approved") return { color: "success", label: "人工已批准" };
+  if (status === "rejected") return { color: "warning", label: "人工已驳回" };
+  return { color: "default", label: "无需人工裁决" };
+};
+
+const findingTypeLabel = (value: string): string => {
+  if (value === "direct_defect") return "直接缺陷";
+  if (value === "test_gap") return "测试缺口";
+  if (value === "design_concern") return "设计关注";
+  return "待验证风险";
 };
 
 const getPriority = (finding: ReviewFinding): string => {
@@ -113,9 +129,17 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
   URL.revokeObjectURL(url);
 };
 
-const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings }) => {
+const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className }) => {
+  const totalCount = findings.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
   const criticalCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
+  const issueByFindingId = new Map<string, DebateIssue>();
+  for (const issue of issues) {
+    for (const findingId of issue.finding_ids) {
+      issueByFindingId.set(findingId, issue);
+    }
+  }
+  const verifiedFindingCount = findings.filter((item) => Boolean(issueByFindingId.get(item.finding_id)?.verified)).length;
   const blockingCount = report
     ? findings.filter((item) =>
         getFindingMergeImpact(item, report.confidence_summary.needs_human_count).includes("Blocking"),
@@ -130,9 +154,16 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
   const mergeDecision = getMergeDecision(report, findings);
   const overallPriority = getOverallPriority(findings);
   const verdict = getVerdict(report, findings);
+  const humanReview = getHumanReviewTone(report?.human_review_status || "not_required");
+  const pendingHumanCount = report?.confidence_summary.needs_human_count || 0;
+  const typeCounts = findings.reduce<Record<string, number>>((acc, item) => {
+    const key = item.finding_type || "risk_hypothesis";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
 
   return (
-    <Card className="module-card" title="Code Review 报告摘要">
+    <Card className={`module-card ${className || ""}`.trim()} title="Code Review 报告摘要">
       <Space style={{ marginBottom: 16 }} wrap>
         <Tag color={verdict.color} style={{ fontSize: 13, paddingInline: 10, borderRadius: 999 }}>
           {verdict.label}
@@ -141,6 +172,8 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
           {mergeDecision}
         </Tag>
         <Tag color="purple">{`建议优先级 ${overallPriority}`}</Tag>
+        <Tag color={humanReview.color}>{humanReview.label}</Tag>
+        <Tag color={pendingHumanCount > 0 ? "error" : "default"}>{`待人工 ${pendingHumanCount}`}</Tag>
         <Button size="small" onClick={() => report && downloadMarkdownReport(report, findings)} disabled={!report}>
           导出 Markdown 报告
         </Button>
@@ -150,22 +183,25 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          <Statistic title="高置信发现" value={report?.confidence_summary.high_confidence_count || 0} />
+          <Statistic title="总问题数" value={totalCount} />
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="已辩论议题" value={report?.confidence_summary.debated_issue_count || 0} />
+          <Statistic title="高风险问题" value={criticalCount} />
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="待人工确认" value={report?.confidence_summary.needs_human_count || 0} />
+          <Statistic title="待人工裁决" value={report?.confidence_summary.needs_human_count || 0} />
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="已核验证据" value={report?.confidence_summary.verified_issue_count || 0} suffix={<Tag color="processing">judge</Tag>} />
+          <Statistic title="已核验问题" value={verifiedFindingCount} />
         </Col>
       </Row>
       <Space wrap style={{ marginTop: 16 }}>
         <Tag color={blockingCount > 0 ? "error" : "default"}>{`Blocking ${blockingCount}`}</Tag>
         <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`Should Fix ${shouldFixCount}`}</Tag>
         <Tag color="success">{`Non-blocking ${Math.max(findings.length - blockingCount - shouldFixCount, 0)}`}</Tag>
+        {Object.entries(typeCounts).map(([key, count]) => (
+          <Tag key={key}>{`${findingTypeLabel(key)} ${count}`}</Tag>
+        ))}
       </Space>
       <Descriptions
         column={2}
@@ -181,11 +217,6 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
             key: "risk",
             label: "高风险问题数",
             children: criticalCount,
-          },
-          {
-            key: "human",
-            label: "人工裁决状态",
-            children: report?.human_review_status || "not_required",
           },
           {
             key: "merge",

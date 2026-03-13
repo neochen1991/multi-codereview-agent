@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.domain.models.event import ReviewEvent
-from app.services.review_service import review_service
+import app.services.review_service as review_service_module
 from app.services.stream_hub import encode_sse, encode_sse_event
 
 router = APIRouter()
@@ -14,30 +14,35 @@ router = APIRouter()
 
 @router.get("/reviews/{review_id}/events")
 def list_events(review_id: str) -> list[dict[str, object]]:
-    return [item.model_dump(mode="json") for item in review_service.list_events(review_id)]
+    return [
+        item.model_dump(mode="json")
+        for item in review_service_module.review_service.list_events(review_id)
+    ]
 
 
 @router.get("/reviews/{review_id}/events/stream")
 async def stream_events(review_id: str, request: Request) -> StreamingResponse:
-    review = review_service.get_review(review_id)
+    review = review_service_module.review_service.get_review(review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
 
     async def event_generator():
-        previous_event_count = len(review_service.list_events(review_id))
-        previous_message_count = len(review_service.list_all_messages(review_id))
+        previous_event_count = len(review_service_module.review_service.list_events(review_id))
+        previous_message_count = len(
+            review_service_module.review_service.list_all_messages(review_id)
+        )
         idle_rounds_after_finish = 0
 
         while True:
             if await request.is_disconnected():
                 break
 
-            current_review = review_service.get_review(review_id)
+            current_review = review_service_module.review_service.get_review(review_id)
             if current_review is None:
                 break
 
-            events = review_service.list_events(review_id)
-            messages = review_service.list_all_messages(review_id)
+            events = review_service_module.review_service.list_events(review_id)
+            messages = review_service_module.review_service.list_all_messages(review_id)
             emitted = False
 
             if len(events) > previous_event_count:

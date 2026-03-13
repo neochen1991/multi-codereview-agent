@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument
@@ -31,7 +32,12 @@ class FileKnowledgeRepository:
                 "storage_path": str(storage_path),
             }
         )
-        documents = [item for item in documents if item.doc_id != persisted.doc_id]
+        persisted_fingerprint = self._fingerprint(persisted)
+        documents = [
+            item
+            for item in documents
+            if item.doc_id != persisted.doc_id and self._fingerprint(item) != persisted_fingerprint
+        ]
         documents.append(persisted)
         write_json(
             self._knowledge_path(),
@@ -44,6 +50,8 @@ class FileKnowledgeRepository:
         if not path.exists():
             return []
         documents: list[KnowledgeDocument] = []
+        fingerprints: set[str] = set()
+        deduped = False
         for item in read_json(path):
             document = KnowledgeDocument.model_validate(item)
             storage_path = Path(document.storage_path) if document.storage_path else None
@@ -51,5 +59,28 @@ class FileKnowledgeRepository:
                 document = document.model_copy(
                     update={"content": storage_path.read_text(encoding="utf-8")}
                 )
+            fingerprint = self._fingerprint(document)
+            if fingerprint in fingerprints:
+                deduped = True
+                continue
+            fingerprints.add(fingerprint)
             documents.append(document)
+        if deduped:
+            write_json(path, [item.model_dump(mode="json") for item in documents])
         return documents
+
+    def _fingerprint(self, document: KnowledgeDocument) -> str:
+        normalized_tags = ",".join(sorted(str(tag).strip().lower() for tag in document.tags if str(tag).strip()))
+        normalized_title = str(document.title).strip().lower()
+        normalized_filename = str(document.source_filename).strip().lower()
+        normalized_content = str(document.content).strip()
+        content_hash = hashlib.sha1(normalized_content.encode("utf-8")).hexdigest()
+        return "|".join(
+            [
+                str(document.expert_id).strip().lower(),
+                normalized_title,
+                normalized_filename,
+                normalized_tags,
+                content_hash,
+            ]
+        )

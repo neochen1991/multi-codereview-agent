@@ -12,11 +12,19 @@ type FindingsPanelProps = {
   onSelectFinding?: (findingId: string) => void;
 };
 
+const findingTypeMeta = (value: string): { label: string; color: string } => {
+  if (value === "direct_defect") return { label: "直接缺陷", color: "red" };
+  if (value === "test_gap") return { label: "测试缺口", color: "gold" };
+  if (value === "design_concern") return { label: "设计关注", color: "blue" };
+  return { label: "待验证风险", color: "processing" };
+};
+
 type StructuredFindingRow = ReviewFinding & {
   issueStatus: string;
   resolution: string;
   recommendedAction: string;
   needsHuman: boolean;
+  verified: boolean;
   mergeImpact: string;
   priority: string;
 };
@@ -64,7 +72,9 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   selectedFindingId,
   onSelectFinding,
 }) => {
-  const [activeGroup, setActiveGroup] = useState<"all" | "blocking" | "should_fix" | "non_blocking">("all");
+  const [activeGroup, setActiveGroup] = useState<
+    "all" | "blocking" | "should_fix" | "non_blocking" | "verified" | "direct_defect" | "risk_hypothesis" | "test_gap" | "design_concern"
+  >("all");
   const issueByFindingId = new Map<string, DebateIssue>();
   for (const issue of issues) {
     for (const findingId of issue.finding_ids) {
@@ -80,6 +90,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       resolution: issue?.resolution || "pending",
       recommendedAction: buildRecommendedAction(issue, finding),
       needsHuman: Boolean(issue?.needs_human),
+      verified: Boolean(issue?.verified),
       mergeImpact: getMergeImpact(issue, finding),
       priority: getPriority(finding),
     };
@@ -95,12 +106,23 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     if (activeGroup === "non_blocking") {
       return rows.filter((item) => item.mergeImpact === "Non-blocking");
     }
+    if (activeGroup === "verified") {
+      return rows.filter((item) => item.verified);
+    }
+    if (["direct_defect", "risk_hypothesis", "test_gap", "design_concern"].includes(activeGroup)) {
+      return rows.filter((item) => item.finding_type === activeGroup);
+    }
     return rows;
   }, [activeGroup, rows]);
 
   const blockingCount = rows.filter((item) => item.mergeImpact === "Blocking").length;
   const shouldFixCount = rows.filter((item) => item.mergeImpact === "Should fix before merge").length;
   const nonBlockingCount = rows.filter((item) => item.mergeImpact === "Non-blocking").length;
+  const verifiedCount = rows.filter((item) => item.verified).length;
+  const directDefectCount = rows.filter((item) => item.finding_type === "direct_defect").length;
+  const riskHypothesisCount = rows.filter((item) => item.finding_type === "risk_hypothesis").length;
+  const testGapCount = rows.filter((item) => item.finding_type === "test_gap").length;
+  const designConcernCount = rows.filter((item) => item.finding_type === "design_concern").length;
 
   const columns = [
     {
@@ -138,6 +160,16 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           {value ? `L${value}` : "-"}
         </button>
       ),
+    },
+    {
+      title: "问题类型",
+      dataIndex: "finding_type",
+      key: "finding_type",
+      width: 130,
+      render: (value: string) => {
+        const meta = findingTypeMeta(value);
+        return <Tag color={meta.color}>{meta.label}</Tag>;
+      },
     },
     {
       title: "级别",
@@ -195,6 +227,13 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       ),
     },
     {
+      title: "核验状态",
+      key: "verified",
+      width: 130,
+      render: (_: unknown, item: StructuredFindingRow) =>
+        item.verified ? <Tag color="success">已核验</Tag> : <Tag>未核验</Tag>,
+    },
+    {
       title: "推荐动作",
       dataIndex: "recommendedAction",
       key: "recommendedAction",
@@ -244,11 +283,26 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
         >
           Non-blocking {nonBlockingCount}
         </Button>
+        <Button type={activeGroup === "verified" ? "primary" : "default"} onClick={() => setActiveGroup("verified")}>
+          已核验 {verifiedCount}
+        </Button>
+        <Button type={activeGroup === "direct_defect" ? "primary" : "default"} onClick={() => setActiveGroup("direct_defect")}>
+          直接缺陷 {directDefectCount}
+        </Button>
+        <Button type={activeGroup === "risk_hypothesis" ? "primary" : "default"} onClick={() => setActiveGroup("risk_hypothesis")}>
+          待验证风险 {riskHypothesisCount}
+        </Button>
+        <Button type={activeGroup === "test_gap" ? "primary" : "default"} onClick={() => setActiveGroup("test_gap")}>
+          测试缺口 {testGapCount}
+        </Button>
+        <Button type={activeGroup === "design_concern" ? "primary" : "default"} onClick={() => setActiveGroup("design_concern")}>
+          设计关注 {designConcernCount}
+        </Button>
       </Space>
       <Table<StructuredFindingRow>
         rowKey="finding_id"
         size="middle"
-        pagination={{ pageSize: 6, hideOnSinglePage: true }}
+        pagination={{ pageSize: 8, hideOnSinglePage: true }}
         scroll={{ x: 1620 }}
         columns={columns}
         dataSource={groupedRows}
@@ -257,25 +311,6 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           onClick: () => onSelectFinding?.(record.finding_id),
           style: { cursor: onSelectFinding ? "pointer" : "default" },
         })}
-        expandable={{
-          expandedRowRender: (item) => (
-            <div style={{ display: "grid", gap: 12 }}>
-              <div>
-                <Paragraph style={{ marginBottom: 4, fontWeight: 600 }}>问题说明</Paragraph>
-                <Paragraph style={{ marginBottom: 0 }}>{item.summary}</Paragraph>
-              </div>
-              <div>
-                <Paragraph style={{ marginBottom: 4, fontWeight: 600 }}>修复建议</Paragraph>
-                <Paragraph style={{ marginBottom: 0 }}>{item.remediation_suggestion || item.recommendedAction}</Paragraph>
-              </div>
-              <div>
-                <Paragraph style={{ marginBottom: 4, fontWeight: 600 }}>问题代码</Paragraph>
-                <pre className="review-conclusion-code">{item.code_excerpt || `${item.file_path}:${item.line_start}`}</pre>
-              </div>
-            </div>
-          ),
-          rowExpandable: () => true,
-        }}
         locale={{ emptyText: "当前还没有问题结论，运行审核后这里会生成正式的 Code Review 问题清单。" }}
       />
     </Card>

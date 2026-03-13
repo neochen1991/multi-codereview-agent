@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -79,23 +80,41 @@ class LLMChatService:
             "temperature": temperature,
         }
         endpoint = resolution.base_url.rstrip("/") + "/chat/completions"
-        try:
-            with httpx.Client(timeout=35.0) as client:
-                response = client.post(
-                    endpoint,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=request_body,
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except Exception as exc:  # pragma: no cover - network dependent
+        payload = None
+        last_error = ""
+        for attempt in range(1, 4):
+            try:
+                with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0, read=60.0)) as client:
+                    response = client.post(
+                        endpoint,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_body,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    break
+            except httpx.TimeoutException as exc:  # pragma: no cover - network dependent
+                last_error = f"request_timeout:{exc}"
+                if attempt < 3:
+                    time.sleep(1.5 * attempt)
+                    continue
+            except httpx.HTTPStatusError as exc:  # pragma: no cover - network dependent
+                last_error = f"http_status:{exc.response.status_code}"
+                if 500 <= exc.response.status_code < 600 and attempt < 3:
+                    time.sleep(1.5 * attempt)
+                    continue
+                break
+            except Exception as exc:  # pragma: no cover - network dependent
+                last_error = f"request_failed:{exc}"
+                break
+        if payload is None:
             return self._handle_failure(
                 resolution=resolution,
                 fallback_text=fallback_text,
-                error=f"request_failed:{exc}",
+                error=last_error or "request_failed:unknown",
                 allow_fallback=allow_fallback,
             )
 

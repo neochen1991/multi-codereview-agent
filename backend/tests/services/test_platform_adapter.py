@@ -83,3 +83,43 @@ def test_platform_adapter_normalizes_github_commit_url(monkeypatch):
     assert normalized.metadata["remote_diff_fetched"] is True
     assert normalized.changed_files == ["backend/app/main.py"]
     assert normalized.commits == ["e396447b53dc0c545543b2b4dabe3deb3a66bb9c"]
+
+
+def test_platform_adapter_normalizes_github_pull_request_url(monkeypatch):
+    adapter = PlatformAdapter()
+
+    monkeypatch.setattr(
+        adapter,
+        "_fetch_remote_diff",
+        lambda review_url, access_token: (
+            "diff --git a/backend/app/api/orders.py b/backend/app/api/orders.py\n"
+            "--- a/backend/app/api/orders.py\n"
+            "+++ b/backend/app/api/orders.py\n"
+            "@@ -40,2 +40,5 @@\n"
+            " def create_order(payload):\n"
+            "+    cache_key = payload.get('cache_key')\n"
+            "+    return persist_order(payload)\n"
+        ),
+    )
+
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="",
+        project_id="",
+        source_ref="",
+        target_ref="",
+        mr_url="https://github.com/example-org/payments-service/pull/128",
+        title="",
+    )
+
+    normalized = adapter.normalize(subject)
+
+    assert normalized.repo_id == "payments-service"
+    assert normalized.project_id == "example-org"
+    assert normalized.source_ref == "mr/128"
+    assert normalized.target_ref == "main"
+    assert normalized.title == "Merge Request !128"
+    assert normalized.metadata["compare_mode"] == "mr_compare"
+    assert normalized.metadata["platform_kind"] == "github"
+    assert normalized.metadata["remote_diff_fetched"] is True
+    assert normalized.changed_files == ["backend/app/api/orders.py"]

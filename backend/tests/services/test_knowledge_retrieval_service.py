@@ -59,3 +59,25 @@ def test_knowledge_retrieval_honors_bound_sources(storage_root: Path):
 
     assert docs
     assert all("lock" in item.source_filename for item in docs)
+
+
+def test_knowledge_retrieval_uses_cache_for_same_context(storage_root: Path):
+    ingestion = KnowledgeIngestionService(storage_root)
+    retrieval = KnowledgeRetrievalService(storage_root)
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="Authz guideline",
+            expert_id="security_compliance",
+            content="权限校验必须覆盖拒绝路径。",
+            tags=["auth", "security"],
+            source_filename="authz-guideline.md",
+        )
+    )
+
+    context = {"changed_files": ["backend/app/security/authz.py"]}
+    first = retrieval.retrieve("security_compliance", context)
+    second = retrieval.retrieve("security_compliance", context)
+
+    assert first
+    assert second
+    assert retrieval._cache

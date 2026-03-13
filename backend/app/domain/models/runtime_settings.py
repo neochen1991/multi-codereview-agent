@@ -7,6 +7,11 @@ from app.config import settings
 
 class RuntimeSettings(BaseModel):
     default_target_branch: str = "main"
+    code_repo_clone_url: str = ""
+    code_repo_local_path: str = ""
+    code_repo_default_branch: str = "main"
+    code_repo_access_token: str | None = None
+    code_repo_auto_sync: bool = False
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
     skill_allowlist: list[str] = Field(
@@ -15,6 +20,7 @@ class RuntimeSettings(BaseModel):
             "diff_inspector",
             "test_surface_locator",
             "dependency_surface_locator",
+            "repo_context_search",
         ]
     )
     agent_allowlist: list[str] = Field(default_factory=list)

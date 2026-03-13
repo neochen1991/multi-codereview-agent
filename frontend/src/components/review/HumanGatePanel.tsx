@@ -8,26 +8,30 @@ const { Paragraph, Text } = Typography;
 type HumanGatePanelProps = {
   review: ReviewSummary | null;
   selectedIssue: DebateIssue | null;
+  isFallbackIssue?: boolean;
   decisionComment: string;
   submitting: boolean;
   onDecisionCommentChange: (value: string) => void;
   onApprove: () => void;
   onReject: () => void;
+  className?: string;
 };
 
 const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   review,
   selectedIssue,
+  isFallbackIssue = false,
   decisionComment,
   submitting,
   onDecisionCommentChange,
   onApprove,
   onReject,
+  className,
 }) => {
   const humanStatus = review?.human_review_status || "not_required";
 
   return (
-    <Card className="module-card" title="人工裁决">
+    <Card className={`module-card ${className || ""}`.trim()} title="人工裁决">
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         <div className="human-gate-status-row">
           <Tag color={humanStatus === "requested" ? "error" : humanStatus === "approved" ? "success" : "default"}>
@@ -38,9 +42,14 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
           </Text>
         </div>
         {!selectedIssue ? (
-          <Empty description="先从左侧议题线程中选择一个需要查看的议题。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="先从问题清单中选择一条需要人工确认的议题。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
+            {isFallbackIssue ? (
+              <Text type="secondary">
+                当前选中的问题无需人工裁决，已自动切换到一条待人工确认的议题。
+              </Text>
+            ) : null}
             <div className="human-gate-issue-box">
               <div className="human-gate-issue-head">
                 <Text strong>{selectedIssue.title}</Text>

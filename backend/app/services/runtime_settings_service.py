@@ -17,5 +17,7 @@ class RuntimeSettingsService:
         current = self._repository.get()
         if payload.get("default_llm_api_key") in (None, ""):
             payload = {key: value for key, value in payload.items() if key != "default_llm_api_key"}
+        if payload.get("code_repo_access_token") in (None, ""):
+            payload = {key: value for key, value in payload.items() if key != "code_repo_access_token"}
         updated = current.model_copy(update=payload)
         return self._repository.save(updated)

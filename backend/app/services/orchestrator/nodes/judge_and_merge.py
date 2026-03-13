@@ -10,28 +10,59 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
     merged_issues: list[dict[str, object]] = []
     for issue in next_state.get("issues", []):
         next_issue = dict(issue)
+        finding_type = str(issue.get("finding_type") or "risk_hypothesis")
+        direct_evidence = bool(issue.get("direct_evidence"))
+        tool_verified = bool(issue.get("tool_verified"))
+        verified = bool(issue.get("verified"))
+        severity = str(issue.get("severity") or "")
+        confidence = float(issue.get("confidence") or 0.0)
+        cross_file_evidence = [
+            str(item).strip() for item in list(issue.get("cross_file_evidence") or []) if str(item).strip()
+        ]
+        context_files = [
+            str(item).strip() for item in list(issue.get("context_files") or []) if str(item).strip()
+        ]
+        evidence = [
+            str(item).strip() for item in list(issue.get("evidence") or []) if str(item).strip()
+        ]
+        evidence_strength = len(cross_file_evidence) + len(context_files) + len(evidence)
         if issue.get("needs_human"):
             next_issue["status"] = "needs_human"
+            next_issue["resolution"] = next_issue.get("resolution") or "needs_human_review"
+            next_issue["needs_human"] = True
             pending_human_issue_ids.append(str(issue.get("issue_id")))
+        elif finding_type == "design_concern":
+            next_issue["status"] = "comment"
+            next_issue["resolution"] = "comment"
+            next_issue["needs_human"] = False
+        elif finding_type == "risk_hypothesis" and not direct_evidence:
+            if (tool_verified or verified) and evidence_strength >= 4:
+                next_issue["status"] = "resolved"
+                next_issue["resolution"] = next_issue.get("resolution") or "accepted_with_verification"
+                next_issue["needs_human"] = False
+            else:
+                next_issue["status"] = "needs_verification"
+                next_issue["resolution"] = "needs_verification"
+                next_issue["needs_human"] = False
         elif (
-            str(issue.get("severity") or "") in {"high", "critical", "blocker"}
-            and not bool(issue.get("tool_verified"))
+            severity in {"high", "critical", "blocker"}
+            and not tool_verified
         ):
             next_issue["status"] = "needs_human"
             next_issue["resolution"] = "needs_human_review"
             next_issue["needs_human"] = True
             pending_human_issue_ids.append(str(issue.get("issue_id")))
-        elif not issue.get("verified") and float(issue.get("confidence") or 0.0) < 0.8:
+        elif not verified and confidence < 0.8:
             next_issue["status"] = "needs_human"
             next_issue["resolution"] = "needs_more_evidence"
             next_issue["needs_human"] = True
             pending_human_issue_ids.append(str(issue.get("issue_id")))
         elif issue.get("status") == "debating":
             next_issue["status"] = "resolved"
-            next_issue["resolution"] = "judge_accepted"
+            next_issue["resolution"] = "accepted"
         else:
             next_issue["status"] = "resolved"
-            next_issue["resolution"] = next_issue.get("resolution") or "judge_accepted"
+            next_issue["resolution"] = next_issue.get("resolution") or "accepted"
         merged_issues.append(next_issue)
     next_state["issues"] = merged_issues
     next_state["pending_human_issue_ids"] = pending_human_issue_ids

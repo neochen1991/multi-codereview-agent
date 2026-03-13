@@ -49,11 +49,17 @@ export interface ReviewFinding {
   expert_id: string;
   title: string;
   summary: string;
+  finding_type: string;
   severity: string;
   confidence: number;
   file_path: string;
   line_start: number;
   evidence: string[];
+  cross_file_evidence?: string[];
+  assumptions?: string[];
+  context_files?: string[];
+  verification_needed?: boolean;
+  verification_plan?: string;
   remediation_suggestion: string;
   code_excerpt: string;
   created_at: string;
@@ -64,6 +70,7 @@ export interface DebateIssue {
   review_id: string;
   title: string;
   summary: string;
+  finding_type?: string;
   file_path?: string;
   line_start?: number;
   status: string;
@@ -110,6 +117,10 @@ export interface ConfidenceSummary {
   debated_issue_count: number;
   needs_human_count: number;
   verified_issue_count: number;
+  direct_defect_count?: number;
+  risk_hypothesis_count?: number;
+  test_gap_count?: number;
+  design_concern_count?: number;
 }
 
 export interface ReviewReport {
@@ -172,6 +183,12 @@ export interface ExpertProfile {
 
 export interface RuntimeSettings {
   default_target_branch: string;
+  code_repo_clone_url: string;
+  code_repo_local_path: string;
+  code_repo_default_branch: string;
+  code_repo_access_token?: string;
+  code_repo_access_token_configured?: boolean;
+  code_repo_auto_sync: boolean;
   tool_allowlist: string[];
   mcp_allowlist: string[];
   skill_allowlist: string[];

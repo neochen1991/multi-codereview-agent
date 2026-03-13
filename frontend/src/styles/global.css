@@ -246,6 +246,10 @@ body {
   margin-bottom: 8px;
 }
 
+.result-top-card {
+  height: 100%;
+}
+
 .incident-section-nav-shell {
   position: sticky;
   top: 82px;

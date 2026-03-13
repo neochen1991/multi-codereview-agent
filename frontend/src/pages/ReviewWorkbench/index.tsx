@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { App as AntdApp, Button, Card, Col, Empty, Row, Space, Tabs, Tag, Typography } from "antd";
+import { App as AntdApp, Button, Card, Col, Empty, Modal, Row, Space, Tabs, Tag, Typography } from "antd";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import ArtifactSummaryPanel from "@/components/review/ArtifactSummaryPanel";
@@ -71,6 +71,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [starting, setStarting] = useState(false);
   const [submittingDecision, setSubmittingDecision] = useState(false);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [findingModalOpen, setFindingModalOpen] = useState(false);
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
   const isReadonlyOverview = Boolean(reviewId);
@@ -132,6 +133,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setSelectedIssueId("");
       setSelectedFindingId("");
       setDecisionComment("");
+      setFindingModalOpen(false);
       setActiveStep("overview");
       return;
     }
@@ -139,6 +141,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     setSelectedIssueId("");
     setSelectedFindingId("");
     setDecisionComment("");
+    setFindingModalOpen(false);
     void loadReviewBundle(reviewId);
   }, [reviewId]);
 
@@ -196,6 +199,17 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => (selectedFinding ? issueByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueByFindingId, selectedFinding],
   );
+  const pendingHumanIssues = useMemo(
+    () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
+    [issues],
+  );
+  const preferredHumanIssue = selectedFindingIssue?.needs_human
+    ? selectedFindingIssue
+    : selectedIssue?.needs_human
+      ? selectedIssue
+      : null;
+  const activeHumanIssue = preferredHumanIssue || pendingHumanIssues[0] || null;
+  const humanGateUsingFallbackIssue = Boolean(activeHumanIssue && activeHumanIssue !== preferredHumanIssue);
 
   useEffect(() => {
     if (selectedIssue && selectedIssue.issue_id !== selectedIssueId) {
@@ -469,40 +483,22 @@ const ReviewWorkbenchPage: React.FC = () => {
         )}
 
         {activeStep === "result" && (
-          <Row gutter={[16, 16]}>
-            <Col xs={24} xl={16}>
-              <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                <ReportSummaryPanel report={report} findings={findings} />
-                <FindingsPanel
-                  findings={findings}
-                  issues={issues}
-                  selectedFindingId={selectedFindingId}
-                  onSelectFinding={(findingId) => {
-                    setSelectedFindingId(findingId);
-                    const issue = issueByFindingId.get(findingId);
-                    if (issue) setSelectedIssueId(issue.issue_id);
-                  }}
-                />
-              </Space>
-            </Col>
-            <Col xs={24} xl={8}>
-              <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                <CodeReviewConclusionPanel
-                  finding={selectedFinding}
-                  issue={selectedFindingIssue}
-                  onJumpToProcess={() => {
-                    setActiveStep("process");
-                    if (selectedFindingIssue) setSelectedIssueId(selectedFindingIssue.issue_id);
-                  }}
-                />
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Row gutter={[16, 16]} align="stretch">
+              <Col xs={24} xl={15}>
+                <ReportSummaryPanel className="result-top-card" report={report} findings={findings} issues={issues} />
+              </Col>
+              <Col xs={24} xl={9}>
                 <HumanGatePanel
+                  className="result-top-card"
                   review={review}
-                  selectedIssue={selectedFindingIssue || selectedIssue}
+                  selectedIssue={activeHumanIssue}
+                  isFallbackIssue={humanGateUsingFallbackIssue}
                   decisionComment={decisionComment}
                   submitting={submittingDecision}
                   onDecisionCommentChange={setDecisionComment}
                   onApprove={async () => {
-                    const targetIssue = selectedFindingIssue || selectedIssue;
+                    const targetIssue = activeHumanIssue;
                     if (!reviewId || !targetIssue) return;
                     setSubmittingDecision(true);
                     try {
@@ -521,7 +517,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                     }
                   }}
                   onReject={async () => {
-                    const targetIssue = selectedFindingIssue || selectedIssue;
+                    const targetIssue = activeHumanIssue;
                     if (!reviewId || !targetIssue) return;
                     setSubmittingDecision(true);
                     try {
@@ -540,11 +536,40 @@ const ReviewWorkbenchPage: React.FC = () => {
                     }
                   }}
                 />
-                <ArtifactSummaryPanel artifacts={artifacts} />
-                <ReviewSubjectPanel review={review} />
-              </Space>
-            </Col>
-          </Row>
+              </Col>
+            </Row>
+            <FindingsPanel
+              findings={findings}
+              issues={issues}
+              selectedFindingId={selectedFindingId}
+              onSelectFinding={(findingId) => {
+                setSelectedFindingId(findingId);
+                const issue = issueByFindingId.get(findingId);
+                if (issue) setSelectedIssueId(issue.issue_id);
+                setFindingModalOpen(true);
+              }}
+            />
+            <ReviewSubjectPanel review={review} />
+            <ArtifactSummaryPanel artifacts={artifacts} />
+            <Modal
+              title="问题详情"
+              open={findingModalOpen}
+              onCancel={() => setFindingModalOpen(false)}
+              footer={null}
+              width={980}
+              destroyOnClose={false}
+            >
+              <CodeReviewConclusionPanel
+                finding={selectedFinding}
+                issue={selectedFindingIssue}
+                onJumpToProcess={() => {
+                  setFindingModalOpen(false);
+                  setActiveStep("process");
+                  if (selectedFindingIssue) setSelectedIssueId(selectedFindingIssue.issue_id);
+                }}
+              />
+            </Modal>
+          </Space>
         )}
       </div>
     </div>

@@ -29,7 +29,7 @@ class PlatformAdapter:
         changed_files = list(subject.changed_files)
         remote_diff_fetched = False
         unified_diff = subject.unified_diff
-        if review_mode == "commit_compare" and not unified_diff and review_url:
+        if review_mode in {"commit_compare", "mr_compare"} and not unified_diff and review_url:
             unified_diff = self._fetch_remote_diff(review_url, subject.access_token)
             remote_diff_fetched = bool(unified_diff)
         if unified_diff and not changed_files:
@@ -144,9 +144,15 @@ class PlatformAdapter:
         return "gitlab_like"
 
     def _fetch_remote_diff(self, review_url: str, access_token: str) -> str:
-        if "github.com" not in review_url or "/commit/" not in review_url:
+        if "github.com" not in review_url:
             return ""
-        patch_url = f"{review_url}.patch"
+        patch_url = ""
+        if "/commit/" in review_url:
+            patch_url = f"{review_url}.patch"
+        elif "/pull/" in review_url:
+            patch_url = f"{review_url}.patch"
+        if not patch_url:
+            return ""
         headers: dict[str, str] = {}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"

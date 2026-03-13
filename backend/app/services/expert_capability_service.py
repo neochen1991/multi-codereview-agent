@@ -65,14 +65,19 @@ class ExpertCapabilityService:
         self,
         expert: ExpertProfile,
         file_path: str,
+        hunk_excerpt: str = "",
+        repo_context_excerpt: str = "",
     ) -> str:
+        lowered_file = file_path.lower()
+        lowered_hunk = hunk_excerpt.lower()
+        lowered_repo = repo_context_excerpt.lower()
         matched = [
             hint
             for hint in expert.activation_hints
-            if hint and hint.lower() in file_path.lower()
+            if hint and (hint.lower() in lowered_file or hint.lower() in lowered_hunk or hint.lower() in lowered_repo)
         ]
         if matched:
-            return f"命中文件线索 {', '.join(matched[:3])}"
+            return f"命中变更线索 {', '.join(matched[:3])}"
         if expert.focus_areas:
             return f"按职责优先检查 {expert.focus_areas[0]}"
         return f"按专家职责 {expert.role} 进行定向派工"
@@ -95,8 +100,53 @@ class ExpertCapabilityService:
             score += 3
         return score
 
+    def score_hunk_relevance(
+        self,
+        expert: ExpertProfile,
+        file_path: str,
+        hunk_excerpt: str,
+        repo_context_excerpt: str = "",
+    ) -> int:
+        score = self.score_file_relevance(expert, file_path)
+        lowered = f"{file_path}\n{hunk_excerpt}\n{repo_context_excerpt}".lower()
+        for hint in expert.activation_hints:
+            token = hint.lower().strip()
+            if token and token in lowered:
+                score += 3
+        for token in self._expert_signal_tokens(expert.expert_id):
+            if token in lowered:
+                score += 4
+        for check in expert.required_checks:
+            for token in self._extract_check_tokens(check):
+                if token in lowered:
+                    score += 1
+        return score
+
     def supported_tools(self, expert: ExpertProfile) -> list[str]:
         return [tool for tool in expert.tool_bindings if tool in self._supported_tools]
 
     def _join_or_default(self, values: list[str], default: str) -> str:
         return " / ".join(values) if values else default
+
+    def _expert_signal_tokens(self, expert_id: str) -> list[str]:
+        mapping = {
+            "security_compliance": ["auth", "permission", "token", "security", "encrypt", "secret"],
+            "database_analysis": ["select", "insert", "update", "delete", "sql", "schema", "migration", "index", "transaction"],
+            "performance_reliability": ["timeout", "retry", "batch", "query", "cache", "migration", "rollback", "lock"],
+            "redis_analysis": ["redis", "cache", "ttl", "expire", "setnx", "pipeline"],
+            "mq_analysis": ["publish", "consumer", "producer", "queue", "kafka", "rabbit", "retry", "dead letter"],
+            "test_verification": ["test", "expect", "assert", "spec", "it(", "describe("],
+            "architecture_design": ["service", "repository", "module", "adapter", "domain", "application"],
+            "correctness_business": ["return", "status", "state", "validate", "error", "if ", "null", "undefined"],
+            "ddd_specification": ["aggregate", "domain", "entity", "value object", "repository", "application service"],
+            "maintainability_code_health": ["todo", "if ", "switch", "else", "dup", "helper", "util"],
+        }
+        return mapping.get(expert_id, [])
+
+    def _extract_check_tokens(self, check: str) -> list[str]:
+        normalized = str(check or "").lower()
+        tokens: list[str] = []
+        for token in ["事务", "锁", "回滚", "schema", "索引", "权限", "测试", "边界", "异常", "输入", "输出"]:
+            if token in normalized:
+                tokens.append(token)
+        return tokens

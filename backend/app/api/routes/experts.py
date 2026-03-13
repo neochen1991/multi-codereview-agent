@@ -4,7 +4,7 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.services.review_service import review_service
+import app.services.review_service as review_service_module
 
 router = APIRouter()
 
@@ -37,16 +37,19 @@ class CreateExpertRequest(BaseModel):
 
 @router.get("/experts")
 def list_experts() -> list[dict[str, object]]:
-    return [item.model_dump(mode="json") for item in review_service.list_experts()]
+    return [
+        item.model_dump(mode="json")
+        for item in review_service_module.review_service.list_experts()
+    ]
 
 
 @router.post("/experts", status_code=status.HTTP_201_CREATED)
 def create_expert(payload: CreateExpertRequest) -> dict[str, object]:
-    expert = review_service.create_expert(payload.model_dump())
+    expert = review_service_module.review_service.create_expert(payload.model_dump())
     return expert.model_dump(mode="json")
 
 
 @router.put("/experts/{expert_id}")
 def update_expert(expert_id: str, payload: CreateExpertRequest) -> dict[str, object]:
-    expert = review_service.update_expert(expert_id, payload.model_dump())
+    expert = review_service_module.review_service.update_expert(expert_id, payload.model_dump())
     return expert.model_dump(mode="json")

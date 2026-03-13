@@ -28,6 +28,7 @@ from app.services.expert_registry import ExpertRegistry
 from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.knowledge_service import KnowledgeService
 from app.services.platform_adapter import PlatformAdapter
+from app.services.repository_context_service import RepositoryContextService
 from app.services.review_runner import ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
 
@@ -196,6 +197,16 @@ class ReviewService:
     def update_runtime_settings(self, payload: dict[str, object]) -> RuntimeSettings:
         return self.runtime_settings_service.update(payload)
 
+    def build_repository_context_service(self) -> RepositoryContextService:
+        runtime = self.get_runtime_settings()
+        return RepositoryContextService(
+            clone_url=runtime.code_repo_clone_url,
+            local_path=runtime.code_repo_local_path,
+            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
+            access_token=runtime.code_repo_access_token,
+            auto_sync=runtime.code_repo_auto_sync,
+        )
+
     def get_artifacts(self, review_id: str) -> dict[str, object]:
         try:
             return self.artifact_service.load(review_id)
@@ -279,6 +290,10 @@ class ReviewService:
                 ),
                 "needs_human_count": len([item for item in issues if item.needs_human]),
                 "verified_issue_count": len([item for item in issues if item.verified]),
+                "direct_defect_count": len([item for item in findings if item.finding_type == "direct_defect"]),
+                "risk_hypothesis_count": len([item for item in findings if item.finding_type == "risk_hypothesis"]),
+                "test_gap_count": len([item for item in findings if item.finding_type == "test_gap"]),
+                "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
             },
         )
 

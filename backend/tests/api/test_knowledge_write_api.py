@@ -35,3 +35,24 @@ def test_upload_knowledge_doc_and_group_by_expert(client):
     payload = grouped.json()
     assert "security_compliance" in payload
     assert any(item["source_filename"] == "auth-guideline.md" for item in payload["security_compliance"])
+
+
+def test_upload_same_knowledge_doc_does_not_create_duplicates(client):
+    payload = {
+        "title": "Schema diff checklist",
+        "expert_id": "performance_reliability",
+        "content": "涉及 migration 时必须检查锁与回滚。",
+        "tags": ["migration", "schema"],
+        "source_filename": "schema-checklist.md",
+    }
+
+    first = client.post("/api/knowledge/upload", json=payload)
+    second = client.post("/api/knowledge/upload", json=payload)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    grouped = client.get("/api/knowledge/grouped")
+    assert grouped.status_code == 200
+    docs = grouped.json()["performance_reliability"]
+    assert len([item for item in docs if item["title"] == "Schema diff checklist"]) == 1

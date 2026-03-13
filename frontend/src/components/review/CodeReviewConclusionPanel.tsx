@@ -31,6 +31,13 @@ const getPriority = (finding: ReviewFinding): string => {
   return "P3";
 };
 
+const getFindingTypeLabel = (findingType?: string): string => {
+  if (findingType === "direct_defect") return "直接缺陷";
+  if (findingType === "test_gap") return "测试缺口";
+  if (findingType === "design_concern") return "设计关注";
+  return "待验证风险";
+};
+
 const renderCodeLines = (
   codeExcerpt: string,
   targetLine: number,
@@ -116,6 +123,11 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
             ),
           },
           {
+            key: "finding_type",
+            label: "问题类型",
+            children: <Tag color="purple">{getFindingTypeLabel(finding.finding_type)}</Tag>,
+          },
+          {
             key: "confidence",
             label: "置信度",
             children: `${(finding.confidence * 100).toFixed(0)}%`,
@@ -141,6 +153,9 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
           {issue?.verifier_name ? <Tag color="blue">{issue.verifier_name}</Tag> : null}
           {issue?.participant_expert_ids?.map((expertId) => (
             <Tag key={expertId}>{expertId}</Tag>
+          ))}
+          {(finding.context_files || []).slice(0, 4).map((path) => (
+            <Tag key={path}>{path}</Tag>
           ))}
         </Space>
       </div>

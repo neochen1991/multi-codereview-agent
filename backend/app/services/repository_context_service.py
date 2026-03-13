@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import fnmatch
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+
+class RepositoryContextService:
+    def __init__(
+        self,
+        clone_url: str,
+        local_path: str | Path,
+        default_branch: str,
+        access_token: str | None = None,
+        auto_sync: bool = False,
+    ) -> None:
+        self.clone_url = str(clone_url or "").strip()
+        self.local_path = Path(local_path).expanduser() if str(local_path or "").strip() else Path()
+        self.default_branch = str(default_branch or "").strip() or "main"
+        self.access_token = (access_token or "").strip() or None
+        self.auto_sync = auto_sync
+        self._cache: dict[tuple[str, tuple[str, ...], int], list[dict[str, Any]]] = {}
+
+    def is_configured(self) -> bool:
+        return bool(self.clone_url and str(self.local_path))
+
+    def is_ready(self) -> bool:
+        return self.is_configured() and self.local_path.exists() and self.local_path.is_dir()
+
+    def search(self, query: str, globs: list[str] | None = None, limit: int = 20) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        normalized_globs = tuple(sorted(str(item).strip() for item in (globs or []) if str(item).strip()))
+        cache_key = (normalized_query, normalized_globs, limit)
+        if cache_key in self._cache:
+            return {
+                "matches": self._cache[cache_key],
+                "cache_hit": True,
+                "local_path": str(self.local_path),
+                "default_branch": self.default_branch,
+            }
+
+        if not self.is_ready() or not normalized_query:
+            return {
+                "matches": [],
+                "cache_hit": False,
+                "local_path": str(self.local_path),
+                "default_branch": self.default_branch,
+            }
+
+        matches = self._search_with_ripgrep(normalized_query, list(normalized_globs), limit)
+        if not matches:
+            matches = self._search_with_fallback(normalized_query, list(normalized_globs), limit)
+        self._cache[cache_key] = matches
+        return {
+            "matches": matches,
+            "cache_hit": False,
+            "local_path": str(self.local_path),
+            "default_branch": self.default_branch,
+        }
+
+    def search_symbol_context(
+        self,
+        symbol: str,
+        globs: list[str] | None = None,
+        *,
+        definition_limit: int = 4,
+        reference_limit: int = 8,
+    ) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").strip()
+        if not normalized_symbol:
+            return {
+                "symbol": normalized_symbol,
+                "definitions": [],
+                "references": [],
+                "cache_hit": False,
+                "local_path": str(self.local_path),
+                "default_branch": self.default_branch,
+            }
+        result = self.search(normalized_symbol, globs=globs, limit=definition_limit + reference_limit + 8)
+        definitions: list[dict[str, Any]] = []
+        references: list[dict[str, Any]] = []
+        for item in result.get("matches", []):
+            snippet = str(item.get("snippet") or "")
+            if self._looks_like_definition(normalized_symbol, snippet):
+                if len(definitions) < definition_limit:
+                    definitions.append(item)
+                continue
+            if len(references) < reference_limit:
+                references.append(item)
+        return {
+            "symbol": normalized_symbol,
+            "definitions": definitions,
+            "references": references,
+            "cache_hit": bool(result.get("cache_hit")),
+            "local_path": str(self.local_path),
+            "default_branch": self.default_branch,
+        }
+
+    def search_many(
+        self,
+        queries: list[str],
+        globs: list[str] | None = None,
+        *,
+        limit_per_query: int = 6,
+        total_limit: int = 12,
+    ) -> dict[str, Any]:
+        deduped_queries: list[str] = []
+        for query in queries:
+            normalized = str(query or "").strip()
+            if not normalized or normalized in deduped_queries:
+                continue
+            deduped_queries.append(normalized)
+        matches: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, int]] = set()
+        cache_hit = True
+        for query in deduped_queries:
+            result = self.search(query, globs=globs, limit=limit_per_query)
+            cache_hit = cache_hit and bool(result.get("cache_hit"))
+            for item in result.get("matches", []):
+                path = str(item.get("path") or "").strip()
+                line_number = int(item.get("line_number") or 0)
+                key = (path, line_number)
+                if not path or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                matches.append({"query": query, **item})
+                if len(matches) >= total_limit:
+                    break
+            if len(matches) >= total_limit:
+                break
+        return {
+            "queries": deduped_queries,
+            "matches": matches,
+            "cache_hit": cache_hit,
+            "local_path": str(self.local_path),
+            "default_branch": self.default_branch,
+        }
+
+    def load_file_context(self, relative_path: str, line_start: int, radius: int = 12) -> dict[str, Any]:
+        if not self.is_ready():
+            return {"path": relative_path, "snippet": "", "line_start": line_start}
+        target = (self.local_path / relative_path).resolve()
+        if not target.exists() or not target.is_file():
+            return {"path": relative_path, "snippet": "", "line_start": line_start}
+        lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        start = max(0, line_start - radius - 1)
+        end = min(len(lines), line_start + radius)
+        snippet = "\n".join(f"{index + 1:>4} | {lines[index]}" for index in range(start, end))
+        return {"path": relative_path, "snippet": snippet, "line_start": line_start}
+
+    def _search_with_ripgrep(self, query: str, globs: list[str], limit: int) -> list[dict[str, Any]]:
+        rg_bin = shutil.which("rg")
+        if not rg_bin:
+            return []
+        cmd = [rg_bin, "--line-number", "--no-heading", "--color", "never", "--max-count", str(limit), query]
+        for pattern in globs:
+            cmd.extend(["--glob", pattern])
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=self.local_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return []
+        if completed.returncode not in {0, 1}:
+            return []
+        matches: list[dict[str, Any]] = []
+        for raw_line in completed.stdout.splitlines():
+            parts = raw_line.split(":", 2)
+            if len(parts) != 3:
+                continue
+            rel_path, line_number, snippet = parts
+            matches.append(
+                {
+                    "path": rel_path,
+                    "line_number": int(line_number),
+                    "snippet": snippet.strip(),
+                }
+            )
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _search_with_fallback(self, query: str, globs: list[str], limit: int) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        for path in self.local_path.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(self.local_path).as_posix()
+            if globs and not any(fnmatch.fnmatch(relative, pattern) for pattern in globs):
+                continue
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for index, line in enumerate(lines, start=1):
+                if query in line:
+                    matches.append(
+                        {
+                            "path": relative,
+                            "line_number": index,
+                            "snippet": line.strip(),
+                        }
+                    )
+                    break
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _looks_like_definition(self, symbol: str, snippet: str) -> bool:
+        normalized_symbol = symbol.strip()
+        normalized_snippet = snippet.strip()
+        definition_markers = [
+            f"def {normalized_symbol}",
+            f"class {normalized_symbol}",
+            f"function {normalized_symbol}",
+            f"const {normalized_symbol}",
+            f"let {normalized_symbol}",
+            f"var {normalized_symbol}",
+            f"export const {normalized_symbol}",
+            f"export function {normalized_symbol}",
+            f"export class {normalized_symbol}",
+            f"{normalized_symbol} =",
+            f"{normalized_symbol}:",
+        ]
+        lowered = normalized_snippet.lower()
+        return any(marker.lower() in lowered for marker in definition_markers)

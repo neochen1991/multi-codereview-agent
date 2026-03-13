@@ -48,6 +48,7 @@ const SettingsPage: React.FC = () => {
           <Descriptions.Item label="日志落盘">前后端日志统一输出到项目根目录 logs/</Descriptions.Item>
           <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
           <Descriptions.Item label="Skill 调用">每个专家按 skill_bindings 真实调用本地 skill gateway</Descriptions.Item>
+          <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
         </Descriptions>
       </Card>
 
@@ -60,6 +61,11 @@ const SettingsPage: React.FC = () => {
             try {
               await settingsApi.updateRuntime({
                 default_target_branch: values.default_target_branch,
+                code_repo_clone_url: values.code_repo_clone_url || "",
+                code_repo_local_path: values.code_repo_local_path || "",
+                code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
+                code_repo_access_token: String(values.code_repo_access_token || "").trim() || undefined,
+                code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
                 skill_allowlist: parseList(String(values.skill_allowlist || "")),
@@ -75,6 +81,7 @@ const SettingsPage: React.FC = () => {
               });
               message.success("运行时设置已更新");
               form.setFieldValue("default_llm_api_key", "");
+              form.setFieldValue("code_repo_access_token", "");
             } catch (error: any) {
               message.error(error?.message || "更新设置失败");
             } finally {
@@ -84,6 +91,34 @@ const SettingsPage: React.FC = () => {
         >
           <Form.Item name="default_target_branch" label="默认目标分支">
             <Input placeholder="main" />
+          </Form.Item>
+          <Form.Item name="code_repo_clone_url" label="代码仓 Git 地址">
+            <Input placeholder="https://github.com/org/repo.git" />
+          </Form.Item>
+          <Form.Item name="code_repo_local_path" label="本地代码仓目录">
+            <Input placeholder="/Users/neochen/code/repo" />
+          </Form.Item>
+          <Form.Item name="code_repo_default_branch" label="代码仓默认分支">
+            <Input placeholder="main" />
+          </Form.Item>
+          <Form.Item name="code_repo_access_token" label="代码仓 Access Token">
+            <Input.Password placeholder="留空则保持当前已配置的代码仓 token" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate>
+            {() =>
+              Boolean(form.getFieldValue("code_repo_access_token_configured")) ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="当前已在配置文件中保存代码仓 Access Token"
+                  description="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+                />
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item name="code_repo_auto_sync" label="自动同步目标分支代码仓" valuePropName="checked">
+            <Switch />
           </Form.Item>
           <Form.Item
             name="tool_allowlist"
@@ -97,7 +132,7 @@ const SettingsPage: React.FC = () => {
             label="全局 Skill 白名单"
             getValueProps={(value) => ({ value: stringifyList(value as string[]) })}
           >
-            <Input placeholder="knowledge_search, diff_inspector, test_surface_locator, dependency_surface_locator" />
+            <Input placeholder="knowledge_search, diff_inspector, test_surface_locator, dependency_surface_locator, repo_context_search" />
           </Form.Item>
           <Form.Item
             name="mcp_allowlist"

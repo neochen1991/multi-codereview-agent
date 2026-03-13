@@ -19,6 +19,7 @@ class DebateIssue(BaseModel):
     review_id: str
     title: str
     summary: str
+    finding_type: str = "risk_hypothesis"
     file_path: str = ""
     line_start: int = 1
     status: str = "open"
@@ -27,6 +28,10 @@ class DebateIssue(BaseModel):
     finding_ids: list[str] = Field(default_factory=list)
     participant_expert_ids: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
+    cross_file_evidence: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    context_files: list[str] = Field(default_factory=list)
+    direct_evidence: bool = False
     needs_human: bool = False
     verified: bool = False
     needs_debate: bool = False
