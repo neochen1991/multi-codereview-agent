@@ -46,9 +46,9 @@ class PlatformAdapter:
             )
         if unified_diff and not changed_files:
             changed_files = self._infer_changed_files_from_diff(unified_diff)
-        if not changed_files:
+        if not changed_files and review_mode == "branch_compare":
             changed_files = self._infer_changed_files(title=title, source_ref=source_ref)
-        if not unified_diff:
+        if not unified_diff and review_mode == "branch_compare":
             unified_diff = self._build_default_diff(changed_files)
 
         commits = list(subject.commits) or ([commit_sha] if commit_sha else [f"{source_ref}-head"])
@@ -61,6 +61,7 @@ class PlatformAdapter:
         metadata.setdefault("platform_kind", self._infer_platform_kind(review_url))
         metadata.setdefault("trigger_source", "manual")
         metadata.setdefault("remote_diff_fetched", remote_diff_fetched)
+        metadata.setdefault("remote_diff_available", bool(unified_diff))
         if commit_sha:
             metadata.setdefault("commit_sha", commit_sha)
 

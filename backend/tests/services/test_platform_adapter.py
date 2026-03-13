@@ -42,7 +42,9 @@ def test_platform_adapter_infers_refs_from_merge_request_url():
     assert normalized.target_ref == "main"
     assert normalized.title == "Merge Request !42"
     assert normalized.metadata["platform"] == "git.example.com"
-    assert "diff --git a/src/review/runtime.py" in normalized.unified_diff
+    assert normalized.unified_diff == ""
+    assert normalized.changed_files == []
+    assert normalized.metadata["remote_diff_available"] is False
 
 
 def test_platform_adapter_normalizes_github_commit_url(monkeypatch):
@@ -123,6 +125,29 @@ def test_platform_adapter_normalizes_github_pull_request_url(monkeypatch):
     assert normalized.metadata["platform_kind"] == "github"
     assert normalized.metadata["remote_diff_fetched"] is True
     assert normalized.changed_files == ["backend/app/api/orders.py"]
+
+
+def test_platform_adapter_keeps_remote_review_empty_when_github_diff_unavailable(monkeypatch):
+    adapter = PlatformAdapter()
+
+    monkeypatch.setattr(adapter, "_fetch_remote_diff", lambda review_url, access_token, runtime_settings=None: "")
+
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="",
+        project_id="",
+        source_ref="",
+        target_ref="",
+        mr_url="https://github.com/example-org/payments-service/pull/128",
+        title="",
+    )
+
+    normalized = adapter.normalize(subject)
+
+    assert normalized.unified_diff == ""
+    assert normalized.changed_files == []
+    assert normalized.metadata["remote_diff_fetched"] is False
+    assert normalized.metadata["remote_diff_available"] is False
 
 
 def test_platform_adapter_fetch_remote_diff_follows_redirect(monkeypatch):

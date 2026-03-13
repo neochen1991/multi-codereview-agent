@@ -23,12 +23,14 @@ import {
   expertApi,
   knowledgeApi,
   reviewApi,
+  settingsApi,
   type DebateIssue,
   type ExpertProfile,
   type KnowledgeDocument,
   type ReviewArtifacts,
   type ReviewReplayBundle,
   type ReviewSummary,
+  type RuntimeSettings,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
 
@@ -41,7 +43,7 @@ const defaultFormState: ReviewFormState = {
   repo_id: "",
   project_id: "",
   source_ref: "",
-  target_ref: "main",
+  target_ref: "",
   access_token: "",
   selected_experts: [
     "correctness_business",
@@ -63,6 +65,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [replay, setReplay] = useState<ReviewReplayBundle | null>(null);
   const [artifacts, setArtifacts] = useState<ReviewArtifacts | null>(null);
   const [experts, setExperts] = useState<ExpertProfile[]>([]);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null);
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [selectedIssueId, setSelectedIssueId] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
@@ -117,18 +120,34 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   useEffect(() => {
-    void expertApi
-      .list()
-      .then((rows) => setExperts(rows.filter((item) => item.enabled)))
-      .catch(() => setExperts([]));
-  }, []);
+    void Promise.all([expertApi.list(), settingsApi.getRuntime()])
+      .then(([rows, runtime]) => {
+        setExperts(rows.filter((item) => item.enabled));
+        setRuntimeSettings(runtime);
+        if (!reviewId) {
+          setForm((current) => ({
+            ...current,
+            target_ref: current.target_ref || runtime.default_target_branch || "",
+            selected_experts:
+              current.selected_experts.length > 0 ? current.selected_experts : defaultFormState.selected_experts,
+          }));
+        }
+      })
+      .catch(() => {
+        setExperts([]);
+        setRuntimeSettings(null);
+      });
+  }, [reviewId]);
 
   useEffect(() => {
     if (!reviewId) {
       setReview(null);
       setReplay(null);
       setArtifacts(null);
-      setForm(defaultFormState);
+      setForm({
+        ...defaultFormState,
+        target_ref: runtimeSettings?.default_target_branch || "",
+      });
       setKnowledgeDocs([]);
       setSelectedIssueId("");
       setSelectedFindingId("");
@@ -143,7 +162,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     setDecisionComment("");
     setFindingModalOpen(false);
     void loadReviewBundle(reviewId);
-  }, [reviewId]);
+  }, [reviewId, runtimeSettings]);
 
   useEffect(() => {
     if (!review) return;

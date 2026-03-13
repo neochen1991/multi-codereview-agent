@@ -44,7 +44,9 @@ const ReviewOverviewPanel: React.FC<Props> = ({
 }) => {
   const statusLabel = reviewId ? status || "pending" : "未开始";
   const hasExperts = experts.length > 0;
-  const disableActions = loading || running || (!readonly && !hasExperts);
+  const hasSelectedExperts = form.selected_experts.length > 0;
+  const hasReviewInput = Boolean(form.mr_url.trim() || form.source_ref.trim());
+  const disableActions = loading || running || (!readonly && (!hasExperts || !hasSelectedExperts || !hasReviewInput));
 
   return (
     <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
@@ -66,7 +68,6 @@ const ReviewOverviewPanel: React.FC<Props> = ({
             description="请检查后端是否已加载预置专家，或先在专家中心创建/启用专家后再启动审核。"
           />
         ) : null}
-
         <div className="incident-overview-status-strip">
           <Tag color={reviewId ? "blue" : "default"}>
             {reviewId ? `Review: ${reviewId}` : "未创建审核"}
