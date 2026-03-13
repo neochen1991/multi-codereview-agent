@@ -10,9 +10,15 @@ set "BACKEND_LOG=%LOG_DIR%\backend.log"
 set "FRONTEND_LOG=%LOG_DIR%\frontend.log"
 set "BACKEND_PID_FILE=%RUN_DIR%\backend.pid"
 set "FRONTEND_PID_FILE=%RUN_DIR%\frontend.pid"
+set "VENV_PYTHON=%ROOT_DIR%\.venv\Scripts\python.exe"
+set "FRONTEND_NODE_MODULES=%ROOT_DIR%\frontend\node_modules"
 
 if not exist "%RUN_DIR%" mkdir "%RUN_DIR%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+
+call :check_python || exit /b 1
+call :check_node || exit /b 1
+call :ensure_frontend_dependencies || exit /b 1
 
 set "BACKEND_CMD=cd /d ""%ROOT_DIR%"" && "".venv\Scripts\python.exe"" -m uvicorn app.main:app --app-dir ""%ROOT_DIR%\backend"" --reload --port 8011 >> ""%BACKEND_LOG%"" 2>&1"
 set "FRONTEND_CMD=cd /d ""%ROOT_DIR%\frontend"" && npm run dev -- --host 127.0.0.1 --port 5174 >> ""%FRONTEND_LOG%"" 2>&1"
@@ -25,6 +31,53 @@ echo started frontend on http://127.0.0.1:5174
 echo logs:
 echo   backend  %BACKEND_LOG%
 echo   frontend %FRONTEND_LOG%
+exit /b 0
+
+:check_python
+if exist "%VENV_PYTHON%" (
+  "%VENV_PYTHON%" --version >nul 2>nul
+  if errorlevel 1 (
+    echo detected .venv but python failed to run: %VENV_PYTHON%
+    exit /b 1
+  )
+  exit /b 0
+)
+
+echo missing python virtual environment: %VENV_PYTHON%
+echo please create it first, for example:
+echo   py -3.11 -m venv .venv
+echo   .venv\Scripts\python.exe -m pip install -e .
+exit /b 1
+
+:check_node
+where node >nul 2>nul
+if errorlevel 1 (
+  echo node.js is not installed or not in PATH
+  exit /b 1
+)
+
+where npm >nul 2>nul
+if errorlevel 1 (
+  echo npm is not installed or not in PATH
+  exit /b 1
+)
+exit /b 0
+
+:ensure_frontend_dependencies
+if exist "%FRONTEND_NODE_MODULES%" (
+  exit /b 0
+)
+
+echo frontend dependencies missing, running npm install...
+pushd "%ROOT_DIR%\frontend" >nul
+call npm install
+set "NPM_EXIT=%ERRORLEVEL%"
+popd >nul
+
+if not "%NPM_EXIT%"=="0" (
+  echo npm install failed
+  exit /b 1
+)
 exit /b 0
 
 :start_process

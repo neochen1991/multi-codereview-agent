@@ -55,6 +55,19 @@ scripts\start-all.bat
 scripts\stop-all.bat
 ```
 
+Windows 启动脚本会在启动前自动检查：
+
+- `.\.venv\Scripts\python.exe` 是否可用
+- `node` / `npm` 是否已安装并在 `PATH`
+- `frontend\node_modules` 是否存在
+
+其中前端依赖缺失时会自动执行 `npm install`。如果 Python 虚拟环境缺失，脚本会提示你先创建：
+
+```bat
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+```
+
 ## 统一配置
 
 项目根目录提供一份用户可直接编辑的配置文件：
