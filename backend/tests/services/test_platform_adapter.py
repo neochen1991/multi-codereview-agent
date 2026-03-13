@@ -123,3 +123,85 @@ def test_platform_adapter_normalizes_github_pull_request_url(monkeypatch):
     assert normalized.metadata["platform_kind"] == "github"
     assert normalized.metadata["remote_diff_fetched"] is True
     assert normalized.changed_files == ["backend/app/api/orders.py"]
+
+
+def test_platform_adapter_fetch_remote_diff_follows_redirect(monkeypatch):
+    adapter = PlatformAdapter()
+
+    class FakeResponse:
+        def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"http {self.status_code}")
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url: str, headers: dict[str, str] | None = None):
+            if url.endswith(".patch"):
+                return FakeResponse(302, headers={"Location": "https://patch-diff.githubusercontent.com/raw/example/repo/pull/128.patch"})
+            return FakeResponse(
+                200,
+                text=(
+                    "diff --git a/backend/app/api/orders.py b/backend/app/api/orders.py\n"
+                    "--- a/backend/app/api/orders.py\n"
+                    "+++ b/backend/app/api/orders.py\n"
+                    "@@ -1,1 +1,2 @@\n"
+                    "+return persist_order(payload)\n"
+                ),
+            )
+
+    monkeypatch.setattr("app.services.platform_adapter.httpx.Client", lambda **kwargs: FakeClient())
+
+    diff = adapter._fetch_remote_diff("https://github.com/example-org/payments-service/pull/128", "")
+
+    assert "diff --git a/backend/app/api/orders.py" in diff
+
+
+def test_platform_adapter_fetch_remote_diff_falls_back_to_diff_when_patch_fails(monkeypatch):
+    adapter = PlatformAdapter()
+
+    class FakeResponse:
+        def __init__(self, status_code: int, text: str = "", headers: dict[str, str] | None = None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"http {self.status_code}")
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url: str, headers: dict[str, str] | None = None):
+            if url.endswith(".patch"):
+                raise RuntimeError("patch unavailable")
+            return FakeResponse(
+                200,
+                text=(
+                    "diff --git a/backend/app/api/orders.py b/backend/app/api/orders.py\n"
+                    "--- a/backend/app/api/orders.py\n"
+                    "+++ b/backend/app/api/orders.py\n"
+                    "@@ -1,1 +1,2 @@\n"
+                    "+return persist_order(payload)\n"
+                ),
+            )
+
+    monkeypatch.setattr("app.services.platform_adapter.httpx.Client", lambda **kwargs: FakeClient())
+
+    diff = adapter._fetch_remote_diff("https://github.com/example-org/payments-service/pull/128", "")
+
+    assert "diff --git a/backend/app/api/orders.py" in diff

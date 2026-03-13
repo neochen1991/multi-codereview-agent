@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlparse
 
 import httpx
 
 from app.domain.models.review import ReviewSubject
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformAdapter:
@@ -146,23 +149,55 @@ class PlatformAdapter:
     def _fetch_remote_diff(self, review_url: str, access_token: str) -> str:
         if "github.com" not in review_url:
             return ""
-        patch_url = ""
-        if "/commit/" in review_url:
-            patch_url = f"{review_url}.patch"
-        elif "/pull/" in review_url:
-            patch_url = f"{review_url}.patch"
-        if not patch_url:
+        candidate_urls = self._build_remote_diff_candidates(review_url)
+        if not candidate_urls:
             return ""
         headers: dict[str, str] = {}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
+        headers["User-Agent"] = "multi-codereview-agent/1.0"
         try:
-            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-                response = client.get(patch_url, headers=headers)
-                response.raise_for_status()
-                return response.text
-        except Exception:
+            with httpx.Client(
+                timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
+                follow_redirects=False,
+            ) as client:
+                for candidate_url in candidate_urls:
+                    try:
+                        diff_text = self._fetch_candidate_diff(client, candidate_url, headers)
+                        if diff_text:
+                            return diff_text
+                    except Exception as error:
+                        logger.warning("remote diff candidate failed for %s via %s: %s", review_url, candidate_url, error)
+        except Exception as error:
+            logger.warning("remote diff fetch failed for %s: %s", review_url, error)
+        return ""
+
+    def _build_remote_diff_candidates(self, review_url: str) -> list[str]:
+        if "/commit/" in review_url or "/pull/" in review_url:
+            return [f"{review_url}.patch", f"{review_url}.diff"]
+        return []
+
+    def _fetch_candidate_diff(
+        self,
+        client: httpx.Client,
+        candidate_url: str,
+        headers: dict[str, str],
+    ) -> str:
+        current_url = candidate_url
+        for _ in range(3):
+            response = client.get(current_url, headers=headers)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location", "").strip()
+                if not location:
+                    return ""
+                current_url = location
+                continue
+            response.raise_for_status()
+            text = response.text
+            if "diff --git " in text:
+                return text
             return ""
+        return ""
 
     def _infer_changed_files_from_diff(self, unified_diff: str) -> list[str]:
         changed_files: list[str] = []

@@ -47,15 +47,21 @@ def _pick_verification_strategy(issue: dict[str, object]) -> str:
     file_path = str(issue.get("file_path") or "").lower()
     topic = str(issue.get("topic") or "").lower()
     participants = [str(item).lower() for item in list(issue.get("participant_expert_ids") or []) if str(item).strip()]
-    evidence_blob = " ".join(str(item).lower() for item in issue.get("evidence", []))
+    evidence_tags = {str(item).lower() for item in issue.get("evidence", []) if str(item).strip()}
 
-    if finding_type == "test_gap" or any(token in f"{file_path} {topic} {evidence_blob}" for token in ["test", "spec", "jest", "vitest", "playwright"]):
+    if (
+        finding_type == "test_gap"
+        or "test_surface" in evidence_tags
+        or any(token in f"{file_path} {topic}" for token in ["test", "spec", "jest", "vitest", "playwright"])
+    ):
         return "coverage_diff"
 
     if any(
-        token in f"{file_path} {topic} {evidence_blob}"
+        token in f"{file_path} {topic}"
         for token in ["migration", ".sql", "schema", "repository", "db"]
-    ) or any(expert in {"database_analysis", "performance_reliability"} for expert in participants):
+    ) or "database_migration" in evidence_tags or any(
+        expert in {"database_analysis", "performance_reliability"} for expert in participants
+    ):
         return "schema_diff"
 
     return "local_diff"
