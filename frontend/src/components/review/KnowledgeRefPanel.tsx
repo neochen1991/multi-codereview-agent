@@ -10,6 +10,7 @@ type KnowledgeRefPanelProps = {
   loading: boolean;
 };
 
+// 知识引用卡用于展示当前审核上下文命中的专家知识文档。
 const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loading }) => {
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="知识引用" loading={loading}>

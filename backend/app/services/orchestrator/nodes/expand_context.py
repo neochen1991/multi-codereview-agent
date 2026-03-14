@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def expand_context(state: ReviewState) -> ReviewState:
+    """从变更文件名中提取高层风险提示，供后续路由使用。"""
+
     next_state = dict(state)
     next_state["phase"] = "expand_context"
     files = [str(item).lower() for item in next_state.get("changed_files", [])]

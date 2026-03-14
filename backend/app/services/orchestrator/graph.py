@@ -18,6 +18,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def build_review_graph():
+    """装配审核状态图，定义节点执行顺序。"""
+
     graph = StateGraph(ReviewState)
     graph.add_node("ingest_subject", ingest_subject)
     graph.add_node("slice_change", slice_change)

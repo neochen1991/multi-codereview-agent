@@ -5,6 +5,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def evidence_verification(state: ReviewState) -> ReviewState:
+    """为每个 issue 选择 verifier，并补齐 verified/tool 信息。"""
+
     next_state = dict(state)
     next_state["phase"] = "evidence_verification"
     verifier = EvidenceVerifierService()
@@ -43,6 +45,8 @@ def evidence_verification(state: ReviewState) -> ReviewState:
 
 
 def _pick_verification_strategy(issue: dict[str, object]) -> str:
+    """根据 issue 类型、文件和参与专家选择最合适的 verifier。"""
+
     finding_type = str(issue.get("finding_type") or "risk_hypothesis")
     file_path = str(issue.get("file_path") or "").lower()
     topic = str(issue.get("topic") or "").lower()

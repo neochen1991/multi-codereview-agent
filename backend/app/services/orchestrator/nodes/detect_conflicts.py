@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def detect_conflicts(state: ReviewState) -> ReviewState:
+    """按文件和行号窗口对 findings 做聚合，形成 conflict 候选。"""
+
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
     findings = list(next_state.get("findings", []))

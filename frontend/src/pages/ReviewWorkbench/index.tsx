@@ -57,6 +57,9 @@ const defaultFormState: ReviewFormState = {
 };
 
 const ReviewWorkbenchPage: React.FC = () => {
+  // 这是前端真正的“审核工作台容器”。
+  // 概览、过程、结果三个页签共用同一份 review/replay/artifact 状态，
+  // 这样页面切换时不会丢失当前审核上下文。
   const { message } = AntdApp.useApp();
   const { reviewId = "" } = useParams();
   const navigate = useNavigate();
@@ -81,6 +84,8 @@ const ReviewWorkbenchPage: React.FC = () => {
   const isReadonlyOverview = Boolean(reviewId);
 
   const loadReviewBundle = async (targetReviewId: string) => {
+    // 工作台恢复和轮询刷新统一走这一条数据加载链，
+    // 确保概览、过程、结果看到的都是同一份后端快照。
     setLoading(true);
     try {
       const [detail, replayBundle, artifactBundle] = await Promise.all([
@@ -122,6 +127,8 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   useEffect(() => {
+    // 页面初始化时先拉专家列表和 runtime settings，
+    // 这样“概览与启动”页才能拿到默认模式、默认分支和可选专家。
     void Promise.all([expertApi.list(), settingsApi.getRuntime()])
       .then(([rows, runtime]) => {
         setExperts(rows.filter((item) => item.enabled));
@@ -143,6 +150,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [reviewId]);
 
   useEffect(() => {
+    // reviewId 变化时，要么进入“新建审核”空态，要么恢复某条历史审核。
     if (!reviewId) {
       setReview(null);
       setReplay(null);
@@ -169,6 +177,9 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [reviewId, runtimeSettings]);
 
   useEffect(() => {
+    // 根据 review 状态自动切换当前工作台页签：
+    // - 运行中优先过程页
+    // - 完成/失败优先结果页
     if (!review) return;
     if (review.status === "completed" || review.status === "failed") {
       setActiveStep("result");
@@ -180,6 +191,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [review, reviewId]);
 
   useEffect(() => {
+    // 过程页使用 SSE 增量刷新，保证主 Agent / 专家消息尽快出现在界面上。
     if (!reviewId) return;
     return subscribeReviewEventStream(buildReviewEventStreamUrl(reviewId), () => {
       void loadReviewBundle(reviewId);
@@ -187,6 +199,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [reviewId]);
 
   useEffect(() => {
+    // 对 running/pending 状态再补一层轮询兜底，防止流式连接偶发断开。
     if (!reviewId) return;
     if (!review || !["pending", "running"].includes(review.status)) return;
     const timer = window.setInterval(() => {
@@ -241,6 +254,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [selectedIssue, selectedIssueId]);
 
   useEffect(() => {
+    // 右侧知识引用面板跟随当前选中的 issue 专家动态刷新。
     const expertId = selectedIssue?.participant_expert_ids?.[0];
     const changedFiles = review?.subject.changed_files || [];
     if (!expertId || changedFiles.length === 0) {
@@ -300,6 +314,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   });
 
   const createReview = async (autoStart: boolean) => {
+    // 概览页主入口：先创建任务，再决定是否自动启动并跳转到过程页。
     if (!form.mr_url.trim() && !form.source_ref.trim()) {
       message.warning("请至少输入 Git MR 链接或源分支信息");
       return;
@@ -318,6 +333,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   useEffect(() => {
+    // auto_start 主要用于“创建成功后立即进入过程页”的跳转链路。
     const search = new URLSearchParams(location.search);
     const shouldAutoStart = search.get("auto_start") === "1";
     if (!shouldAutoStart || !reviewId || !review || starting) return;
@@ -353,6 +369,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [location.search, navigate, review, reviewId, starting]);
 
   const startExistingReview = async () => {
+    // 历史记录里还处于 pending 的任务，可以从这里继续启动。
     if (!reviewId) {
       await createReview(true);
       return;
@@ -407,10 +424,6 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Title level={3} style={{ margin: 0 }}>
             {headerTitle}
           </Title>
-          <Paragraph style={{ marginBottom: 0 }}>
-            页面布局直接参考故障分析页的 V1 工作台结构，统一改成“概览与启动 / 审核过程 /
-            结论与行动”三段式；审核过程页重点展示主 Agent 协调和专家聊天式对话流。
-          </Paragraph>
           {review?.report_summary ? (
             <Paragraph className="review-inline-summary">{review.report_summary}</Paragraph>
           ) : null}

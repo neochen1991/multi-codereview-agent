@@ -43,6 +43,8 @@ const buildCompactDetail = (value: string): { text: string; truncated: boolean }
 };
 
 const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => {
+  // 把后端原始消息统一映射成聊天视图模型，
+  // 这样主 Agent、专家、Judge、工具调用都能复用同一种渲染壳。
   const metadata = message.metadata || {};
   const eventType = message.message_type;
   let messageKind: ReviewDialogueViewMessage["messageKind"] = "chat";
@@ -71,7 +73,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   } else if (eventType === "expert_tool_call") {
     summaryParts.push(`${message.expert_id} 正在调用工具 ${String(metadata.tool_name || "")}`);
   } else if (eventType === "expert_skill_call") {
-    summaryParts.push(`${message.expert_id} 正在调用技能 ${String(metadata.skill_name || "")}`);
+    summaryParts.push(`${message.expert_id} 正在调用运行时工具 ${String(metadata.tool_name || metadata.skill_name || "")}`);
   } else if (eventType === "debate_message") {
     summaryParts.push(`${message.expert_id} 正在回应 ${replyToExpertId || "上一位专家"}`);
   } else if (eventType === "judge_summary") {
@@ -112,15 +114,17 @@ const buildInvocationDetail = (
   content: string,
   metadata: Record<string, unknown>,
 ): string => {
+  // 工具消息会把结构化结果压成更适合阅读的文本，
+  // 过程页才能直接看懂“刚调用了什么、拿到了什么证据”。
   if (eventType === "expert_tool_call") {
     const toolName = typeof metadata.tool_name === "string" ? metadata.tool_name : "tool";
     const toolResult = metadata.tool_result;
     return formatInvocationDetail(`工具 ${toolName}`, content, toolResult);
   }
   if (eventType === "expert_skill_call") {
-    const skillName = typeof metadata.skill_name === "string" ? metadata.skill_name : "skill";
-    const skillResult = metadata.skill_result;
-    return formatInvocationDetail(`技能 ${skillName}`, content, skillResult);
+    const skillName = typeof metadata.tool_name === "string" ? metadata.tool_name : typeof metadata.skill_name === "string" ? metadata.skill_name : "tool";
+    const skillResult = metadata.tool_result || metadata.skill_result;
+    return formatInvocationDetail(`运行时工具 ${skillName}`, content, skillResult);
   }
   return content;
 };
@@ -149,6 +153,8 @@ const buildLiveWaitingRow = (
   review?: ReviewSummary | null,
   events?: ReviewEvent[],
 ): ReviewDialogueViewMessage | null => {
+  // 真实 LLM 首条消息出来前，先展示一个系统占位气泡，
+  // 避免用户误以为审核过程页“卡住了”。
   if (!review || !["pending", "running"].includes(review.status)) return null;
   const latestEvent = events && events.length > 0 ? events[events.length - 1] : null;
   const phase = String(review.phase || latestEvent?.phase || "intake");
@@ -187,6 +193,7 @@ const buildLiveWaitingRow = (
 };
 
 const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }) => {
+  // 过程页本质上是 replay/messages 的可视化回放器。
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo(
@@ -221,7 +228,12 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
         const targetExpertName = typeof row.metadata.target_expert_name === "string" ? row.metadata.target_expert_name : "";
         const replyToExpertId = typeof row.metadata.reply_to_expert_id === "string" ? row.metadata.reply_to_expert_id : "";
         const toolName = typeof row.metadata.tool_name === "string" ? row.metadata.tool_name : "";
-        const skillName = typeof row.metadata.skill_name === "string" ? row.metadata.skill_name : "";
+        const skillName =
+          typeof row.metadata.tool_name === "string"
+            ? row.metadata.tool_name
+            : typeof row.metadata.skill_name === "string"
+              ? row.metadata.skill_name
+              : "";
         const provider = typeof row.metadata.provider === "string" ? row.metadata.provider : "";
         const model = typeof row.metadata.model === "string" ? row.metadata.model : "";
         const mode = typeof row.metadata.mode === "string" ? row.metadata.mode : "";
@@ -262,7 +274,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 {targetExpertId ? <Tag className="dialogue-tag dialogue-tag-target">{`to ${targetExpertName || targetExpertId}`}</Tag> : null}
                 {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`reply ${replyToExpertId}`}</Tag> : null}
                 {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${toolName}`}</Tag> : null}
-                {skillName ? <Tag className="dialogue-tag dialogue-tag-target">{`skill ${skillName}`}</Tag> : null}
+                {skillName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${skillName}`}</Tag> : null}
                 {filePath ? <Tag className="dialogue-tag">{filePath}</Tag> : null}
                 {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
                 {hunkHeader ? <Tag className="dialogue-tag">{hunkHeader}</Tag> : null}

@@ -17,7 +17,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "code_repo_auto_sync": True,
             "tool_allowlist": ["local_diff", "schema_diff"],
             "mcp_allowlist": ["github.diff", "playwright.snapshot"],
-            "skill_allowlist": ["frontend-design"],
+            "runtime_tool_allowlist": ["frontend-design"],
             "agent_allowlist": ["judge"],
             "allow_human_gate": True,
             "default_max_debate_rounds": 3,
@@ -60,7 +60,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["light_max_parallel_experts"] == 1
     assert payload["light_max_debate_rounds"] == 1
     assert "schema_diff" in payload["tool_allowlist"]
-    assert "frontend-design" in payload["skill_allowlist"]
+    assert "frontend-design" in payload["runtime_tool_allowlist"]
     assert payload["default_llm_model"] == "kimi-k2.5"
     assert payload["default_llm_api_key_configured"] is True
     assert payload["verify_ssl"] is True

@@ -70,6 +70,8 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   selectedFindingId,
   onSelectFinding,
 }) => {
+  // 结果页的问题清单承担“正式报告索引”的职责：
+  // 顶部筛选负责切换问题集合，表格负责让用户快速定位到具体 finding。
   const [activeGroup, setActiveGroup] = useState<
     "all" | "blocking" | "should_fix" | "non_blocking" | "verified" | "direct_defect" | "risk_hypothesis" | "test_gap" | "design_concern"
   >("all");

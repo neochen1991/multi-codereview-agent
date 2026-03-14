@@ -42,6 +42,5 @@ def test_review_runner_persists_main_agent_coordination_messages(storage_root: P
     assert analysis.metadata["model"] == "kimi-k2.5"
     assert "allowed_tools" in analysis.metadata
     assert "knowledge_sources" in analysis.metadata
-    assert "skill_results" in analysis.metadata
+    assert "runtime_tool_results" in analysis.metadata
     assert any(item.message_type == "expert_tool_call" for item in messages)
-    assert any(item.message_type == "expert_skill_call" for item in messages)

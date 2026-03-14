@@ -3,7 +3,7 @@ from pathlib import Path
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.services.skill_gateway import SkillGateway
+from app.services.tool_gateway import ReviewToolGateway
 
 
 def test_skill_gateway_adds_repo_context_search_for_all_experts(tmp_path: Path):
@@ -13,7 +13,7 @@ def test_skill_gateway_adds_repo_context_search_for_all_experts(tmp_path: Path):
     target.parent.mkdir(parents=True)
     target.write_text("export const foo = () => repo.search()\n", encoding="utf-8")
 
-    gateway = SkillGateway(storage_root)
+    gateway = ReviewToolGateway(storage_root)
     expert = ExpertProfile(
         expert_id="correctness_business",
         name="Correctness",
@@ -22,7 +22,7 @@ def test_skill_gateway_adds_repo_context_search_for_all_experts(tmp_path: Path):
         enabled=True,
         focus_areas=["业务规则"],
         system_prompt="prompt",
-        skill_bindings=["knowledge_search"],
+        runtime_tool_bindings=["knowledge_search"],
     )
     subject = ReviewSubject(
         subject_type="mr",
@@ -36,7 +36,7 @@ def test_skill_gateway_adds_repo_context_search_for_all_experts(tmp_path: Path):
         code_repo_clone_url="https://github.com/example/repo.git",
         code_repo_local_path=str(repo_root),
         code_repo_default_branch="main",
-        skill_allowlist=["knowledge_search", "repo_context_search"],
+        runtime_tool_allowlist=["knowledge_search", "repo_context_search"],
     )
 
     results = gateway.invoke_for_expert(
@@ -47,8 +47,8 @@ def test_skill_gateway_adds_repo_context_search_for_all_experts(tmp_path: Path):
         line_start=1,
     )
 
-    skill_names = {item["skill_name"] for item in results}
-    assert "repo_context_search" in skill_names
+    tool_names = {item["tool_name"] for item in results}
+    assert "repo_context_search" in tool_names
 
 
 def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Path):
@@ -60,7 +60,7 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
     primary.write_text("export const foo = () => transform()\n", encoding="utf-8")
     related.write_text("export const transform = () => 'ok'\n", encoding="utf-8")
 
-    gateway = SkillGateway(storage_root)
+    gateway = ReviewToolGateway(storage_root)
     expert = ExpertProfile(
         expert_id="correctness_business",
         name="Correctness",
@@ -69,7 +69,7 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
         enabled=True,
         focus_areas=["业务规则"],
         system_prompt="prompt",
-        skill_bindings=[],
+        runtime_tool_bindings=[],
     )
     subject = ReviewSubject(
         subject_type="mr",
@@ -83,7 +83,7 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
         code_repo_clone_url="https://github.com/example/repo.git",
         code_repo_local_path=str(repo_root),
         code_repo_default_branch="main",
-        skill_allowlist=["repo_context_search"],
+        runtime_tool_allowlist=["repo_context_search"],
     )
 
     results = gateway.invoke_for_expert(
@@ -95,7 +95,7 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
         related_files=["src/transform.ts"],
     )
 
-    repo_result = next(item for item in results if item["skill_name"] == "repo_context_search")
+    repo_result = next(item for item in results if item["tool_name"] == "repo_context_search")
     assert "src/service.ts" in repo_result["context_files"]
     assert "src/transform.ts" in repo_result["context_files"]
     assert repo_result["related_contexts"]

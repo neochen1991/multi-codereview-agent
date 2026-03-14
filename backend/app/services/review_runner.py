@@ -30,12 +30,22 @@ from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.orchestrator.graph import build_review_graph
 from app.services.runtime_settings_service import RuntimeSettingsService
-from app.services.skill_gateway import SkillGateway
+from app.services.tool_gateway import ReviewToolGateway
 
 logger = logging.getLogger(__name__)
 
 
 class ReviewRunner:
+    """审核执行引擎。
+
+    这是后端最核心的运行时之一，负责把一次代码审核真正跑起来：
+    - 选择专家
+    - 主 Agent 派工
+    - 专家调用运行时工具并产出 finding
+    - graph/judge 收敛 issue
+    - human gate / 最终报告落盘
+    """
+
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
         self.review_repo = FileReviewRepository(self.storage_root)
@@ -50,7 +60,7 @@ class ReviewRunner:
         self.capability_service = ExpertCapabilityService()
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
-        self.skill_gateway = SkillGateway(self.storage_root)
+        self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.graph = build_review_graph()
 
@@ -86,6 +96,7 @@ class ReviewRunner:
         return self.event_repo.list(review_id)
 
     def run_once(self, review_id: str) -> ReviewTask:
+        """完整执行一次审核主链。"""
         review = self.review_repo.get(review_id)
         if review is None:
             raise KeyError(review_id)
@@ -441,6 +452,10 @@ class ReviewRunner:
         runtime_settings,
         analysis_mode: Literal["standard", "light"],
     ) -> None:
+        """按分析模式执行专家任务。
+
+        标准模式允许更高并发；轻量模式会压低并发，减少内网/Windows 下的大模型并发压力。
+        """
         if not expert_jobs:
             return
         if os.getenv("PYTEST_CURRENT_TEST") or len(expert_jobs) <= 1:
@@ -467,8 +482,18 @@ class ReviewRunner:
         bound_documents: list[object],
         finding_payloads: list[dict[str, object]],
     ) -> None:
+        """执行单个专家任务。
+
+        关键顺序：
+        1. 收集 verifier/tool 证据
+        2. 调用运行时工具
+        3. 发送 expert_ack / tool 消息
+        4. 拼接 prompt 调用 LLM
+        5. 解析并稳定化 finding
+        6. 落库 finding、analysis message 和 event
+        """
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
-        skill_results = self.skill_gateway.invoke_for_expert(
+        runtime_tool_results = self.review_tool_gateway.invoke_for_expert(
             expert,
             review.subject,
             runtime_settings,
@@ -523,7 +548,7 @@ class ReviewRunner:
                     "file_path": file_path,
                     "line_start": line_start,
                     "allowed_tools": expert.tool_bindings,
-                    "allowed_skills": expert.skill_bindings,
+                    "allowed_runtime_tools": expert.runtime_tool_bindings,
                     "knowledge_sources": expert.knowledge_sources,
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "related_files": command_message.metadata.get("related_files", []),
@@ -531,7 +556,7 @@ class ReviewRunner:
                     "repository_context": repository_context,
                     "expected_checks": command_message.metadata.get("expected_checks", []),
                     "disallowed_inference": command_message.metadata.get("disallowed_inference", []),
-                    "skill_results": skill_results,
+                    "runtime_tool_results": runtime_tool_results,
                     **self._expert_llm_metadata(expert, runtime_settings),
                 },
             )
@@ -545,22 +570,22 @@ class ReviewRunner:
                 payload={"expert_id": expert.expert_id, "file_path": file_path, "line_start": line_start},
             )
         )
-        for skill_result in skill_results:
-            skill_name = str(skill_result.get("skill_name") or "")
+        for tool_result in runtime_tool_results:
+            tool_name = str(tool_result.get("tool_name") or "")
             self.message_repo.append(
                 ConversationMessage(
                     review_id=review.review_id,
                     issue_id="review_orchestration",
                     expert_id=expert.expert_id,
-                    message_type="expert_skill_call",
-                    content=str(skill_result.get("summary") or f"{skill_name} 调用完成"),
+                    message_type="expert_tool_call",
+                    content=str(tool_result.get("summary") or f"{tool_name} 调用完成"),
                     metadata={
                         "phase": "expert_review",
-                        "skill_name": skill_name,
+                        "tool_name": tool_name,
                         "file_path": file_path,
                         "line_start": line_start,
-                        "skill_result": skill_result,
-                        "tool_name": skill_name,
+                        "tool_result": tool_result,
+                        "tool_category": "runtime",
                         "target_hunk": target_hunk,
                         **self._expert_llm_metadata(expert, runtime_settings),
                     },
@@ -569,10 +594,10 @@ class ReviewRunner:
             self.event_repo.append(
                 ReviewEvent(
                     review_id=review.review_id,
-                    event_type="expert_skill_invoked",
+                    event_type="expert_tool_invoked",
                     phase="expert_review",
-                    message=f"{expert.name_zh} 调用了 skill {skill_name}",
-                    payload={"expert_id": expert.expert_id, "skill_name": skill_name},
+                    message=f"{expert.name_zh} 调用了运行时工具 {tool_name}",
+                    payload={"expert_id": expert.expert_id, "tool_name": tool_name, "tool_category": "runtime"},
                 )
             )
 
@@ -585,7 +610,7 @@ class ReviewRunner:
                 file_path,
                 line_start,
                 tool_evidence,
-                skill_results,
+                runtime_tool_results,
                 repository_context,
                 target_hunk,
                 bound_documents,
@@ -615,7 +640,7 @@ class ReviewRunner:
             file_path,
             line_start,
         )
-        parsed = self._stabilize_expert_analysis(parsed, file_path, line_start, target_hunk)
+        parsed = self._stabilize_expert_analysis(parsed, expert.expert_id, file_path, line_start, target_hunk)
         severity = self._normalize_severity(parsed.get("severity"), severity)
         confidence = self._normalize_confidence(parsed.get("confidence"), confidence)
         parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
@@ -635,7 +660,7 @@ class ReviewRunner:
             context_files=self._merge_context_files(
                 parsed.get("context_files", []),
                 repository_context,
-                skill_results,
+                runtime_tool_results,
             ),
             matched_rules=self._normalize_text_list(parsed.get("matched_rules"), []),
             violated_guidelines=self._normalize_text_list(parsed.get("violated_guidelines"), []),
@@ -666,6 +691,22 @@ class ReviewRunner:
             ),
             suggested_code_language=self._infer_code_language(file_path),
         )
+        if self._should_skip_finding(expert.expert_id, finding):
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="finding_suppressed",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 的低证据发现已被抑制",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "file_path": finding.file_path,
+                        "line_start": finding.line_start,
+                        "finding_type": finding.finding_type,
+                    },
+                )
+            )
+            return
         self.finding_repo.save(review.review_id, finding)
         self.message_repo.append(
             ConversationMessage(
@@ -684,10 +725,10 @@ class ReviewRunner:
                     "reply_to_message_id": command_message.message_id,
                     "target_expert_id": expert.expert_id,
                     "allowed_tools": expert.tool_bindings,
-                    "allowed_skills": expert.skill_bindings,
+                    "allowed_runtime_tools": expert.runtime_tool_bindings,
                     "knowledge_sources": expert.knowledge_sources,
                     "tool_evidence": tool_evidence,
-                    "skill_results": skill_results,
+                    "runtime_tool_results": runtime_tool_results,
                     "target_hunk": target_hunk,
                     "repository_context": repository_context,
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
@@ -1326,17 +1367,22 @@ class ReviewRunner:
         file_path: str,
         line_start: int,
         tool_evidence: list[dict[str, object]],
-        skill_results: list[dict[str, object]],
+        runtime_tool_results: list[dict[str, object]],
         repository_context: dict[str, object],
         target_hunk: dict[str, object],
         bound_documents: list[object],
         disallowed_inference: list[str],
         expected_checks: list[str],
     ) -> str:
+        """构造专家最终输入给 LLM 的用户提示词。
+
+        这里强制把 diff、代码仓上下文、运行时工具结果、规范文档和禁止推断规则合并，
+        目的是把专家的审查边界和证据来源约束得足够明确。
+        """
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
-        skill_summary = self._build_skill_summary(skill_results)
-        repository_context_summary = self._build_repository_context_summary(repository_context, skill_results)
+        skill_summary = self._build_runtime_tool_summary(runtime_tool_results)
+        repository_context_summary = self._build_repository_context_summary(repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
         review_spec_summary = self._build_review_spec_summary(expert.review_spec)
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
@@ -1351,7 +1397,7 @@ class ReviewRunner:
             f"规范提要:\n{review_spec_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
-            f"Skill 调用结果:\n{skill_summary}\n"
+            f"运行时工具调用结果:\n{skill_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
@@ -1426,10 +1472,12 @@ class ReviewRunner:
     def _stabilize_expert_analysis(
         self,
         parsed: dict[str, object],
+        expert_id: str,
         file_path: str,
         line_start: int,
         target_hunk: dict[str, object],
     ) -> dict[str, object]:
+        """对专家输出做二次收敛，压制明显误报。"""
         result = dict(parsed)
         text_blob = "\n".join(
             [
@@ -1474,6 +1522,36 @@ class ReviewRunner:
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
             result["confidence"] = min(float(result.get("confidence") or 0.0), 0.6)
+        if expert_id == "performance_reliability":
+            perf_tokens = [
+                "超时",
+                "重试",
+                "限流",
+                "队列",
+                "吞吐",
+                "性能",
+                "缓存",
+                "序列化",
+                "响应体",
+                "锁",
+                "热点",
+                "退化",
+                "并发",
+                "cpu",
+                "内存",
+                "network",
+                "latency",
+                "throughput",
+                "cache",
+                "timeout",
+                "retry",
+            ]
+            has_perf_signal = any(token.lower() in text_blob.lower() for token in perf_tokens)
+            if not has_perf_signal:
+                result["finding_type"] = "design_concern"
+                result["severity"] = "low"
+                result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
+                result["verification_needed"] = True
 
         result["line_start"] = self._normalize_line_start(result.get("line_start"), line_start)
         result["line_end"] = self._normalize_line_start(result.get("line_end"), int(result["line_start"]))
@@ -1505,22 +1583,23 @@ class ReviewRunner:
             f"回应主Agent：收到，我先看 {file_path}:{line_start} 附近的改动。\n"
             f"问题标题：{self._build_finding_title(expert)}\n"
             f"风险结论：从{expert.name_zh}视角看，这里最值得警惕的是：{summary}\n"
-            f"代码证据：我已经基于 diff 片段、绑定 skill 和知识库命中结果完成首轮取证，但仍需补充更直接的上下文证据。\n"
+            f"代码证据：我已经基于 diff 片段、绑定运行时工具和知识库命中结果完成首轮取证，但仍需补充更直接的上下文证据。\n"
             f"修复建议：{self._build_remediation_suggestion(subject, expert.expert_id, file_path)}\n"
             f"证据诉求：需要补充关联测试、失败路径和变更前后的行为对比。"
         )
 
-    def _build_skill_summary(self, skill_results: list[dict[str, object]]) -> str:
-        if not skill_results:
-            return "无可用 skill 或本轮未命中可调用 skill。"
+    def _build_runtime_tool_summary(self, runtime_tool_results: list[dict[str, object]]) -> str:
+        """把运行时工具结果压缩成适合再次输入 LLM 的摘要。"""
+        if not runtime_tool_results:
+            return "无可用运行时工具或本轮未命中可调用工具。"
         lines: list[str] = []
-        for item in skill_results:
-            skill_name = str(item.get("skill_name") or "")
+        for item in runtime_tool_results:
+            tool_name = str(item.get("tool_name") or "")
             summary = str(item.get("summary") or "").strip()
             if summary:
-                lines.append(f"- {skill_name}: {summary}")
+                lines.append(f"- {tool_name}: {summary}")
             else:
-                lines.append(f"- {skill_name}: 已执行")
+                lines.append(f"- {tool_name}: 已执行")
             matches = item.get("matches")
             if isinstance(matches, list) and matches:
                 for match in matches[:2]:
@@ -1533,8 +1612,9 @@ class ReviewRunner:
     def _build_repository_context_summary(
         self,
         repository_context: dict[str, object],
-        skill_results: list[dict[str, object]],
+        runtime_tool_results: list[dict[str, object]],
     ) -> str:
+        """整合主 Agent 和 repo_context_search 提供的代码仓上下文摘要。"""
         lines: list[str] = []
         if repository_context:
             summary = str(repository_context.get("summary") or "").strip()
@@ -1562,12 +1642,12 @@ class ReviewRunner:
                     reference_count = len(list(item.get("references") or []))
                     if symbol:
                         lines.append(f"- 符号上下文: {symbol} · 定义 {definition_count} · 引用 {reference_count}")
-        for item in skill_results:
-            if str(item.get("skill_name") or "") != "repo_context_search":
+        for item in runtime_tool_results:
+            if str(item.get("tool_name") or "") != "repo_context_search":
                 continue
             summary = str(item.get("summary") or "").strip()
             if summary:
-                lines.append(f"- Repo skill: {summary}")
+                lines.append(f"- Repo 工具: {summary}")
             context_files = [
                 str(value).strip()
                 for value in list(item.get("context_files") or [])
@@ -1657,25 +1737,84 @@ class ReviewRunner:
         self,
         parsed_context_files: object,
         repository_context: dict[str, object],
-        skill_results: list[dict[str, object]],
+        runtime_tool_results: list[dict[str, object]],
     ) -> list[str]:
+        """合并多处来源的上下文文件，并过滤无意义路径。"""
         merged: list[str] = []
         for item in list(parsed_context_files or []):
             text = str(item).strip()
-            if text and text not in merged:
+            if text and self._is_meaningful_context_file(text) and text not in merged:
                 merged.append(text)
         for item in list(repository_context.get("context_files", []) or []):
             text = str(item).strip()
-            if text and text not in merged:
+            if text and self._is_meaningful_context_file(text) and text not in merged:
                 merged.append(text)
-        for result in skill_results:
-            if str(result.get("skill_name") or "") != "repo_context_search":
+        for result in runtime_tool_results:
+            if str(result.get("tool_name") or "") != "repo_context_search":
                 continue
             for item in list(result.get("context_files", []) or []):
                 text = str(item).strip()
-                if text and text not in merged:
+                if text and self._is_meaningful_context_file(text) and text not in merged:
                     merged.append(text)
         return merged[:6]
+
+    def _is_meaningful_context_file(self, path_text: str) -> bool:
+        normalized = str(path_text or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        banned_parts = [".git/", "node_modules/", "dist/", "build/", ".next/", ".turbo/", "__pycache__/"]
+        if any(part in normalized for part in banned_parts):
+            return False
+        banned_suffixes = (".lock", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff", ".woff2")
+        return not normalized.endswith(banned_suffixes)
+
+    def _should_skip_finding(self, expert_id: str, finding: ReviewFinding) -> bool:
+        if expert_id != "performance_reliability":
+            return False
+        text_blob = "\n".join(
+            [
+                finding.title,
+                finding.summary,
+                finding.rule_based_reasoning,
+                *finding.evidence,
+                *finding.cross_file_evidence,
+            ]
+        ).lower()
+        perf_tokens = {
+            "超时",
+            "重试",
+            "限流",
+            "吞吐",
+            "锁",
+            "热点",
+            "退化",
+            "并发",
+            "序列化",
+            "响应体",
+            "缓存",
+            "内存",
+            "cpu",
+            "latency",
+            "throughput",
+            "timeout",
+            "retry",
+            "cache",
+            "performance",
+        }
+        has_perf_signal = any(token in text_blob for token in perf_tokens)
+        has_repo_context = len(finding.context_files) >= 2
+        if finding.finding_type == "risk_hypothesis" and (not has_perf_signal or not has_repo_context):
+            logger.info(
+                "suppressing weak performance finding review_id=%s file=%s line=%s has_perf_signal=%s has_repo_context=%s title=%s",
+                finding.review_id,
+                finding.file_path,
+                finding.line_start,
+                has_perf_signal,
+                has_repo_context,
+                finding.title,
+            )
+            return True
+        return False
 
     def _build_debate_prompt(
         self,

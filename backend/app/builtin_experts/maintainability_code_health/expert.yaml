@@ -29,7 +29,7 @@ knowledge_sources:
   - maintainability-review-checklist
 tool_bindings:
   - local_diff
-skill_bindings:
+runtime_tool_bindings:
   - diff_inspector
   - dependency_surface_locator
   - knowledge_search

@@ -30,7 +30,7 @@ knowledge_sources:
   - business-review-checklist
 tool_bindings:
   - local_diff
-skill_bindings:
+runtime_tool_bindings:
   - diff_inspector
   - knowledge_search
 agent_bindings:

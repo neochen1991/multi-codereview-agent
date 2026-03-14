@@ -12,6 +12,7 @@ const parseList = (value: string) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+// 设置页负责维护 config.json 对应的系统级运行参数和专家治理配置。
 const SettingsPage: React.FC = () => {
   const [form] = Form.useForm<RuntimeSettings>();
   const [loading, setLoading] = React.useState(false);
@@ -20,6 +21,7 @@ const SettingsPage: React.FC = () => {
   const [savingExpertId, setSavingExpertId] = React.useState("");
 
   const loadPage = React.useCallback(async () => {
+    // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
       const [runtime, expertList] = await Promise.all([settingsApi.getRuntime(), expertApi.list()]);
@@ -39,7 +41,7 @@ const SettingsPage: React.FC = () => {
       <Card className="module-card">
         <Title level={3}>系统设置</Title>
         <Paragraph>
-          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、skill 和知识源绑定。设置页改动会直接影响审核 runtime，并同步写入项目根目录 config.json。
+          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、运行时工具和知识源绑定。设置页改动会直接影响审核 runtime，并同步写入项目根目录 config.json。
         </Paragraph>
         <Form.Item noStyle shouldUpdate>
           {() =>
@@ -60,7 +62,7 @@ const SettingsPage: React.FC = () => {
         <Descriptions column={1}>
           <Descriptions.Item label="日志落盘">前后端日志统一输出到项目根目录 logs/</Descriptions.Item>
           <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
-          <Descriptions.Item label="Skill 调用">每个专家按 skill_bindings 真实调用本地 skill gateway</Descriptions.Item>
+          <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
           <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
         </Descriptions>
       </Card>
@@ -85,7 +87,7 @@ const SettingsPage: React.FC = () => {
                 code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
-                skill_allowlist: parseList(String(values.skill_allowlist || "")),
+                runtime_tool_allowlist: parseList(String(values.runtime_tool_allowlist || "")),
                 agent_allowlist: parseList(String(values.agent_allowlist || "")),
                 allow_human_gate: Boolean(values.allow_human_gate),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
@@ -214,8 +216,8 @@ const SettingsPage: React.FC = () => {
             <Input placeholder="local_diff, schema_diff, coverage_diff" />
           </Form.Item>
           <Form.Item
-            name="skill_allowlist"
-            label="全局 Skill 白名单"
+            name="runtime_tool_allowlist"
+            label="全局运行时工具白名单"
             getValueProps={(value) => ({ value: stringifyList(value as string[]) })}
           >
             <Input placeholder="knowledge_search, diff_inspector, test_surface_locator, dependency_surface_locator, repo_context_search" />
@@ -314,7 +316,7 @@ const SettingsPage: React.FC = () => {
                   initialValues={{
                     knowledge_sources: stringifyList(expert.knowledge_sources),
                     tool_bindings: stringifyList(expert.tool_bindings),
-                    skill_bindings: stringifyList(expert.skill_bindings),
+                    runtime_tool_bindings: stringifyList(expert.runtime_tool_bindings),
                   }}
                   onFinish={async (values) => {
                     setSavingExpertId(expert.expert_id);
@@ -323,7 +325,7 @@ const SettingsPage: React.FC = () => {
                         ...expert,
                         knowledge_sources: parseList(values.knowledge_sources || ""),
                         tool_bindings: parseList(values.tool_bindings || ""),
-                        skill_bindings: parseList(values.skill_bindings || ""),
+                        runtime_tool_bindings: parseList(values.runtime_tool_bindings || ""),
                       });
                       message.success(`${expert.name_zh} 配置已更新`);
                       await loadPage();
@@ -340,7 +342,7 @@ const SettingsPage: React.FC = () => {
                   <Form.Item name="tool_bindings" label="工具绑定">
                     <Input placeholder="local_diff, schema_diff" />
                   </Form.Item>
-                  <Form.Item name="skill_bindings" label="Skill 绑定">
+                  <Form.Item name="runtime_tool_bindings" label="运行时工具绑定">
                     <Input placeholder="knowledge_search, diff_inspector" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" loading={savingExpertId === expert.expert_id}>

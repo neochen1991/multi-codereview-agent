@@ -8,16 +8,26 @@ from app.repositories.fs import read_json, write_json
 
 
 class FileKnowledgeRepository:
+    """管理知识文档的元数据和 Markdown 实体文件。"""
+
     def __init__(self, root: Path) -> None:
+        """初始化知识库根目录。"""
+
         self.root = Path(root)
 
     def _knowledge_path(self) -> Path:
+        """返回知识文档索引文件路径。"""
+
         return self.root / "knowledge" / "documents.json"
 
     def _doc_dir(self, expert_id: str) -> Path:
+        """返回某个专家的知识文档目录。"""
+
         return self.root / "knowledge" / "docs" / expert_id
 
     def save(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        """保存文档内容，并对重复内容做去重。"""
+
         documents = self.list()
         doc_dir = self._doc_dir(document.expert_id)
         doc_dir.mkdir(parents=True, exist_ok=True)
@@ -49,6 +59,8 @@ class FileKnowledgeRepository:
         return persisted
 
     def list(self) -> list[KnowledgeDocument]:
+        """读取全部知识文档，并在加载时清理历史重复项。"""
+
         path = self._knowledge_path()
         if not path.exists():
             return []
@@ -73,6 +85,8 @@ class FileKnowledgeRepository:
         return documents
 
     def delete(self, doc_id: str) -> bool:
+        """删除指定文档及其绑定关系。"""
+
         documents = self.list()
         remaining: list[KnowledgeDocument] = []
         removed: KnowledgeDocument | None = None
@@ -93,6 +107,8 @@ class FileKnowledgeRepository:
         return True
 
     def _fingerprint(self, document: KnowledgeDocument) -> str:
+        """生成用于内容去重的稳定指纹。"""
+
         normalized_tags = ",".join(sorted(str(tag).strip().lower() for tag in document.tags if str(tag).strip()))
         normalized_title = str(document.title).strip().lower()
         normalized_filename = str(document.source_filename).strip().lower()
@@ -110,6 +126,8 @@ class FileKnowledgeRepository:
         )
 
     def _identity_key(self, document: KnowledgeDocument) -> str:
+        """生成用于标题/文件名维度判重的业务主键。"""
+
         return "|".join(
             [
                 str(document.expert_id).strip().lower(),

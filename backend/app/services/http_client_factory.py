@@ -9,6 +9,8 @@ from app.domain.models.runtime_settings import RuntimeSettings
 
 
 class HttpClientFactory:
+    """统一构建访问外部平台时使用的 httpx Client。"""
+
     @classmethod
     def create(
         cls,
@@ -17,6 +19,8 @@ class HttpClientFactory:
         runtime_settings: RuntimeSettings | None = None,
         follow_redirects: bool = False,
     ) -> httpx.Client:
+        """根据运行时 SSL 配置创建 httpx Client。"""
+
         return httpx.Client(
             timeout=timeout,
             follow_redirects=follow_redirects,
@@ -25,6 +29,8 @@ class HttpClientFactory:
 
     @classmethod
     def build_verify(cls, runtime_settings: RuntimeSettings | None = None) -> bool | ssl.SSLContext:
+        """生成 verify 参数，兼容系统证书、自定义 CA 和关闭校验三种模式。"""
+
         runtime = runtime_settings or RuntimeSettings()
         if not runtime.verify_ssl:
             return False

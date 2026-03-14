@@ -9,6 +9,7 @@ type ArtifactSummaryPanelProps = {
   artifacts: ReviewArtifacts | null;
 };
 
+// 产物快照卡把 summary comment、check run 等外部产物汇总展示。
 const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }) => {
   const summaryComment = artifacts?.summary_comment;
   const checkRun = artifacts?.check_run;

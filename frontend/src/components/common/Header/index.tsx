@@ -4,6 +4,7 @@ import { GithubOutlined, RobotOutlined } from "@ant-design/icons";
 
 const { Header: AntHeader } = Layout;
 
+// 全局页头展示产品名称、运行标识和外部链接入口。
 const AppHeader: React.FC = () => {
   return (
     <AntHeader className="app-header">

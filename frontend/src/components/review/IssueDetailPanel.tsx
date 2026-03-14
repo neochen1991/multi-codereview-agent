@@ -7,6 +7,7 @@ type IssueDetailPanelProps = {
   issue: DebateIssue | null;
 };
 
+// 议题详情卡主要展示当前选中 issue 的摘要和参与专家。
 const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue }) => {
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">

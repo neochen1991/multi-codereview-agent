@@ -9,6 +9,8 @@ from app.config import settings
 
 
 def configure_logging() -> None:
+    """配置后端日志文件和控制台输出。"""
+
     logs_root = settings.LOGS_ROOT
     logs_root.mkdir(parents=True, exist_ok=True)
     backend_log = logs_root / "backend.log"
@@ -33,6 +35,8 @@ def configure_logging() -> None:
 
 
 def create_application() -> FastAPI:
+    """创建并装配 FastAPI 应用及所有业务路由。"""
+
     configure_logging()
     app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
     app.add_middleware(
@@ -53,6 +57,8 @@ def create_application() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
+        """提供轻量健康检查接口。"""
+
         return {"status": "ok"}
 
     return app

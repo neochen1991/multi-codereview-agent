@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import settings
 
 
 class RuntimeSettings(BaseModel):
+    """定义审核运行时、网络和默认模型的完整设置。"""
+
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
     code_repo_clone_url: str = ""
@@ -20,14 +22,15 @@ class RuntimeSettings(BaseModel):
     code_repo_auto_sync: bool = False
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
-    skill_allowlist: list[str] = Field(
+    runtime_tool_allowlist: list[str] = Field(
         default_factory=lambda: [
             "knowledge_search",
             "diff_inspector",
             "test_surface_locator",
             "dependency_surface_locator",
             "repo_context_search",
-        ]
+        ],
+        validation_alias=AliasChoices("runtime_tool_allowlist", "skill_allowlist"),
     )
     agent_allowlist: list[str] = Field(default_factory=list)
     allow_human_gate: bool = True

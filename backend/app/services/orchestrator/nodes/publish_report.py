@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def publish_report(state: ReviewState) -> ReviewState:
+    """生成简要报告摘要，供结果页和外部产物复用。"""
+
     next_state = dict(state)
     next_state["phase"] = "publish_report"
     findings = list(next_state.get("findings", []))

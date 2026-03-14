@@ -13,6 +13,8 @@ def build_report_summary(
     issue_count: int,
     pending_human_count: int,
 ) -> str:
+    """生成产物快照和结果页都会复用的报告摘要文案。"""
+
     return (
         f"审核报告已生成，共收敛 {finding_count} 条 findings，"
         f"形成 {issue_count} 个议题，其中 {pending_human_count} 个待人工裁决。"
@@ -20,10 +22,16 @@ def build_report_summary(
 
 
 class ArtifactService:
+    """负责发布和读取审核对外产物快照。"""
+
     def __init__(self, storage_root: Path) -> None:
+        """初始化产物目录根路径。"""
+
         self.storage_root = Path(storage_root)
 
     def publish(self, review: ReviewTask, issues: list[DebateIssue]) -> dict[str, object]:
+        """落盘 summary comment、check run 和报告快照。"""
+
         artifact_dir = self.storage_root / "reviews" / review.review_id / "artifacts"
         summary_comment = {
             "review_id": review.review_id,
@@ -56,6 +64,8 @@ class ArtifactService:
         }
 
     def load(self, review_id: str) -> dict[str, object]:
+        """读取指定审核的产物快照。"""
+
         artifact_dir = self.storage_root / "reviews" / review_id / "artifacts"
         if not artifact_dir.exists():
             raise KeyError(review_id)

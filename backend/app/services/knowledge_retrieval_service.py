@@ -10,7 +10,11 @@ from app.repositories.file_knowledge_repository import FileKnowledgeRepository
 
 
 class KnowledgeRetrievalService:
+    """基于专家、变更文件和关键词检索知识文档。"""
+
     def __init__(self, root: Path) -> None:
+        """初始化知识仓储和检索缓存。"""
+
         self._root = Path(root)
         self._repository = FileKnowledgeRepository(root)
         self._cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[KnowledgeDocument]] = {}
@@ -18,6 +22,8 @@ class KnowledgeRetrievalService:
     def retrieve(
         self, expert_id: str, review_context: dict[str, object]
     ) -> list[KnowledgeDocument]:
+        """返回某个专家在当前审核上下文下最相关的知识文档。"""
+
         cache_key = self._build_cache_key(expert_id, review_context)
         if cache_key in self._cache:
             return [item.model_copy() for item in self._cache[cache_key]]
@@ -48,6 +54,8 @@ class KnowledgeRetrievalService:
         return result
 
     def _matches_bound_sources(self, document: KnowledgeDocument, bound_sources: set[str]) -> bool:
+        """判断文档是否命中专家显式绑定的知识源范围。"""
+
         if not bound_sources:
             return True
         searchable = " ".join(
@@ -62,6 +70,8 @@ class KnowledgeRetrievalService:
         return any(source in searchable for source in bound_sources)
 
     def _build_query_terms(self, review_context: dict[str, object]) -> list[str]:
+        """从 changed_files 和显式 query_terms 里提取检索关键词。"""
+
         changed_files = [str(item) for item in review_context.get("changed_files", [])]
         explicit_terms = [str(item) for item in review_context.get("query_terms", []) or []]
         tokens: list[str] = []
@@ -76,6 +86,8 @@ class KnowledgeRetrievalService:
         documents: list[KnowledgeDocument],
         query_terms: list[str],
     ) -> list[KnowledgeDocument]:
+        """优先用 ripgrep 在 Markdown 文档正文中做高效匹配。"""
+
         paths = [doc.storage_path for doc in documents if doc.storage_path]
         existing_paths = [path for path in paths if Path(path).exists()]
         if not existing_paths:
@@ -120,6 +132,8 @@ class KnowledgeRetrievalService:
         expert_id: str,
         review_context: dict[str, object],
     ) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        """构造知识检索缓存键，避免重复扫描同一上下文。"""
+
         changed_files = tuple(sorted(str(item).strip() for item in review_context.get("changed_files", []) or [] if str(item).strip()))
         query_terms = tuple(sorted(self._build_query_terms(review_context)))
         return (str(expert_id).strip(), changed_files, query_terms)

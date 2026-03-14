@@ -1,5 +1,6 @@
 import axios from "axios";
 
+// 所有前端页面共用同一个 axios 实例，统一 API 前缀和超时时间。
 const api = axios.create({
   baseURL: "/api",
   timeout: 120000,
@@ -33,6 +34,8 @@ export interface ReviewSummary {
   duration_seconds?: number | null;
   updated_at?: string;
 }
+
+// 前端 API 类型集中定义在这里，保证页面和接口契约保持一致。
 
 export interface ReviewEvent {
   event_id: string;
@@ -176,7 +179,8 @@ export interface ExpertProfile {
   knowledge_sources: string[];
   tool_bindings: string[];
   mcp_tools: string[];
-  skill_bindings: string[];
+  runtime_tool_bindings: string[];
+  skill_bindings?: string[];
   agent_bindings: string[];
   max_tool_calls: number;
   max_debate_rounds: number;
@@ -208,7 +212,7 @@ export interface RuntimeSettings {
   code_repo_auto_sync: boolean;
   tool_allowlist: string[];
   mcp_allowlist: string[];
-  skill_allowlist: string[];
+  runtime_tool_allowlist: string[];
   agent_allowlist: string[];
   allow_human_gate: boolean;
   default_max_debate_rounds: number;
@@ -361,7 +365,7 @@ export const expertApi = {
     knowledge_sources: string[];
     tool_bindings: string[];
     mcp_tools: string[];
-    skill_bindings: string[];
+    runtime_tool_bindings: string[];
     agent_bindings: string[];
     max_tool_calls?: number;
     max_debate_rounds?: number;
@@ -390,7 +394,7 @@ export const expertApi = {
     knowledge_sources: string[];
     tool_bindings: string[];
     mcp_tools: string[];
-    skill_bindings: string[];
+    runtime_tool_bindings: string[];
     agent_bindings: string[];
     max_tool_calls?: number;
     max_debate_rounds?: number;
@@ -470,6 +474,7 @@ export const settingsApi = {
   },
 };
 
+// 过程页通过这个方法统一构造 SSE 地址，避免各页面手写路径。
 export const buildReviewEventStreamUrl = (reviewId: string): string =>
   `${window.location.origin}/api/reviews/${reviewId}/events/stream`;
 

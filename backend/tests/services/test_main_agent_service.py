@@ -304,6 +304,57 @@ def test_main_agent_repository_context_includes_repo_search_hit_files(tmp_path: 
     assert command["repository_context"]["symbol_contexts"]
 
 
+def test_main_agent_repository_context_filters_git_noise(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    source = repo_root / "packages" / "lib" / "schedules" / "getScheduleListItemData.ts"
+    git_index = repo_root / ".git" / "index"
+    source.parent.mkdir(parents=True)
+    git_index.parent.mkdir(parents=True)
+    source.write_text("export const getScheduleListItemData = () => updatedAt\n", encoding="utf-8")
+    git_index.write_text("getScheduleListItemData\n", encoding="utf-8")
+
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["packages/lib/schedules/getScheduleListItemData.ts"],
+        unified_diff=(
+            "diff --git a/packages/lib/schedules/getScheduleListItemData.ts b/packages/lib/schedules/getScheduleListItemData.ts\n"
+            "--- a/packages/lib/schedules/getScheduleListItemData.ts\n"
+            "+++ b/packages/lib/schedules/getScheduleListItemData.ts\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-export const getScheduleListItemData = () => null\n"
+            "+export const getScheduleListItemData = () => updatedAt\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务规则"],
+        activation_hints=["service", "transformer"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(
+        subject,
+        expert,
+        RuntimeSettings(
+            allow_llm_fallback=True,
+            code_repo_clone_url="https://github.com/example/repo.git",
+            code_repo_local_path=str(repo_root),
+            code_repo_default_branch="main",
+        ),
+    )
+
+    assert ".git/index" not in command["repository_context"]["context_files"]
+
+
 def test_main_agent_correctness_prefers_transformer_chain_for_timestamp_changes():
     agent = MainAgentService()
     subject = ReviewSubject(

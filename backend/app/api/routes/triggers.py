@@ -9,6 +9,8 @@ router = APIRouter()
 
 
 class ManualTriggerRequest(BaseModel):
+    """定义手工触发审核时的请求体。"""
+
     subject_type: str
     repo_id: str = ""
     project_id: str = ""
@@ -25,6 +27,8 @@ class ManualTriggerRequest(BaseModel):
 
 
 class WebhookTriggerRequest(BaseModel):
+    """定义外部平台 webhook 触发审核时的请求体。"""
+
     provider: str
     event_type: str
     repository: dict[str, object] = Field(default_factory=dict)
@@ -33,6 +37,8 @@ class WebhookTriggerRequest(BaseModel):
 
 @router.post("/triggers/manual", status_code=status.HTTP_201_CREATED)
 def manual_trigger(payload: ManualTriggerRequest) -> dict[str, object]:
+    """以手工方式创建一条审核任务。"""
+
     review = review_service_module.review_service.create_review(
         payload.model_dump()
         | {
@@ -47,6 +53,8 @@ def manual_trigger(payload: ManualTriggerRequest) -> dict[str, object]:
 
 @router.post("/triggers/webhook", status_code=status.HTTP_201_CREATED)
 def webhook_trigger(payload: WebhookTriggerRequest) -> dict[str, object]:
+    """把 webhook 载荷转换成审核任务输入。"""
+
     repository = payload.repository
     merge_request = payload.merge_request
     review = review_service_module.review_service.create_review(

@@ -8,6 +8,8 @@ from app.domain.models.review import ReviewTask
 
 
 class ConfidenceSummary(BaseModel):
+    """聚合报告页需要展示的关键信心度统计指标。"""
+
     high_confidence_count: int = 0
     debated_issue_count: int = 0
     needs_human_count: int = 0
@@ -19,6 +21,8 @@ class ConfidenceSummary(BaseModel):
 
 
 class ReviewReport(BaseModel):
+    """面向前端结果页输出的最终 Code Review 报告模型。"""
+
     review_id: str
     status: str
     phase: str

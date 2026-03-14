@@ -7,14 +7,20 @@ from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一议题时间字段。"""
+
     return datetime.now(UTC)
 
 
 def build_issue_id() -> str:
+    """生成争议议题的唯一 ID。"""
+
     return f"iss_{uuid4().hex[:12]}"
 
 
 class DebateIssue(BaseModel):
+    """表示多个 finding 收敛后的争议议题或待裁决问题。"""
+
     issue_id: str = Field(default_factory=build_issue_id)
     review_id: str
     title: str

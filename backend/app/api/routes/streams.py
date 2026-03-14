@@ -14,6 +14,8 @@ router = APIRouter()
 
 @router.get("/reviews/{review_id}/events")
 def list_events(review_id: str) -> list[dict[str, object]]:
+    """返回某次审核当前已落盘的事件列表。"""
+
     return [
         item.model_dump(mode="json")
         for item in review_service_module.review_service.list_events(review_id)
@@ -22,11 +24,15 @@ def list_events(review_id: str) -> list[dict[str, object]]:
 
 @router.get("/reviews/{review_id}/events/stream")
 async def stream_events(review_id: str, request: Request) -> StreamingResponse:
+    """通过 SSE 实时推送审核事件和消息更新。"""
+
     review = review_service_module.review_service.get_review(review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
 
     async def event_generator():
+        """循环监听新增事件和消息，并按 SSE 协议输出。"""
+
         previous_event_count = len(review_service_module.review_service.list_events(review_id))
         previous_message_count = len(
             review_service_module.review_service.list_all_messages(review_id)

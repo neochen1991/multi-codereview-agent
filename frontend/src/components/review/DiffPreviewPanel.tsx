@@ -42,6 +42,8 @@ type FileTreeNode = {
 type ExpandedState = Record<string, boolean>;
 
 const parseDiff = (diff: string): DiffFile[] => {
+  // 先把 unified diff 解析成“文件 -> diff 行”的结构，
+  // 左侧文件树和右侧详细 diff 都依赖这份中间态。
   const lines = diff.replace(/\r/g, "").split("\n");
   const files: DiffFile[] = [];
   let currentFile: DiffFile | null = null;
@@ -145,6 +147,7 @@ const parseDiff = (diff: string): DiffFile[] => {
 };
 
 const buildTree = (files: DiffFile[]): FileTreeNode[] => {
+  // 把平铺文件列表转成左侧目录树，便于复杂 PR 中按路径导航。
   const roots: FileTreeNode[] = [];
   const nodeByKey = new Map<string, FileTreeNode>();
 
@@ -242,6 +245,8 @@ const renderTree = (
   });
 
 const DiffPreviewPanel: React.FC<DiffPreviewPanelProps> = ({ diff }) => {
+  // Diff 预览是过程页第二主视图：
+  // 左侧负责“选文件”，右侧负责“看当前文件的详细 diff”。
   const files = useMemo(() => parseDiff(diff), [diff]);
   const tree = useMemo(() => buildTree(files), [files]);
   const [selectedPath, setSelectedPath] = useState<string | undefined>(files[0]?.path);

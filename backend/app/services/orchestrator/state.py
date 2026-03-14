@@ -4,6 +4,8 @@ from typing import Any, TypedDict
 
 
 class ReviewState(TypedDict, total=False):
+    """定义审核状态图在各节点之间共享的字段集合。"""
+
     review_id: str
     phase: str
     subject_type: str

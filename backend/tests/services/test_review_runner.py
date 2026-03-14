@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument
+from app.domain.models.finding import ReviewFinding
 from app.domain.models.review import ReviewSubject
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.services.review_runner import ReviewRunner
@@ -75,7 +76,7 @@ def test_review_runner_merge_context_files_uses_repo_context_and_skill_hits(stor
         },
         [
             {
-                "skill_name": "repo_context_search",
+                "tool_name": "repo_context_search",
                 "context_files": [
                     "packages/lib/schedules/getScheduleListItemData.ts",
                     "packages/prisma/schema.prisma",
@@ -109,6 +110,7 @@ def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Pat
             "context_files": [],
             "verification_needed": False,
         },
+        "maintainability_code_health",
         "apps/api/schedules/output.service.ts",
         4,
         {
@@ -125,6 +127,88 @@ def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Pat
     assert stabilized["severity"] == "medium"
     assert float(stabilized["confidence"]) <= 0.45
     assert any("constructor" in item for item in stabilized["assumptions"])
+
+
+def test_review_runner_merge_context_files_filters_noise(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    merged = runner._merge_context_files(
+        ["apps/api/schedules/output.service.ts", ".git/index", "yarn.lock"],
+        {
+            "context_files": [
+                "packages/lib/schedules/getScheduleListItemData.ts",
+                ".git/index",
+            ]
+        },
+        [
+            {
+                "tool_name": "repo_context_search",
+                "context_files": [
+                    "packages/prisma/schema.prisma",
+                    "node_modules/pkg/index.js",
+                ],
+            }
+        ],
+    )
+
+    assert merged == [
+        "apps/api/schedules/output.service.ts",
+        "packages/lib/schedules/getScheduleListItemData.ts",
+        "packages/prisma/schema.prisma",
+    ]
+
+
+def test_review_runner_downgrades_weak_performance_signal(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "DTO 可能需要继续观察",
+            "claim": "当前 diff 只看到了 DTO 字段变化，但还没有明确的链路级证据。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.7,
+            "evidence": ["ApiPropertyOptional 导入发生变化"],
+            "cross_file_evidence": [],
+            "assumptions": ["需要继续确认调用场景"],
+            "context_files": ["packages/platform/types/schedules/output.ts"],
+            "verification_needed": True,
+        },
+        "performance_reliability",
+        "packages/platform/types/schedules/output.ts",
+        1,
+        {"excerpt": "1 | +import { ApiPropertyOptional } from '@nestjs/swagger'"},
+    )
+
+    assert stabilized["finding_type"] == "design_concern"
+    assert stabilized["severity"] == "low"
+    assert float(stabilized["confidence"]) <= 0.35
+
+
+def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        review_id="rev_demo",
+        expert_id="performance_reliability",
+        title="DTO 字段变更可能有风险",
+        summary="当前只看到 DTO 变化，尚无明确性能证据。",
+        finding_type="risk_hypothesis",
+        severity="medium",
+        confidence=0.4,
+        file_path="packages/platform/types/schedules/output.ts",
+        line_start=1,
+        evidence=["ApiPropertyOptional 导入变化"],
+        cross_file_evidence=[],
+        context_files=["packages/platform/types/schedules/output.ts"],
+        remediation_strategy="观察",
+        remediation_suggestion="补充验证",
+        remediation_steps=[],
+        code_excerpt="1 | +import { ApiPropertyOptional } from '@nestjs/swagger'",
+        suggested_code="",
+        suggested_code_language="typescript",
+    )
+
+    assert runner._should_skip_finding("performance_reliability", finding) is True
 
 
 def test_review_runner_build_evidence_scopes_domain_hints_by_file(storage_root: Path):

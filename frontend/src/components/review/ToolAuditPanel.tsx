@@ -7,6 +7,7 @@ type ToolAuditPanelProps = {
   issue: DebateIssue | null;
 };
 
+// 工具核验卡用于展示某条 issue 的 verifier/tool 结果。
 const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-sm" title="工具核验">

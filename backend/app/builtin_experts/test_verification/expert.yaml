@@ -31,7 +31,7 @@ knowledge_sources:
 tool_bindings:
   - local_diff
   - coverage_diff
-skill_bindings:
+runtime_tool_bindings:
   - diff_inspector
   - test_surface_locator
   - knowledge_search

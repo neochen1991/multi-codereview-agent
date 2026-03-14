@@ -10,7 +10,7 @@ def test_create_custom_expert_and_list_it(client):
             "knowledge_sources": ["a11y-guidelines"],
             "tool_bindings": ["local_diff", "coverage_diff"],
             "mcp_tools": ["playwright.snapshot"],
-            "skill_bindings": ["frontend-design"],
+            "runtime_tool_bindings": ["frontend-design"],
             "agent_bindings": ["judge"],
             "max_tool_calls": 4,
             "max_debate_rounds": 2,
@@ -27,7 +27,7 @@ def test_create_custom_expert_and_list_it(client):
     payload = response.json()
     assert payload["expert_id"] == "frontend_accessibility"
     assert payload["custom"] is True
-    assert "frontend-design" in payload["skill_bindings"]
+    assert "frontend-design" in payload["runtime_tool_bindings"]
     assert payload["provider"] == "dashscope-openai-compatible"
     assert payload["model"] == "kimi-k2.5"
     assert "前端可访问性审视规范" in payload["review_spec"]
@@ -53,7 +53,7 @@ def test_update_expert_bindings(client):
             "knowledge_sources": ["security-review-checklist", "auth-guideline"],
             "tool_bindings": ["local_diff"],
             "mcp_tools": [],
-            "skill_bindings": ["knowledge_search", "diff_inspector"],
+            "runtime_tool_bindings": ["knowledge_search", "diff_inspector"],
             "agent_bindings": ["main_agent", "judge"],
             "max_tool_calls": 2,
             "max_debate_rounds": 3,
@@ -67,6 +67,6 @@ def test_update_expert_bindings(client):
     )
     assert update.status_code == 200
     payload = update.json()
-    assert "knowledge_search" in payload["skill_bindings"]
+    assert "knowledge_search" in payload["runtime_tool_bindings"]
     assert "auth-guideline" in payload["knowledge_sources"]
     assert "安全与合规审视规范" in payload["review_spec"]

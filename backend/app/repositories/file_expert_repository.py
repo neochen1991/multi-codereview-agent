@@ -11,10 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 class FileExpertRepository:
+    """负责加载和保存专家配置、提示词及规范文档。"""
+
     def __init__(self, root: Path) -> None:
+        """初始化用户自定义专家目录。"""
+
         self.root = Path(root)
 
     def list(self) -> list[ExpertProfile]:
+        """合并内置专家与用户专家配置，并返回完整专家列表。"""
+
         items: list[ExpertProfile] = []
         packaged_root = Path(__file__).resolve().parents[1] / "builtin_experts"
         builtin_payloads = self._load_payloads(packaged_root, mark_custom=False)
@@ -39,6 +45,8 @@ class FileExpertRepository:
         return items
 
     def save(self, expert: ExpertProfile) -> ExpertProfile:
+        """把专家配置、提示词和规范文档保存到用户目录。"""
+
         target_dir = self.root / expert.expert_id
         target_dir.mkdir(parents=True, exist_ok=True)
         payload = expert.model_dump(mode="json")
@@ -54,6 +62,8 @@ class FileExpertRepository:
         return expert
 
     def _load_payloads(self, root: Path, *, mark_custom: bool) -> dict[str, dict]:
+        """从给定目录读取 expert.yaml、prompt.md 和 review_spec.md。"""
+
         payloads: dict[str, dict] = {}
         if not root.exists():
             logger.warning("expert root missing: %s", root)

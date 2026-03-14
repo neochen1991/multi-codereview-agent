@@ -17,6 +17,7 @@ type HumanGatePanelProps = {
   className?: string;
 };
 
+// 人工裁决卡负责处理待人工 issue 的批准/驳回动作。
 const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   review,
   selectedIssue,

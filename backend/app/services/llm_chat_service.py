@@ -40,6 +40,7 @@ class LLMChatService:
     _PREVIEW_LIMIT = 1600
 
     def resolve_expert(self, expert: ExpertProfile, runtime: RuntimeSettings) -> LLMResolution:
+        """解析专家本轮应该使用的模型配置。"""
         return LLMResolution(
             provider=expert.provider or runtime.default_llm_provider or settings.DEFAULT_LLM_PROVIDER,
             model=expert.model or runtime.default_llm_model or settings.DEFAULT_LLM_MODEL,
@@ -73,6 +74,7 @@ class LLMChatService:
         max_attempts: int = 3,
         log_context: dict[str, object] | None = None,
     ) -> LLMTextResult:
+        """统一的文本补全入口，兼容 JSON 与 SSE 两类返回。"""
         api_key = (resolution.api_key or "").strip() or os.getenv(resolution.api_key_env, "").strip()
         if not api_key:
             return self._handle_failure(

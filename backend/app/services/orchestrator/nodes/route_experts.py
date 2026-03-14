@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def route_experts(state: ReviewState) -> ReviewState:
+    """根据风险提示补充最小必需的专家集合。"""
+
     next_state = dict(state)
     next_state["phase"] = "route_experts"
     selected = list(next_state.get("selected_experts", []))

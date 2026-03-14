@@ -10,6 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseModel):
+    """定义项目默认路径、默认模型和全局常量设置。"""
+
     APP_NAME: str = "Multi Code Review Agent"
     APP_VERSION: str = "0.1.0"
     API_PREFIX: str = "/api"
@@ -33,6 +35,8 @@ class Settings(BaseModel):
 
     @classmethod
     def load(cls) -> "Settings":
+        """从环境变量覆盖默认值，生成最终设置对象。"""
+
         return cls(
             APP_NAME=os.getenv("APP_NAME", cls.model_fields["APP_NAME"].default),
             APP_VERSION=os.getenv("APP_VERSION", cls.model_fields["APP_VERSION"].default),
@@ -64,6 +68,8 @@ class Settings(BaseModel):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """缓存 Settings，避免在每次导入时重复解析。"""
+
     return Settings.load()
 
 

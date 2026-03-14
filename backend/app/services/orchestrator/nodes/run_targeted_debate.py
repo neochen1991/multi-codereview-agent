@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def run_targeted_debate(state: ReviewState) -> ReviewState:
+    """根据 conflict 聚合结果决定哪些议题需要进入辩论。"""
+
     next_state = dict(state)
     next_state["phase"] = "run_targeted_debate"
     issues: list[dict[str, object]] = []

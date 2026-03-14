@@ -129,6 +129,7 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
   URL.revokeObjectURL(url);
 };
 
+// 报告摘要卡负责展示最终 verdict、统计指标和导出入口。
 const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className }) => {
   const totalCount = findings.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;

@@ -7,6 +7,7 @@ type ReviewSubjectPanelProps = {
   review: ReviewSummary | null;
 };
 
+// 审核对象卡用于展示当前 review 对应的仓库、分支和变更文件。
 const ReviewSubjectPanel: React.FC<ReviewSubjectPanelProps> = ({ review }) => {
   return (
     <Card className="module-card" title="审核对象">

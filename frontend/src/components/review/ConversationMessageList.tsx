@@ -10,6 +10,7 @@ type ConversationMessageListProps = {
   messages: ConversationMessage[];
 };
 
+// 议题对话卡用于查看某个 issue 对应的完整消息轨迹。
 const ConversationMessageList: React.FC<ConversationMessageListProps> = ({
   issueId,
   messages,

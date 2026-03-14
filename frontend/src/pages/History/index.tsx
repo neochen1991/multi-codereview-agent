@@ -24,6 +24,7 @@ const formatAnalysisMode = (value?: string) => {
   return { label: "标准模式", color: "blue" as const };
 };
 
+// 历史记录页用于回看审核结果，并从“查看工作台”跳回详情。
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);

@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 
 
 class ReviewService:
+    """审核应用层总入口。
+
+    这层面向 API 和页面交互，负责把“创建任务、启动执行、查询结果、管理专家/知识库”
+    这些应用动作统一收口。真正的专家分析和裁决由 ReviewRunner 完成，
+    这里更像一个把配置、平台适配、仓储和运行时串起来的协调层。
+    """
+
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
         self.review_repo = FileReviewRepository(self.storage_root)
@@ -56,6 +63,13 @@ class ReviewService:
         self._active_reviews_lock = threading.Lock()
 
     def create_review(self, payload: dict[str, object]) -> ReviewTask:
+        """创建审核任务并落盘为 pending。
+
+        这里会优先补全：
+        - 默认分析模式
+        - 按平台选择的 Git access token
+        - 由 PlatformAdapter 归一化后的 ReviewSubject
+        """
         review_id = f"rev_{uuid4().hex[:8]}"
         runtime_settings = self.get_runtime_settings()
         analysis_mode = str(payload.pop("analysis_mode", runtime_settings.default_analysis_mode or "standard")).strip()
@@ -100,12 +114,21 @@ class ReviewService:
         return task
 
     def start_review(self, review_id: str) -> ReviewTask:
+        """同步执行一次审核。
+
+        主要用于测试或阻塞式触发；前端交互默认优先走异步启动。
+        """
         try:
             return self.runner.run_once(review_id)
         except Exception as exc:
             return self._mark_failed(review_id, str(exc))
 
     def start_review_async(self, review_id: str) -> ReviewTask:
+        """异步启动审核并立即返回 queued/running 状态。
+
+        这样前端在点击“创建并启动审核”后，可以第一时间跳转到过程页，
+        再通过轮询/SSE 逐步看到主 Agent 和专家消息流。
+        """
         if os.getenv("PYTEST_CURRENT_TEST"):
             return self.start_review(review_id)
         review = self.get_review(review_id)
@@ -159,6 +182,7 @@ class ReviewService:
         return review
 
     def _resolve_git_access_token(self, review_url: str, runtime_settings: RuntimeSettings) -> str:
+        """按平台优先级选择最合适的代码平台 token。"""
         lowered = review_url.lower()
         if "github.com" in lowered:
             return str(runtime_settings.github_access_token or runtime_settings.code_repo_access_token or "").strip()
@@ -169,6 +193,7 @@ class ReviewService:
         return str(runtime_settings.code_repo_access_token or "").strip()
 
     def _mark_failed(self, review_id: str, reason: str) -> ReviewTask:
+        """统一把后台异常收口成 review 的 failed 状态。"""
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)

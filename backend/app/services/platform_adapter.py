@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ReviewPlatformProvider:
+    """代码平台 provider 抽象。"""
     platform_kind: str
 
     def supports(self, review_url: str) -> bool:
@@ -166,6 +167,7 @@ class PlatformAdapter:
         ]
 
     def normalize(self, subject: ReviewSubject, runtime_settings: RuntimeSettings | None = None) -> ReviewSubject:
+        """把外部 Git 平台输入归一化成统一的 ReviewSubject。"""
         review_url = subject.mr_url or subject.repo_url
         review_mode = self._infer_review_mode(subject.subject_type, review_url)
         provider = self._resolve_provider(review_url)

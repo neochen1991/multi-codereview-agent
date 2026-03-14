@@ -7,10 +7,14 @@ from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一对话消息时间字段。"""
+
     return datetime.now(UTC)
 
 
 class ConversationMessage(BaseModel):
+    """表示审核过程中的一条专家、主 Agent 或工具消息。"""
+
     message_id: str = Field(default_factory=lambda: f"msg_{uuid4().hex[:12]}")
     review_id: str
     issue_id: str

@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import settings
 from app.domain.models.runtime_settings import RuntimeSettings
 
 
 class ServerConfig(BaseModel):
+    """定义前后端服务默认端口。"""
+
     backend_port: int = 8011
     frontend_port: int = 5174
 
 
 class LlmConfig(BaseModel):
+    """定义系统级默认大模型配置。"""
+
     default_provider: str = settings.DEFAULT_LLM_PROVIDER
     default_base_url: str = settings.DEFAULT_LLM_BASE_URL
     default_model: str = settings.DEFAULT_LLM_MODEL
@@ -22,6 +26,8 @@ class LlmConfig(BaseModel):
 
 
 class GitConfig(BaseModel):
+    """定义不同代码平台使用的访问令牌。"""
+
     repo_access_token: str | None = None
     github_access_token: str | None = None
     gitlab_access_token: str | None = None
@@ -29,6 +35,8 @@ class GitConfig(BaseModel):
 
 
 class CodeRepoConfig(BaseModel):
+    """定义目标源码仓检索时使用的代码仓配置。"""
+
     clone_url: str = ""
     local_path: str = ""
     default_branch: str = "main"
@@ -36,6 +44,8 @@ class CodeRepoConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
+    """定义审核运行时模式和并发/超时参数。"""
+
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
     allow_llm_fallback: bool = False
@@ -51,27 +61,34 @@ class RuntimeConfig(BaseModel):
 
 
 class NetworkConfig(BaseModel):
+    """定义访问外部平台时的 HTTPS 校验策略。"""
+
     verify_ssl: bool = True
     use_system_trust_store: bool = True
     ca_bundle_path: str = ""
 
 
 class AllowlistConfig(BaseModel):
+    """定义审核运行时允许使用的工具和代理白名单。"""
+
     tools: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
-    skills: list[str] = Field(
+    runtime_tools: list[str] = Field(
         default_factory=lambda: [
             "knowledge_search",
             "diff_inspector",
             "test_surface_locator",
             "dependency_surface_locator",
             "repo_context_search",
-        ]
+        ],
+        validation_alias=AliasChoices("runtime_tools", "skills"),
     )
     mcp: list[str] = Field(default_factory=list)
     agents: list[str] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):
+    """聚合项目可由用户在 config.json 中维护的顶层配置。"""
+
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     git: GitConfig = Field(default_factory=GitConfig)
@@ -82,6 +99,8 @@ class AppConfig(BaseModel):
 
     @classmethod
     def from_runtime_settings(cls, runtime: RuntimeSettings) -> "AppConfig":
+        """把旧版运行时设置对象映射成统一的应用配置对象。"""
+
         return cls(
             llm=LlmConfig(
                 default_provider=runtime.default_llm_provider,
@@ -123,13 +142,15 @@ class AppConfig(BaseModel):
             ),
             allowlist=AllowlistConfig(
                 tools=list(runtime.tool_allowlist),
-                skills=list(runtime.skill_allowlist),
+                runtime_tools=list(runtime.runtime_tool_allowlist),
                 mcp=list(runtime.mcp_allowlist),
                 agents=list(runtime.agent_allowlist),
             ),
         )
 
     def to_runtime_settings(self) -> RuntimeSettings:
+        """把应用配置转换回运行时服务使用的配置对象。"""
+
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
             default_analysis_mode=self.runtime.default_analysis_mode,
@@ -143,7 +164,7 @@ class AppConfig(BaseModel):
             code_repo_auto_sync=self.code_repo.auto_sync,
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),
-            skill_allowlist=list(self.allowlist.skills),
+            runtime_tool_allowlist=list(self.allowlist.runtime_tools),
             agent_allowlist=list(self.allowlist.agents),
             allow_human_gate=self.runtime.allow_human_gate,
             default_max_debate_rounds=self.runtime.default_max_debate_rounds,

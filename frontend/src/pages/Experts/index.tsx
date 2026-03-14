@@ -37,6 +37,15 @@ const docTypeLabelMap: Record<string, string> = {
 
 const formatDocTypeLabel = (value?: string) => docTypeLabelMap[String(value || "reference")] || String(value || "reference");
 
+const getRuntimeToolBindings = (expert: ExpertProfile): string[] => {
+  const runtimeBindings = Array.isArray(expert.runtime_tool_bindings) ? expert.runtime_tool_bindings : [];
+  if (runtimeBindings.length > 0) {
+    return runtimeBindings;
+  }
+  return Array.isArray(expert.skill_bindings) ? expert.skill_bindings : [];
+};
+
+// 专家中心负责管理专家配置、核心规范和绑定文档，是审核能力治理的主入口。
 const ExpertsPage: React.FC = () => {
   const [experts, setExperts] = useState<ExpertProfile[]>([]);
   const [documents, setDocuments] = useState<Record<string, KnowledgeDocument[]>>({});
@@ -135,15 +144,15 @@ const ExpertsPage: React.FC = () => {
                                 <Tag>{item.api_key ? "已配置 API Key" : formatOptionalLlmValue(item.api_key_env)}</Tag>
                               </div>
                               {item.api_base_url ? (
-                                <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>{item.api_base_url}</div>
+                                <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>{item.api_base_url}</div>
                               ) : null}
-                              <div style={{ marginTop: 8, color: "rgba(255,255,255,0.75)" }}>
+                              <div style={{ marginTop: 8, color: "var(--text-primary)" }}>
                                 必查项：{item.required_checks.length ? item.required_checks.join(" / ") : "未配置"}
                               </div>
-                              <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>
+                              <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
                                 产物偏好：{item.preferred_artifacts.length ? item.preferred_artifacts.join(" / ") : "未配置"}
                               </div>
-                              <div style={{ marginTop: 6, color: "rgba(255,255,255,0.65)" }}>
+                              <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
                                 越界限制：{item.out_of_scope.length ? item.out_of_scope.join(" / ") : "未配置"}
                               </div>
                               <div style={{ marginTop: 6 }}>
@@ -157,7 +166,7 @@ const ExpertsPage: React.FC = () => {
                                     {tool}
                                   </Tag>
                                 ))}
-                                {item.skill_bindings.map((tool) => (
+                                {getRuntimeToolBindings(item).map((tool) => (
                                   <Tag key={`${item.expert_id}_${tool}`} color="gold">
                                     {tool}
                                   </Tag>
@@ -181,7 +190,7 @@ const ExpertsPage: React.FC = () => {
                                   上传并绑定 Markdown
                                 </Button>
                               </Space>
-                              <div style={{ color: "rgba(255,255,255,0.65)" }}>
+                              <div style={{ color: "var(--text-secondary)" }}>
                                 核心规范默认折叠，已绑定文档 {expertDocs.length} 篇。点击“展开文档详情”后查看具体内容。
                               </div>
                             </div>
@@ -228,7 +237,7 @@ const ExpertsPage: React.FC = () => {
                               .split(",")
                               .map((item: string) => item.trim())
                               .filter(Boolean),
-                            skill_bindings: String(values.skill_bindings || "")
+                            runtime_tool_bindings: String(values.runtime_tool_bindings || "")
                               .split(",")
                               .map((item: string) => item.trim())
                               .filter(Boolean),
@@ -280,7 +289,7 @@ const ExpertsPage: React.FC = () => {
                       <Form.Item name="mcp_tools" label="MCP 白名单">
                         <Input placeholder="playwright.snapshot" />
                       </Form.Item>
-                      <Form.Item name="skill_bindings" label="Skill 白名单">
+                      <Form.Item name="runtime_tool_bindings" label="运行时工具白名单">
                         <Input placeholder="knowledge_search, repo_context_search" />
                       </Form.Item>
                       <Form.Item name="agent_bindings" label="Agent 白名单">
@@ -347,7 +356,7 @@ const ExpertsPage: React.FC = () => {
                                           {tool}
                                         </Tag>
                                       ))}
-                                      {item.skill_bindings.map((tool) => (
+                                      {getRuntimeToolBindings(item).map((tool) => (
                                         <Tag key={`${item.expert_id}_${tool}`} color="gold">
                                           {tool}
                                         </Tag>
@@ -361,7 +370,7 @@ const ExpertsPage: React.FC = () => {
                                         上传并绑定 Markdown
                                       </Button>
                                     </Space>
-                                    <div style={{ marginTop: 8, color: "rgba(255,255,255,0.65)" }}>
+                                    <div style={{ marginTop: 8, color: "var(--text-secondary)" }}>
                                       核心规范默认折叠，已绑定文档 {expertDocs.length} 篇。
                                     </div>
                                   </div>

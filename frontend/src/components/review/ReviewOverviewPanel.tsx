@@ -43,6 +43,8 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   onStart,
   onCreateOnly,
 }) => {
+  // 概览页只负责“审核输入 + 启动前状态提示”，
+  // 不承担过程流和结果渲染逻辑。
   const statusLabel = reviewId ? status || "pending" : "未开始";
   const hasExperts = experts.length > 0;
   const hasSelectedExperts = form.selected_experts.length > 0;
@@ -58,7 +60,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           message={
             readonly
               ? "当前是审核记录查看模式。这里展示当时提交的审核对象与专家选择，过程细节请切到“审核过程”，最终结论请切到“结论与行动”。"
-              : "先输入 GitHub PR / GitLab MR / GitHub Commit 链接，选择参与专家，再启动审核。启动后去“审核过程”查看主 Agent 调度、专家发言和裁决收敛。"
+              : "先输入 Codehub MR 链接，选择参与专家，再启动审核。启动后去“审核过程”查看主 Agent 调度、专家发言和裁决收敛。"
           }
         />
         {!hasExperts ? (

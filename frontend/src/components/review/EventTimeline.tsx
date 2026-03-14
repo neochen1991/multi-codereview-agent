@@ -9,6 +9,7 @@ type EventTimelineProps = {
   events: ReviewEvent[];
 };
 
+// 事件时间线卡用于按时间顺序回看审核运行过程。
 const EventTimeline: React.FC<EventTimelineProps> = ({ events }) => {
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-lg" title="专家实时对话流">

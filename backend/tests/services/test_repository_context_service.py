@@ -96,3 +96,27 @@ def test_repository_context_service_search_symbol_context_separates_definitions_
     assert result["definitions"]
     assert result["references"]
     assert result["definitions"][0]["path"].endswith("src/service.ts")
+
+
+def test_repository_context_service_ignores_git_and_lock_noise(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    git_index = repo_root / ".git" / "index"
+    lock_file = repo_root / "yarn.lock"
+    source_file = repo_root / "src" / "service.ts"
+    git_index.parent.mkdir(parents=True)
+    source_file.parent.mkdir(parents=True)
+    git_index.write_text("getScheduleListItemData\n", encoding="utf-8")
+    lock_file.write_text("getScheduleListItemData\n", encoding="utf-8")
+    source_file.write_text("export const getScheduleListItemData = () => 'ok'\n", encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    result = service.search("getScheduleListItemData")
+
+    assert result["matches"]
+    assert all(".git/" not in item["path"] for item in result["matches"])
+    assert all(not item["path"].endswith("yarn.lock") for item in result["matches"])

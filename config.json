@@ -46,7 +46,7 @@
       "local_diff",
       "schema_diff"
     ],
-    "skills": [
+    "runtime_tools": [
       "frontend-design",
       "knowledge_search",
       "diff_inspector",

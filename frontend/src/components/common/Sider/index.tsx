@@ -13,12 +13,14 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 const { Sider: AntSider } = Layout;
 
+// 全局侧边导航用于在首页、审核、专家、知识和治理页面之间切换。
 const AppSider: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
 
   const menuItems = useMemo(
+    // 菜单项固定，只需要在首次渲染时构造一次。
     () => [
       { key: "/", icon: <HomeOutlined />, label: "首页" },
       { key: "/review", icon: <CodeOutlined />, label: "审核工作台" },
@@ -32,6 +34,7 @@ const AppSider: React.FC = () => {
   );
 
   const selectedKey = useMemo(() => {
+    // 根据当前路径推导高亮菜单项，兼容 review 详情子路由。
     if (location.pathname === "/") return "/";
     const matched = menuItems
       .filter((item) => item.key !== "/")

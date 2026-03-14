@@ -4,6 +4,8 @@ from typing import Any
 
 
 def schema_diff_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """检查变更中是否包含 migration/schema 类数据库改动。"""
+
     changed_files = " ".join(str(item) for item in payload.get("changed_files", [])).lower()
     verified = any(token in changed_files for token in ["migration", ".sql", "schema"])
     return {

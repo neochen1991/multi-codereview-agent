@@ -11,6 +11,8 @@ class ExpertCapabilityService:
     """Builds execution context from expert capability metadata."""
 
     def __init__(self, verifier: EvidenceVerifierService | None = None) -> None:
+        """初始化工具探测器和支持的内建工具集合。"""
+
         self.verifier = verifier or EvidenceVerifierService()
         self._supported_tools = {"local_diff", "coverage_diff", "schema_diff"}
 
@@ -19,6 +21,8 @@ class ExpertCapabilityService:
         expert: ExpertProfile,
         subject: ReviewSubject,
     ) -> list[dict[str, Any]]:
+        """执行专家显式绑定的内建工具，并返回预探测结果。"""
+
         evidence: list[dict[str, Any]] = []
         payload = {
             "changed_files": list(subject.changed_files),
@@ -41,6 +45,8 @@ class ExpertCapabilityService:
         expert: ExpertProfile,
         tool_evidence: list[dict[str, Any]],
     ) -> str:
+        """把专家能力元数据整理成供提示词注入的摘要文本。"""
+
         sections = [
             f"职责重点: {self._join_or_default(expert.focus_areas, expert.role)}",
             f"触发线索: {self._join_or_default(expert.activation_hints, '按目标 diff 判定')}",
@@ -49,7 +55,7 @@ class ExpertCapabilityService:
             f"证据来源: {self._join_or_default(expert.preferred_artifacts, 'diff hunk / 代码上下文 / 调用链')}",
             f"允许工具: {self._join_or_default(expert.tool_bindings, '无内建工具')}",
             f"知识来源: {self._join_or_default(expert.knowledge_sources, '无额外知识库')}",
-            f"技能绑定: {self._join_or_default(expert.skill_bindings, '无附加 skill')}",
+            f"运行时工具绑定: {self._join_or_default(expert.runtime_tool_bindings, '无附加运行时工具')}",
             f"MCP 工具: {self._join_or_default(expert.mcp_tools, '无 MCP 工具')}",
             f"协作对象: {self._join_or_default(expert.agent_bindings, 'judge')}",
         ]
@@ -68,6 +74,8 @@ class ExpertCapabilityService:
         hunk_excerpt: str = "",
         repo_context_excerpt: str = "",
     ) -> str:
+        """根据文件、hunk 和源码上下文给出派工理由。"""
+
         lowered_file = file_path.lower()
         lowered_hunk = hunk_excerpt.lower()
         lowered_repo = repo_context_excerpt.lower()
@@ -87,6 +95,8 @@ class ExpertCapabilityService:
         expert: ExpertProfile,
         file_path: str,
     ) -> int:
+        """按文件路径粗粒度评估专家相关性。"""
+
         score = 0
         lowered = file_path.lower()
         for hint in expert.activation_hints:
@@ -107,6 +117,8 @@ class ExpertCapabilityService:
         hunk_excerpt: str,
         repo_context_excerpt: str = "",
     ) -> int:
+        """结合 hunk 内容和 repo context 细粒度评估专家相关性。"""
+
         score = self.score_file_relevance(expert, file_path)
         lowered = f"{file_path}\n{hunk_excerpt}\n{repo_context_excerpt}".lower()
         for hint in expert.activation_hints:
@@ -123,12 +135,18 @@ class ExpertCapabilityService:
         return score
 
     def supported_tools(self, expert: ExpertProfile) -> list[str]:
+        """返回当前专家可使用且系统已支持的工具列表。"""
+
         return [tool for tool in expert.tool_bindings if tool in self._supported_tools]
 
     def _join_or_default(self, values: list[str], default: str) -> str:
+        """把列表值拼成展示文本，不存在时返回默认说明。"""
+
         return " / ".join(values) if values else default
 
     def _expert_signal_tokens(self, expert_id: str) -> list[str]:
+        """返回不同专家用于识别相关 hunk 的信号词。"""
+
         mapping = {
             "security_compliance": ["auth", "permission", "token", "security", "encrypt", "secret"],
             "database_analysis": ["select", "insert", "update", "delete", "sql", "schema", "migration", "index", "transaction"],
@@ -144,6 +162,8 @@ class ExpertCapabilityService:
         return mapping.get(expert_id, [])
 
     def _extract_check_tokens(self, check: str) -> list[str]:
+        """从中文必查项中提取少量可用于匹配的关键词。"""
+
         normalized = str(check or "").lower()
         tokens: list[str] = []
         for token in ["事务", "锁", "回滚", "schema", "索引", "权限", "测试", "边界", "异常", "输入", "输出"]:

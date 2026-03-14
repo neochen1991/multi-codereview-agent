@@ -6,6 +6,7 @@ import { expertApi, knowledgeApi, type ExpertProfile, type KnowledgeDocument } f
 
 const { Paragraph, Text, Title } = Typography;
 
+// 知识库页分成“上传新文档”和“按专家管理现有文档”两条主路径。
 const KnowledgePage: React.FC = () => {
   const [documents, setDocuments] = useState<Record<string, KnowledgeDocument[]>>({});
   const [experts, setExperts] = useState<ExpertProfile[]>([]);

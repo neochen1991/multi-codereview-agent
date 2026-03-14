@@ -5,6 +5,7 @@ import { governanceApi, type GovernanceMetrics } from "@/services/api";
 
 const { Paragraph } = Typography;
 
+// 治理页用于观察平台级质量指标和各专家表现。
 const GovernancePage: React.FC = () => {
   const [metrics, setMetrics] = useState<GovernanceMetrics | null>(null);
   const [loading, setLoading] = useState(false);

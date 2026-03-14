@@ -9,6 +9,7 @@ type ReplayConsolePanelProps = {
   replay: ReviewReplayBundle | null;
 };
 
+// 回放面板按时间轴重播审核事件，帮助开发者定位收敛路径。
 const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
   const [cursor, setCursor] = useState(0);
   const events = replay?.events || [];

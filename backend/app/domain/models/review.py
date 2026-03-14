@@ -7,10 +7,14 @@ from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一审核任务时间字段。"""
+
     return datetime.now(UTC)
 
 
 class ReviewSubject(BaseModel):
+    """描述一次审核对应的代码对象，例如 PR、MR 或分支对比。"""
+
     subject_type: Literal["mr", "branch"]
     repo_id: str
     project_id: str
@@ -27,6 +31,8 @@ class ReviewSubject(BaseModel):
 
 
 class ReviewTask(BaseModel):
+    """表示一次审核任务的生命周期状态和核心上下文。"""
+
     review_id: str
     subject: ReviewSubject
     status: str

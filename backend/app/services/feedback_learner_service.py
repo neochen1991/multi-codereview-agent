@@ -11,12 +11,18 @@ from app.repositories.file_review_repository import FileReviewRepository
 
 
 class FeedbackLearnerService:
+    """从历史审核和人工反馈中聚合专家质量指标。"""
+
     def __init__(self, storage_root: Path) -> None:
+        """初始化审核、议题和反馈仓储。"""
+
         self.review_repo = FileReviewRepository(storage_root)
         self.issue_repo = FileIssueRepository(storage_root)
         self.feedback_repo = FileFeedbackRepository(storage_root)
 
     def build_expert_metrics(self) -> list[dict[str, object]]:
+        """汇总每个专家的误报、人工批准和工具核验指标。"""
+
         reviews = self.review_repo.list()
         metrics: dict[str, dict[str, object]] = {}
         for review in reviews:
@@ -61,6 +67,8 @@ class FeedbackLearnerService:
     def _index_labels(
         self, labels: list[FeedbackLabel]
     ) -> dict[str, list[FeedbackLabel]]:
+        """把反馈标签按 issue_id 建立索引，便于统计。"""
+
         result: dict[str, list[FeedbackLabel]] = {}
         for label in labels:
             result.setdefault(label.issue_id, []).append(label)

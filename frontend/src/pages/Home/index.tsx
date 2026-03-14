@@ -1,6 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Col, Form, Input, Row, Select, Space, Statistic, Table, Tag, message } from "antd";
+import { Button, Card, Col, Row, Space, Statistic, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import {
+  ArrowRightOutlined,
+  BookOutlined,
+  CodeOutlined,
+  DashboardOutlined,
+  HistoryOutlined,
+  RobotOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
 import { reviewApi, type ReviewSummary } from "@/services/api";
@@ -9,14 +18,23 @@ const statusColor: Record<string, string> = {
   pending: "default",
   running: "processing",
   completed: "success",
+  failed: "error",
 };
 
+type QuickEntry = {
+  key: string;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  path: string;
+  accentClass: string;
+};
+
+// 首页现在承担平台入口职责：展示系统状态、最近审核和关键导航，不再直接创建审核。
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [form] = Form.useForm();
 
   const loadReviews = async () => {
     setLoading(true);
@@ -37,11 +55,80 @@ const HomePage: React.FC = () => {
     const total = reviews.length;
     const completed = reviews.filter((item) => item.status === "completed").length;
     const running = reviews.filter((item) => item.status === "running").length;
-    return { total, completed, running };
+    const pendingHuman = reviews.filter((item) => item.human_review_status === "requested").length;
+    const completedIn24h = reviews.filter((item) => {
+      if (item.status !== "completed") return false;
+      const updatedAt = new Date(item.updated_at || item.completed_at || item.created_at || 0).getTime();
+      return Number.isFinite(updatedAt) && Date.now() - updatedAt <= 24 * 60 * 60 * 1000;
+    }).length;
+    return { total, completed, running, pendingHuman, completedIn24h };
   }, [reviews]);
 
+  const quickEntries = useMemo<QuickEntry[]>(
+    () => [
+      {
+        key: "review",
+        title: "开始一次新审核",
+        description: "进入审核工作台，粘贴 Git 平台链接、选择专家并启动分析。",
+        icon: <CodeOutlined />,
+        path: "/review",
+        accentClass: "home-entry-review",
+      },
+      {
+        key: "experts",
+        title: "管理专家与规范",
+        description: "查看专家边界、核心规范文档和运行时工具绑定。",
+        icon: <RobotOutlined />,
+        path: "/experts",
+        accentClass: "home-entry-experts",
+      },
+      {
+        key: "knowledge",
+        title: "维护知识库",
+        description: "上传并绑定 Markdown 文档，让专家审查时引用团队知识和规则。",
+        icon: <BookOutlined />,
+        path: "/knowledge",
+        accentClass: "home-entry-knowledge",
+      },
+      {
+        key: "settings",
+        title: "调整系统设置",
+        description: "维护代码仓、平台 Token、模型参数和标准/轻量运行模式。",
+        icon: <SettingOutlined />,
+        path: "/settings",
+        accentClass: "home-entry-settings",
+      },
+    ],
+    [],
+  );
+
+  const systemHints = useMemo(() => {
+    const hints: Array<{ title: string; tone: "warning" | "info" | "success" }> = [];
+    if (stats.pendingHuman > 0) {
+      hints.push({
+        title: `当前有 ${stats.pendingHuman} 条审核待人工裁决，建议优先从历史记录或审核工作台进入处理。`,
+        tone: "warning",
+      });
+    }
+    if (stats.running > 0) {
+      hints.push({
+        title: `当前有 ${stats.running} 条审核仍在运行中，首页适合看全局状态，详细过程请进入审核工作台。`,
+        tone: "info",
+      });
+    }
+    if (stats.total === 0) {
+      hints.push({
+        title: "当前还没有审核记录，可以从“开始一次新审核”进入工作台发起第一条审查任务。",
+        tone: "success",
+      });
+    }
+    return hints.slice(0, 3);
+  }, [stats.pendingHuman, stats.running, stats.total]);
+
+  const recentReviews = useMemo(() => reviews.slice(0, 6), [reviews]);
+
   const columns: ColumnsType<ReviewSummary> = [
-    { title: "Review ID", dataIndex: "review_id", key: "review_id", width: 140 },
+    { title: "Review ID", dataIndex: "review_id", key: "review_id", width: 150 },
     {
       title: "主题",
       key: "subject",
@@ -51,29 +138,29 @@ const HomePage: React.FC = () => {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 120,
-      render: (value: string) => <Tag color={statusColor[value] || "default"}>{value}</Tag>,
+      width: 180,
+      render: (value: string, record) => (
+        <Space size={6} wrap>
+          <Tag color={statusColor[value] || "default"}>{value}</Tag>
+          {record.analysis_mode === "light" ? <Tag color="gold">轻量模式</Tag> : <Tag color="blue">标准模式</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: "更新时间",
+      key: "updated_at",
+      width: 180,
+      render: (_, record) =>
+        new Date(record.updated_at || record.completed_at || record.created_at || 0).toLocaleString("zh-CN"),
     },
     {
       title: "操作",
       key: "action",
-      width: 220,
+      width: 140,
       render: (_, record) => (
-        <Space>
-          <Button type="link" onClick={() => navigate(`/review/${record.review_id}`)}>
-            打开工作台
-          </Button>
-          <Button
-            type="link"
-            onClick={async () => {
-              await reviewApi.start(record.review_id);
-              await loadReviews();
-              navigate(`/review/${record.review_id}`);
-            }}
-          >
-            启动审核
-          </Button>
-        </Space>
+        <Button type="link" onClick={() => navigate(`/review/${record.review_id}`)}>
+          查看工作台
+        </Button>
       ),
     },
   ];
@@ -81,84 +168,123 @@ const HomePage: React.FC = () => {
   return (
     <div className="home-page">
       <Card className="module-card home-hero-card">
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Tag color="processing" style={{ width: "fit-content" }}>
-            Expert Debate Code Review
-          </Tag>
-          <h2 className="home-title">多专家协同代码审核工作台</h2>
-          <p className="home-subtitle">
-            参考多 Agent RCA 平台的交互形式，重构为面向 MR / Branch 的专家审查、对话流和发现收敛控制台。
-          </p>
-        </Space>
+        <Row gutter={[24, 24]} align="middle">
+          <Col xs={24} xl={15}>
+            <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+              <Tag color="processing" style={{ width: "fit-content" }}>
+                Expert Debate Code Review
+              </Tag>
+              <h2 className="home-title">多专家协同代码审核控制台</h2>
+              <p className="home-subtitle">
+                首页只负责展示平台状态、最近审核和关键入口。真正的新建与启动审核统一放在“审核工作台”中完成，
+                让首页更像系统总入口，而不是表单页面。
+              </p>
+              <Space wrap size="middle">
+                <Button type="primary" size="large" icon={<CodeOutlined />} onClick={() => navigate("/review")}>
+                  进入审核工作台
+                </Button>
+                <Button size="large" icon={<HistoryOutlined />} onClick={() => navigate("/history")}>
+                  查看历史记录
+                </Button>
+                <Button size="large" icon={<DashboardOutlined />} onClick={() => navigate("/governance")}>
+                  查看治理中心
+                </Button>
+              </Space>
+            </Space>
+          </Col>
+          <Col xs={24} xl={9}>
+            <div className="home-hero-status-grid">
+              <div className="home-hero-status-card">
+                <span className="home-hero-status-label">运行中</span>
+                <strong>{stats.running}</strong>
+              </div>
+              <div className="home-hero-status-card">
+                <span className="home-hero-status-label">待人工裁决</span>
+                <strong>{stats.pendingHuman}</strong>
+              </div>
+              <div className="home-hero-status-card">
+                <span className="home-hero-status-label">24h 完成数</span>
+                <strong>{stats.completedIn24h}</strong>
+              </div>
+              <div className="home-hero-status-card">
+                <span className="home-hero-status-label">累计审核</span>
+                <strong>{stats.total}</strong>
+              </div>
+            </div>
+          </Col>
+        </Row>
       </Card>
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} md={8}>
-          <Card className="module-card"><Statistic title="总审核数" value={stats.total} /></Card>
+        <Col xs={24} md={6}>
+          <Card className="module-card">
+            <Statistic title="总审核数" value={stats.total} />
+          </Card>
         </Col>
-        <Col xs={24} md={8}>
-          <Card className="module-card"><Statistic title="运行中" value={stats.running} /></Card>
+        <Col xs={24} md={6}>
+          <Card className="module-card">
+            <Statistic title="运行中" value={stats.running} />
+          </Card>
         </Col>
-        <Col xs={24} md={8}>
-          <Card className="module-card"><Statistic title="已完成" value={stats.completed} /></Card>
+        <Col xs={24} md={6}>
+          <Card className="module-card">
+            <Statistic title="已完成" value={stats.completed} />
+          </Card>
+        </Col>
+        <Col xs={24} md={6}>
+          <Card className="module-card">
+            <Statistic title="待人工裁决" value={stats.pendingHuman} />
+          </Card>
         </Col>
       </Row>
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} lg={10}>
-          <Card className="module-card" title="快速新建审核">
-            <Form
-              form={form}
-              layout="vertical"
-              initialValues={{
-                subject_type: "mr",
-                repo_id: "repo_demo",
-                project_id: "proj_demo",
-                target_ref: "main",
-              }}
-              onFinish={async (values) => {
-                setSubmitting(true);
-                try {
-                  const created = await reviewApi.create(values);
-                  message.success(`已创建审核 ${created.review_id}`);
-                  form.resetFields(["title", "source_ref"]);
-                  await loadReviews();
-                  navigate(`/review/${created.review_id}`);
-                } catch (error: any) {
-                  message.error(error?.message || "创建审核失败");
-                } finally {
-                  setSubmitting(false);
-                }
-              }}
-            >
-              <Form.Item label="审核类型" name="subject_type" rules={[{ required: true }]}>
-                <Select options={[{ value: "mr", label: "Merge Request" }, { value: "branch", label: "Branch Compare" }]} />
-              </Form.Item>
-              <Form.Item label="审核标题" name="title" rules={[{ required: true }]}>
-                <Input placeholder="例如：支付链路权限改造" />
-              </Form.Item>
-              <Form.Item label="仓库 ID" name="repo_id" rules={[{ required: true }]}>
-                <Input />
-              </Form.Item>
-              <Form.Item label="项目 ID" name="project_id" rules={[{ required: true }]}>
-                <Input />
-              </Form.Item>
-              <Form.Item label="源分支 / MR Ref" name="source_ref" rules={[{ required: true }]}>
-                <Input placeholder="feature/..." />
-              </Form.Item>
-              <Form.Item label="目标分支" name="target_ref" rules={[{ required: true }]}>
-                <Input />
-              </Form.Item>
-              <Button type="primary" htmlType="submit" loading={submitting}>
-                创建审核
-              </Button>
-            </Form>
+        <Col xs={24} xl={16}>
+          <Card className="module-card" title="最近审核">
+            <Table rowKey="review_id" columns={columns} dataSource={recentReviews} loading={loading} pagination={false} />
           </Card>
         </Col>
+        <Col xs={24} xl={8}>
+          <Card className="module-card" title="快速导航">
+            <div className="home-entry-grid">
+              {quickEntries.map((entry) => (
+                <button
+                  key={entry.key}
+                  type="button"
+                  className={`home-entry-card ${entry.accentClass}`}
+                  onClick={() => navigate(entry.path)}
+                >
+                  <div className="home-entry-icon">{entry.icon}</div>
+                  <div className="home-entry-body">
+                    <div className="home-entry-title">{entry.title}</div>
+                    <div className="home-entry-desc">{entry.description}</div>
+                  </div>
+                  <ArrowRightOutlined className="home-entry-arrow" />
+                </button>
+              ))}
+            </div>
+          </Card>
+        </Col>
+      </Row>
 
-        <Col xs={24} lg={14}>
-          <Card className="module-card" title="最近审核">
-            <Table rowKey="review_id" columns={columns} dataSource={reviews} loading={loading} pagination={false} />
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24}>
+          <Card className="module-card" title="系统提示">
+            <div className="home-hint-list">
+              {systemHints.length > 0 ? (
+                systemHints.map((hint, index) => (
+                  <div key={`${hint.title}-${index}`} className={`home-hint-card home-hint-${hint.tone}`}>
+                    <span className="home-hint-dot" />
+                    <span>{hint.title}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="home-hint-card home-hint-success">
+                  <span className="home-hint-dot" />
+                  <span>当前系统运行平稳，可以直接进入审核工作台发起新的代码审查。</span>
+                </div>
+              )}
+            </div>
           </Card>
         </Col>
       </Row>

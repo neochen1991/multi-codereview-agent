@@ -2,7 +2,11 @@ from __future__ import annotations
 
 
 class DiffExcerptService:
+    """负责从 unified diff 中提取 hunk、行号和代码片段。"""
+
     def list_hunks(self, unified_diff: str, file_path: str) -> list[dict[str, object]]:
+        """列出某个文件在 diff 中的全部 hunk。"""
+
         lines = unified_diff.splitlines()
         active_file = ""
         current_new_line: int | None = None
@@ -11,6 +15,8 @@ class DiffExcerptService:
         hunks: list[dict[str, object]] = []
 
         def flush_hunk() -> None:
+            """把当前累计的 hunk 条目转换成结构化结果。"""
+
             nonlocal file_entries, current_header
             if active_file != file_path or not file_entries:
                 file_entries = []
@@ -79,6 +85,8 @@ class DiffExcerptService:
         file_path: str,
         target_line: int,
     ) -> dict[str, object] | None:
+        """根据目标行号找到最接近的 hunk。"""
+
         hunks = self.list_hunks(unified_diff, file_path)
         if not hunks:
             return None
@@ -96,6 +104,8 @@ class DiffExcerptService:
         file_path: str,
         target_line: int,
     ) -> int | None:
+        """在文件 diff 里找与目标行最接近的真实变更行。"""
+
         line_numbers = self._collect_changed_line_numbers(unified_diff, file_path) or self._collect_line_numbers(
             unified_diff,
             file_path,
@@ -112,6 +122,8 @@ class DiffExcerptService:
         *,
         context_lines: int = 2,
     ) -> str:
+        """提取目标行附近最相关的 diff 代码片段。"""
+
         best_hunk = self.find_best_hunk(unified_diff, file_path, target_line)
         if best_hunk:
             hunk_lines = str(best_hunk.get("excerpt") or "").splitlines()
@@ -167,6 +179,8 @@ class DiffExcerptService:
         return f"# {file_path}\n" + "\n".join(entry for _, entry in best_window)
 
     def _collect_line_numbers(self, unified_diff: str, file_path: str) -> list[int]:
+        """收集某个文件在 diff 中出现过的所有新文件行号。"""
+
         lines = unified_diff.splitlines()
         active_file = ""
         current_new_line: int | None = None
@@ -203,6 +217,8 @@ class DiffExcerptService:
         return line_numbers
 
     def _collect_changed_line_numbers(self, unified_diff: str, file_path: str) -> list[int]:
+        """只收集真正新增或修改的目标行号。"""
+
         lines = unified_diff.splitlines()
         active_file = ""
         current_new_line: int | None = None
@@ -247,6 +263,8 @@ class DiffExcerptService:
         target_line: int,
         context_lines: int,
     ) -> list[tuple[int, list[tuple[int | None, str]]]]:
+        """围绕目标行构造可供 excerpt 选择的候选窗口。"""
+
         line_numbers = [line for line, _ in file_entries if line is not None]
         if not line_numbers:
             return []
@@ -257,6 +275,8 @@ class DiffExcerptService:
         return [(abs(nearest_line - target_line), file_entries[start:end])]
 
     def _parse_file_path(self, diff_header: str) -> str:
+        """从 diff --git 头部解析新文件路径。"""
+
         parts = diff_header.split()
         if len(parts) < 4:
             return ""

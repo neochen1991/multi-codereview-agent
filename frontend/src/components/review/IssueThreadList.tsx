@@ -11,6 +11,7 @@ type IssueThreadListProps = {
   onSelect: (issueId: string) => void;
 };
 
+// 议题线程列表用于在过程页快速切换争议议题。
 const IssueThreadList: React.FC<IssueThreadListProps> = ({
   issues,
   selectedIssueId,

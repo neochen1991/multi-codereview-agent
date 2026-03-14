@@ -22,7 +22,7 @@ knowledge_sources:
 tool_bindings:
 - local_diff
 mcp_tools: []
-skill_bindings:
+runtime_tool_bindings:
 - knowledge_search
 - diff_inspector
 agent_bindings:

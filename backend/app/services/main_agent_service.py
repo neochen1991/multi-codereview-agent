@@ -14,6 +14,13 @@ from app.services.repository_context_service import RepositoryContextService
 
 
 class MainAgentService:
+    """主 Agent 协调器。
+
+    它本身不直接产出最终 finding，而是负责：
+    - 在专家执行前做派工规划
+    - 在审核结束后做全局收敛播报
+    """
+
     agent_id = "main_agent"
     agent_name = "MainAgent"
 
@@ -28,6 +35,7 @@ class MainAgentService:
         expert: ExpertProfile,
         runtime_settings: RuntimeSettings,
     ) -> dict[str, object]:
+        """为单个专家生成一次带上下文的派工指令。"""
         change_chain = self.build_change_chain(subject)
         repository_service = self._build_repository_service(runtime_settings)
         target_focus = self._pick_target_focus(subject, expert, repository_service)
@@ -91,6 +99,7 @@ class MainAgentService:
         }
 
     def build_change_chain(self, subject: ReviewSubject) -> dict[str, object]:
+        """基于 changed_files 推导一条粗粒度的关联变更链。"""
         changed_files = [item for item in subject.changed_files if item]
         related_files: list[str] = []
         token_links = {
@@ -128,6 +137,7 @@ class MainAgentService:
         timeout_seconds: float = 60.0,
         max_attempts: int = 3,
     ) -> tuple[str, dict[str, object]]:
+        """让主 Agent 在 issue 收敛后输出控制台播报式总结。"""
         blocker_count = len([issue for issue in issues if issue.severity in {"blocker", "critical"}])
         pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
         resolution = self._llm.resolve_main_agent(runtime_settings)
@@ -495,7 +505,11 @@ class MainAgentService:
         repo_hit_paths = [
             str(item.get("path") or "").strip()
             for item in repo_hit_matches
-            if str(item.get("path") or "").strip() and str(item.get("path") or "").strip() != file_path
+            if (
+                str(item.get("path") or "").strip()
+                and str(item.get("path") or "").strip() != file_path
+                and service.is_searchable_path(str(item.get("path") or "").strip())
+            )
         ]
         related_contexts = [
             service.load_file_context(item, 1, radius=8)
@@ -505,7 +519,7 @@ class MainAgentService:
         context_files: list[str] = []
         for item in [file_path, *related_files[:3], *repo_hit_paths[:3]]:
             normalized = str(item).strip()
-            if normalized and normalized not in context_files:
+            if normalized and service.is_searchable_path(normalized) and normalized not in context_files:
                 context_files.append(normalized)
         return {
             "summary": (

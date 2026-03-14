@@ -7,10 +7,14 @@ from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一知识文档时间字段。"""
+
     return datetime.now(UTC)
 
 
 class KnowledgeDocument(BaseModel):
+    """定义绑定到专家名下的一篇 Markdown 知识文档。"""
+
     doc_id: str = Field(default_factory=lambda: f"knd_{uuid4().hex[:12]}")
     title: str
     expert_id: str

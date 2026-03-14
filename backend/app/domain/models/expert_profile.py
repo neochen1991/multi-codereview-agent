@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class ExpertProfile(BaseModel):
+    """定义专家 Agent 的职责、能力绑定和模型配置。"""
+
     expert_id: str
     name: str
     name_zh: str
@@ -17,7 +19,10 @@ class ExpertProfile(BaseModel):
     knowledge_sources: list[str] = Field(default_factory=list)
     tool_bindings: list[str] = Field(default_factory=list)
     mcp_tools: list[str] = Field(default_factory=list)
-    skill_bindings: list[str] = Field(default_factory=list)
+    runtime_tool_bindings: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("runtime_tool_bindings", "skill_bindings"),
+    )
     agent_bindings: list[str] = Field(default_factory=list)
     max_tool_calls: int = 4
     max_debate_rounds: int = 2

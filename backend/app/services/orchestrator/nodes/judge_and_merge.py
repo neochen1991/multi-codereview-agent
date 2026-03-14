@@ -4,6 +4,8 @@ from app.services.orchestrator.state import ReviewState
 
 
 def judge_and_merge(state: ReviewState) -> ReviewState:
+    """依据证据强度和风险等级决定 issue 的最终状态。"""
+
     next_state = dict(state)
     next_state["phase"] = "judge_and_merge"
     pending_human_issue_ids: list[str] = []

@@ -12,6 +12,7 @@ type Props = {
 };
 
 const severityColor = (severity: string): string => {
+  // 结果弹窗里沿用 severity 到颜色的固定映射，降低视觉判断成本。
   if (severity === "blocker" || severity === "critical") return "red";
   if (severity === "high") return "volcano";
   if (severity === "medium") return "gold";
@@ -19,12 +20,14 @@ const severityColor = (severity: string): string => {
 };
 
 const getMergeImpact = (finding: ReviewFinding, issue: DebateIssue | null): string => {
+  // 合并影响会结合 severity 和人工裁决需求共同判断。
   if (issue?.needs_human && issue.status !== "resolved") return "阻塞合并";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "建议修复后再合并";
   return "可跟随后续修复计划";
 };
 
 const getPriority = (finding: ReviewFinding): string => {
+  // 单条 finding 的优先级取决于其严重等级。
   if (["blocker", "critical"].includes(finding.severity)) return "P0";
   if (finding.severity === "high") return "P1";
   if (finding.severity === "medium") return "P2";
@@ -32,6 +35,7 @@ const getPriority = (finding: ReviewFinding): string => {
 };
 
 const getFindingTypeLabel = (findingType?: string): string => {
+  // 将结构化 finding_type 转换成结果页展示使用的中文标签。
   if (findingType === "direct_defect") return "直接缺陷";
   if (findingType === "test_gap") return "测试缺口";
   if (findingType === "design_concern") return "设计关注";
@@ -43,6 +47,7 @@ const renderCodeLines = (
   targetLine: number,
   lineRefs: React.MutableRefObject<Record<number, HTMLDivElement | null>>,
 ) => {
+  // 问题代码需要高亮目标行，并兼容增删行配色。
   const lines = codeExcerpt.split("\n").filter(Boolean);
   return (
     <div className="review-code-frame">
@@ -71,6 +76,7 @@ const renderCodeLines = (
 };
 
 const renderSuggestedCode = (code: string) => (
+  // 建议代码单独使用深色面板，和“当前代码”形成明确视觉区分。
   <div className="review-suggested-code-frame">
     <pre className="review-suggested-code-pre">
       <code>{code}</code>
@@ -78,10 +84,12 @@ const renderSuggestedCode = (code: string) => (
   </div>
 );
 
+// 结果弹窗负责把单条 finding 渲染成正式 Code Review 详情视图。
 const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToProcess }) => {
   const lineRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
 
   React.useEffect(() => {
+    // 打开详情后自动滚到目标代码行，减少手动查找成本。
     if (!finding) return;
     const targetNode = lineRefs.current[finding.line_start];
     if (targetNode) {

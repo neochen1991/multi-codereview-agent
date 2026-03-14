@@ -7,10 +7,14 @@ from pydantic import BaseModel, Field
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一反馈标签的时间戳。"""
+
     return datetime.now(UTC)
 
 
 class FeedbackLabel(BaseModel):
+    """记录人工裁决或反馈学习沉淀下来的标签。"""
+
     label_id: str = Field(default_factory=lambda: f"fbl_{uuid4().hex[:12]}")
     review_id: str
     issue_id: str

@@ -10,6 +10,7 @@ type OverviewCardsProps = {
   humanGateCount: number;
 };
 
+// 顶部概览卡把当前审核最核心的状态指标浓缩展示。
 const OverviewCards: React.FC<OverviewCardsProps> = ({
   status,
   phase,

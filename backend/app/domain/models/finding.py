@@ -7,14 +7,20 @@ from pydantic import BaseModel, Field
 
 
 def build_finding_id() -> str:
+    """生成单条审核发现的唯一 ID。"""
+
     return f"fdg_{uuid4().hex[:12]}"
 
 
 def utc_now() -> datetime:
+    """返回当前 UTC 时间，统一 finding 时间字段。"""
+
     return datetime.now(UTC)
 
 
 class ReviewFinding(BaseModel):
+    """描述专家针对某段代码输出的一条结构化发现。"""
+
     finding_id: str = Field(default_factory=build_finding_id)
     review_id: str
     expert_id: str

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
 from app.config import settings
@@ -11,6 +11,8 @@ router = APIRouter()
 
 
 class RuntimeSettingsRequest(BaseModel):
+    """定义设置页提交的运行时配置请求体。"""
+
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
     code_repo_clone_url: str = ""
@@ -23,7 +25,10 @@ class RuntimeSettingsRequest(BaseModel):
     code_repo_auto_sync: bool = False
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)
-    skill_allowlist: list[str] = Field(default_factory=list)
+    runtime_tool_allowlist: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("runtime_tool_allowlist", "skill_allowlist"),
+    )
     agent_allowlist: list[str] = Field(default_factory=list)
     allow_human_gate: bool = True
     default_max_debate_rounds: int = 2
@@ -47,6 +52,8 @@ class RuntimeSettingsRequest(BaseModel):
 
 @router.get("/settings/runtime")
 def get_runtime_settings() -> dict[str, object]:
+    """返回设置页展示用的运行时配置，并隐藏敏感值明文。"""
+
     runtime = review_service_module.review_service.get_runtime_settings()
     payload = runtime.model_dump(
         mode="json",
@@ -69,6 +76,8 @@ def get_runtime_settings() -> dict[str, object]:
 
 @router.put("/settings/runtime")
 def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object]:
+    """更新运行时配置并返回脱敏后的最新值。"""
+
     runtime = review_service_module.review_service.update_runtime_settings(payload.model_dump())
     response = runtime.model_dump(
         mode="json",

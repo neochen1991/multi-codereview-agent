@@ -10,6 +10,8 @@ router = APIRouter()
 
 
 class CreateReviewRequest(BaseModel):
+    """定义新建审核任务时的请求体。"""
+
     subject_type: str
     analysis_mode: Literal["standard", "light"] = "standard"
     repo_id: str = ""
@@ -29,12 +31,16 @@ class CreateReviewRequest(BaseModel):
 
 @router.post("/reviews", status_code=status.HTTP_201_CREATED)
 def create_review(payload: CreateReviewRequest) -> dict[str, object]:
+    """创建一条新的审核任务主记录。"""
+
     review = review_service_module.review_service.create_review(payload.model_dump())
     return {"review_id": review.review_id, "status": review.status}
 
 
 @router.get("/reviews")
 def list_reviews() -> list[dict[str, object]]:
+    """返回历史审核记录列表。"""
+
     return [
         item.model_dump(mode="json")
         for item in review_service_module.review_service.list_reviews()
@@ -43,6 +49,8 @@ def list_reviews() -> list[dict[str, object]]:
 
 @router.get("/reviews/{review_id}")
 def get_review(review_id: str) -> dict[str, object]:
+    """返回单条审核任务详情。"""
+
     review = review_service_module.review_service.get_review(review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
@@ -51,6 +59,8 @@ def get_review(review_id: str) -> dict[str, object]:
 
 @router.post("/reviews/{review_id}/start", status_code=status.HTTP_202_ACCEPTED)
 def start_review(review_id: str) -> dict[str, object]:
+    """以后台异步方式启动审核执行。"""
+
     review = review_service_module.review_service.get_review(review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
@@ -60,6 +70,8 @@ def start_review(review_id: str) -> dict[str, object]:
 
 @router.get("/reviews/{review_id}/findings")
 def list_findings(review_id: str) -> list[dict[str, object]]:
+    """返回某次审核产出的 finding 列表。"""
+
     return [
         item.model_dump(mode="json")
         for item in review_service_module.review_service.list_findings(review_id)
@@ -68,6 +80,8 @@ def list_findings(review_id: str) -> list[dict[str, object]]:
 
 @router.get("/reviews/{review_id}/report")
 def get_report(review_id: str) -> dict[str, object]:
+    """返回用于结果页展示的完整审核报告。"""
+
     try:
         report = review_service_module.review_service.build_report(review_id)
     except KeyError as error:
@@ -77,6 +91,8 @@ def get_report(review_id: str) -> dict[str, object]:
 
 @router.get("/reviews/{review_id}/replay")
 def get_replay(review_id: str) -> dict[str, object]:
+    """返回回放模式使用的事件与消息聚合数据。"""
+
     try:
         return review_service_module.review_service.build_replay_bundle(review_id)
     except KeyError as error:
@@ -85,4 +101,6 @@ def get_replay(review_id: str) -> dict[str, object]:
 
 @router.get("/reviews/{review_id}/artifacts")
 def get_artifacts(review_id: str) -> dict[str, object]:
+    """返回检查结果、摘要评论等外部产物快照。"""
+
     return review_service_module.review_service.get_artifacts(review_id)

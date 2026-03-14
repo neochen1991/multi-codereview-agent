@@ -10,6 +10,7 @@ type ExpertLaneBoardProps = {
   events: ReviewEvent[];
 };
 
+// 专家泳道板按专家维度重组事件，便于观察谁在什么时候介入审查。
 const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, events }) => {
   const experts = review?.selected_experts || [];
 

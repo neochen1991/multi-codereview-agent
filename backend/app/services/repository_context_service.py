@@ -8,6 +8,37 @@ from typing import Any
 
 
 class RepositoryContextService:
+    """目标代码仓上下文检索服务。
+
+    专家不应该只看 PR/MR diff，这个服务负责让它们回到目标分支源码里继续找：
+    - 文本命中
+    - 定义/引用
+    - 文件局部上下文
+    """
+
+    EXCLUDED_PATH_PARTS = {
+        ".git",
+        "node_modules",
+        "dist",
+        "build",
+        ".next",
+        ".turbo",
+        ".cache",
+        "__pycache__",
+        "coverage",
+    }
+    EXCLUDED_FILENAMES = {
+        "yarn.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "Cargo.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "composer.lock",
+    }
+
     def __init__(
         self,
         clone_url: str,
@@ -30,6 +61,7 @@ class RepositoryContextService:
         return self.is_configured() and self.local_path.exists() and self.local_path.is_dir()
 
     def search(self, query: str, globs: list[str] | None = None, limit: int = 20) -> dict[str, Any]:
+        """搜索源码仓中的文本命中，并带简单缓存。"""
         normalized_query = str(query or "").strip()
         normalized_globs = tuple(sorted(str(item).strip() for item in (globs or []) if str(item).strip()))
         cache_key = (normalized_query, normalized_globs, limit)
@@ -60,6 +92,9 @@ class RepositoryContextService:
             "default_branch": self.default_branch,
         }
 
+    def is_searchable_path(self, relative_path: str) -> bool:
+        return self._is_searchable_relative_path(relative_path)
+
     def search_symbol_context(
         self,
         symbol: str,
@@ -68,6 +103,7 @@ class RepositoryContextService:
         definition_limit: int = 4,
         reference_limit: int = 8,
     ) -> dict[str, Any]:
+        """把 symbol 命中拆成 definitions / references 两类结果。"""
         normalized_symbol = str(symbol or "").strip()
         if not normalized_symbol:
             return {
@@ -106,6 +142,7 @@ class RepositoryContextService:
         limit_per_query: int = 6,
         total_limit: int = 12,
     ) -> dict[str, Any]:
+        """批量执行多个查询词，并把结果去重后合并。"""
         deduped_queries: list[str] = []
         for query in queries:
             normalized = str(query or "").strip()
@@ -139,6 +176,7 @@ class RepositoryContextService:
         }
 
     def load_file_context(self, relative_path: str, line_start: int, radius: int = 12) -> dict[str, Any]:
+        """读取目标文件指定行附近的上下文片段。"""
         if not self.is_ready():
             return {"path": relative_path, "snippet": "", "line_start": line_start}
         target = (self.local_path / relative_path).resolve()
@@ -154,7 +192,32 @@ class RepositoryContextService:
         rg_bin = shutil.which("rg")
         if not rg_bin:
             return []
-        cmd = [rg_bin, "--line-number", "--no-heading", "--color", "never", "--max-count", str(limit), query]
+        cmd = [
+            rg_bin,
+            "--line-number",
+            "--no-heading",
+            "--color",
+            "never",
+            "--max-count",
+            str(limit),
+            "--glob",
+            "!.git/**",
+            "--glob",
+            "!node_modules/**",
+            "--glob",
+            "!dist/**",
+            "--glob",
+            "!build/**",
+            "--glob",
+            "!.next/**",
+            "--glob",
+            "!.turbo/**",
+            "--glob",
+            "!coverage/**",
+            "--glob",
+            "!**/*.lock",
+            query,
+        ]
         for pattern in globs:
             cmd.extend(["--glob", pattern])
         try:
@@ -175,6 +238,8 @@ class RepositoryContextService:
             if len(parts) != 3:
                 continue
             rel_path, line_number, snippet = parts
+            if not self._is_searchable_relative_path(rel_path):
+                continue
             matches.append(
                 {
                     "path": rel_path,
@@ -192,6 +257,8 @@ class RepositoryContextService:
             if not path.is_file():
                 continue
             relative = path.relative_to(self.local_path).as_posix()
+            if not self._is_searchable_relative_path(relative):
+                continue
             if globs and not any(fnmatch.fnmatch(relative, pattern) for pattern in globs):
                 continue
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -227,3 +294,16 @@ class RepositoryContextService:
         ]
         lowered = normalized_snippet.lower()
         return any(marker.lower() in lowered for marker in definition_markers)
+
+    def _is_searchable_relative_path(self, relative_path: str) -> bool:
+        normalized = str(relative_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        path = Path(normalized)
+        if any(part in self.EXCLUDED_PATH_PARTS for part in path.parts):
+            return False
+        if path.name in self.EXCLUDED_FILENAMES:
+            return False
+        if path.suffix.lower() in {".lock", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".ico", ".woff", ".woff2"}:
+            return False
+        return True
