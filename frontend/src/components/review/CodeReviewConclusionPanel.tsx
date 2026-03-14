@@ -169,6 +169,43 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
       </div>
 
       <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>
+        <Space wrap>
+          {(finding.matched_rules || []).length ? (
+            (finding.matched_rules || []).map((rule) => (
+              <Tag key={rule} color="blue">
+                {rule}
+              </Tag>
+            ))
+          ) : (
+            <Tag>当前未返回明确规范条款</Tag>
+          )}
+        </Space>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>违反的规范要求</Paragraph>
+        <Space wrap>
+          {(finding.violated_guidelines || []).length ? (
+            (finding.violated_guidelines || []).map((rule) => (
+              <Tag key={rule} color="volcano">
+                {rule}
+              </Tag>
+            ))
+          ) : (
+            <Tag>当前未识别到明确违反条款</Tag>
+          )}
+        </Space>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>规范依据</Paragraph>
+        <Paragraph style={{ marginBottom: 0 }}>
+          {finding.rule_based_reasoning || "当前还没有返回更详细的规范依据说明。"}
+        </Paragraph>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题说明</Paragraph>
         <Paragraph style={{ marginBottom: 0 }}>{finding.summary}</Paragraph>
       </div>

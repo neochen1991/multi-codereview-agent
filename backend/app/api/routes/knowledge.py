@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 import app.services.review_service as review_service_module
@@ -11,6 +11,7 @@ router = APIRouter()
 class CreateKnowledgeDocumentRequest(BaseModel):
     title: str
     expert_id: str
+    doc_type: str = "reference"
     content: str
     tags: list[str] = Field(default_factory=list)
     source_filename: str = ""
@@ -55,3 +56,10 @@ def create_knowledge_doc(payload: CreateKnowledgeDocumentRequest) -> dict[str, o
 def upload_knowledge_doc(payload: CreateKnowledgeDocumentRequest) -> dict[str, object]:
     document = review_service_module.review_service.create_knowledge_document(payload.model_dump())
     return document.model_dump(mode="json")
+
+
+@router.delete("/knowledge/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_knowledge_doc(doc_id: str) -> None:
+    deleted = review_service_module.review_service.delete_knowledge_document(doc_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found")

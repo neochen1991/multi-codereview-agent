@@ -19,6 +19,7 @@ def test_create_custom_expert_and_list_it(client):
             "api_key_env": "DASHSCOPE_API_KEY",
             "model": "kimi-k2.5",
             "system_prompt": "Focus on accessibility regressions first.",
+            "review_spec": "# 前端可访问性审视规范\n\n必须检查语义标签和键盘可访问性。",
         },
     )
 
@@ -29,6 +30,7 @@ def test_create_custom_expert_and_list_it(client):
     assert "frontend-design" in payload["skill_bindings"]
     assert payload["provider"] == "dashscope-openai-compatible"
     assert payload["model"] == "kimi-k2.5"
+    assert "前端可访问性审视规范" in payload["review_spec"]
 
     experts = client.get("/api/experts").json()
     assert any(item["expert_id"] == "frontend_accessibility" for item in experts)
@@ -60,9 +62,11 @@ def test_update_expert_bindings(client):
             "api_key_env": None,
             "model": None,
             "system_prompt": "你是安全与合规专家。",
+            "review_spec": "# 安全与合规审视规范\n\n必须检查鉴权、输入校验和敏感数据暴露。",
         },
     )
     assert update.status_code == 200
     payload = update.json()
     assert "knowledge_search" in payload["skill_bindings"]
     assert "auth-guideline" in payload["knowledge_sources"]
+    assert "安全与合规审视规范" in payload["review_spec"]

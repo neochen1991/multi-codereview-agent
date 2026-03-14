@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
+from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.review import ReviewSubject
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.services.review_runner import ReviewRunner
@@ -20,6 +21,9 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
         """
         {
           "finding_type": "risk_hypothesis",
+          "matched_rules": ["规则 1", "规则 2"],
+          "violated_guidelines": ["规范 A"],
+          "rule_based_reasoning": "字段变更后必须同步 transformer 与 DTO。",
           "context_files": ["packages/lib/schedules/getScheduleListItemData.ts"],
           "assumptions": ["当前只看到了局部 diff"],
           "claim": "存在跨文件语义漂移风险",
@@ -48,6 +52,9 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     )
 
     assert parsed["finding_type"] == "risk_hypothesis"
+    assert parsed["matched_rules"] == ["规则 1", "规则 2"]
+    assert parsed["violated_guidelines"] == ["规范 A"]
+    assert parsed["rule_based_reasoning"] == "字段变更后必须同步 transformer 与 DTO。"
     assert parsed["context_files"] == ["packages/lib/schedules/getScheduleListItemData.ts"]
     assert parsed["assumptions"] == ["当前只看到了局部 diff"]
     assert parsed["fix_strategy"] == "先统一 transformer 和输出 DTO"
@@ -209,3 +216,33 @@ def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
     assert effective.default_max_debate_rounds == 1
     assert llm_options["timeout_seconds"] >= 120
     assert runner._max_parallel_experts(runtime, "light") == 1
+
+
+def test_review_runner_system_prompt_includes_review_spec(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库分析专家",
+        role="database",
+        enabled=True,
+        system_prompt="你是数据库分析专家。",
+        review_spec="# 数据库分析审视规范\n\n必须检查索引与 migration 风险。",
+    )
+    bound_docs = [
+        KnowledgeDocument(
+            title="数据库迁移补充规范",
+            expert_id="database_analysis",
+            doc_type="review_rule",
+            content="补充要求：涉及 DDL 变更时必须评估锁表、回填和回滚路径。",
+            source_filename="database-review.md",
+        )
+    ]
+
+    prompt = runner._build_expert_system_prompt(expert, bound_docs)
+
+    assert "《审视规范文档》开始" in prompt
+    assert "数据库分析审视规范" in prompt
+    assert "必须检查索引与 migration 风险" in prompt
+    assert "《专家绑定参考文档》开始" in prompt
+    assert "数据库迁移补充规范" in prompt

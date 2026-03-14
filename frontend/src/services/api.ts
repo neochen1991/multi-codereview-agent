@@ -59,6 +59,9 @@ export interface ReviewFinding {
   cross_file_evidence?: string[];
   assumptions?: string[];
   context_files?: string[];
+  matched_rules?: string[];
+  violated_guidelines?: string[];
+  rule_based_reasoning?: string;
   verification_needed?: boolean;
   verification_plan?: string;
   remediation_strategy?: string;
@@ -184,6 +187,7 @@ export interface ExpertProfile {
   api_key_env?: string | null;
   model?: string | null;
   system_prompt: string;
+  review_spec: string;
 }
 
 export interface RuntimeSettings {
@@ -231,6 +235,7 @@ export interface KnowledgeDocument {
   doc_id: string;
   title: string;
   expert_id: string;
+  doc_type?: string;
   content: string;
   tags: string[];
   source_filename: string;
@@ -366,6 +371,7 @@ export const expertApi = {
     api_key_env?: string | null;
     model?: string | null;
     system_prompt: string;
+    review_spec?: string;
   }): Promise<ExpertProfile> {
     const { data } = await api.post("/experts", payload);
     return data;
@@ -394,6 +400,7 @@ export const expertApi = {
     api_key_env?: string | null;
     model?: string | null;
     system_prompt: string;
+    review_spec?: string;
   }): Promise<ExpertProfile> {
     const { data } = await api.put(`/experts/${expertId}`, payload);
     return data;
@@ -428,12 +435,16 @@ export const knowledgeApi = {
   async uploadMarkdown(payload: {
     title: string;
     expert_id: string;
+    doc_type?: string;
     content: string;
     tags?: string[];
     source_filename?: string;
   }): Promise<KnowledgeDocument> {
     const { data } = await api.post("/knowledge/upload", payload);
     return data;
+  },
+  async remove(docId: string): Promise<void> {
+    await api.delete(`/knowledge/${docId}`);
   },
 };
 

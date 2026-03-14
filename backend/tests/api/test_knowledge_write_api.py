@@ -56,3 +56,65 @@ def test_upload_same_knowledge_doc_does_not_create_duplicates(client):
     assert grouped.status_code == 200
     docs = grouped.json()["performance_reliability"]
     assert len([item for item in docs if item["title"] == "Schema diff checklist"]) == 1
+
+
+def test_upload_same_identity_knowledge_doc_replaces_old_content(client):
+    first = client.post(
+        "/api/knowledge/upload",
+        json={
+            "title": "security_compliance 长版审视规范",
+            "expert_id": "security_compliance",
+            "doc_type": "review_rule",
+            "content": "旧版本内容",
+            "tags": ["security"],
+            "source_filename": "security_compliance.md",
+        },
+    )
+    second = client.post(
+        "/api/knowledge/upload",
+        json={
+            "title": "security_compliance 长版审视规范",
+            "expert_id": "security_compliance",
+            "doc_type": "review_rule",
+            "content": "新版本内容",
+            "tags": ["security", "owasp"],
+            "source_filename": "security_compliance.md",
+        },
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    grouped = client.get("/api/knowledge/grouped")
+    assert grouped.status_code == 200
+    docs = [
+        item
+        for item in grouped.json()["security_compliance"]
+        if item["title"] == "security_compliance 长版审视规范"
+    ]
+    assert len(docs) == 1
+    assert docs[0]["content"] == "新版本内容"
+
+
+def test_delete_knowledge_doc_unbinds_and_removes_document(client):
+    created = client.post(
+        "/api/knowledge/upload",
+        json={
+            "title": "Redis 排查手册",
+            "expert_id": "redis_analysis",
+            "doc_type": "runbook",
+            "content": "先检查 key、TTL 和热点。",
+            "tags": ["redis", "runbook"],
+            "source_filename": "redis-runbook.md",
+        },
+    )
+    assert created.status_code == 201
+    doc_id = created.json()["doc_id"]
+
+    deleted = client.delete(f"/api/knowledge/{doc_id}")
+    assert deleted.status_code == 204
+
+    grouped = client.get("/api/knowledge/grouped")
+    assert grouped.status_code == 200
+    docs = grouped.json().get("redis_analysis", [])
+    assert all(item["doc_id"] != doc_id for item in docs)

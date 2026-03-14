@@ -28,3 +28,4 @@ class ExpertProfile(BaseModel):
     api_key_env: str | None = None
     model: str | None = None
     system_prompt: str = ""
+    review_spec: str = ""

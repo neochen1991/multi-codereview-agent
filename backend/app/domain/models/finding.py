@@ -29,6 +29,9 @@ class ReviewFinding(BaseModel):
     cross_file_evidence: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     context_files: list[str] = Field(default_factory=list)
+    matched_rules: list[str] = Field(default_factory=list)
+    violated_guidelines: list[str] = Field(default_factory=list)
+    rule_based_reasoning: str = ""
     verification_needed: bool = True
     verification_plan: str = ""
     remediation_strategy: str = ""

@@ -14,6 +14,7 @@ class KnowledgeDocument(BaseModel):
     doc_id: str = Field(default_factory=lambda: f"knd_{uuid4().hex[:12]}")
     title: str
     expert_id: str
+    doc_type: str = "reference"
     content: str
     tags: list[str] = Field(default_factory=list)
     source_filename: str = ""

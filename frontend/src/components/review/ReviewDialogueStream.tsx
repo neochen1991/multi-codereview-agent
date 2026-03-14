@@ -225,6 +225,14 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
         const provider = typeof row.metadata.provider === "string" ? row.metadata.provider : "";
         const model = typeof row.metadata.model === "string" ? row.metadata.model : "";
         const mode = typeof row.metadata.mode === "string" ? row.metadata.mode : "";
+        const matchedRules = Array.isArray(row.metadata.matched_rules)
+          ? row.metadata.matched_rules.map((item) => String(item)).filter(Boolean)
+          : [];
+        const violatedGuidelines = Array.isArray(row.metadata.violated_guidelines)
+          ? row.metadata.violated_guidelines.map((item) => String(item)).filter(Boolean)
+          : [];
+        const ruleBasedReasoning =
+          typeof row.metadata.rule_based_reasoning === "string" ? row.metadata.rule_based_reasoning : "";
         const targetHunk =
           row.metadata.target_hunk && typeof row.metadata.target_hunk === "object"
             ? (row.metadata.target_hunk as Record<string, unknown>)
@@ -275,6 +283,25 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 ) : null}
               </div>
               <Paragraph className="dialogue-summary">{row.summary}</Paragraph>
+              {matchedRules.length ? (
+                <div className="dialogue-rule-strip">
+                  {matchedRules.slice(0, 3).map((rule) => (
+                    <Tag key={`${row.id}-matched-${rule}`} color="blue">
+                      {rule}
+                    </Tag>
+                  ))}
+                </div>
+              ) : null}
+              {violatedGuidelines.length ? (
+                <div className="dialogue-rule-strip">
+                  {violatedGuidelines.slice(0, 3).map((rule) => (
+                    <Tag key={`${row.id}-violated-${rule}`} color="volcano">
+                      {rule}
+                    </Tag>
+                  ))}
+                </div>
+              ) : null}
+              {ruleBasedReasoning ? <Paragraph className="dialogue-rule-reason">{ruleBasedReasoning}</Paragraph> : null}
               <pre className={`dialogue-content dialogue-content-${row.messageKind}`}>
                 {isExpanded ? row.detail : compact.text || "暂无更多上下文"}
               </pre>

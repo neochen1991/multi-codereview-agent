@@ -17,9 +17,16 @@ class KnowledgeService:
     def list_documents(self) -> list[KnowledgeDocument]:
         return self._repository.list()
 
+    def list_documents_for_expert(self, expert_id: str) -> list[KnowledgeDocument]:
+        normalized = str(expert_id).strip()
+        return [item for item in self._repository.list() if item.expert_id == normalized]
+
     def create_document(self, payload: dict[str, object]) -> KnowledgeDocument:
         document = KnowledgeDocument.model_validate(payload)
         return self._ingestion.ingest(document)
+
+    def delete_document(self, doc_id: str) -> bool:
+        return self._repository.delete(doc_id)
 
     def retrieve_for_expert(
         self, expert_id: str, review_context: dict[str, object]

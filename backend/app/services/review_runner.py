@@ -25,6 +25,7 @@ from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
+from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.orchestrator.graph import build_review_graph
@@ -50,6 +51,7 @@ class ReviewRunner:
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
         self.skill_gateway = SkillGateway(self.storage_root)
+        self.knowledge_service = KnowledgeService(self.storage_root)
         self.graph = build_review_graph()
 
     def bootstrap_demo_review(self) -> str:
@@ -250,6 +252,7 @@ class ReviewRunner:
                     "runtime_settings": effective_runtime_settings,
                     "analysis_mode": analysis_mode,
                     "llm_request_options": llm_request_options,
+                    "bound_documents": self.knowledge_service.list_documents_for_expert(expert.expert_id),
                     "finding_payloads": finding_payloads,
                 }
             )
@@ -461,6 +464,7 @@ class ReviewRunner:
         runtime_settings,
         analysis_mode: Literal["standard", "light"],
         llm_request_options: dict[str, int | float],
+        bound_documents: list[object],
         finding_payloads: list[dict[str, object]],
     ) -> None:
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
@@ -521,6 +525,7 @@ class ReviewRunner:
                     "allowed_tools": expert.tool_bindings,
                     "allowed_skills": expert.skill_bindings,
                     "knowledge_sources": expert.knowledge_sources,
+                    "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "related_files": command_message.metadata.get("related_files", []),
                     "target_hunk": target_hunk,
                     "repository_context": repository_context,
@@ -573,7 +578,7 @@ class ReviewRunner:
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
         llm_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(expert),
+            system_prompt=self._build_expert_system_prompt(expert, bound_documents),
             user_prompt=self._build_expert_prompt(
                 review.subject,
                 expert,
@@ -583,6 +588,7 @@ class ReviewRunner:
                 skill_results,
                 repository_context,
                 target_hunk,
+                bound_documents,
                 list(command_message.metadata.get("disallowed_inference", []) or []),
                 list(command_message.metadata.get("expected_checks", []) or []),
             ),
@@ -631,6 +637,9 @@ class ReviewRunner:
                 repository_context,
                 skill_results,
             ),
+            matched_rules=self._normalize_text_list(parsed.get("matched_rules"), []),
+            violated_guidelines=self._normalize_text_list(parsed.get("violated_guidelines"), []),
+            rule_based_reasoning=str(parsed.get("rule_based_reasoning") or "").strip(),
             verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
             verification_plan=str(parsed.get("verification_plan") or "").strip(),
             remediation_strategy=str(
@@ -681,9 +690,13 @@ class ReviewRunner:
                     "skill_results": skill_results,
                     "target_hunk": target_hunk,
                     "repository_context": repository_context,
+                    "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "finding_type": finding.finding_type,
                     "context_files": finding.context_files,
                     "assumptions": finding.assumptions,
+                    "matched_rules": finding.matched_rules,
+                    "violated_guidelines": finding.violated_guidelines,
+                    "rule_based_reasoning": finding.rule_based_reasoning,
                     "analysis_mode": analysis_mode,
                     **self._llm_message_metadata(llm_result),
                 },
@@ -744,10 +757,11 @@ class ReviewRunner:
                 expert = experts_by_id.get(participant_id)
                 if expert is None:
                     continue
+                bound_documents = self.knowledge_service.list_documents_for_expert(expert.expert_id)
                 file_path = issue_file_path
                 line_start = issue_line_start
                 llm_result = self.llm_chat_service.complete_text(
-                    system_prompt=self._build_expert_system_prompt(expert),
+                    system_prompt=self._build_expert_system_prompt(expert, bound_documents),
                     user_prompt=self._build_debate_prompt(
                         review.subject,
                         issue,
@@ -755,6 +769,7 @@ class ReviewRunner:
                         previous_expert_id,
                         file_path,
                         line_start,
+                        bound_documents,
                     ),
                     resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
                     runtime_settings=runtime_settings,
@@ -793,6 +808,7 @@ class ReviewRunner:
                             "file_path": file_path,
                             "line_start": line_start,
                             "reply_to_expert_id": previous_expert_id,
+                            "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                             "debate_turn": index + 1,
                             "analysis_mode": analysis_mode,
                             **self._llm_message_metadata(llm_result),
@@ -1313,6 +1329,7 @@ class ReviewRunner:
         skill_results: list[dict[str, object]],
         repository_context: dict[str, object],
         target_hunk: dict[str, object],
+        bound_documents: list[object],
         disallowed_inference: list[str],
         expected_checks: list[str],
     ) -> str:
@@ -1321,6 +1338,8 @@ class ReviewRunner:
         skill_summary = self._build_skill_summary(skill_results)
         repository_context_summary = self._build_repository_context_summary(repository_context, skill_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
+        review_spec_summary = self._build_review_spec_summary(expert.review_spec)
+        bound_documents_summary = self._build_bound_documents_summary(bound_documents)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
@@ -1329,31 +1348,40 @@ class ReviewRunner:
             f"目标行号: {line_start}\n"
             f"变更文件: {', '.join(subject.changed_files[:5]) or '未提供'}\n"
             f"能力约束:\n{capability_summary}\n"
+            f"规范提要:\n{review_spec_summary}\n"
+            f"已绑定参考文档:\n{bound_documents_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
             f"Skill 调用结果:\n{skill_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
+            f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
             f"请基于真实 diff 做审查，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
             f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
             f"JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
-    def _build_expert_system_prompt(self, expert: ExpertProfile) -> str:
+    def _build_expert_system_prompt(self, expert: ExpertProfile, bound_documents: list[object]) -> str:
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
+        bound_documents_text = self._build_bound_documents_fulltext(bound_documents)
         return (
             f"{base_prompt}\n\n"
+            f"《审视规范文档》开始\n"
+            f"{expert.review_spec or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
+            f"《审视规范文档》结束\n\n"
+            f"{bound_documents_text}\n\n"
             f"执行纪律：\n"
             f"1. 只在你的职责边界内下结论。\n"
             f"2. 结论必须绑定具体文件和代码行，禁止泛化空谈。\n"
             f"3. 没有代码证据时，只能提出“需要验证”，不能伪造确定性结论。\n"
             f"4. 修复建议必须可执行，不能只写“建议优化”。\n"
             f"5. 必须讲清楚怎么改，并给出建议修改后的完整代码片段。\n"
-            f"6. 输出必须遵守 JSON contract。"
+            f"6. 必须显式引用命中的规范条款和违反的规范要求。\n"
+            f"7. 输出必须遵守 JSON contract。"
         )
 
     def _parse_expert_analysis(
@@ -1376,6 +1404,9 @@ class ReviewRunner:
             "severity": "",
             "line_start": line_start,
             "line_end": line_start,
+            "matched_rules": [],
+            "violated_guidelines": [],
+            "rule_based_reasoning": self._extract_structured_field(text, "规范依据"),
             "evidence": [self._extract_structured_field(text, "代码证据")] if self._extract_structured_field(text, "代码证据") else [],
             "cross_file_evidence": [],
             "assumptions": [],
@@ -1446,6 +1477,18 @@ class ReviewRunner:
 
         result["line_start"] = self._normalize_line_start(result.get("line_start"), line_start)
         result["line_end"] = self._normalize_line_start(result.get("line_end"), int(result["line_start"]))
+        result["matched_rules"] = [str(item).strip() for item in list(result.get("matched_rules") or []) if str(item).strip()]
+        result["violated_guidelines"] = [
+            str(item).strip() for item in list(result.get("violated_guidelines") or []) if str(item).strip()
+        ]
+        if not str(result.get("rule_based_reasoning") or "").strip():
+            matched_rules = list(result.get("matched_rules") or [])
+            violated = list(result.get("violated_guidelines") or [])
+            if matched_rules or violated:
+                result["rule_based_reasoning"] = (
+                    f"命中规范: {' / '.join(matched_rules[:3]) or '无'}；"
+                    f"违反规范: {' / '.join(violated[:3]) or '无'}。"
+                )
         result["context_files"] = [str(item).strip() for item in list(result.get("context_files") or []) if str(item).strip()]
         result["evidence"] = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
         return result
@@ -1557,6 +1600,46 @@ class ReviewRunner:
                     )
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
 
+    def _build_review_spec_summary(self, review_spec: str) -> str:
+        if not review_spec.strip():
+            return "未提供额外规范文档，请至少遵守职责边界、证据优先、修复建议可执行三条规则。"
+        lines = [line.strip() for line in review_spec.splitlines() if line.strip()]
+        return "\n".join(lines[:18])
+
+    def _build_bound_documents_summary(self, bound_documents: list[object]) -> str:
+        if not bound_documents:
+            return "未绑定额外专家参考文档。"
+        lines: list[str] = []
+        for item in bound_documents[:8]:
+            title = str(getattr(item, "title", "") or "").strip() or "未命名文档"
+            doc_type = str(getattr(item, "doc_type", "") or "reference").strip()
+            source_filename = str(getattr(item, "source_filename", "") or "").strip()
+            tags = [str(tag).strip() for tag in list(getattr(item, "tags", []) or []) if str(tag).strip()]
+            line = f"- [{doc_type}] {title}"
+            if source_filename:
+                line += f" · {source_filename}"
+            if tags:
+                line += f" · 标签: {' / '.join(tags[:4])}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _build_bound_documents_fulltext(self, bound_documents: list[object]) -> str:
+        if not bound_documents:
+            return "《专家绑定参考文档》开始\n未绑定额外专家参考文档。\n《专家绑定参考文档》结束"
+        sections: list[str] = ["《专家绑定参考文档》开始"]
+        for index, item in enumerate(bound_documents, start=1):
+            title = str(getattr(item, "title", "") or "").strip() or f"文档 {index}"
+            doc_type = str(getattr(item, "doc_type", "") or "reference").strip()
+            source_filename = str(getattr(item, "source_filename", "") or "").strip()
+            content = str(getattr(item, "content", "") or "").strip() or "空文档"
+            sections.append(f"## 文档 {index}: {title}")
+            sections.append(f"- 类型: {doc_type}")
+            if source_filename:
+                sections.append(f"- 来源文件: {source_filename}")
+            sections.append(content)
+        sections.append("《专家绑定参考文档》结束")
+        return "\n".join(sections)
+
     def _build_hunk_summary(self, target_hunk: dict[str, object]) -> str:
         if not target_hunk:
             return "未定位到明确 hunk，请结合当前代码片段谨慎判断。"
@@ -1602,8 +1685,10 @@ class ReviewRunner:
         reply_to_expert_id: str,
         file_path: str,
         line_start: int,
+        bound_documents: list[object],
     ) -> str:
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
+        bound_documents_summary = self._build_bound_documents_summary(bound_documents)
         return (
             f"议题标题: {issue.title}\n"
             f"议题摘要: {issue.summary}\n"
@@ -1612,6 +1697,7 @@ class ReviewRunner:
             f"目标代码: {file_path}:{line_start}\n"
             f"职责边界: {' / '.join(expert.focus_areas) or expert.role}\n"
             f"禁止越界: {' / '.join(expert.out_of_scope) or '不要替其他专家下最终结论'}\n"
+            f"已绑定参考文档:\n{bound_documents_summary}\n"
             f"代码片段:\n{code_excerpt}\n"
             f"请输出一段中文聊天式辩论消息，必须围绕 {file_path}:{line_start} 这段真实变更展开，"
             f"先点名回应对象，再说明你同意或反驳什么，指出具体代码证据，并说明还缺什么验证。"

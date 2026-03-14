@@ -33,10 +33,13 @@ class FileKnowledgeRepository:
             }
         )
         persisted_fingerprint = self._fingerprint(persisted)
+        identity_key = self._identity_key(persisted)
         documents = [
             item
             for item in documents
-            if item.doc_id != persisted.doc_id and self._fingerprint(item) != persisted_fingerprint
+            if item.doc_id != persisted.doc_id
+            and self._fingerprint(item) != persisted_fingerprint
+            and self._identity_key(item) != identity_key
         ]
         documents.append(persisted)
         write_json(
@@ -69,6 +72,26 @@ class FileKnowledgeRepository:
             write_json(path, [item.model_dump(mode="json") for item in documents])
         return documents
 
+    def delete(self, doc_id: str) -> bool:
+        documents = self.list()
+        remaining: list[KnowledgeDocument] = []
+        removed: KnowledgeDocument | None = None
+        for item in documents:
+            if item.doc_id == doc_id and removed is None:
+                removed = item
+                continue
+            remaining.append(item)
+        if removed is None:
+            return False
+        storage_path = Path(removed.storage_path) if removed.storage_path else None
+        if storage_path and storage_path.exists():
+            storage_path.unlink()
+        write_json(
+            self._knowledge_path(),
+            [item.model_dump(mode="json") for item in remaining],
+        )
+        return True
+
     def _fingerprint(self, document: KnowledgeDocument) -> str:
         normalized_tags = ",".join(sorted(str(tag).strip().lower() for tag in document.tags if str(tag).strip()))
         normalized_title = str(document.title).strip().lower()
@@ -78,9 +101,20 @@ class FileKnowledgeRepository:
         return "|".join(
             [
                 str(document.expert_id).strip().lower(),
+                str(document.doc_type).strip().lower(),
                 normalized_title,
                 normalized_filename,
                 normalized_tags,
                 content_hash,
+            ]
+        )
+
+    def _identity_key(self, document: KnowledgeDocument) -> str:
+        return "|".join(
+            [
+                str(document.expert_id).strip().lower(),
+                str(document.doc_type).strip().lower(),
+                str(document.title).strip().lower(),
+                str(document.source_filename).strip().lower(),
             ]
         )

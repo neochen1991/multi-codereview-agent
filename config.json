@@ -17,13 +17,13 @@
     "codehub_access_token": "codehub_example"
   },
   "code_repo": {
-    "clone_url": "https://github.com/example/repo.git",
-    "local_path": "/tmp/example-repo",
-    "default_branch": "release",
+    "clone_url": "https://github.com/calcom/cal.com.git",
+    "local_path": "/tmp/calcom-review-repo",
+    "default_branch": "main",
     "auto_sync": true
   },
   "runtime": {
-    "default_target_branch": "develop",
+    "default_target_branch": "main",
     "default_analysis_mode": "standard",
     "allow_llm_fallback": false,
     "allow_human_gate": true,
@@ -47,7 +47,12 @@
       "schema_diff"
     ],
     "skills": [
-      "frontend-design"
+      "frontend-design",
+      "knowledge_search",
+      "diff_inspector",
+      "test_surface_locator",
+      "dependency_surface_locator",
+      "repo_context_search"
     ],
     "mcp": [
       "github.diff",

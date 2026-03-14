@@ -232,6 +232,9 @@ class ReviewService:
     def list_knowledge(self) -> list[KnowledgeDocument]:
         return self.knowledge_service.list_documents()
 
+    def list_expert_knowledge(self, expert_id: str) -> list[KnowledgeDocument]:
+        return self.knowledge_service.list_documents_for_expert(expert_id)
+
     def list_feedback_labels(self, review_id: str) -> list[FeedbackLabel]:
         return self.feedback_repo.list(review_id)
 
@@ -296,6 +299,9 @@ class ReviewService:
 
     def create_knowledge_document(self, payload: dict[str, object]) -> KnowledgeDocument:
         return self.knowledge_service.create_document(payload)
+
+    def delete_knowledge_document(self, doc_id: str) -> bool:
+        return self.knowledge_service.delete_document(doc_id)
 
     def retrieve_knowledge(
         self, expert_id: str, review_context: dict[str, object]

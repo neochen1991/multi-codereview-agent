@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Collapse, Empty, Form, Input, Select, Space, Tag, Typography, Upload, message } from "antd";
+import { Button, Card, Collapse, Empty, Form, Input, Popconfirm, Select, Space, Tabs, Tag, Typography, Upload, message } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 
 import { expertApi, knowledgeApi, type ExpertProfile, type KnowledgeDocument } from "@/services/api";
@@ -31,9 +31,10 @@ const KnowledgePage: React.FC = () => {
           key: expertId,
           label: `${expert?.name_zh || expertId} (${docs.length})`,
           children: docs.length ? (
-            <Space direction="vertical" style={{ width: "100%" }} size={12}>
-              {docs.map((item) => (
-                <Card key={item.doc_id} size="small" className="module-card">
+            <Collapse
+              items={docs.map((item) => ({
+                key: item.doc_id,
+                label: (
                   <Space wrap>
                     <Text strong>{item.title}</Text>
                     <Tag>{item.source_filename || item.doc_id}</Tag>
@@ -43,12 +44,39 @@ const KnowledgePage: React.FC = () => {
                       </Tag>
                     ))}
                   </Space>
-                  <Paragraph style={{ marginTop: 12, marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                    {item.content}
-                  </Paragraph>
-                </Card>
-              ))}
-            </Space>
+                ),
+                children: (
+                  <Space direction="vertical" style={{ width: "100%" }} size={12}>
+                    <Space wrap>
+                      <Tag color="purple">{item.doc_type || "reference"}</Tag>
+                      <Text type="secondary">{new Date(item.created_at).toLocaleString()}</Text>
+                      <Popconfirm
+                        title="解绑并删除这篇文档？"
+                        description="删除后将从当前专家下解绑，并从知识库移除。"
+                        okText="删除"
+                        cancelText="取消"
+                        onConfirm={async () => {
+                          try {
+                            await knowledgeApi.remove(item.doc_id);
+                            message.success("文档已删除");
+                            await loadPage();
+                          } catch (error: any) {
+                            message.error(error?.message || "删除知识文档失败");
+                          }
+                        }}
+                      >
+                        <Button danger size="small">
+                          解绑并删除
+                        </Button>
+                      </Popconfirm>
+                    </Space>
+                    <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                      {item.content}
+                    </Paragraph>
+                  </Space>
+                ),
+              }))}
+            />
           ) : (
             <Empty description="该专家暂未绑定知识文档。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           ),
@@ -66,87 +94,103 @@ const KnowledgePage: React.FC = () => {
         </Paragraph>
       </Card>
 
-      <Card className="module-card" title="上传 Markdown 知识文档" style={{ marginTop: 16 }}>
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={async (values) => {
-            if (!selectedFile) {
-              message.error("请先选择一个 Markdown 文件");
-              return;
-            }
-            setUploading(true);
-            try {
-              const content = await selectedFile.text();
-              await knowledgeApi.uploadMarkdown({
-                title: String(values.title || selectedFile.name.replace(/\.md$/i, "")),
-                expert_id: values.expert_id,
-                content,
-                tags: String(values.tags || "")
-                  .split(",")
-                  .map((item: string) => item.trim())
-                  .filter(Boolean),
-                source_filename: selectedFile.name,
-              });
-              message.success("知识文档已上传");
-              form.resetFields();
-              setSelectedFile(null);
-              await loadPage();
-            } catch (error: any) {
-              message.error(error?.message || "上传知识文档失败");
-            } finally {
-              setUploading(false);
-            }
-          }}
-        >
-          <Form.Item name="expert_id" label="绑定专家" rules={[{ required: true, message: "请选择专家" }]}>
-            <Select
-              placeholder="选择需要绑定知识的专家"
-              options={experts.map((item) => ({
-                value: item.expert_id,
-                label: `${item.name_zh} (${item.expert_id})`,
-              }))}
-            />
-          </Form.Item>
-          <Form.Item name="title" label="文档标题">
-            <Input placeholder="留空时默认取文件名" />
-          </Form.Item>
-          <Form.Item name="tags" label="标签">
-            <Input placeholder="migration, auth, redis" />
-          </Form.Item>
-          <Form.Item label="Markdown 文件">
-            <Upload
-              accept=".md,text/markdown"
-              beforeUpload={(file) => {
-                setSelectedFile(file);
-                return false;
-              }}
-              onRemove={() => {
-                setSelectedFile(null);
-              }}
-              fileList={
-                selectedFile
-                  ? ([{ uid: selectedFile.name, name: selectedFile.name, status: "done" }] as UploadFile[])
-                  : []
-              }
-              maxCount={1}
-            >
-              <Button>选择 .md 文件</Button>
-            </Upload>
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={uploading}>
-            上传并绑定专家
-          </Button>
-        </Form>
-      </Card>
-
-      <Card className="module-card" title="按专家分组的知识文档" style={{ marginTop: 16 }}>
-        {groupedItems.length ? (
-          <Collapse items={groupedItems} defaultActiveKey={groupedItems[0]?.key ? [groupedItems[0].key] : []} />
-        ) : (
-          <Empty description="当前还没有导入知识文档。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        )}
-      </Card>
+      <Tabs
+        style={{ marginTop: 16 }}
+        items={[
+          {
+            key: "upload",
+            label: "上传新文档",
+            children: (
+              <Card className="module-card" title="上传 Markdown 知识文档">
+                <Form
+                  form={form}
+                  layout="vertical"
+                  onFinish={async (values) => {
+                    if (!selectedFile) {
+                      message.error("请先选择一个 Markdown 文件");
+                      return;
+                    }
+                    setUploading(true);
+                    try {
+                      const content = await selectedFile.text();
+                      await knowledgeApi.uploadMarkdown({
+                        title: String(values.title || selectedFile.name.replace(/\.md$/i, "")),
+                        expert_id: values.expert_id,
+                        content,
+                        tags: String(values.tags || "")
+                          .split(",")
+                          .map((item: string) => item.trim())
+                          .filter(Boolean),
+                        source_filename: selectedFile.name,
+                      });
+                      message.success("知识文档已上传");
+                      form.resetFields();
+                      setSelectedFile(null);
+                      await loadPage();
+                    } catch (error: any) {
+                      message.error(error?.message || "上传知识文档失败");
+                    } finally {
+                      setUploading(false);
+                    }
+                  }}
+                >
+                  <Form.Item name="expert_id" label="绑定专家" rules={[{ required: true, message: "请选择专家" }]}>
+                    <Select
+                      placeholder="选择需要绑定知识的专家"
+                      options={experts.map((item) => ({
+                        value: item.expert_id,
+                        label: `${item.name_zh} (${item.expert_id})`,
+                      }))}
+                    />
+                  </Form.Item>
+                  <Form.Item name="title" label="文档标题">
+                    <Input placeholder="留空时默认取文件名" />
+                  </Form.Item>
+                  <Form.Item name="tags" label="标签">
+                    <Input placeholder="migration, auth, redis" />
+                  </Form.Item>
+                  <Form.Item label="Markdown 文件">
+                    <Upload
+                      accept=".md,text/markdown"
+                      beforeUpload={(file) => {
+                        setSelectedFile(file);
+                        return false;
+                      }}
+                      onRemove={() => {
+                        setSelectedFile(null);
+                      }}
+                      fileList={
+                        selectedFile
+                          ? ([{ uid: selectedFile.name, name: selectedFile.name, status: "done" }] as UploadFile[])
+                          : []
+                      }
+                      maxCount={1}
+                    >
+                      <Button>选择 .md 文件</Button>
+                    </Upload>
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" loading={uploading}>
+                    上传并绑定专家
+                  </Button>
+                </Form>
+              </Card>
+            ),
+          },
+          {
+            key: "browse",
+            label: "已有专家与文档",
+            children: (
+              <Card className="module-card" title="按专家分组的知识文档">
+                {groupedItems.length ? (
+                  <Collapse items={groupedItems} />
+                ) : (
+                  <Empty description="当前还没有导入知识文档。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )}
+              </Card>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 };

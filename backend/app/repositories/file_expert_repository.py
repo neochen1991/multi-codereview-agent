@@ -16,29 +16,26 @@ class FileExpertRepository:
 
     def list(self) -> list[ExpertProfile]:
         items: list[ExpertProfile] = []
-        roots = [self.root]
         packaged_root = Path(__file__).resolve().parents[1] / "builtin_experts"
-        if packaged_root != self.root:
-            roots.append(packaged_root)
-        seen_ids: set[str] = set()
-        for root in roots:
-            if not root.exists():
-                logger.warning("expert root missing: %s", root)
-                continue
-            for expert_yaml in sorted(root.glob("*/expert.yaml")):
-                payload = yaml.safe_load(expert_yaml.read_text(encoding="utf-8")) or {}
-                expert_id = str(payload.get("expert_id") or "")
-                if expert_id in seen_ids:
+        builtin_payloads = self._load_payloads(packaged_root, mark_custom=False)
+        user_payloads = self._load_payloads(self.root, mark_custom=True)
+
+        merged_ids = sorted(set(builtin_payloads) | set(user_payloads))
+        for expert_id in merged_ids:
+            payload = dict(builtin_payloads.get(expert_id) or {})
+            for key, value in (user_payloads.get(expert_id) or {}).items():
+                if key in {"system_prompt", "review_spec"} and not value:
                     continue
-                prompt_path = expert_yaml.parent / "prompt.md"
-                payload["system_prompt"] = (
-                    prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
-                )
-                payload["custom"] = bool(payload.get("custom", False))
-                items.append(ExpertProfile.model_validate(payload))
-                if expert_id:
-                    seen_ids.add(expert_id)
-        logger.info("loaded %s experts from roots=%s", len(items), [str(root) for root in roots])
+                payload[key] = value
+            if not payload:
+                continue
+            payload["custom"] = bool((user_payloads.get(expert_id) or {}).get("custom", payload.get("custom", False)))
+            items.append(ExpertProfile.model_validate(payload))
+        logger.info(
+            "loaded %s experts from roots=%s",
+            len(items),
+            [str(root) for root in {self.root, packaged_root}],
+        )
         return items
 
     def save(self, expert: ExpertProfile) -> ExpertProfile:
@@ -46,9 +43,30 @@ class FileExpertRepository:
         target_dir.mkdir(parents=True, exist_ok=True)
         payload = expert.model_dump(mode="json")
         system_prompt = str(payload.pop("system_prompt", ""))
+        review_spec = str(payload.pop("review_spec", ""))
         (target_dir / "expert.yaml").write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
         (target_dir / "prompt.md").write_text(system_prompt, encoding="utf-8")
+        if review_spec:
+            (target_dir / "review_spec.md").write_text(review_spec, encoding="utf-8")
         return expert
+
+    def _load_payloads(self, root: Path, *, mark_custom: bool) -> dict[str, dict]:
+        payloads: dict[str, dict] = {}
+        if not root.exists():
+            logger.warning("expert root missing: %s", root)
+            return payloads
+        for expert_yaml in sorted(root.glob("*/expert.yaml")):
+            payload = yaml.safe_load(expert_yaml.read_text(encoding="utf-8")) or {}
+            expert_id = str(payload.get("expert_id") or "")
+            if not expert_id:
+                continue
+            prompt_path = expert_yaml.parent / "prompt.md"
+            review_spec_path = expert_yaml.parent / "review_spec.md"
+            payload["system_prompt"] = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+            payload["review_spec"] = review_spec_path.read_text(encoding="utf-8") if review_spec_path.exists() else ""
+            payload["custom"] = bool(payload.get("custom", mark_custom))
+            payloads[expert_id] = payload
+        return payloads
