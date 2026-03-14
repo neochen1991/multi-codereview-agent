@@ -34,6 +34,23 @@ import {
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
 
+type RoutingExpertItem = {
+  expert_id: string;
+  expert_name?: string;
+  reason?: string;
+  file_path?: string;
+  line_start?: number;
+  source?: string;
+};
+
+type ExpertRoutingSummary = {
+  user_selected_experts: RoutingExpertItem[];
+  skipped_experts: RoutingExpertItem[];
+  effective_experts: RoutingExpertItem[];
+  system_added_experts: RoutingExpertItem[];
+  fallback_expert_added: boolean;
+};
+
 const { Paragraph, Text, Title } = Typography;
 
 const defaultFormState: ReviewFormState = {
@@ -54,6 +71,94 @@ const defaultFormState: ReviewFormState = {
     "maintainability_code_health",
     "test_verification",
   ],
+};
+
+const normalizeRoutingItems = (value: unknown): RoutingExpertItem[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item) => ({
+      expert_id: String(item.expert_id || ""),
+      expert_name: item.expert_name ? String(item.expert_name) : undefined,
+      reason: item.reason ? String(item.reason) : undefined,
+      file_path: item.file_path ? String(item.file_path) : undefined,
+      line_start: typeof item.line_start === "number" ? item.line_start : undefined,
+      source: item.source ? String(item.source) : undefined,
+    }))
+    .filter((item) => item.expert_id);
+};
+
+const readExpertRoutingSummary = (review?: ReviewSummary | null): ExpertRoutingSummary | null => {
+  const metadata = review?.subject?.metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const routing = (metadata as Record<string, unknown>).expert_routing;
+  if (!routing || typeof routing !== "object") return null;
+  const payload = routing as Record<string, unknown>;
+  return {
+    user_selected_experts: normalizeRoutingItems(payload.user_selected_experts),
+    skipped_experts: normalizeRoutingItems(payload.skipped_experts),
+    effective_experts: normalizeRoutingItems(payload.effective_experts),
+    system_added_experts: normalizeRoutingItems(payload.system_added_experts),
+    fallback_expert_added: Boolean(payload.fallback_expert_added),
+  };
+};
+
+const RoutingExpertTags: React.FC<{
+  title: string;
+  items: RoutingExpertItem[];
+  color: string;
+}> = ({ title, items, color }) => {
+  if (items.length === 0) return null;
+  return (
+    <div className="routing-group">
+      <Text className="routing-group-title">{title}</Text>
+      <Space size={[8, 8]} wrap>
+        {items.map((item) => (
+          <Tag key={`${title}-${item.expert_id}-${item.file_path || "none"}`} color={color}>
+            {item.expert_name || item.expert_id}
+          </Tag>
+        ))}
+      </Space>
+    </div>
+  );
+};
+
+const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = ({ summary }) => {
+  if (!summary) return null;
+  const hasAdjustments = summary.skipped_experts.length > 0 || summary.system_added_experts.length > 0;
+  const bannerTone = summary.system_added_experts.length > 0 ? "warning" : hasAdjustments ? "info" : "default";
+  const heading =
+    summary.system_added_experts.length > 0
+      ? "专家与代码不完全匹配，系统已自动补入兜底专家继续审查"
+      : hasAdjustments
+        ? "部分已选择专家与当前变更相关性较低，系统已自动跳过"
+        : "本轮专家路由已完成";
+  return (
+    <Card className={`module-card expert-routing-card expert-routing-card-${bannerTone}`} title="专家路由提示">
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        <Paragraph className="expert-routing-summary">{heading}</Paragraph>
+        <RoutingExpertTags title="用户选择" items={summary.user_selected_experts} color="blue" />
+        <RoutingExpertTags title="实际参与" items={summary.effective_experts} color="green" />
+        <RoutingExpertTags title="系统补入" items={summary.system_added_experts} color="gold" />
+        {summary.skipped_experts.length > 0 ? (
+          <div className="routing-group">
+            <Text className="routing-group-title">已跳过</Text>
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              {summary.skipped_experts.map((item) => (
+                <div key={`skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
+                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text type="secondary">
+                    {item.reason || "当前变更未命中该专家的有效审查线索"}
+                    {item.file_path ? ` · ${item.file_path}${item.line_start ? `:${item.line_start}` : ""}` : ""}
+                  </Text>
+                </div>
+              ))}
+            </Space>
+          </div>
+        ) : null}
+      </Space>
+    </Card>
+  );
 };
 
 const ReviewWorkbenchPage: React.FC = () => {
@@ -239,6 +344,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
     [issues],
   );
+  const expertRoutingSummary = useMemo(() => readExpertRoutingSummary(review), [review]);
   const preferredHumanIssue = selectedFindingIssue?.needs_human
     ? selectedFindingIssue
     : selectedIssue?.needs_human
@@ -492,6 +598,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Row gutter={[16, 16]}>
             <Col xs={24} xl={17}>
               <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-main-stack">
+                <ExpertRoutingPanel summary={expertRoutingSummary} />
                 <Card className="module-card process-dialogue-card" title="专家对话流">
                   {reviewId ? (
                     <ReviewDialogueStream messages={allMessages} review={review} events={events} />

@@ -665,6 +665,51 @@ body {
   padding: 14px !important;
 }
 
+.expert-routing-card .ant-card-body {
+  padding: 12px 14px !important;
+}
+
+.expert-routing-card-info {
+  border-color: #cfe0ff;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.expert-routing-card-warning {
+  border-color: #f5d58a;
+  background: linear-gradient(180deg, #fffaf0 0%, #ffffff 100%);
+}
+
+.expert-routing-card-default {
+  border-color: #d8e3f2;
+}
+
+.expert-routing-summary {
+  margin: 0 !important;
+  color: #1f2937;
+}
+
+.routing-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.routing-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.routing-skip-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid #e6edf5;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
 .process-main-stack,
 .process-sidebar-stack {
   width: 100%;

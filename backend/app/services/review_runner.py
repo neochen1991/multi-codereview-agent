@@ -34,6 +34,8 @@ from app.services.tool_gateway import ReviewToolGateway
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_EXPERT_ID = "architecture_design"
+
 
 class ReviewRunner:
     """审核执行引擎。
@@ -172,6 +174,9 @@ class ReviewRunner:
         experts_by_id = {expert.expert_id: expert for expert in experts}
         finding_payloads: list[dict[str, object]] = []
         expert_jobs: list[dict[str, object]] = []
+        skipped_experts: list[dict[str, object]] = []
+        effective_experts: list[dict[str, object]] = []
+        system_added_experts: list[dict[str, object]] = []
         for expert in experts:
             command = self.main_agent_service.build_command(
                 review.subject,
@@ -185,6 +190,15 @@ class ReviewRunner:
             llm_metadata = dict(command.get("llm") or {})
             if not bool(command.get("routeable", True)):
                 skip_reason = str(command.get("skip_reason") or "当前变更未命中该专家的有效审查线索")
+                skipped_experts.append(
+                    {
+                        "expert_id": expert_id,
+                        "expert_name": expert.name_zh,
+                        "reason": skip_reason,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                    }
+                )
                 self.event_repo.append(
                     ReviewEvent(
                         review_id=review_id,
@@ -253,6 +267,15 @@ class ReviewRunner:
                     },
                 )
             )
+            effective_experts.append(
+                {
+                    "expert_id": expert_id,
+                    "expert_name": expert.name_zh,
+                    "source": "user_selected",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                }
+            )
             expert_jobs.append(
                 {
                     "review": review,
@@ -268,14 +291,74 @@ class ReviewRunner:
                 }
             )
 
+        fallback_job = self._maybe_build_fallback_job(
+            review=review,
+            enabled_experts=enabled_experts,
+            existing_jobs=expert_jobs,
+            selected_ids=selected_ids,
+            skipped_experts=skipped_experts,
+            effective_runtime_settings=effective_runtime_settings,
+            analysis_mode=analysis_mode,
+            llm_request_options=llm_request_options,
+            finding_payloads=finding_payloads,
+        )
+        if fallback_job is not None:
+            expert_jobs.append(fallback_job)
+            fallback_expert = fallback_job["expert"]
+            assert isinstance(fallback_expert, ExpertProfile)
+            file_path = str(fallback_job["file_path"])
+            line_start = int(fallback_job["line_start"])
+            system_added_experts.append(
+                {
+                    "expert_id": fallback_expert.expert_id,
+                    "expert_name": fallback_expert.name_zh,
+                    "reason": "用户选择的专家与当前变更相关性不足，已自动补入架构与设计专家做兜底审查",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                }
+            )
+            effective_experts.append(
+                {
+                    "expert_id": fallback_expert.expert_id,
+                    "expert_name": fallback_expert.name_zh,
+                    "source": "system_fallback",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                }
+            )
+
+        routing_summary = self._build_routing_summary(
+            selected_ids=selected_ids,
+            experts_by_id={expert.expert_id: expert for expert in enabled_experts},
+            skipped_experts=skipped_experts,
+            effective_experts=effective_experts,
+            system_added_experts=system_added_experts,
+        )
+        review.subject.metadata = {
+            **review.subject.metadata,
+            "expert_routing": routing_summary,
+        }
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="expert_routing_summary",
+                phase="coordination",
+                message=self._build_routing_summary_message(routing_summary),
+                payload=routing_summary,
+            )
+        )
+
         self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
         if not expert_jobs:
-            reason = "未获取到真实 diff 或有效变更文件，无法启动专家分析。"
+            reason = "用户选择的专家与当前变更相关性不足，且未能补入兜底专家，无法继续审核。"
             logger.error(
-                "review has no executable expert jobs review_id=%s changed_files=%s remote_diff_available=%s",
+                "review has no executable expert jobs review_id=%s changed_files=%s remote_diff_available=%s skipped_experts=%s",
                 review.review_id,
                 list(review.subject.changed_files),
                 bool(review.subject.unified_diff),
+                [item["expert_id"] for item in skipped_experts],
             )
             review.status = "failed"
             review.phase = "failed"
@@ -297,6 +380,7 @@ class ReviewRunner:
                     payload={
                         "changed_files": list(review.subject.changed_files),
                         "remote_diff_available": bool(review.subject.unified_diff),
+                        "expert_routing": routing_summary,
                     },
                 )
             )
@@ -445,6 +529,159 @@ class ReviewRunner:
         )
         self.artifact_service.publish(review, issues)
         return review
+
+    def _maybe_build_fallback_job(
+        self,
+        *,
+        review: ReviewTask,
+        enabled_experts: list[ExpertProfile],
+        existing_jobs: list[dict[str, object]],
+        selected_ids: list[str],
+        skipped_experts: list[dict[str, object]],
+        effective_runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+        llm_request_options: dict[str, int | float],
+        finding_payloads: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        """当用户选择的专家全部不匹配时，补入架构专家做兜底审查。"""
+        if existing_jobs or not skipped_experts or not review.subject.changed_files:
+            return None
+        fallback_expert = next((item for item in enabled_experts if item.expert_id == FALLBACK_EXPERT_ID), None)
+        if fallback_expert is None or not fallback_expert.enabled:
+            return None
+        fallback_file = review.subject.changed_files[0]
+        fallback_line = self.diff_excerpt_service.find_nearest_line(
+            review.subject.unified_diff,
+            fallback_file,
+            1,
+        ) or 1
+        summary = (
+            "**兜底派工指令**\n\n"
+            f"**目标专家：** {fallback_expert.expert_id} / {fallback_expert.name_zh}\n\n"
+            "用户选择的专家与当前变更相关性较低，系统已自动补入架构与设计专家执行保守型兜底审查。\n"
+            f"请围绕 `{fallback_file}` 第 **{fallback_line} 行** 附近变更，优先检查结构性影响、接口契约、边界条件和明显测试缺口。\n"
+            "若证据不足，请明确标记为待验证风险，不要越界输出数据库、安全、Redis 或 MQ 专项结论。"
+        )
+        command_message = self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_command",
+                content=summary,
+                metadata={
+                    "phase": "coordination",
+                    "target_expert_id": fallback_expert.expert_id,
+                    "target_expert_name": fallback_expert.name_zh,
+                    "file_path": fallback_file,
+                    "line_start": fallback_line,
+                    "related_files": list(review.subject.changed_files[:4]),
+                    "target_hunk": {},
+                    "repository_context": {},
+                    "expected_checks": [
+                        "结构性影响",
+                        "接口契约",
+                        "边界条件",
+                        "测试缺口",
+                    ],
+                    "disallowed_inference": [
+                        "不要把 import 变化直接推断成架构问题",
+                        "证据不足时只能输出待验证风险",
+                    ],
+                    "fallback_expert": True,
+                    "fallback_reason": "selected_experts_mismatch",
+                    "provider": "main-agent-template",
+                    "model": "template",
+                    "base_url": "",
+                    "api_key_env": "",
+                    "mode": "template",
+                    "error": "",
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="fallback_expert_added",
+                phase="coordination",
+                message="系统已自动补入架构与设计专家作为兜底审查者",
+                payload={
+                    "expert_id": fallback_expert.expert_id,
+                    "expert_name": fallback_expert.name_zh,
+                    "selected_experts": selected_ids,
+                    "skipped_experts": skipped_experts,
+                    "file_path": fallback_file,
+                    "line_start": fallback_line,
+                },
+            )
+        )
+        logger.info(
+            "fallback expert added review_id=%s expert_id=%s skipped=%s",
+            review.review_id,
+            fallback_expert.expert_id,
+            [item["expert_id"] for item in skipped_experts],
+        )
+        return {
+            "review": review,
+            "expert": fallback_expert,
+            "command_message": command_message,
+            "file_path": fallback_file,
+            "line_start": fallback_line,
+            "runtime_settings": effective_runtime_settings,
+            "analysis_mode": analysis_mode,
+            "llm_request_options": llm_request_options,
+            "bound_documents": self.knowledge_service.list_documents_for_expert(fallback_expert.expert_id),
+            "finding_payloads": finding_payloads,
+        }
+
+    def _build_routing_summary(
+        self,
+        *,
+        selected_ids: list[str],
+        experts_by_id: dict[str, ExpertProfile],
+        skipped_experts: list[dict[str, object]],
+        effective_experts: list[dict[str, object]],
+        system_added_experts: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """把专家路由结果整理成 review metadata 和前端可读的结构。"""
+        user_selected_experts = [
+            {
+                "expert_id": expert_id,
+                "expert_name": experts_by_id.get(expert_id).name_zh if experts_by_id.get(expert_id) else expert_id,
+            }
+            for expert_id in selected_ids
+        ]
+        return {
+            "user_selected_experts": user_selected_experts,
+            "skipped_experts": skipped_experts,
+            "effective_experts": effective_experts,
+            "system_added_experts": system_added_experts,
+            "fallback_expert_added": bool(system_added_experts),
+        }
+
+    def _build_routing_summary_message(self, routing_summary: dict[str, object]) -> str:
+        """生成前端提示条和事件时间线都会复用的路由摘要文案。"""
+        skipped = routing_summary.get("skipped_experts", [])
+        added = routing_summary.get("system_added_experts", [])
+        skipped_names = "、".join(
+            [
+                str(item.get("expert_name") or item.get("expert_id") or "")
+                for item in skipped
+                if isinstance(item, dict)
+            ]
+        )
+        added_names = "、".join(
+            [
+                str(item.get("expert_name") or item.get("expert_id") or "")
+                for item in added
+                if isinstance(item, dict)
+            ]
+        )
+        if skipped_names and added_names:
+            return f"{skipped_names} 与当前变更相关性较低，系统已自动补入 {added_names} 继续审查。"
+        if skipped_names:
+            return f"{skipped_names} 与当前变更相关性较低，已跳过本轮审查。"
+        return "本轮专家路由已完成。"
 
     def _execute_expert_jobs(
         self,

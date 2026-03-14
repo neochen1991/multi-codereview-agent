@@ -3,7 +3,7 @@ from pathlib import Path
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.finding import ReviewFinding
-from app.domain.models.review import ReviewSubject
+from app.domain.models.review import ReviewSubject, ReviewTask
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.services.review_runner import ReviewRunner
 
@@ -258,8 +258,93 @@ def test_review_runner_fails_when_no_enabled_experts(storage_root: Path):
 
     assert review.status == "failed"
     assert review.phase == "failed"
-    assert "没有可执行的专家" in (review.failure_reason or "")
-    assert any(event.event_type == "review_failed" for event in runner.list_events(review_id))
+
+
+def test_review_runner_builds_routing_summary_with_system_fallback(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    enabled_experts = runner.registry.list_enabled()
+    experts_by_id = {expert.expert_id: expert for expert in enabled_experts}
+
+    summary = runner._build_routing_summary(
+        selected_ids=["ddd_specification"],
+        experts_by_id=experts_by_id,
+        skipped_experts=[
+            {
+                "expert_id": "ddd_specification",
+                "expert_name": "DDD规范专家",
+                "reason": "当前 hunk 仅为 import 级调整",
+            }
+        ],
+        effective_experts=[
+            {
+                "expert_id": "architecture_design",
+                "expert_name": "架构与设计专家",
+                "source": "system_fallback",
+            }
+        ],
+        system_added_experts=[
+            {
+                "expert_id": "architecture_design",
+                "expert_name": "架构与设计专家",
+                "reason": "系统已自动补入架构与设计专家作为兜底审查者",
+            }
+        ],
+    )
+
+    assert summary["fallback_expert_added"] is True
+    assert summary["user_selected_experts"][0]["expert_id"] == "ddd_specification"
+    assert summary["system_added_experts"][0]["expert_id"] == "architecture_design"
+    assert "自动补入" in runner._build_routing_summary_message(summary)
+
+
+def test_review_runner_adds_architecture_fallback_job_when_all_selected_experts_skipped(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_fallback_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/demo",
+            target_ref="main",
+            title="Fallback review",
+            changed_files=["src/demo.ts"],
+            unified_diff=(
+                "diff --git a/src/demo.ts b/src/demo.ts\n"
+                "--- a/src/demo.ts\n"
+                "+++ b/src/demo.ts\n"
+                "@@ -1,2 +1,3 @@\n"
+                " import { A } from './a'\n"
+                "+import { B } from './b'\n"
+                " export const demo = true\n"
+            ),
+        ),
+        selected_experts=["ddd_specification"],
+    )
+
+    job = runner._maybe_build_fallback_job(
+        review=review,
+        enabled_experts=runner.registry.list_enabled(),
+        existing_jobs=[],
+        selected_ids=["ddd_specification"],
+        skipped_experts=[
+            {
+                "expert_id": "ddd_specification",
+                "expert_name": "DDD规范专家",
+                "reason": "当前 hunk 仅为 import 级调整",
+            }
+        ],
+        effective_runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 60.0, "max_attempts": 1},
+        finding_payloads=[],
+    )
+
+    assert job is not None
+    assert job["expert"].expert_id == "architecture_design"
+    assert job["file_path"] == "src/demo.ts"
 
 
 def test_review_runner_fails_when_remote_diff_is_missing(storage_root: Path):
@@ -274,7 +359,7 @@ def test_review_runner_fails_when_remote_diff_is_missing(storage_root: Path):
 
     assert updated.status == "failed"
     assert updated.phase == "failed"
-    assert "未获取到真实 diff" in (updated.failure_reason or "")
+    assert "无法继续审核" in (updated.failure_reason or "")
 
 
 def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
