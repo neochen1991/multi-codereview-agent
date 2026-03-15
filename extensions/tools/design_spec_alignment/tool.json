@@ -4,7 +4,7 @@
   "description": "结构化提取详细设计文档中的关键设计点，并输出实现一致性证据",
   "runtime": "python",
   "entry": "run.py",
-  "timeout_seconds": 60,
+  "timeout_seconds": 300,
   "allowed_experts": ["correctness_business", "architecture_design", "database_analysis", "performance_reliability", "security_compliance"],
   "input_schema": {
     "review_id": "string",

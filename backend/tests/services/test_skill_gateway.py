@@ -56,9 +56,12 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
     repo_root = tmp_path / "repo"
     primary = repo_root / "src" / "service.ts"
     related = repo_root / "src" / "transform.ts"
+    test_file = repo_root / "src" / "__tests__" / "transform.test.ts"
     primary.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
     primary.write_text("export const foo = () => transform()\n", encoding="utf-8")
     related.write_text("export const transform = () => 'ok'\n", encoding="utf-8")
+    test_file.write_text("describe('transform', () => transform())\n", encoding="utf-8")
 
     gateway = ReviewToolGateway(storage_root)
     expert = ExpertProfile(
@@ -78,6 +81,13 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
         source_ref="feature/x",
         target_ref="main",
         changed_files=["src/service.ts", "src/transform.ts"],
+        unified_diff=(
+            "diff --git a/src/service.ts b/src/service.ts\n"
+            "--- a/src/service.ts\n"
+            "+++ b/src/service.ts\n"
+            "@@ -0,0 +1 @@\n"
+            "+export const foo = () => transform()\n"
+        ),
     )
     runtime = RuntimeSettings(
         code_repo_clone_url="https://github.com/example/repo.git",
@@ -100,3 +110,9 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
     assert "src/transform.ts" in repo_result["context_files"]
     assert repo_result["related_contexts"]
     assert "symbol_contexts" in repo_result
+    assert repo_result["search_keywords"] == ["foo"]
+    assert repo_result["search_commands"]
+    assert all("__tests__" not in item for item in repo_result["definition_hits"])
+    assert all("__tests__" not in item for item in repo_result["reference_hits"])
+    assert repo_result["symbol_match_strategy"] == "文本检索命中 + 轻量定义特征判断"
+    assert "不是 AST 级静态分析" in repo_result["symbol_match_explanation"]

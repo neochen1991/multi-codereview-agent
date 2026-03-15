@@ -26,6 +26,18 @@ class ReviewToolGateway:
     才能真正调用这些工具。
     """
 
+    TEST_PATH_MARKERS = {
+        "test",
+        "tests",
+        "__tests__",
+        "__mocks__",
+        "spec",
+        "specs",
+        "fixtures",
+        "playwright",
+        "cypress",
+    }
+
     def __init__(self, root: Path) -> None:
         self._gateway = CapabilityGateway()
         self._knowledge_retrieval = KnowledgeRetrievalService(root)
@@ -78,13 +90,9 @@ class ReviewToolGateway:
                 output = self._invoke_plugin_tool(tool_name, payload)
                 if output is None:
                     continue
-            results.append(
-                {
-                    "tool_name": tool_name,
-                    "success": True,
-                    **output,
-                }
-            )
+            merged_output = {"tool_name": tool_name, **output}
+            merged_output.setdefault("success", True)
+            results.append(merged_output)
         return results
 
     def _register_defaults(self) -> None:
@@ -111,22 +119,36 @@ class ReviewToolGateway:
             *(env.get("PYTHONPATH", "").split(os.pathsep) if env.get("PYTHONPATH") else []),
         ]
         env["PYTHONPATH"] = os.pathsep.join(item for item in pythonpath_items if item)
-        completed = subprocess.run(
-            [sys.executable, str(entry)],
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=plugin.timeout_seconds,
-            cwd=str(repo_root),
-            env=env,
-        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(entry)],
+                input=json.dumps(payload, ensure_ascii=False),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=plugin.timeout_seconds,
+                cwd=str(repo_root),
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "summary": f"{tool_name} 执行超时，已跳过该工具结果。",
+                "success": False,
+                "timed_out": True,
+            }
         if completed.returncode != 0:
             return {
                 "summary": completed.stderr.strip() or f"{tool_name} 执行失败",
                 "success": False,
             }
-        return json.loads(completed.stdout or "{}")
+        parsed = json.loads(completed.stdout or "{}")
+        if isinstance(parsed, dict):
+            parsed.setdefault("success", True)
+            return parsed
+        return {
+            "summary": f"{tool_name} 返回了非对象结果",
+            "success": False,
+        }
 
     def _knowledge_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         expert = dict(payload.get("expert") or {})
@@ -198,6 +220,7 @@ class ReviewToolGateway:
     def _repo_context_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         """从目标分支源码仓补充文件、符号和引用上下文。"""
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
+        subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
         service = RepositoryContextService(
             clone_url=runtime.code_repo_clone_url,
             local_path=runtime.code_repo_local_path,
@@ -210,7 +233,11 @@ class ReviewToolGateway:
         related_files = [
             str(item).strip()
             for item in list(payload.get("related_files") or [])
-            if str(item).strip() and str(item).strip() != file_path
+            if (
+                str(item).strip()
+                and str(item).strip() != file_path
+                and not self._is_test_like_path(str(item).strip())
+            )
         ]
         if not service.is_ready():
             return {
@@ -219,52 +246,133 @@ class ReviewToolGateway:
                 "related_contexts": [],
                 "context_files": [],
                 "matches": [],
-            }
+        }
         primary_context = service.load_file_context(file_path, line_start, radius=10)
-        file_name = Path(file_path).name
-        stem = Path(file_path).stem
-        query = stem if stem else file_name
-        matches = service.search(query=query, globs=None, limit=6)
-        symbol_queries = self._derive_repo_symbols(file_path, primary_context.get("snippet", ""))
+        excerpt = self._diff_excerpt.extract_excerpt(subject.unified_diff, file_path, line_start)
+        symbol_queries = self._extract_repo_search_terms(excerpt)
         symbol_contexts = [
-            service.search_symbol_context(symbol, globs=None, definition_limit=2, reference_limit=4)
+            self._filter_symbol_context(
+                service.search_symbol_context(symbol, globs=None, definition_limit=2, reference_limit=4)
+            )
             for symbol in symbol_queries[:3]
         ]
         related_contexts = [
             service.load_file_context(related_path, 1, radius=8)
             for related_path in related_files[:3]
         ]
-        context_files = [item for item in [file_path, *related_files[:3]] if item]
+        context_files = [
+            item
+            for item in [file_path, *related_files[:3]]
+            if item and not self._is_test_like_path(item)
+        ]
+        definition_hits = self._flatten_symbol_hits(symbol_contexts, "definitions")
+        reference_hits = self._flatten_symbol_hits(symbol_contexts, "references")
+        search_matches = self._build_symbol_matches(symbol_contexts)
+        search_commands = [self._build_repo_search_command(symbol) for symbol in symbol_queries[:3]]
+        if not symbol_queries:
+            summary = "未从目标 diff hunk 中提取到方法名或类名，已跳过源码仓检索。"
+        else:
+            summary = (
+                f"已按 {len(symbol_queries[:3])} 个方法/类关键词检索目标分支代码仓，"
+                f"命中 {len(definition_hits)} 条定义、{len(reference_hits)} 条引用，"
+                "并已自动排除 test/spec 等测试代码。"
+            )
         return {
-            "summary": (
-                f"已从目标分支代码仓补充 {len(context_files)} 个文件上下文，"
-                f"检索到 {len(matches.get('matches', []))} 条关联命中，"
-                f"补充了 {len(symbol_contexts)} 组定义/引用上下文"
-            ),
+            "summary": summary,
             "primary_context": primary_context,
             "related_contexts": related_contexts,
             "context_files": context_files,
-            "matches": matches.get("matches", []),
+            "matches": search_matches[:8],
             "symbol_contexts": symbol_contexts,
+            "search_keywords": symbol_queries[:3],
+            "search_commands": search_commands,
+            "definition_hits": definition_hits[:6],
+            "reference_hits": reference_hits[:6],
+            "symbol_match_strategy": "文本检索命中 + 轻量定义特征判断",
+            "symbol_match_explanation": (
+                "先在目标分支源码仓里搜索 symbol 文本命中，再根据 function/class/const/export 等定义特征，"
+                "把结果拆成 definitions 和 references。当前不是 AST 级静态分析。"
+            ),
         }
 
     def _repo_context_enabled(self, runtime: RuntimeSettings) -> bool:
         return bool(runtime.code_repo_clone_url and runtime.code_repo_local_path)
 
-    def _derive_repo_symbols(self, file_path: str, snippet: object) -> list[str]:
+    def _extract_repo_search_terms(self, excerpt: str) -> list[str]:
+        cleaned_lines = [
+            re.sub(r"^\s*\d+\s+\|\s*[+\- ]?", "", line).strip()
+            for line in str(excerpt or "").splitlines()
+        ]
+        cleaned_excerpt = "\n".join(line for line in cleaned_lines if line)
+        patterns = [
+            r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\bdef\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(",
+            r"\b(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\([^)\n]*\)\s*\{",
+        ]
         tokens: list[str] = []
-        stem = Path(file_path).stem
-        if stem:
-            tokens.append(stem)
-        for match in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", str(snippet or "")):
-            lowered = match.lower()
-            if lowered in {"const", "return", "true", "false", "null", "none", "export"}:
-                continue
-            if match not in tokens:
-                tokens.append(match)
-            if len(tokens) >= 5:
-                break
-        return tokens
+        for pattern in patterns:
+            for match in re.findall(pattern, cleaned_excerpt):
+                token = str(match).strip()
+                if not token:
+                    continue
+                if token.lower() in {"if", "for", "while", "switch", "return", "catch"}:
+                    continue
+                if token not in tokens:
+                    tokens.append(token)
+        return tokens[:4]
+
+    def _is_test_like_path(self, path: str) -> bool:
+        parts = Path(str(path or "").replace("\\", "/")).parts
+        return any(str(part).lower() in self.TEST_PATH_MARKERS for part in parts)
+
+    def _filter_symbol_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **context,
+            "definitions": [
+                item
+                for item in list(context.get("definitions") or [])
+                if isinstance(item, dict) and not self._is_test_like_path(str(item.get("path") or ""))
+            ],
+            "references": [
+                item
+                for item in list(context.get("references") or [])
+                if isinstance(item, dict) and not self._is_test_like_path(str(item.get("path") or ""))
+            ],
+        }
+
+    def _flatten_symbol_hits(self, symbol_contexts: list[dict[str, Any]], key: str) -> list[str]:
+        hits: list[str] = []
+        for context in symbol_contexts:
+            symbol = str(context.get("symbol") or "").strip()
+            for item in list(context.get(key) or []):
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                line_number = int(item.get("line_number") or 0)
+                snippet = str(item.get("snippet") or "").strip()
+                if not path:
+                    continue
+                hits.append(f"{symbol} -> {path}:{line_number} · {snippet}")
+        return hits
+
+    def _build_symbol_matches(self, symbol_contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        for context in symbol_contexts:
+            symbol = str(context.get("symbol") or "").strip()
+            for kind in ("definitions", "references"):
+                for item in list(context.get(kind) or []):
+                    if not isinstance(item, dict):
+                        continue
+                    matches.append({"query": symbol, "kind": kind, **item})
+        return matches
+
+    def _build_repo_search_command(self, symbol: str) -> str:
+        return (
+            f"rg --line-number --no-heading --glob '!.git/**' --glob '!**/*test*/**' "
+            f"--glob '!**/*spec*/**' --glob '!**/__tests__/**' \"{symbol}\""
+        )
 
 
 __all__ = ["ReviewToolGateway"]

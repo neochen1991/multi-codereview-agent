@@ -310,9 +310,14 @@ const buildStructuredGroups = (
           {
             title: "源码上下文",
             sections: [
+              { label: "检索关键词", values: normalizeValueList(toolResult.search_keywords) },
+              { label: "搜索命令", values: normalizeValueList(toolResult.search_commands) },
               { label: "上下文文件", values: normalizeValueList(toolResult.context_files) },
               { label: "关联上下文", values: normalizeValueList(toolResult.related_contexts) },
-              { label: "定义/引用", values: normalizeValueList(toolResult.symbol_contexts) },
+              { label: "定义命中", values: normalizeValueList(toolResult.definition_hits) },
+              { label: "引用命中", values: normalizeValueList(toolResult.reference_hits) },
+              { label: "判定逻辑", values: normalizeSingleValue(toolResult.symbol_match_strategy) },
+              { label: "结果说明", values: normalizeSingleValue(toolResult.symbol_match_explanation) },
             ].filter((section) => section.values.length > 0),
           },
         ].filter((group) => group.sections.length > 0),
@@ -603,7 +608,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`reply ${replyToExpertId}`}</Tag> : null}
                 {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${toolName}`}</Tag> : null}
                 {skillName ? <Tag className="dialogue-tag dialogue-tag-skill">{`skill ${skillName}`}</Tag> : null}
-                {filePath ? <Tag className="dialogue-tag">{filePath}</Tag> : null}
+                {filePath ? <Tag className="dialogue-tag dialogue-tag-path">{filePath}</Tag> : null}
                 {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
                 {hunkHeader ? <Tag className="dialogue-tag">{hunkHeader}</Tag> : null}
                 {model ? <Tag className="dialogue-tag dialogue-tag-model">{model}</Tag> : null}

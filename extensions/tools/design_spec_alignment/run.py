@@ -188,6 +188,7 @@ def _parse_design_docs_with_llm(design_docs: list[dict[str, Any]], runtime: Runt
         if runtime.default_analysis_mode == "light"
         else runtime.standard_llm_timeout_seconds
     )
+    parse_timeout_seconds = float(max(timeout_seconds * 2, 240))
     max_attempts = (
         runtime.light_llm_retry_count
         if runtime.default_analysis_mode == "light"
@@ -202,12 +203,13 @@ def _parse_design_docs_with_llm(design_docs: list[dict[str, Any]], runtime: Runt
         fallback_text="",
         temperature=0.0,
         allow_fallback=False,
-        timeout_seconds=float(max(timeout_seconds, 60)),
+        timeout_seconds=parse_timeout_seconds,
         max_attempts=max(1, min(max_attempts, 2)),
         log_context={
             "phase": "design_spec_parse",
             "tool_name": "design_spec_alignment",
             "design_doc_count": len(design_docs),
+            "parse_timeout_seconds": parse_timeout_seconds,
         },
     )
     raw_json = _strip_code_fence(result.text)
@@ -336,7 +338,26 @@ def main() -> int:
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ]
     runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
-    structured_design = _parse_design_docs_with_llm(design_docs, runtime)
+    try:
+        structured_design = _parse_design_docs_with_llm(design_docs, runtime)
+    except Exception as exc:
+        error_text = str(exc).strip() or "未知错误"
+        result = {
+            "success": False,
+            "summary": f"详细设计文档解析失败：{error_text}。本轮将跳过设计一致性比对，不阻塞整体审核流程。",
+            "design_doc_titles": [str(item.get("title") or item.get("filename") or "详细设计文档") for item in design_docs],
+            "structured_design": StructuredDesignDoc().model_dump(mode="json"),
+            "design_alignment_status": "insufficient_design_context",
+            "matched_implementation_points": [],
+            "missing_implementation_points": [],
+            "extra_implementation_points": [],
+            "conflicting_implementation_points": [],
+            "uncertain_points": [f"详细设计文档解析失败：{error_text}"],
+            "parse_failed": True,
+            "parse_error": error_text,
+        }
+        sys.stdout.write(json.dumps(result, ensure_ascii=False))
+        return 0
 
     diff_text = str(payload.get("subject", {}).get("unified_diff") or payload.get("diff") or "")
     repo_context = payload.get("repo_context") if isinstance(payload.get("repo_context"), dict) else {}
@@ -355,6 +376,7 @@ def main() -> int:
     conflicts = _infer_conflicts(structured_design, corpus)
     nonfunctional_observations = _collect_nonfunctional_observations(structured_design, corpus)
     result = {
+        "success": True,
         "summary": (
             f"已通过大模型解析 {len(design_docs)} 份详细设计文档，抽取 {len(requirements)} 个关键设计点，"
             f"命中 {len(matched)} 个，缺口 {len(missing)} 个，冲突 {len(conflicts)} 个，"

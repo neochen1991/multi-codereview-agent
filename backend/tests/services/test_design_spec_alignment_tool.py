@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 from pathlib import Path
 
 from app.domain.models.runtime_settings import RuntimeSettings
@@ -122,3 +124,36 @@ def test_design_spec_alignment_treats_nonfunctional_requirements_as_uncertain():
     assert not any("token" in item for item in missing)
     assert any("性能要求待专项验证" in item for item in uncertain)
     assert any("安全要求待专项验证" in item for item in uncertain)
+
+
+def test_design_spec_alignment_returns_failure_payload_when_llm_parse_fails(monkeypatch):
+    module = _load_tool_module()
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("请求超时")
+
+    monkeypatch.setattr(module, "_parse_design_docs_with_llm", _raise)
+    monkeypatch.setattr(
+        module.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "design_docs": [{"title": "设计", "content": "# API\nPOST /api/orders"}],
+                    "runtime": RuntimeSettings().model_dump(mode="json"),
+                },
+                ensure_ascii=False,
+            )
+        ),
+    )
+    stdout = io.StringIO()
+    monkeypatch.setattr(module.sys, "stdout", stdout)
+
+    exit_code = module.main()
+    payload = json.loads(stdout.getvalue())
+
+    assert exit_code == 0
+    assert payload["success"] is False
+    assert payload["design_alignment_status"] == "insufficient_design_context"
+    assert "解析失败" in payload["summary"]
+    assert payload["parse_failed"] is True
