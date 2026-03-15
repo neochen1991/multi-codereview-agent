@@ -73,6 +73,24 @@ const normalizeSingleValue = (value: unknown): string[] => {
   return [];
 };
 
+const formatContextEntry = (value: unknown): string => {
+  if (typeof value === "string") return value.trim();
+  if (!value || typeof value !== "object") return "";
+  const payload = value as Record<string, unknown>;
+  const path = typeof payload.path === "string" ? payload.path.trim() : "";
+  const lineStart = typeof payload.line_start === "number" ? payload.line_start : 0;
+  const snippet = typeof payload.snippet === "string" ? payload.snippet.trim() : "";
+  const firstSnippetLine = snippet.split("\n").map((line) => line.trim()).filter(Boolean)[0] || "";
+  const title = path ? `${path}${lineStart ? `:${lineStart}` : ""}` : "";
+  if (title && firstSnippetLine) return `${title} · ${firstSnippetLine}`;
+  return title || firstSnippetLine;
+};
+
+const normalizeContextValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map(formatContextEntry).filter(Boolean);
+};
+
 const tryParseJsonBlock = (value: string): Record<string, unknown> | null => {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -115,7 +133,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     : [];
   let messageKind: ReviewDialogueViewMessage["messageKind"] = "chat";
   if (eventType === "main_agent_command") messageKind = "command";
-  if (eventType === "judge_summary" || eventType === "main_agent_summary") messageKind = "status";
+  if (eventType === "judge_summary" || eventType === "main_agent_summary" || eventType === "main_agent_intake") messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
   const categorySet = new Set<ReviewDialogueViewMessage["categories"][number]>([messageKind]);
@@ -149,6 +167,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("Judge 正在收敛本轮议题");
   } else if (eventType === "main_agent_summary") {
     summaryParts.push("主Agent 已输出最终收敛播报");
+  } else if (eventType === "main_agent_intake") {
+    summaryParts.push("主Agent 已接收并整理本次审核输入");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
@@ -269,6 +289,32 @@ const buildStructuredGroups = (
     };
   }
 
+  if (row.eventType === "main_agent_intake") {
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "MR 基本信息",
+          sections: [
+            { label: "标题", values: normalizeSingleValue(metadata.title) },
+            { label: "链接", values: normalizeSingleValue(metadata.review_url) },
+            { label: "平台", values: normalizeSingleValue(metadata.platform_kind) },
+            { label: "源分支", values: normalizeSingleValue(metadata.source_ref) },
+            { label: "目标分支", values: normalizeSingleValue(metadata.target_ref) },
+            { label: "对比模式", values: normalizeSingleValue(metadata.compare_mode) },
+          ].filter((section) => section.values.length > 0),
+        },
+        {
+          title: "变更文件",
+          sections: [
+            { label: "全部变更文件", values: normalizeValueList(metadata.changed_files) },
+            { label: "业务变更文件", values: normalizeValueList(metadata.business_changed_files) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ].filter((group) => group.sections.length > 0),
+    };
+  }
+
   if (row.eventType === "expert_tool_call" && toolResult) {
     const toolName = typeof metadata.tool_name === "string" ? metadata.tool_name : "";
     if (toolName === "design_spec_alignment") {
@@ -313,7 +359,7 @@ const buildStructuredGroups = (
               { label: "检索关键词", values: normalizeValueList(toolResult.search_keywords) },
               { label: "搜索命令", values: normalizeValueList(toolResult.search_commands) },
               { label: "上下文文件", values: normalizeValueList(toolResult.context_files) },
-              { label: "关联上下文", values: normalizeValueList(toolResult.related_contexts) },
+              { label: "关联上下文", values: normalizeContextValueList(toolResult.related_contexts) },
               { label: "定义命中", values: normalizeValueList(toolResult.definition_hits) },
               { label: "引用命中", values: normalizeValueList(toolResult.reference_hits) },
               { label: "判定逻辑", values: normalizeSingleValue(toolResult.symbol_match_strategy) },

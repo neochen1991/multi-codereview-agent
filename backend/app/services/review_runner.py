@@ -181,11 +181,40 @@ class ReviewRunner:
         skipped_experts: list[dict[str, object]] = []
         effective_experts: list[dict[str, object]] = []
         system_added_experts: list[dict[str, object]] = []
+        intake_summary, intake_metadata = self.main_agent_service.build_intake_summary(review.subject)
+        routing_plan = self.main_agent_service.build_routing_plan(
+            review.subject,
+            experts,
+            effective_runtime_settings,
+        )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_intake",
+                content=intake_summary,
+                metadata={
+                    "phase": "coordination",
+                    **intake_metadata,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="main_agent_intake",
+                phase="coordination",
+                message="主Agent 已播报本次审核输入信息",
+                payload=intake_metadata,
+            )
+        )
         for expert in experts:
             command = self.main_agent_service.build_command(
                 review.subject,
                 expert,
                 effective_runtime_settings,
+                route_hint=routing_plan.get(expert.expert_id),
             )
             expert_id = expert.expert_id
             file_path = str(command.get("file_path") or self._pick_file_path(review.subject, expert_id))
@@ -248,10 +277,13 @@ class ReviewRunner:
                         "file_path": file_path,
                         "line_start": line_start,
                         "related_files": command.get("related_files", []),
+                        "business_changed_files": self._business_changed_files(review.subject),
                         "target_hunk": command.get("target_hunk", {}),
                         "repository_context": command.get("repository_context", {}),
                         "expected_checks": command.get("expected_checks", []),
                         "disallowed_inference": command.get("disallowed_inference", []),
+                        "routing_reason": command.get("routing_reason", ""),
+                        "routing_confidence": command.get("routing_confidence", 0.0),
                         **llm_metadata,
                     },
                 )
@@ -268,6 +300,7 @@ class ReviewRunner:
                         "file_path": file_path,
                         "line_start": line_start,
                         "related_files": command.get("related_files", []),
+                        "business_changed_files": self._business_changed_files(review.subject),
                     },
                 )
             )
@@ -752,6 +785,8 @@ class ReviewRunner:
             extra_tools=self._collect_skill_tools(active_skills),
         )
         repository_context = dict(command_message.metadata.get("repository_context") or {})
+        repository_context["routing_reason"] = command_message.metadata.get("routing_reason", "")
+        repository_context["routing_confidence"] = command_message.metadata.get("routing_confidence", 0.0)
         target_hunk = dict(command_message.metadata.get("target_hunk") or {})
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
@@ -803,6 +838,7 @@ class ReviewRunner:
                     "active_skills": [skill.skill_id for skill in active_skills],
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "related_files": command_message.metadata.get("related_files", []),
+                    "business_changed_files": command_message.metadata.get("business_changed_files", []),
                     "target_hunk": target_hunk,
                     "repository_context": repository_context,
                     "expected_checks": command_message.metadata.get("expected_checks", []),
@@ -1684,13 +1720,16 @@ class ReviewRunner:
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
+        business_changed_files = self._business_changed_files(subject)
+        routing_reason = str(repository_context.get("routing_reason") or "").strip()
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
             f"角色: {expert.role}\n"
             f"目标文件: {file_path}\n"
             f"目标行号: {line_start}\n"
-            f"变更文件: {', '.join(subject.changed_files[:5]) or '未提供'}\n"
+            f"业务变更文件: {', '.join(business_changed_files) or '未提供'}\n"
+            f"主Agent派工理由: {routing_reason or '未提供'}\n"
             f"能力约束:\n{capability_summary}\n"
             f"规范提要:\n{review_spec_summary}\n"
             f"已激活技能:\n{active_skill_summary}\n"
@@ -2134,6 +2173,18 @@ class ReviewRunner:
                 if text and self._is_meaningful_context_file(text) and text not in merged:
                     merged.append(text)
         return merged[:6]
+
+    def _is_test_like_path(self, path: str) -> bool:
+        parts = str(path or "").replace("\\", "/").split("/")
+        return any(part.lower() in {"test", "tests", "__tests__", "__mocks__", "spec", "specs", "fixtures", "playwright", "cypress"} for part in parts)
+
+    def _business_changed_files(self, subject: ReviewSubject) -> list[str]:
+        business_files = [
+            item
+            for item in subject.changed_files
+            if item and not self._is_test_like_path(item)
+        ]
+        return business_files or [item for item in subject.changed_files if item]
 
     def _extract_design_alignment(self, runtime_tool_results: list[dict[str, object]]) -> dict[str, object]:
         """从 design_spec_alignment tool 结果里提取设计一致性信息。"""

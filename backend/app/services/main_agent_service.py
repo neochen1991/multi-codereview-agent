@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -23,6 +24,7 @@ class MainAgentService:
 
     agent_id = "main_agent"
     agent_name = "MainAgent"
+    TEST_PATH_MARKERS = {"test", "tests", "__tests__", "__mocks__", "spec", "specs", "fixtures", "playwright", "cypress"}
 
     def __init__(self) -> None:
         self._llm = LLMChatService()
@@ -34,11 +36,12 @@ class MainAgentService:
         subject: ReviewSubject,
         expert: ExpertProfile,
         runtime_settings: RuntimeSettings,
+        route_hint: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """为单个专家生成一次带上下文的派工指令。"""
         change_chain = self.build_change_chain(subject)
         repository_service = self._build_repository_service(runtime_settings)
-        target_focus = self._pick_target_focus(subject, expert, repository_service)
+        target_focus = route_hint or self._build_rule_route(subject, expert, repository_service)
         file_path = str(target_focus.get("file_path") or self._pick_file_path(subject, expert))
         line_start = (
             int(target_focus.get("line_start") or self._pick_line_start(subject, expert.expert_id, file_path))
@@ -48,7 +51,7 @@ class MainAgentService:
         target_hunk = dict(target_focus.get("target_hunk") or {})
         related_files = self._build_expert_related_files(subject, expert, file_path, change_chain["related_files"])
         routing_repo_excerpt = self._format_repo_matches(dict(target_focus.get("repo_hits") or {}))
-        routing_reason = self._capability_service.build_routing_reason(
+        routing_reason = str(target_focus.get("routing_reason") or "").strip() or self._capability_service.build_routing_reason(
             expert,
             file_path,
             str(target_hunk.get("excerpt") or ""),
@@ -87,6 +90,8 @@ class MainAgentService:
             "disallowed_inference": disallowed_inference,
             "routeable": routeable,
             "skip_reason": skip_reason,
+            "routing_reason": routing_reason,
+            "routing_confidence": float(target_focus.get("confidence") or 0.0),
             "summary": summary,
             "llm": {
                 "provider": "main-agent-template",
@@ -98,9 +103,74 @@ class MainAgentService:
             },
         }
 
+    def build_routing_plan(
+        self,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        runtime_settings: RuntimeSettings,
+    ) -> dict[str, dict[str, object]]:
+        """基于完整业务变更和专家职责生成统一派工计划。
+
+        流程分两层：
+        1. 先用现有规则挑出每个专家的 baseline route，作为兜底计划
+        2. 再把全部业务变更、候选 hunk 和专家职责交给 LLM 做语义分工
+        """
+
+        repository_service = self._build_repository_service(runtime_settings)
+        baseline_routes = {
+            expert.expert_id: self._build_rule_route(subject, expert, repository_service)
+            for expert in experts
+        }
+        candidate_hunks = self._build_candidate_hunks(subject, repository_service)
+        if not candidate_hunks or not experts:
+            return baseline_routes
+
+        fallback_payload = self._build_routing_plan_payload(
+            subject=subject,
+            experts=experts,
+            routes=baseline_routes,
+            candidate_hunks=candidate_hunks,
+        )
+        resolution = self._llm.resolve_main_agent(runtime_settings)
+        result = self._llm.complete_text(
+            system_prompt=self._build_routing_system_prompt(),
+            user_prompt=self._build_routing_user_prompt(
+                subject=subject,
+                experts=experts,
+                candidate_hunks=candidate_hunks,
+            ),
+            resolution=resolution,
+            runtime_settings=runtime_settings,
+            fallback_text=json.dumps(fallback_payload, ensure_ascii=False),
+            allow_fallback=self._allow_fallback(runtime_settings),
+            timeout_seconds=120.0,
+            max_attempts=2,
+            log_context={
+                "phase": "routing_plan",
+                "agent_id": self.agent_id,
+                "source_ref": subject.source_ref,
+                "target_ref": subject.target_ref,
+                "changed_file_count": len(subject.changed_files),
+            },
+        )
+        parsed = self._parse_routing_plan(result.text)
+        merged = self._merge_routing_plan(
+            subject=subject,
+            experts=experts,
+            baseline_routes=baseline_routes,
+            candidate_hunks=candidate_hunks,
+            llm_plan=parsed,
+        )
+        for route in merged.values():
+            route["routing_llm"] = self._llm_metadata(result)
+        return merged
+
     def build_change_chain(self, subject: ReviewSubject) -> dict[str, object]:
         """基于 changed_files 推导一条粗粒度的关联变更链。"""
         changed_files = [item for item in subject.changed_files if item]
+        business_files = [item for item in changed_files if not self._is_test_like_path(item)]
+        if business_files:
+            changed_files = business_files
         related_files: list[str] = []
         token_links = {
             "migration": ["schema", "repository", "service", "transform", "output"],
@@ -125,7 +195,31 @@ class MainAgentService:
                         related_files.append(candidate_path)
         return {
             "primary_files": changed_files[:2],
-            "related_files": related_files[:8] or changed_files[:],
+            "related_files": related_files or changed_files[:],
+        }
+
+    def build_intake_summary(self, subject: ReviewSubject) -> tuple[str, dict[str, object]]:
+        """把远程平台返回的审核输入整理成主 Agent 的前置播报。"""
+        metadata = dict(subject.metadata or {})
+        business_changed_files = self._candidate_changed_files(subject, "")
+        review_url = str(subject.mr_url or metadata.get("review_url") or subject.repo_url or "").strip()
+        platform_kind = str(metadata.get("platform_kind") or metadata.get("platform_provider") or "代码平台").strip()
+        summary = (
+            f"已接收 {platform_kind} 的审核输入：{subject.title or review_url or subject.source_ref}。"
+            f" 当前识别到 {len(subject.changed_files)} 个变更文件，其中业务文件 {len(business_changed_files)} 个。"
+        )
+        if not subject.changed_files:
+            summary = "未从远程代码平台获取到真实 diff 或变更文件，后续派工可能受限。"
+        return summary, {
+            "title": subject.title,
+            "review_url": review_url,
+            "platform_kind": platform_kind,
+            "source_ref": subject.source_ref,
+            "target_ref": subject.target_ref,
+            "compare_mode": str(metadata.get("compare_mode") or "").strip(),
+            "remote_diff_fetched": bool(metadata.get("remote_diff_fetched")),
+            "changed_files": list(subject.changed_files),
+            "business_changed_files": business_changed_files,
         }
 
     def build_final_summary(
@@ -226,7 +320,7 @@ class MainAgentService:
         return deduped[:6]
 
     def _pick_file_path(self, subject: ReviewSubject, expert: ExpertProfile) -> str:
-        changed_files = list(subject.changed_files)
+        changed_files = self._candidate_changed_files(subject, expert.expert_id)
         if not changed_files:
             return ""
         ranked = sorted(
@@ -273,7 +367,7 @@ class MainAgentService:
         expert: ExpertProfile,
         repository_service: RepositoryContextService,
     ) -> dict[str, object]:
-        changed_files = [item for item in subject.changed_files if item]
+        changed_files = self._candidate_changed_files(subject, expert.expert_id)
         if not changed_files:
             return {}
         if expert.expert_id == "correctness_business":
@@ -317,6 +411,40 @@ class MainAgentService:
                 }
                 best_score = score
         return best_candidate or {}
+
+    def _build_rule_route(
+        self,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        repository_service: RepositoryContextService,
+    ) -> dict[str, object]:
+        target_focus = self._pick_target_focus(subject, expert, repository_service)
+        file_path = str(target_focus.get("file_path") or self._pick_file_path(subject, expert))
+        line_start = (
+            int(target_focus.get("line_start") or self._pick_line_start(subject, expert.expert_id, file_path))
+            if file_path
+            else 0
+        )
+        target_hunk = dict(target_focus.get("target_hunk") or {})
+        routing_reason = self._capability_service.build_routing_reason(
+            expert,
+            file_path,
+            str(target_hunk.get("excerpt") or ""),
+            self._format_repo_matches(dict(target_focus.get("repo_hits") or {})),
+        )
+        routeable, skip_reason = self._should_route_expert(expert, target_focus, file_path)
+        return {
+            **target_focus,
+            "expert_id": expert.expert_id,
+            "file_path": file_path,
+            "line_start": line_start,
+            "target_hunk": target_hunk,
+            "routing_reason": routing_reason,
+            "routeable": routeable,
+            "skip_reason": skip_reason,
+            "confidence": 0.55 if routeable else 0.25,
+            "routing_source": "rule",
+        }
 
     def _pick_correctness_chain_focus(
         self,
@@ -408,11 +536,17 @@ class MainAgentService:
     ) -> list[str]:
         if not file_path:
             return []
+        business_changed_files = self._candidate_changed_files(subject, expert.expert_id)
         if expert.expert_id != "correctness_business":
-            return related_files
+            merged: list[str] = []
+            for path in [file_path, *business_changed_files, *related_files]:
+                normalized = str(path).strip()
+                if normalized and normalized not in merged:
+                    merged.append(normalized)
+            return merged
         chain_tokens = ("transform", "output", "service", "schema", "migration")
         prioritized: list[str] = []
-        for path in subject.changed_files:
+        for path in business_changed_files:
             lowered = path.lower()
             if any(token in lowered for token in chain_tokens) and path not in prioritized:
                 prioritized.append(path)
@@ -421,7 +555,7 @@ class MainAgentService:
                 prioritized.append(path)
         if file_path in prioritized:
             prioritized.remove(file_path)
-        return [file_path, *prioritized][:8]
+        return [file_path, *prioritized]
 
     def _should_route_expert(
         self,
@@ -509,17 +643,23 @@ class MainAgentService:
                 str(item.get("path") or "").strip()
                 and str(item.get("path") or "").strip() != file_path
                 and service.is_searchable_path(str(item.get("path") or "").strip())
+                and not self._is_test_like_path(str(item.get("path") or "").strip())
             )
         ]
         related_contexts = [
             service.load_file_context(item, 1, radius=8)
-            for item in [*related_files[:3], *repo_hit_paths[:3]]
-            if item != file_path
+            for item in [*related_files, *repo_hit_paths]
+            if item != file_path and not self._is_test_like_path(item)
         ]
         context_files: list[str] = []
-        for item in [file_path, *related_files[:3], *repo_hit_paths[:3]]:
+        for item in [file_path, *related_files, *repo_hit_paths]:
             normalized = str(item).strip()
-            if normalized and service.is_searchable_path(normalized) and normalized not in context_files:
+            if (
+                normalized
+                and service.is_searchable_path(normalized)
+                and not self._is_test_like_path(normalized)
+                and normalized not in context_files
+            ):
                 context_files.append(normalized)
         return {
             "summary": (
@@ -532,6 +672,18 @@ class MainAgentService:
             "symbol_contexts": list((repo_hits or {}).get("symbol_contexts", []) or []),
             "context_files": context_files,
         }
+
+    def _candidate_changed_files(self, subject: ReviewSubject, expert_id: str) -> list[str]:
+        changed_files = [item for item in subject.changed_files if item]
+        if expert_id == "test_verification":
+            test_files = [item for item in changed_files if self._is_test_like_path(item)]
+            return test_files or changed_files
+        business_files = [item for item in changed_files if not self._is_test_like_path(item)]
+        return business_files or changed_files
+
+    def _is_test_like_path(self, path: str) -> bool:
+        parts = str(path or "").replace("\\", "/").split("/")
+        return any(part.lower() in self.TEST_PATH_MARKERS for part in parts)
 
     def _build_repository_service(self, runtime_settings: RuntimeSettings) -> RepositoryContextService:
         return RepositoryContextService(
@@ -554,29 +706,287 @@ class MainAgentService:
         if not queries:
             return {"queries": [], "matches": [], "symbol_contexts": []}
         search_result = service.search_many(queries, globs=None, limit_per_query=4, total_limit=8)
+        filtered_matches = [
+            item
+            for item in list(search_result.get("matches", []) or [])
+            if not self._is_test_like_path(str(item.get("path") or ""))
+        ]
         symbol_contexts = [
             service.search_symbol_context(query, globs=None, definition_limit=2, reference_limit=3)
             for query in queries[:3]
         ]
+        filtered_symbol_contexts = []
+        for context in symbol_contexts:
+            filtered_symbol_contexts.append(
+                {
+                    **context,
+                    "definitions": [
+                        item
+                        for item in list(context.get("definitions", []) or [])
+                        if not self._is_test_like_path(str(item.get("path") or ""))
+                    ],
+                    "references": [
+                        item
+                        for item in list(context.get("references", []) or [])
+                        if not self._is_test_like_path(str(item.get("path") or ""))
+                    ],
+                }
+            )
         return {
             **search_result,
-            "symbol_contexts": symbol_contexts,
+            "matches": filtered_matches,
+            "symbol_contexts": filtered_symbol_contexts,
         }
 
     def _derive_repo_queries(self, file_path: str, hunk: dict[str, object]) -> list[str]:
         tokens: list[str] = []
-        stem = file_path.rsplit("/", 1)[-1].split(".", 1)[0]
-        if stem:
-            tokens.append(stem)
         excerpt = str(hunk.get("excerpt") or "")
-        for match in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", excerpt):
-            if match.lower() in {"diff", "const", "return", "true", "false", "null", "none"}:
-                continue
-            if match not in tokens:
-                tokens.append(match)
-            if len(tokens) >= 6:
-                break
+        for pattern in [
+            r"(?:function|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?(?:\(|[A-Za-z_])",
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:async\s*)?\(",
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ]:
+            for match in re.findall(pattern, excerpt):
+                if match.lower() in {"diff", "const", "return", "true", "false", "null", "none", "if", "for"}:
+                    continue
+                if match not in tokens:
+                    tokens.append(match)
+                if len(tokens) >= 4:
+                    return tokens[:4]
         return tokens[:6]
+
+    def _build_candidate_hunks(
+        self,
+        subject: ReviewSubject,
+        repository_service: RepositoryContextService,
+    ) -> list[dict[str, object]]:
+        candidates: list[dict[str, object]] = []
+        for file_path in self._candidate_changed_files(subject, ""):
+            hunks = self._diff_excerpt_service.list_hunks(subject.unified_diff, file_path)
+            if not hunks:
+                fallback_line = self._pick_line_start(subject, "", file_path)
+                hunks = [
+                    {
+                        "file_path": file_path,
+                        "hunk_header": "",
+                        "start_line": fallback_line,
+                        "end_line": fallback_line,
+                        "changed_lines": [fallback_line],
+                        "excerpt": self._diff_excerpt_service.extract_excerpt(subject.unified_diff, file_path, fallback_line),
+                    }
+                ]
+            for index, hunk in enumerate(hunks[:3], start=1):
+                changed_lines = [int(item) for item in list(hunk.get("changed_lines") or []) if isinstance(item, int)]
+                line_start = changed_lines[0] if changed_lines else int(hunk.get("start_line") or 1)
+                repo_hits = self._search_related_repo_context(repository_service, file_path, hunk)
+                candidates.append(
+                    {
+                        "candidate_id": f"{file_path}:{line_start}:{index}",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "hunk_header": str(hunk.get("hunk_header") or ""),
+                        "excerpt": str(hunk.get("excerpt") or ""),
+                        "repo_hits": repo_hits,
+                    }
+                )
+        return candidates
+
+    def _build_routing_plan_payload(
+        self,
+        *,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        routes: dict[str, dict[str, object]],
+        candidate_hunks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "expert_routes": [
+                {
+                    "expert_id": expert.expert_id,
+                    "file_path": str(routes.get(expert.expert_id, {}).get("file_path") or ""),
+                    "line_start": int(routes.get(expert.expert_id, {}).get("line_start") or 0),
+                    "candidate_id": self._match_candidate_id(candidate_hunks, routes.get(expert.expert_id, {})),
+                    "routeable": bool(routes.get(expert.expert_id, {}).get("routeable", True)),
+                    "reason": str(routes.get(expert.expert_id, {}).get("routing_reason") or ""),
+                    "confidence": float(routes.get(expert.expert_id, {}).get("confidence") or 0.0),
+                }
+                for expert in experts
+            ],
+            "skipped_experts": [
+                {
+                    "expert_id": expert.expert_id,
+                    "reason": str(routes.get(expert.expert_id, {}).get("skip_reason") or ""),
+                }
+                for expert in experts
+                if not bool(routes.get(expert.expert_id, {}).get("routeable", True))
+            ],
+        }
+
+    def _build_routing_system_prompt(self) -> str:
+        return (
+            "你是多专家代码审查系统的主Agent，职责是根据完整代码变更和专家职责进行派工。"
+            "请只输出 JSON，不要输出任何解释性文字。"
+            "派工原则：1. 优先依据代码语义和变更内容，而不是路径；"
+            "2. 非 test_verification 专家默认避开 test/spec 文件；"
+            "3. 每个专家只选择一个主焦点 hunk，但后续会收到完整业务变更信息；"
+            "4. 若当前变更与专家职责不符，可以 routeable=false 并给出 skip reason；"
+            "5. 输出必须使用提供的 candidate_id 或 file_path+line_start 对应真实候选 hunk。"
+        )
+
+    def _build_routing_user_prompt(
+        self,
+        *,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        candidate_hunks: list[dict[str, object]],
+    ) -> str:
+        expert_sections = []
+        for expert in experts:
+            expert_sections.append(
+                "\n".join(
+                    [
+                        f"- expert_id: {expert.expert_id}",
+                        f"  名称: {expert.name_zh}",
+                        f"  职责重点: {' / '.join(expert.focus_areas) or expert.role}",
+                        f"  触发线索: {' / '.join(expert.activation_hints) or '按代码语义判断'}",
+                        f"  必查项: {' / '.join(expert.required_checks) or '无'}",
+                        f"  禁止越界: {' / '.join(expert.out_of_scope) or '无'}",
+                    ]
+                )
+            )
+        candidate_sections = []
+        for item in candidate_hunks:
+            candidate_sections.append(
+                "\n".join(
+                    [
+                        f"- candidate_id: {item['candidate_id']}",
+                        f"  file_path: {item['file_path']}",
+                        f"  line_start: {item['line_start']}",
+                        f"  hunk_header: {item['hunk_header']}",
+                        f"  excerpt: {str(item['excerpt'])[:700]}",
+                        f"  repo_context: {self._format_repo_matches(dict(item.get('repo_hits') or {}))[:500]}",
+                    ]
+                )
+            )
+        business_changed_files = self._candidate_changed_files(subject, "")
+        return (
+            f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
+            f"源分支: {subject.source_ref}\n"
+            f"目标分支: {subject.target_ref}\n"
+            f"全部变更文件: {json.dumps(list(subject.changed_files), ensure_ascii=False)}\n"
+            f"业务变更文件: {json.dumps(business_changed_files, ensure_ascii=False)}\n"
+            f"完整 diff:\n{subject.unified_diff[:12000]}\n\n"
+            f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
+            f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
+            "请输出 JSON，格式为：\n"
+            "{\n"
+            '  "expert_routes": [\n'
+            "    {\n"
+            '      "expert_id": "correctness_business",\n'
+            '      "candidate_id": "path:line:index",\n'
+            '      "routeable": true,\n'
+            '      "reason": "为什么这个专家应该看这个 hunk",\n'
+            '      "confidence": 0.91\n'
+            "    }\n"
+            "  ],\n"
+            '  "skipped_experts": [\n'
+            '    {"expert_id": "ddd_specification", "reason": "未命中领域建模变化"}\n'
+            "  ]\n"
+            "}"
+        )
+
+    def _parse_routing_plan(self, text: str) -> dict[str, object]:
+        content = str(text or "").strip()
+        if "```json" in content:
+            content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif content.startswith("```"):
+            content = content.split("```", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _merge_routing_plan(
+        self,
+        *,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        baseline_routes: dict[str, dict[str, object]],
+        candidate_hunks: list[dict[str, object]],
+        llm_plan: dict[str, object],
+    ) -> dict[str, dict[str, object]]:
+        candidate_index = {str(item["candidate_id"]): item for item in candidate_hunks}
+        skipped_by_id = {
+            str(item.get("expert_id") or ""): str(item.get("reason") or "").strip()
+            for item in list(llm_plan.get("skipped_experts", []) or [])
+            if isinstance(item, dict)
+        }
+        route_entries = {
+            str(item.get("expert_id") or ""): item
+            for item in list(llm_plan.get("expert_routes", []) or [])
+            if isinstance(item, dict)
+        }
+        merged: dict[str, dict[str, object]] = {}
+        for expert in experts:
+            baseline = dict(baseline_routes.get(expert.expert_id) or {})
+            entry = route_entries.get(expert.expert_id)
+            if not entry:
+                if expert.expert_id in skipped_by_id:
+                    baseline["routeable"] = False
+                    baseline["skip_reason"] = skipped_by_id[expert.expert_id]
+                    baseline["routing_source"] = "llm_skip"
+                    baseline["confidence"] = 0.35
+                merged[expert.expert_id] = baseline
+                continue
+            candidate = candidate_index.get(str(entry.get("candidate_id") or ""))
+            if not candidate:
+                merged[expert.expert_id] = baseline
+                continue
+            routeable = bool(entry.get("routeable", True))
+            changed_lines = self._normalize_changed_lines(candidate.get("line_start"))
+            merged[expert.expert_id] = {
+                **baseline,
+                "expert_id": expert.expert_id,
+                "file_path": str(candidate.get("file_path") or baseline.get("file_path") or ""),
+                "line_start": int(candidate.get("line_start") or baseline.get("line_start") or 1),
+                "target_hunk": {
+                    "file_path": candidate.get("file_path"),
+                    "hunk_header": candidate.get("hunk_header"),
+                    "start_line": candidate.get("line_start"),
+                    "end_line": candidate.get("line_start"),
+                    "changed_lines": changed_lines,
+                    "excerpt": candidate.get("excerpt"),
+                },
+                "repo_hits": dict(candidate.get("repo_hits") or {}),
+                "routing_reason": str(entry.get("reason") or baseline.get("routing_reason") or ""),
+                "confidence": float(entry.get("confidence") or baseline.get("confidence") or 0.0),
+                "routeable": routeable,
+                "skip_reason": "" if routeable else str(skipped_by_id.get(expert.expert_id) or entry.get("reason") or baseline.get("skip_reason") or ""),
+                "routing_source": "llm",
+            }
+        return merged
+
+    def _normalize_changed_lines(self, line_start: object) -> list[int]:
+        try:
+            value = int(line_start or 1)
+        except (TypeError, ValueError):
+            value = 1
+        return [value]
+
+    def _match_candidate_id(
+        self,
+        candidate_hunks: list[dict[str, object]],
+        route: dict[str, object] | None,
+    ) -> str:
+        route = route or {}
+        file_path = str(route.get("file_path") or "")
+        line_start = int(route.get("line_start") or 0)
+        for item in candidate_hunks:
+            if str(item.get("file_path") or "") == file_path and int(item.get("line_start") or 0) == line_start:
+                return str(item.get("candidate_id") or "")
+        return ""
 
     def _format_repo_matches(self, repo_hits: dict[str, object]) -> str:
         matches = list(repo_hits.get("matches", []) or [])

@@ -789,6 +789,7 @@ body {
 .dialogue-structured-section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 6px;
   padding: 10px;
   border: 1px solid #e2e8f0;
@@ -807,15 +808,20 @@ body {
 .dialogue-structured-values {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 6px;
 }
 
 .dialogue-structured-item {
   position: relative;
+  min-width: 0;
+  white-space: normal;
   padding-left: 10px;
   color: #334155;
   font-size: 12px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .dialogue-structured-item::before {

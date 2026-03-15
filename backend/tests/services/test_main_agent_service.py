@@ -1,6 +1,7 @@
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.llm_chat_service import LLMTextResult
 from app.services.main_agent_service import MainAgentService
 from pathlib import Path
 
@@ -25,6 +26,28 @@ def test_main_agent_builds_related_file_chain_for_schedule_changes():
 
     assert "packages/lib/schedules/getScheduleListItemData.ts" in chain["related_files"]
     assert "packages/prisma/schema.prisma" in chain["related_files"]
+
+
+def test_main_agent_change_chain_filters_test_files_for_business_flow():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="mr/2",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/service.ts",
+            "apps/api/orders/__tests__/service.test.ts",
+            "packages/platform/types/order.output.ts",
+        ],
+    )
+
+    chain = agent.build_change_chain(subject)
+
+    assert "apps/api/orders/service.ts" in chain["related_files"]
+    assert "packages/platform/types/order.output.ts" in chain["related_files"]
+    assert all("__tests__" not in item for item in chain["related_files"])
 
 
 def test_main_agent_command_exposes_disallowed_inference():
@@ -61,6 +84,34 @@ def test_main_agent_command_exposes_disallowed_inference():
     assert "不要凭 import 猜测未完成需求" in command["disallowed_inference"]
     assert command["llm"]["mode"] == "template"
     assert "目标专家" in command["summary"]
+
+
+def test_main_agent_builds_intake_summary_with_business_files():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        title="Order API update",
+        mr_url="https://codehub.example/mr/1",
+        changed_files=[
+            "apps/api/orders/service.ts",
+            "apps/api/orders/__tests__/service.test.ts",
+            "packages/platform/types/order.output.ts",
+        ],
+        metadata={"platform_kind": "codehub", "compare_mode": "mr_compare", "remote_diff_fetched": True},
+    )
+
+    summary, metadata = agent.build_intake_summary(subject)
+
+    assert "当前识别到 3 个变更文件" in summary
+    assert metadata["platform_kind"] == "codehub"
+    assert metadata["business_changed_files"] == [
+        "apps/api/orders/service.ts",
+        "packages/platform/types/order.output.ts",
+    ]
 
 
 def test_main_agent_does_not_fallback_to_runtime_file_without_changed_files():
@@ -258,7 +309,11 @@ def test_main_agent_repository_context_includes_repo_search_hit_files(tmp_path: 
     source.parent.mkdir(parents=True)
     related.parent.mkdir(parents=True)
     source.write_text("export const getScheduleListItemData = () => updatedAt\n", encoding="utf-8")
-    related.write_text("const updatedAt = schedule.updatedAt\n", encoding="utf-8")
+    related.write_text(
+        "import { getScheduleListItemData } from '@/packages/lib/schedules/getScheduleListItemData'\n"
+        "export const mapOutput = () => getScheduleListItemData()\n",
+        encoding="utf-8",
+    )
 
     agent = MainAgentService()
     subject = ReviewSubject(
@@ -553,3 +608,132 @@ def test_main_agent_treats_import_change_with_context_lines_as_import_only():
 
     assert command["routeable"] is False
     assert "import" in command["skip_reason"]
+
+
+def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/order.service.ts",
+            "packages/platform/types/order.output.ts",
+        ],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -10,3 +10,5 @@ export async function createOrder(payload) {\n"
+            "+  return mapOrderOutput(payload)\n"
+            " }\n"
+            "diff --git a/packages/platform/types/order.output.ts b/packages/platform/types/order.output.ts\n"
+            "--- a/packages/platform/types/order.output.ts\n"
+            "+++ b/packages/platform/types/order.output.ts\n"
+            "@@ -1,2 +1,4 @@ export type OrderOutput = {\n"
+            "+  createdAt?: string;\n"
+            "+  updatedAt?: string;\n"
+            " }\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            activation_hints=["output", "service", "transformer"],
+            required_checks=["跨文件一致性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="architecture_design",
+            name="Architecture",
+            name_zh="架构与设计专家",
+            role="architecture",
+            enabled=True,
+            focus_areas=["模块边界"],
+            activation_hints=["module", "service"],
+            system_prompt="prompt",
+        ),
+    ]
+
+    def fake_complete_text(**_: object) -> LLMTextResult:
+        return LLMTextResult(
+            text=(
+                '{"expert_routes":['
+                '{"expert_id":"correctness_business","candidate_id":"packages/platform/types/order.output.ts:1:1","routeable":true,"reason":"字段契约变化更适合正确性专家","confidence":0.94},'
+                '{"expert_id":"architecture_design","candidate_id":"apps/api/orders/order.service.ts:10:1","routeable":true,"reason":"服务层接口编排适合架构专家","confidence":0.79}'
+                '],"skipped_experts":[]}'
+            ),
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    plan = agent.build_routing_plan(subject, experts, RuntimeSettings(allow_llm_fallback=True))
+
+    assert plan["correctness_business"]["routing_source"] == "llm"
+    assert plan["correctness_business"]["file_path"] == "packages/platform/types/order.output.ts"
+    assert "字段契约变化" in plan["correctness_business"]["routing_reason"]
+    assert plan["architecture_design"]["file_path"] == "apps/api/orders/order.service.ts"
+
+
+def test_main_agent_command_accepts_route_hint_with_full_business_files():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/order.service.ts",
+            "apps/api/orders/__tests__/order.service.test.ts",
+            "packages/platform/types/order.output.ts",
+        ],
+        unified_diff="",
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(
+        subject,
+        expert,
+        RuntimeSettings(allow_llm_fallback=True),
+        route_hint={
+            "file_path": "packages/platform/types/order.output.ts",
+            "line_start": 1,
+            "target_hunk": {
+                "file_path": "packages/platform/types/order.output.ts",
+                "hunk_header": "@@ -1,2 +1,4 @@",
+                "excerpt": "+ createdAt?: string",
+            },
+            "repo_hits": {},
+            "routeable": True,
+            "routing_reason": "字段契约变更",
+            "confidence": 0.88,
+        },
+    )
+
+    assert command["file_path"] == "packages/platform/types/order.output.ts"
+    assert command["related_files"] == [
+        "packages/platform/types/order.output.ts",
+        "apps/api/orders/order.service.ts",
+    ]
+    assert command["routing_reason"] == "字段契约变更"

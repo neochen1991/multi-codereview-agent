@@ -18,6 +18,18 @@ def test_review_runner_emits_finding_created_event(storage_root: Path):
     assert any(event.event_type == "finding_created" for event in events)
 
 
+def test_review_runner_emits_main_agent_intake_message(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    runner.run_once(review_id)
+
+    messages = runner.message_repo.list(review_id)
+
+    intake = next(item for item in messages if item.message_type == "main_agent_intake")
+    assert intake.expert_id == "main_agent"
+    assert "changed_files" in intake.metadata
+
+
 def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     parsed = runner._parse_expert_analysis(
@@ -325,7 +337,7 @@ def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_co
                 "design_alignment_status": "partially_aligned",
             }
         ],
-        repository_context={"summary": "目标分支中存在 order controller 和 dto 实现。"},
+        repository_context={"summary": "目标分支中存在 order controller 和 dto 实现。", "routing_reason": "字段契约变化更适合正确性专家"},
         target_hunk={"hunk_header": "@@ -8,6 +8,8 @@", "excerpt": "+ return client.post('/api/orders', payload);"},
         bound_documents=[],
         disallowed_inference=["证据不足时不要假定接口已经完全打通"],
@@ -340,6 +352,7 @@ def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_co
     assert "本次审核绑定的详细设计文档" in prompt
     assert "订单创建详细设计" in prompt
     assert "POST /api/orders" in prompt
+    assert "主Agent派工理由" in prompt
 
 
 def test_review_runner_extract_design_alignment_returns_tool_payload(storage_root: Path):
