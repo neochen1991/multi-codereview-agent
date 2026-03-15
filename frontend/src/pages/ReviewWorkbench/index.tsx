@@ -6,6 +6,7 @@ import ArtifactSummaryPanel from "@/components/review/ArtifactSummaryPanel";
 import CodeReviewConclusionPanel from "@/components/review/CodeReviewConclusionPanel";
 import DiffPreviewPanel from "@/components/review/DiffPreviewPanel";
 import EventTimeline from "@/components/review/EventTimeline";
+import ExpertLaneBoard from "@/components/review/ExpertLaneBoard";
 import FindingsPanel from "@/components/review/FindingsPanel";
 import HumanGatePanel from "@/components/review/HumanGatePanel";
 import IssueDetailPanel from "@/components/review/IssueDetailPanel";
@@ -191,6 +192,18 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [selectedIssueId, setSelectedIssueId] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
+  const [findingsActiveGroup, setFindingsActiveGroup] = useState<
+    | "all"
+    | "blocking"
+    | "should_fix"
+    | "non_blocking"
+    | "verified"
+    | "design_misaligned"
+    | "direct_defect"
+    | "risk_hypothesis"
+    | "test_gap"
+    | "design_concern"
+  >("all");
   const [decisionComment, setDecisionComment] = useState("");
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -199,6 +212,11 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [findingModalOpen, setFindingModalOpen] = useState(false);
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
+  const processDialogueRef = useRef<HTMLDivElement | null>(null);
+  const processIssuesRef = useRef<HTMLDivElement | null>(null);
+  const resultSummaryRef = useRef<HTMLDivElement | null>(null);
+  const resultHumanRef = useRef<HTMLDivElement | null>(null);
+  const resultFindingsRef = useRef<HTMLDivElement | null>(null);
   const isReadonlyOverview = Boolean(reviewId);
 
   const loadReviewBundle = async (targetReviewId: string) => {
@@ -514,6 +532,46 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   const currentStatus = review?.status || "idle";
+  const scrollToRef = (target: React.RefObject<HTMLDivElement | null>) => {
+    window.setTimeout(() => {
+      target.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  };
+  const focusProcess = () => setActiveStep("process");
+  const focusProcessDialogue = () => {
+    setActiveStep("process");
+    scrollToRef(processDialogueRef);
+  };
+  const focusProcessIssues = () => {
+    setActiveStep("process");
+    scrollToRef(processIssuesRef);
+  };
+  const focusResultGroup = (
+    group:
+      | "all"
+      | "blocking"
+      | "should_fix"
+      | "non_blocking"
+      | "verified"
+      | "design_misaligned"
+      | "direct_defect"
+      | "risk_hypothesis"
+      | "test_gap"
+      | "design_concern",
+  ) => {
+    setFindingsActiveGroup(group);
+    setActiveStep("result");
+    scrollToRef(resultFindingsRef);
+  };
+  const focusResultSummary = () => {
+    setActiveStep("result");
+    scrollToRef(resultSummaryRef);
+  };
+  const focusResultHuman = () => {
+    setFindingsActiveGroup("blocking");
+    setActiveStep("result");
+    scrollToRef(resultHumanRef);
+  };
 
   return (
     <div className="review-workbench-page">
@@ -575,6 +633,12 @@ const ReviewWorkbenchPage: React.FC = () => {
           findingCount={findings.length}
           issueCount={issues.length}
           humanGateCount={review?.pending_human_issue_ids?.length || 0}
+          onStatusClick={focusProcessDialogue}
+          onPhaseClick={focusProcessDialogue}
+          onExpertClick={focusProcessDialogue}
+          onFindingClick={() => focusResultGroup("all")}
+          onIssueClick={focusProcessIssues}
+          onHumanGateClick={focusResultHuman}
         />
       </div>
 
@@ -610,24 +674,29 @@ const ReviewWorkbenchPage: React.FC = () => {
             <Col xs={24} xl={17}>
               <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-main-stack">
                 <ExpertRoutingPanel summary={expertRoutingSummary} />
-                <Card className="module-card process-dialogue-card" title="专家对话流">
-                  {reviewId ? (
-                    <ReviewDialogueStream messages={allMessages} review={review} events={events} />
-                  ) : (
-                    <Empty description="请先在“概览与启动”创建一个审核任务。" />
-                  )}
-                </Card>
+                <div ref={processDialogueRef}>
+                  <Card className="module-card process-dialogue-card" title="专家对话流">
+                    {reviewId ? (
+                      <ReviewDialogueStream messages={allMessages} review={review} events={events} />
+                    ) : (
+                      <Empty description="请先在“概览与启动”创建一个审核任务。" />
+                    )}
+                  </Card>
+                </div>
+                <ExpertLaneBoard review={review} messages={allMessages} />
                 <DiffPreviewPanel diff={review?.subject?.unified_diff || ""} />
                 <ReplayConsolePanel replay={replay} />
               </Space>
             </Col>
             <Col xs={24} xl={7}>
               <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-sidebar-stack">
-                <IssueThreadList
-                  issues={issues}
-                  selectedIssueId={selectedIssueId}
-                  onSelect={setSelectedIssueId}
-                />
+                <div ref={processIssuesRef}>
+                  <IssueThreadList
+                    issues={issues}
+                    selectedIssueId={selectedIssueId}
+                    onSelect={setSelectedIssueId}
+                  />
+                </div>
                 <IssueDetailPanel issue={selectedIssue} />
                 <ToolAuditPanel issue={selectedIssue} />
                 <KnowledgeRefPanel documents={knowledgeDocs} loading={knowledgeLoading} />
@@ -641,69 +710,83 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             <Row gutter={[16, 16]} align="stretch">
               <Col xs={24} xl={15}>
-                <ReportSummaryPanel className="result-top-card" report={report} findings={findings} issues={issues} />
+                <div ref={resultSummaryRef}>
+                  <ReportSummaryPanel
+                    className="result-top-card"
+                    report={report}
+                    findings={findings}
+                    issues={issues}
+                    onNavigateToGroup={focusResultGroup}
+                  />
+                </div>
               </Col>
               <Col xs={24} xl={9}>
-                <HumanGatePanel
-                  className="result-top-card"
-                  review={review}
-                  selectedIssue={activeHumanIssue}
-                  isFallbackIssue={humanGateUsingFallbackIssue}
-                  decisionComment={decisionComment}
-                  submitting={submittingDecision}
-                  onDecisionCommentChange={setDecisionComment}
-                  onApprove={async () => {
-                    const targetIssue = activeHumanIssue;
-                    if (!reviewId || !targetIssue) return;
-                    setSubmittingDecision(true);
-                    try {
-                      await reviewApi.submitHumanDecision(reviewId, {
-                        issue_id: targetIssue.issue_id,
-                        decision: "approved",
-                        comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
-                      });
-                      await loadReviewBundle(reviewId);
-                      setDecisionComment("");
-                      message.success("已记录人工批准结论");
-                    } catch (error: any) {
-                      message.error(error?.message || "提交人工结论失败");
-                    } finally {
-                      setSubmittingDecision(false);
-                    }
-                  }}
-                  onReject={async () => {
-                    const targetIssue = activeHumanIssue;
-                    if (!reviewId || !targetIssue) return;
-                    setSubmittingDecision(true);
-                    try {
-                      await reviewApi.submitHumanDecision(reviewId, {
-                        issue_id: targetIssue.issue_id,
-                        decision: "rejected",
-                        comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
-                      });
-                      await loadReviewBundle(reviewId);
-                      setDecisionComment("");
-                      message.success("已记录人工驳回结论");
-                    } catch (error: any) {
-                      message.error(error?.message || "提交人工结论失败");
-                    } finally {
-                      setSubmittingDecision(false);
-                    }
-                  }}
-                />
+                <div ref={resultHumanRef}>
+                  <HumanGatePanel
+                    className="result-top-card"
+                    review={review}
+                    selectedIssue={activeHumanIssue}
+                    isFallbackIssue={humanGateUsingFallbackIssue}
+                    decisionComment={decisionComment}
+                    submitting={submittingDecision}
+                    onDecisionCommentChange={setDecisionComment}
+                    onApprove={async () => {
+                      const targetIssue = activeHumanIssue;
+                      if (!reviewId || !targetIssue) return;
+                      setSubmittingDecision(true);
+                      try {
+                        await reviewApi.submitHumanDecision(reviewId, {
+                          issue_id: targetIssue.issue_id,
+                          decision: "approved",
+                          comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
+                        });
+                        await loadReviewBundle(reviewId);
+                        setDecisionComment("");
+                        message.success("已记录人工批准结论");
+                      } catch (error: any) {
+                        message.error(error?.message || "提交人工结论失败");
+                      } finally {
+                        setSubmittingDecision(false);
+                      }
+                    }}
+                    onReject={async () => {
+                      const targetIssue = activeHumanIssue;
+                      if (!reviewId || !targetIssue) return;
+                      setSubmittingDecision(true);
+                      try {
+                        await reviewApi.submitHumanDecision(reviewId, {
+                          issue_id: targetIssue.issue_id,
+                          decision: "rejected",
+                          comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
+                        });
+                        await loadReviewBundle(reviewId);
+                        setDecisionComment("");
+                        message.success("已记录人工驳回结论");
+                      } catch (error: any) {
+                        message.error(error?.message || "提交人工结论失败");
+                      } finally {
+                        setSubmittingDecision(false);
+                      }
+                    }}
+                  />
+                </div>
               </Col>
             </Row>
-            <FindingsPanel
-              findings={findings}
-              issues={issues}
-              selectedFindingId={selectedFindingId}
-              onSelectFinding={(findingId) => {
-                setSelectedFindingId(findingId);
-                const issue = issueByFindingId.get(findingId);
-                if (issue) setSelectedIssueId(issue.issue_id);
-                setFindingModalOpen(true);
-              }}
-            />
+            <div ref={resultFindingsRef}>
+              <FindingsPanel
+                findings={findings}
+                issues={issues}
+                selectedFindingId={selectedFindingId}
+                activeGroup={findingsActiveGroup}
+                onGroupChange={setFindingsActiveGroup}
+                onSelectFinding={(findingId) => {
+                  setSelectedFindingId(findingId);
+                  const issue = issueByFindingId.get(findingId);
+                  if (issue) setSelectedIssueId(issue.issue_id);
+                  setFindingModalOpen(true);
+                }}
+              />
+            </div>
             <ReviewSubjectPanel review={review} />
             <ArtifactSummaryPanel artifacts={artifacts} />
             <Modal

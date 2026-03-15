@@ -10,6 +10,19 @@ type ReportSummaryPanelProps = {
   findings: ReviewFinding[];
   issues: DebateIssue[];
   className?: string;
+  onNavigateToGroup?: (
+    group:
+      | "all"
+      | "blocking"
+      | "should_fix"
+      | "non_blocking"
+      | "verified"
+      | "design_misaligned"
+      | "direct_defect"
+      | "risk_hypothesis"
+      | "test_gap"
+      | "design_concern",
+  ) => void;
 };
 
 const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]): string => {
@@ -130,7 +143,17 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
 };
 
 // 报告摘要卡负责展示最终 verdict、统计指标和导出入口。
-const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className }) => {
+const clickableStatistic = (
+  title: string,
+  value: number,
+  onClick?: () => void,
+) => (
+  <button type="button" className={`summary-stat-button ${onClick ? "summary-stat-button-clickable" : ""}`} onClick={onClick}>
+    <Statistic title={title} value={value} />
+  </button>
+);
+
+const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className, onNavigateToGroup }) => {
   const totalCount = findings.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
   const criticalCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
@@ -184,16 +207,20 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          <Statistic title="总问题数" value={totalCount} />
+          {clickableStatistic("总问题数", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="高风险问题" value={criticalCount} />
+          {clickableStatistic("高风险问题", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="待人工裁决" value={report?.confidence_summary.needs_human_count || 0} />
+          {clickableStatistic(
+            "待人工裁决",
+            report?.confidence_summary.needs_human_count || 0,
+            onNavigateToGroup ? () => onNavigateToGroup("blocking") : undefined,
+          )}
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="已核验问题" value={verifiedFindingCount} />
+          {clickableStatistic("已核验问题", verifiedFindingCount, onNavigateToGroup ? () => onNavigateToGroup("verified") : undefined)}
         </Col>
       </Row>
       <Space wrap style={{ marginTop: 16 }}>

@@ -7,7 +7,31 @@ type FindingsPanelProps = {
   findings: ReviewFinding[];
   issues: DebateIssue[];
   selectedFindingId?: string;
+  activeGroup?:
+    | "all"
+    | "blocking"
+    | "should_fix"
+    | "non_blocking"
+    | "verified"
+    | "design_misaligned"
+    | "direct_defect"
+    | "risk_hypothesis"
+    | "test_gap"
+    | "design_concern";
   onSelectFinding?: (findingId: string) => void;
+  onGroupChange?: (
+    group:
+      | "all"
+      | "blocking"
+      | "should_fix"
+      | "non_blocking"
+      | "verified"
+      | "design_misaligned"
+      | "direct_defect"
+      | "risk_hypothesis"
+      | "test_gap"
+      | "design_concern",
+  ) => void;
 };
 
 const findingTypeMeta = (value: string): { label: string; color: string } => {
@@ -81,11 +105,13 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   findings,
   issues,
   selectedFindingId,
+  activeGroup: activeGroupProp,
   onSelectFinding,
+  onGroupChange,
 }) => {
   // 结果页的问题清单承担“正式报告索引”的职责：
   // 顶部筛选负责切换问题集合，表格负责让用户快速定位到具体 finding。
-  const [activeGroup, setActiveGroup] = useState<
+  const [internalActiveGroup, setInternalActiveGroup] = useState<
     | "all"
     | "blocking"
     | "should_fix"
@@ -97,6 +123,25 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     | "test_gap"
     | "design_concern"
   >("all");
+  const activeGroup = activeGroupProp || internalActiveGroup;
+  const setActiveGroup = (
+    group:
+      | "all"
+      | "blocking"
+      | "should_fix"
+      | "non_blocking"
+      | "verified"
+      | "design_misaligned"
+      | "direct_defect"
+      | "risk_hypothesis"
+      | "test_gap"
+      | "design_concern",
+  ) => {
+    if (activeGroupProp == null) {
+      setInternalActiveGroup(group);
+    }
+    onGroupChange?.(group);
+  };
   const issueByFindingId = new Map<string, DebateIssue>();
   for (const issue of issues) {
     for (const findingId of issue.finding_ids) {

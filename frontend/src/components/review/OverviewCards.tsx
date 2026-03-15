@@ -8,6 +8,12 @@ type OverviewCardsProps = {
   findingCount: number;
   issueCount: number;
   humanGateCount: number;
+  onStatusClick?: () => void;
+  onPhaseClick?: () => void;
+  onExpertClick?: () => void;
+  onFindingClick?: () => void;
+  onIssueClick?: () => void;
+  onHumanGateClick?: () => void;
 };
 
 // 顶部概览卡把当前审核最核心的状态指标浓缩展示。
@@ -18,6 +24,12 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
   findingCount,
   issueCount,
   humanGateCount,
+  onStatusClick,
+  onPhaseClick,
+  onExpertClick,
+  onFindingClick,
+  onIssueClick,
+  onHumanGateClick,
 }) => {
   const statusLabel =
     status === "idle" ? "未开始" : status === "waiting_human" ? "待人工确认" : status;
@@ -27,34 +39,46 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
   return (
     <Row gutter={[16, 16]}>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="状态" value={statusLabel} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onStatusClick ? "overview-stat-button-clickable" : ""}`} onClick={onStatusClick}>
+          <Card className="module-card">
+            <Statistic title="状态" value={statusLabel} />
+          </Card>
+        </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="当前阶段" value={phaseLabel} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onPhaseClick ? "overview-stat-button-clickable" : ""}`} onClick={onPhaseClick}>
+          <Card className="module-card">
+            <Statistic title="当前阶段" value={phaseLabel} />
+          </Card>
+        </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="已启用专家" value={expertCount} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onExpertClick ? "overview-stat-button-clickable" : ""}`} onClick={onExpertClick}>
+          <Card className="module-card">
+            <Statistic title="已启用专家" value={expertCount} />
+          </Card>
+        </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="审核发现" value={findingCount} suffix={<Tag color="processing">evidence-first</Tag>} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onFindingClick ? "overview-stat-button-clickable" : ""}`} onClick={onFindingClick}>
+          <Card className="module-card">
+            <Statistic title="审核发现" value={findingCount} suffix={<Tag color="processing">evidence-first</Tag>} />
+          </Card>
+        </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="争议议题" value={issueCount} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onIssueClick ? "overview-stat-button-clickable" : ""}`} onClick={onIssueClick}>
+          <Card className="module-card">
+            <Statistic title="争议议题" value={issueCount} />
+          </Card>
+        </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
-        <Card className="module-card">
-          <Statistic title="待人工确认" value={humanGateCount} suffix={<Tag color={humanGateCount > 0 ? "error" : "success"}>{humanGateCount > 0 ? "gate" : "clear"}</Tag>} />
-        </Card>
+        <button type="button" className={`overview-stat-button ${onHumanGateClick ? "overview-stat-button-clickable" : ""}`} onClick={onHumanGateClick}>
+          <Card className="module-card">
+            <Statistic title="待人工确认" value={humanGateCount} suffix={<Tag color={humanGateCount > 0 ? "error" : "success"}>{humanGateCount > 0 ? "gate" : "clear"}</Tag>} />
+          </Card>
+        </button>
       </Col>
     </Row>
   );

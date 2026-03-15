@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Avatar, Button, Empty, Tag, Typography } from "antd";
+import { Avatar, Button, Empty, Segmented, Select, Space, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services/api";
 
@@ -11,7 +11,8 @@ export type ReviewDialogueViewMessage = {
   agentName: string;
   side: "agent" | "system";
   isMainAgent?: boolean;
-  messageKind: "chat" | "tool" | "command" | "status";
+  messageKind: "chat" | "tool" | "skill" | "command" | "status";
+  categories: Array<"chat" | "tool" | "skill" | "command" | "status">;
   phase: string;
   eventType: string;
   status: "streaming" | "done" | "error";
@@ -62,10 +63,16 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   // 这样主 Agent、专家、Judge、工具调用都能复用同一种渲染壳。
   const metadata = message.metadata || {};
   const eventType = message.message_type;
+  const activeSkills = Array.isArray(metadata.active_skills)
+    ? metadata.active_skills.map((item) => String(item)).filter(Boolean)
+    : [];
   let messageKind: ReviewDialogueViewMessage["messageKind"] = "chat";
   if (eventType === "main_agent_command") messageKind = "command";
   if (eventType === "judge_summary" || eventType === "main_agent_summary") messageKind = "status";
-  if (eventType === "expert_tool_call" || eventType === "expert_skill_call" || String(metadata.tool_name || "")) messageKind = "tool";
+  if (eventType === "expert_skill_call") messageKind = "skill";
+  if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
+  const categorySet = new Set<ReviewDialogueViewMessage["categories"][number]>([messageKind]);
+  if (activeSkills.length > 0) categorySet.add("skill");
   const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
   const lineStart = typeof metadata.line_start === "number" ? metadata.line_start : 0;
   const targetExpertId = typeof metadata.target_expert_id === "string" ? metadata.target_expert_id : "";
@@ -96,6 +103,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   } else if (eventType === "main_agent_summary") {
     summaryParts.push("主Agent 已输出最终收敛播报");
   }
+  if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
   if (filePath) summaryParts.push(`定位：${filePath}${lineStart ? `:${lineStart}` : ""}`);
   if (hunkHeader) summaryParts.push(`Hunk：${hunkHeader}`);
@@ -109,6 +117,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     side: message.expert_id === "main_agent" || message.expert_id === "judge" ? "system" : "agent",
     isMainAgent: message.expert_id === "main_agent",
     messageKind,
+    categories: Array.from(categorySet),
     phase: String(metadata.phase || (message.expert_id === "judge" ? "judge" : "review")),
     eventType,
     status: messageStatus,
@@ -194,6 +203,7 @@ const buildLiveWaitingRow = (
     side: "system",
     isMainAgent: false,
     messageKind: "status",
+    categories: ["status"],
     phase,
     eventType: "system_waiting",
     status: "streaming",
@@ -210,6 +220,8 @@ const buildLiveWaitingRow = (
 const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }) => {
   // 过程页本质上是 replay/messages 的可视化回放器。
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const [categoryFilter, setCategoryFilter] = useState<"all" | "command" | "chat" | "tool" | "skill" | "status">("all");
+  const [expertFilter, setExpertFilter] = useState<string>("all");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo(
     () =>
@@ -221,20 +233,77 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
   );
   const liveWaitingRow = useMemo(() => buildLiveWaitingRow(review, events), [events, review]);
   const displayRows = rows.length === 0 && liveWaitingRow ? [liveWaitingRow] : rows;
+  const expertOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    displayRows.forEach((row) => {
+      if (!map.has(row.agentName)) {
+        map.set(
+          row.agentName,
+          row.agentName === "main_agent" ? "主Agent" : row.agentName === "judge" ? "Judge" : row.agentName,
+        );
+      }
+    });
+    return [
+      { label: "全部角色", value: "all" },
+      { label: "系统消息", value: "system" },
+      ...Array.from(map.entries()).map(([value, label]) => ({ label, value })),
+    ];
+  }, [displayRows]);
+  const filteredRows = useMemo(
+    () =>
+      displayRows.filter((row) => {
+        const categoryMatched = categoryFilter === "all" || row.categories.includes(categoryFilter);
+        const expertMatched =
+          expertFilter === "all"
+            ? true
+            : expertFilter === "system"
+              ? row.side === "system"
+              : row.agentName === expertFilter;
+        return categoryMatched && expertMatched;
+      }),
+    [categoryFilter, displayRows, expertFilter],
+  );
 
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-  }, [displayRows.length]);
+  }, [filteredRows.length]);
 
   if (displayRows.length === 0) {
     return <Empty description="暂无专家对话流。" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
 
   return (
-    <div ref={scrollRef} className="dialogue-stream dialogue-stream-scroll discord-thread">
-      {displayRows.map((row) => {
+    <div className="dialogue-stream-shell">
+      <div className="dialogue-toolbar">
+        <Space size={12} wrap className="dialogue-toolbar-group">
+          <Segmented
+            value={categoryFilter}
+            onChange={(value) => setCategoryFilter(value as typeof categoryFilter)}
+            options={[
+              { label: "全部", value: "all" },
+              { label: "命令", value: "command" },
+              { label: "对话", value: "chat" },
+              { label: "工具调用", value: "tool" },
+              { label: "技能", value: "skill" },
+              { label: "状态", value: "status" },
+            ]}
+          />
+          <Select
+            value={expertFilter}
+            onChange={setExpertFilter}
+            options={expertOptions}
+            className="dialogue-expert-filter"
+            popupMatchSelectWidth={false}
+          />
+        </Space>
+      </div>
+      <div ref={scrollRef} className="dialogue-stream dialogue-stream-scroll discord-thread">
+        {filteredRows.length === 0 ? (
+          <Empty description="当前筛选条件下暂无对话记录。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : null}
+        {filteredRows.map((row) => {
         const compact = buildCompactDetail(row.detail);
         const isExpanded = Boolean(expandedIds[row.id]);
         const filePath = typeof row.metadata.file_path === "string" ? row.metadata.file_path : "";
@@ -290,14 +359,22 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 {row.isMainAgent ? <Tag className="dialogue-main-badge">主Agent</Tag> : null}
                 <Text className="dialogue-time">{row.timeText}</Text>
                 <Tag className={`dialogue-kind-tag dialogue-kind-tag-${row.messageKind}`}>
-                  {row.messageKind === "command" ? "派工" : row.messageKind === "status" ? "收敛" : row.messageKind === "tool" ? "工具" : "对话"}
+                  {row.messageKind === "command"
+                    ? "命令"
+                    : row.messageKind === "status"
+                      ? "状态"
+                      : row.messageKind === "tool"
+                        ? "工具调用"
+                        : row.messageKind === "skill"
+                          ? "技能"
+                          : "对话"}
                 </Tag>
                 {row.headerNote ? <Tag className="dialogue-tag dialogue-tag-focus">{row.headerNote}</Tag> : null}
                 <Tag className="dialogue-tag">{row.eventType}</Tag>
                 {targetExpertId ? <Tag className="dialogue-tag dialogue-tag-target">{`to ${targetExpertName || targetExpertId}`}</Tag> : null}
                 {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`reply ${replyToExpertId}`}</Tag> : null}
                 {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${toolName}`}</Tag> : null}
-                {skillName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${skillName}`}</Tag> : null}
+                {skillName ? <Tag className="dialogue-tag dialogue-tag-skill">{`skill ${skillName}`}</Tag> : null}
                 {filePath ? <Tag className="dialogue-tag">{filePath}</Tag> : null}
                 {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
                 {hunkHeader ? <Tag className="dialogue-tag">{hunkHeader}</Tag> : null}
@@ -345,6 +422,11 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                   ))}
                 </div>
               ) : null}
+              {activeSkills.length ? (
+                <Paragraph className="dialogue-skill-summary">
+                  {`本轮已激活 ${activeSkills.length} 个技能，会据此自动展开工具调用并约束专家输出。`}
+                </Paragraph>
+              ) : null}
               {designAlignmentStatus ? (
                 <div className="dialogue-rule-strip">
                   <Tag color="gold">{getDesignAlignmentLabel(designAlignmentStatus)}</Tag>
@@ -378,7 +460,8 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
             </div>
           </div>
         );
-      })}
+        })}
+      </div>
     </div>
   );
 };
