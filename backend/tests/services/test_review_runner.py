@@ -30,6 +30,22 @@ def test_review_runner_emits_main_agent_intake_message(storage_root: Path):
     assert "changed_files" in intake.metadata
 
 
+def test_review_runner_emits_main_agent_intake_before_routing_plan(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    original_build_routing_plan = runner.main_agent_service.build_routing_plan
+
+    def _assert_intake_written_first(subject, experts, runtime_settings):
+        messages = runner.message_repo.list(review_id)
+        intake_messages = [item for item in messages if item.message_type == "main_agent_intake"]
+        assert intake_messages, "main_agent_intake 应该在路由规划前就已写入"
+        return original_build_routing_plan(subject, experts, runtime_settings)
+
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_intake_written_first)
+
+    runner.run_once(review_id)
+
+
 def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     parsed = runner._parse_expert_analysis(

@@ -182,11 +182,6 @@ class ReviewRunner:
         effective_experts: list[dict[str, object]] = []
         system_added_experts: list[dict[str, object]] = []
         intake_summary, intake_metadata = self.main_agent_service.build_intake_summary(review.subject)
-        routing_plan = self.main_agent_service.build_routing_plan(
-            review.subject,
-            experts,
-            effective_runtime_settings,
-        )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review_id,
@@ -208,6 +203,11 @@ class ReviewRunner:
                 message="主Agent 已播报本次审核输入信息",
                 payload=intake_metadata,
             )
+        )
+        routing_plan = self.main_agent_service.build_routing_plan(
+            review.subject,
+            experts,
+            effective_runtime_settings,
         )
         for expert in experts:
             command = self.main_agent_service.build_command(
