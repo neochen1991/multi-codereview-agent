@@ -64,6 +64,19 @@ const buildRecommendedAction = (issue: DebateIssue | undefined, finding: ReviewF
   return "补充证据后再裁决";
 };
 
+const hasDesignMisalignment = (finding: ReviewFinding): boolean =>
+  ["misaligned", "partially_aligned"].includes(String(finding.design_alignment_status || "").trim()) ||
+  (finding.missing_design_points?.length || 0) > 0 ||
+  (finding.design_conflicts?.length || 0) > 0;
+
+const getDesignAlignmentLabel = (value: string): string => {
+  if (value === "misaligned") return "设计不一致";
+  if (value === "partially_aligned") return "部分偏离设计";
+  if (value === "aligned") return "符合设计";
+  if (value === "insufficient_design_context") return "设计上下文不足";
+  return "设计待核对";
+};
+
 const FindingsPanel: React.FC<FindingsPanelProps> = ({
   findings,
   issues,
@@ -73,7 +86,16 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   // 结果页的问题清单承担“正式报告索引”的职责：
   // 顶部筛选负责切换问题集合，表格负责让用户快速定位到具体 finding。
   const [activeGroup, setActiveGroup] = useState<
-    "all" | "blocking" | "should_fix" | "non_blocking" | "verified" | "direct_defect" | "risk_hypothesis" | "test_gap" | "design_concern"
+    | "all"
+    | "blocking"
+    | "should_fix"
+    | "non_blocking"
+    | "verified"
+    | "design_misaligned"
+    | "direct_defect"
+    | "risk_hypothesis"
+    | "test_gap"
+    | "design_concern"
   >("all");
   const issueByFindingId = new Map<string, DebateIssue>();
   for (const issue of issues) {
@@ -109,6 +131,9 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     if (activeGroup === "verified") {
       return rows.filter((item) => item.verified);
     }
+    if (activeGroup === "design_misaligned") {
+      return rows.filter((item) => hasDesignMisalignment(item));
+    }
     if (["direct_defect", "risk_hypothesis", "test_gap", "design_concern"].includes(activeGroup)) {
       return rows.filter((item) => item.finding_type === activeGroup);
     }
@@ -119,6 +144,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   const shouldFixCount = rows.filter((item) => item.mergeImpact === "Should fix before merge").length;
   const nonBlockingCount = rows.filter((item) => item.mergeImpact === "Non-blocking").length;
   const verifiedCount = rows.filter((item) => item.verified).length;
+  const designMisalignedCount = rows.filter((item) => hasDesignMisalignment(item)).length;
   const directDefectCount = rows.filter((item) => item.finding_type === "direct_defect").length;
   const riskHypothesisCount = rows.filter((item) => item.finding_type === "risk_hypothesis").length;
   const testGapCount = rows.filter((item) => item.finding_type === "test_gap").length;
@@ -235,6 +261,19 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
         item.verified ? <Tag color="success">已核验</Tag> : <Tag>未核验</Tag>,
     },
     {
+      title: "设计一致性",
+      key: "design_alignment_status",
+      width: 150,
+      render: (_: unknown, item: StructuredFindingRow) =>
+        hasDesignMisalignment(item) ? (
+          <Tag color="magenta">{getDesignAlignmentLabel(item.design_alignment_status || "")}</Tag>
+        ) : item.design_alignment_status ? (
+          <Tag color="success">{getDesignAlignmentLabel(item.design_alignment_status || "")}</Tag>
+        ) : (
+          <span style={{ color: "var(--text-tertiary)" }}>-</span>
+        ),
+    },
+    {
       title: "推荐动作",
       dataIndex: "recommendedAction",
       key: "recommendedAction",
@@ -293,6 +332,12 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
         </Button>
         <Button type={activeGroup === "verified" ? "primary" : "default"} onClick={() => setActiveGroup("verified")}>
           已核验 {verifiedCount}
+        </Button>
+        <Button
+          type={activeGroup === "design_misaligned" ? "primary" : "default"}
+          onClick={() => setActiveGroup("design_misaligned")}
+        >
+          设计不一致 {designMisalignedCount}
         </Button>
         <Button type={activeGroup === "direct_defect" ? "primary" : "default"} onClick={() => setActiveGroup("direct_defect")}>
           直接缺陷 {directDefectCount}

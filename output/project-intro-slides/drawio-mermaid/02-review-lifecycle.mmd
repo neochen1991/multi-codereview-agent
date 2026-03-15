@@ -1,0 +1,8 @@
+flowchart LR
+  A["输入 PR + 模式 + 专家 + design spec"] --> B["拉取真实 patch 与 changed_files"]
+  B --> C["主 Agent 按 hunk / symbol 派工"]
+  C --> D["专家激活 skill"]
+  D --> E["展开 tools 并读取 repo context"]
+  E --> F["生成 finding"]
+  F --> G["judge 合并 issue"]
+  G --> H["human gate / 结果页"]

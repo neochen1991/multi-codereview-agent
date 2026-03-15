@@ -37,13 +37,17 @@ const docTypeLabelMap: Record<string, string> = {
 
 const formatDocTypeLabel = (value?: string) => docTypeLabelMap[String(value || "reference")] || String(value || "reference");
 
-const getRuntimeToolBindings = (expert: ExpertProfile): string[] => {
-  const runtimeBindings = Array.isArray(expert.runtime_tool_bindings) ? expert.runtime_tool_bindings : [];
-  if (runtimeBindings.length > 0) {
-    return runtimeBindings;
-  }
-  return Array.isArray(expert.skill_bindings) ? expert.skill_bindings : [];
-};
+const getRuntimeToolBindings = (expert: ExpertProfile): string[] =>
+  (Array.isArray(expert.runtime_tool_bindings) ? expert.runtime_tool_bindings : []).filter(Boolean);
+
+const getMergedSkillBindings = (expert: ExpertProfile): string[] =>
+  (Array.isArray(expert.skill_bindings) ? expert.skill_bindings : []).filter(Boolean);
+
+const getManualSkillBindings = (expert: ExpertProfile): string[] =>
+  (Array.isArray(expert.skill_bindings_manual) ? expert.skill_bindings_manual : []).filter(Boolean);
+
+const getExtensionSkillBindings = (expert: ExpertProfile): string[] =>
+  (Array.isArray(expert.skill_bindings_extension) ? expert.skill_bindings_extension : []).filter(Boolean);
 
 // 专家中心负责管理专家配置、核心规范和绑定文档，是审核能力治理的主入口。
 const ExpertsPage: React.FC = () => {
@@ -122,6 +126,10 @@ const ExpertsPage: React.FC = () => {
                   dataSource={allExperts}
                   renderItem={(item) => {
                     const expertDocs = documents[item.expert_id] || [];
+                    const runtimeTools = getRuntimeToolBindings(item);
+                    const manualSkills = getManualSkillBindings(item);
+                    const extensionSkills = getExtensionSkillBindings(item);
+                    const mergedSkills = getMergedSkillBindings(item);
 
                     return (
                       <List.Item>
@@ -147,6 +155,15 @@ const ExpertsPage: React.FC = () => {
                                 <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>{item.api_base_url}</div>
                               ) : null}
                               <div style={{ marginTop: 8, color: "var(--text-primary)" }}>
+                                Skill 绑定：{mergedSkills.length ? `${mergedSkills.length} 个` : "未绑定"}
+                              </div>
+                              <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
+                                Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
+                              </div>
+                              <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
+                                专家源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                              </div>
+                              <div style={{ marginTop: 8, color: "var(--text-primary)" }}>
                                 必查项：{item.required_checks.length ? item.required_checks.join(" / ") : "未配置"}
                               </div>
                               <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
@@ -166,9 +183,19 @@ const ExpertsPage: React.FC = () => {
                                     {tool}
                                   </Tag>
                                 ))}
-                                {getRuntimeToolBindings(item).map((tool) => (
+                                {runtimeTools.map((tool) => (
                                   <Tag key={`${item.expert_id}_${tool}`} color="gold">
                                     {tool}
+                                  </Tag>
+                                ))}
+                                {extensionSkills.map((skill) => (
+                                  <Tag key={`${item.expert_id}_${skill}_ext`} color="geekblue">
+                                    {`skill ${skill} · extension`}
+                                  </Tag>
+                                ))}
+                                {manualSkills.map((skill) => (
+                                  <Tag key={`${item.expert_id}_${skill}_manual`} color="default">
+                                    {`skill ${skill} · 源码`}
                                   </Tag>
                                 ))}
                                 {item.agent_bindings.map((tool) => (
@@ -191,7 +218,7 @@ const ExpertsPage: React.FC = () => {
                                 </Button>
                               </Space>
                               <div style={{ color: "var(--text-secondary)" }}>
-                                核心规范默认折叠，已绑定文档 {expertDocs.length} 篇。点击“展开文档详情”后查看具体内容。
+                                核心规范默认折叠，已绑定文档 {expertDocs.length} 篇。Skill 推荐通过 extension 目录配置；点击“展开文档详情”后查看具体内容。
                               </div>
                             </div>
                           }
@@ -336,6 +363,9 @@ const ExpertsPage: React.FC = () => {
                         dataSource={customExperts}
                         renderItem={(item) => {
                           const expertDocs = documents[item.expert_id] || [];
+                          const runtimeTools = getRuntimeToolBindings(item);
+                          const manualSkills = getManualSkillBindings(item);
+                          const extensionSkills = getExtensionSkillBindings(item);
                           return (
                             <List.Item>
                               <List.Item.Meta
@@ -350,15 +380,31 @@ const ExpertsPage: React.FC = () => {
                                 description={
                                   <div>
                                     <div>{`${item.role} · ${item.focus_areas.join(" / ")}`}</div>
+                                    <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
+                                      Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
+                                    </div>
+                                    <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
+                                      专家源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                                    </div>
                                     <div style={{ marginTop: 6 }}>
                                       {item.tool_bindings.map((tool) => (
                                         <Tag key={`${item.expert_id}_${tool}`} color="blue">
                                           {tool}
                                         </Tag>
                                       ))}
-                                      {getRuntimeToolBindings(item).map((tool) => (
+                                      {runtimeTools.map((tool) => (
                                         <Tag key={`${item.expert_id}_${tool}`} color="gold">
                                           {tool}
+                                        </Tag>
+                                      ))}
+                                      {extensionSkills.map((skill) => (
+                                        <Tag key={`${item.expert_id}_${skill}_ext`} color="geekblue">
+                                          {`skill ${skill} · extension`}
+                                        </Tag>
+                                      ))}
+                                      {manualSkills.map((skill) => (
+                                        <Tag key={`${item.expert_id}_${skill}_manual`} color="default">
+                                          {`skill ${skill} · 源码`}
                                         </Tag>
                                       ))}
                                     </div>

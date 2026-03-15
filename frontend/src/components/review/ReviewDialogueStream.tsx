@@ -42,6 +42,21 @@ const buildCompactDetail = (value: string): { text: string; truncated: boolean }
   return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
 };
 
+const getDesignAlignmentLabel = (status: string): string => {
+  switch (status) {
+    case "aligned":
+      return "设计一致";
+    case "partially_aligned":
+      return "部分符合设计";
+    case "misaligned":
+      return "与设计冲突";
+    case "insufficient_design_context":
+      return "设计上下文不足";
+    default:
+      return status;
+  }
+};
+
 const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => {
   // 把后端原始消息统一映射成聊天视图模型，
   // 这样主 Agent、专家、Judge、工具调用都能复用同一种渲染壳。
@@ -245,6 +260,14 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
           : [];
         const ruleBasedReasoning =
           typeof row.metadata.rule_based_reasoning === "string" ? row.metadata.rule_based_reasoning : "";
+        const activeSkills = Array.isArray(row.metadata.active_skills)
+          ? row.metadata.active_skills.map((item) => String(item)).filter(Boolean)
+          : [];
+        const designAlignmentStatus =
+          typeof row.metadata.design_alignment_status === "string" ? row.metadata.design_alignment_status : "";
+        const designDocTitles = Array.isArray(row.metadata.design_doc_titles)
+          ? row.metadata.design_doc_titles.map((item) => String(item)).filter(Boolean)
+          : [];
         const targetHunk =
           row.metadata.target_hunk && typeof row.metadata.target_hunk === "object"
             ? (row.metadata.target_hunk as Record<string, unknown>)
@@ -309,6 +332,25 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                   {violatedGuidelines.slice(0, 3).map((rule) => (
                     <Tag key={`${row.id}-violated-${rule}`} color="volcano">
                       {rule}
+                    </Tag>
+                  ))}
+                </div>
+              ) : null}
+              {activeSkills.length ? (
+                <div className="dialogue-rule-strip">
+                  {activeSkills.map((skill) => (
+                    <Tag key={`${row.id}-skill-${skill}`} color="geekblue">
+                      {`skill ${skill}`}
+                    </Tag>
+                  ))}
+                </div>
+              ) : null}
+              {designAlignmentStatus ? (
+                <div className="dialogue-rule-strip">
+                  <Tag color="gold">{getDesignAlignmentLabel(designAlignmentStatus)}</Tag>
+                  {designDocTitles.slice(0, 2).map((title) => (
+                    <Tag key={`${row.id}-design-doc-${title}`} color="cyan">
+                      {title}
                     </Tag>
                   ))}
                 </div>

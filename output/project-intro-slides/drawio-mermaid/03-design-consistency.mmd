@@ -1,0 +1,9 @@
+flowchart LR
+  U["启动页上传 design spec.md"] --> R["review.subject.metadata.design_docs"]
+  R --> S["design-consistency-check"]
+  S --> T1["diff_inspector"]
+  S --> T2["repo_context_search"]
+  S --> T3["design_spec_alignment"]
+  T3 --> SD["结构化设计基线: API / 字段 / 表 / 时序 / 性能 / 安全"]
+  SD --> E["correctness_business"]
+  E --> F["design_alignment_status + missing_design_points + design_conflicts"]

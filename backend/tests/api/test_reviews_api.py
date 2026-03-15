@@ -60,3 +60,31 @@ def test_list_reviews_includes_started_time_and_duration(client):
     row = next(item for item in payload if item["review_id"] == created["review_id"])
     assert row["started_at"] is not None
     assert "duration_seconds" in row
+
+
+def test_create_review_persists_design_docs_into_review_metadata(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "source_ref": "feature/demo",
+            "target_ref": "main",
+            "title": "design review",
+            "mr_url": "https://github.com/example/repo/pull/1",
+            "design_docs": [
+                {
+                    "title": "订单创建详细设计",
+                    "filename": "order-create-design.md",
+                    "content": "# 订单创建详细设计\n\n## API\n- POST /api/orders",
+                }
+            ],
+        },
+    ).json()
+
+    detail = client.get(f"/api/reviews/{created['review_id']}")
+    assert detail.status_code == 200
+    payload = detail.json()
+    design_docs = payload["subject"]["metadata"]["design_docs"]
+    assert len(design_docs) == 1
+    assert design_docs[0]["doc_type"] == "design_spec"
+    assert design_docs[0]["filename"] == "order-create-design.md"

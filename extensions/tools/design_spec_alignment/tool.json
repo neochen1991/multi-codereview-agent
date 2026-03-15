@@ -1,0 +1,24 @@
+{
+  "tool_id": "design_spec_alignment",
+  "name": "详细设计文档一致性比对",
+  "description": "结构化提取详细设计文档中的关键设计点，并输出实现一致性证据",
+  "runtime": "python",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "allowed_experts": ["correctness_business", "architecture_design", "database_analysis", "performance_reliability", "security_compliance"],
+  "input_schema": {
+    "review_id": "string",
+    "diff": "string",
+    "changed_files": "string[]",
+    "design_docs": "document[]",
+    "repo_context": "object"
+  },
+  "output_schema": {
+    "structured_design": "object",
+    "matched_implementation_points": "string[]",
+    "missing_implementation_points": "string[]",
+    "extra_implementation_points": "string[]",
+    "conflicting_implementation_points": "string[]",
+    "uncertain_points": "string[]"
+  }
+}

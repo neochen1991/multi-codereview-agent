@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -23,6 +24,9 @@ class FileExpertRepository:
 
         items: list[ExpertProfile] = []
         packaged_root = Path(__file__).resolve().parents[1] / "builtin_experts"
+        extension_skill_bindings = self._load_extension_skill_bindings(
+            Path(__file__).resolve().parents[3] / "extensions" / "skills"
+        )
         builtin_payloads = self._load_payloads(packaged_root, mark_custom=False)
         user_payloads = self._load_payloads(self.root, mark_custom=True)
 
@@ -36,6 +40,14 @@ class FileExpertRepository:
             if not payload:
                 continue
             payload["custom"] = bool((user_payloads.get(expert_id) or {}).get("custom", payload.get("custom", False)))
+            manual_skill_bindings = self._merge_list_field(payload.get("skill_bindings", []), [])
+            extension_bound_skills = extension_skill_bindings.get(expert_id, [])
+            payload["skill_bindings_manual"] = manual_skill_bindings
+            payload["skill_bindings_extension"] = extension_bound_skills
+            payload["skill_bindings"] = self._merge_list_field(
+                manual_skill_bindings,
+                extension_bound_skills,
+            )
             items.append(ExpertProfile.model_validate(payload))
         logger.info(
             "loaded %s experts from roots=%s",
@@ -60,6 +72,42 @@ class FileExpertRepository:
         if review_spec:
             (target_dir / "review_spec.md").write_text(review_spec, encoding="utf-8")
         return expert
+
+    def _load_extension_skill_bindings(self, root: Path) -> dict[str, list[str]]:
+        """从 extensions/skills 中加载 skill -> expert 绑定关系。
+
+        这样后续新增或调整 skill 绑定只需要修改 extension 目录，
+        不必再去改内置专家源码目录。
+        """
+        bindings: dict[str, list[str]] = {}
+        if not root.exists():
+            return bindings
+        for metadata_path in sorted(root.glob("*/metadata.json")):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                logger.warning("invalid skill metadata: %s", metadata_path)
+                continue
+            skill_id = str(metadata.get("skill_id") or "").strip()
+            if not skill_id:
+                continue
+            for expert_id in [str(item).strip() for item in list(metadata.get("bound_experts") or []) if str(item).strip()]:
+                bindings.setdefault(expert_id, [])
+                if skill_id not in bindings[expert_id]:
+                    bindings[expert_id].append(skill_id)
+        return bindings
+
+    def _merge_list_field(self, current: list[str] | object, extra: list[str]) -> list[str]:
+        merged: list[str] = []
+        for item in list(current or []) if isinstance(current, list) else []:
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+        for item in extra:
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+        return merged
 
     def _load_payloads(self, root: Path, *, mark_custom: bool) -> dict[str, dict]:
         """从给定目录读取 expert.yaml、prompt.md 和 review_spec.md。"""

@@ -67,6 +67,12 @@ export interface ReviewFinding {
   rule_based_reasoning?: string;
   verification_needed?: boolean;
   verification_plan?: string;
+  design_alignment_status?: string;
+  design_doc_titles?: string[];
+  matched_design_points?: string[];
+  missing_design_points?: string[];
+  extra_implementation_points?: string[];
+  design_conflicts?: string[];
   remediation_strategy?: string;
   remediation_suggestion: string;
   remediation_steps?: string[];
@@ -181,6 +187,8 @@ export interface ExpertProfile {
   mcp_tools: string[];
   runtime_tool_bindings: string[];
   skill_bindings?: string[];
+  skill_bindings_manual?: string[];
+  skill_bindings_extension?: string[];
   agent_bindings: string[];
   max_tool_calls: number;
   max_debate_rounds: number;
@@ -247,6 +255,14 @@ export interface KnowledgeDocument {
   created_at: string;
 }
 
+export interface ReviewDesignDocumentInput {
+  doc_id?: string;
+  title: string;
+  filename: string;
+  content: string;
+  doc_type?: "design_spec";
+}
+
 export interface ReviewReplayBundle {
   review: ReviewSummary;
   events: ReviewEvent[];
@@ -284,15 +300,13 @@ export const reviewApi = {
   async create(payload: {
     subject_type: "mr" | "branch";
     analysis_mode?: "standard" | "light";
-    repo_id?: string;
-    project_id?: string;
     source_ref?: string;
     target_ref?: string;
     title?: string;
     mr_url?: string;
     repo_url?: string;
-    access_token?: string;
     selected_experts?: string[];
+    design_docs?: ReviewDesignDocumentInput[];
   }): Promise<{ review_id: string; status: string }> {
     const { data } = await api.post("/reviews", payload);
     return data;

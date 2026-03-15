@@ -42,6 +42,20 @@ const getFindingTypeLabel = (findingType?: string): string => {
   return "待验证风险";
 };
 
+const getDesignAlignmentLabel = (status?: string): string => {
+  if (status === "aligned") return "与设计一致";
+  if (status === "partially_aligned") return "部分偏离设计";
+  if (status === "misaligned") return "与设计冲突";
+  return "设计上下文不足";
+};
+
+const getDesignAlignmentColor = (status?: string): string => {
+  if (status === "aligned") return "success";
+  if (status === "partially_aligned") return "gold";
+  if (status === "misaligned") return "error";
+  return "default";
+};
+
 const renderCodeLines = (
   codeExcerpt: string,
   targetLine: number,
@@ -212,6 +226,66 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
           {finding.rule_based_reasoning || "当前还没有返回更详细的规范依据说明。"}
         </Paragraph>
       </div>
+
+      {(finding.design_alignment_status ||
+        (finding.design_doc_titles || []).length ||
+        (finding.matched_design_points || []).length ||
+        (finding.missing_design_points || []).length ||
+        (finding.design_conflicts || []).length) ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>详细设计一致性</Paragraph>
+          <Space wrap style={{ marginBottom: 10 }}>
+            <Tag color={getDesignAlignmentColor(finding.design_alignment_status)}>
+              {getDesignAlignmentLabel(finding.design_alignment_status)}
+            </Tag>
+            {(finding.design_doc_titles || []).map((title) => (
+              <Tag key={title} color="purple">
+                {title}
+              </Tag>
+            ))}
+          </Space>
+          {(finding.matched_design_points || []).length ? (
+            <>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>已实现设计点</Paragraph>
+              <ul className="review-remediation-steps">
+                {(finding.matched_design_points || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {(finding.missing_design_points || []).length ? (
+            <>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>缺失设计点</Paragraph>
+              <ul className="review-remediation-steps">
+                {(finding.missing_design_points || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {(finding.extra_implementation_points || []).length ? (
+            <>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>超出设计的实现</Paragraph>
+              <ul className="review-remediation-steps">
+                {(finding.extra_implementation_points || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {(finding.design_conflicts || []).length ? (
+            <>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>设计冲突点</Paragraph>
+              <ul className="review-remediation-steps">
+                {(finding.design_conflicts || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题说明</Paragraph>

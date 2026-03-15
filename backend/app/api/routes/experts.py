@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, status
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
 
 from app.config import settings
 import app.services.review_service as review_service_module
@@ -25,10 +25,8 @@ class CreateExpertRequest(BaseModel):
     knowledge_sources: list[str] = Field(default_factory=list)
     tool_bindings: list[str] = Field(default_factory=list)
     mcp_tools: list[str] = Field(default_factory=list)
-    runtime_tool_bindings: list[str] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("runtime_tool_bindings", "skill_bindings"),
-    )
+    runtime_tool_bindings: list[str] = Field(default_factory=list)
+    skill_bindings: list[str] = Field(default_factory=list)
     agent_bindings: list[str] = Field(default_factory=list)
     max_tool_calls: int = 4
     max_debate_rounds: int = 2

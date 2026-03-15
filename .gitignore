@@ -25,3 +25,12 @@ scripts/logs/
 # Runtime data
 backend/app/storage/
 scripts/backend/app/storage/
+
+# Generated presentation artifacts
+output/project-intro/
+output/project-intro-slides/node_modules/
+output/project-intro-slides/package-lock.json
+output/project-intro-slides/package.json
+output/project-intro-slides/notes.md
+output/project-intro-slides/pptxgenjs_helpers/
+scripts/generate_project_intro_ppt.py

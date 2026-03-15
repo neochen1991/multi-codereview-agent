@@ -1,7 +1,8 @@
 import React from "react";
-import { Alert, Button, Card, Divider, Input, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Divider, Input, Select, Space, Tag, Typography, Upload } from "antd";
+import { UploadOutlined } from "@ant-design/icons";
 
-import type { ExpertProfile } from "@/services/api";
+import type { ExpertProfile, ReviewDesignDocumentInput } from "@/services/api";
 
 const { Text } = Typography;
 
@@ -10,12 +11,10 @@ export type ReviewFormState = {
   analysis_mode: "standard" | "light";
   mr_url: string;
   title: string;
-  repo_id: string;
-  project_id: string;
   source_ref: string;
   target_ref: string;
-  access_token: string;
   selected_experts: string[];
+  design_docs: ReviewDesignDocumentInput[];
 };
 
 type Props = {
@@ -50,6 +49,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   const hasSelectedExperts = form.selected_experts.length > 0;
   const hasReviewInput = Boolean(form.mr_url.trim() || form.source_ref.trim());
   const disableActions = loading || running || (!readonly && (!hasExperts || !hasSelectedExperts || !hasReviewInput));
+  const designDocNames = form.design_docs.map((item) => item.filename || item.title);
 
   return (
     <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
@@ -134,30 +134,6 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           </div>
           <div>
             <Input
-              placeholder="Access Token（可选）"
-              value={form.access_token}
-              disabled={readonly}
-              onChange={(event) => onChange({ access_token: event.target.value })}
-            />
-          </div>
-          <div>
-            <Input
-              placeholder="Repo ID（MR 链接可自动推断）"
-              value={form.repo_id}
-              disabled={readonly}
-              onChange={(event) => onChange({ repo_id: event.target.value })}
-            />
-          </div>
-          <div>
-            <Input
-              placeholder="Project ID（MR 链接可自动推断）"
-              value={form.project_id}
-              disabled={readonly}
-              onChange={(event) => onChange({ project_id: event.target.value })}
-            />
-          </div>
-          <div>
-            <Input
               placeholder="源分支 / MR Ref"
               value={form.source_ref}
               disabled={readonly}
@@ -186,6 +162,63 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                 value: expert.expert_id,
               }))}
             />
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            {readonly ? (
+              <div className="review-design-docs-readonly">
+                <Text strong>本次绑定的详细设计文档</Text>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  {designDocNames.length > 0 ? (
+                    designDocNames.map((name) => <Tag key={name} color="purple">{name}</Tag>)
+                  ) : (
+                    <Text type="secondary">本次审核未绑定详细设计文档</Text>
+                  )}
+                </Space>
+              </div>
+            ) : (
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Text strong>上传本次审核对应的详细设计文档（md）</Text>
+                <Upload
+                  multiple
+                  accept=".md,text/markdown"
+                  beforeUpload={(file) => {
+                    void file
+                      .text()
+                      .then((content) => {
+                        onChange({
+                          design_docs: [
+                            ...form.design_docs.filter((item) => item.filename !== file.name),
+                            {
+                              doc_id: `design_${file.uid.replace(/[^a-zA-Z0-9_-]/g, "")}`,
+                              title: file.name.replace(/\.md$/i, ""),
+                              filename: file.name,
+                              content,
+                              doc_type: "design_spec",
+                            },
+                          ],
+                        });
+                      });
+                    return false;
+                  }}
+                  fileList={form.design_docs.map((item, index) => ({
+                    uid: item.doc_id || `${item.filename}-${index}`,
+                    name: item.filename,
+                    status: "done" as const,
+                  }))}
+                  onRemove={(file) => {
+                    onChange({
+                      design_docs: form.design_docs.filter((item) => item.filename !== file.name),
+                    });
+                    return true;
+                  }}
+                >
+                  <Button icon={<UploadOutlined />}>选择详细设计文档</Button>
+                </Upload>
+                <Text type="secondary">
+                  当前上传的详细设计文档只绑定到本次审核，不会自动进入长期知识库。
+                </Text>
+              </Space>
+            )}
           </div>
         </div>
 

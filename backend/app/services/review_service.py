@@ -80,12 +80,31 @@ class ReviewService:
             for expert_id in payload.pop("selected_experts", []) or []
             if str(expert_id).strip()
         ]
+        design_docs = [
+            item
+            for item in payload.pop("design_docs", []) or []
+            if isinstance(item, dict) and str(item.get("content") or "").strip()
+        ]
         if not str(payload.get("access_token") or "").strip():
             review_url = str(payload.get("mr_url") or payload.get("repo_url") or "")
             configured_token = self._resolve_git_access_token(review_url, runtime_settings)
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        if design_docs:
+            subject.metadata = {
+                **subject.metadata,
+                "design_docs": [
+                    {
+                        "doc_id": str(item.get("doc_id") or f"design_{uuid4().hex[:8]}"),
+                        "title": str(item.get("title") or item.get("filename") or "详细设计文档"),
+                        "filename": str(item.get("filename") or "design-spec.md"),
+                        "content": str(item.get("content") or ""),
+                        "doc_type": "design_spec",
+                    }
+                    for item in design_docs
+                ],
+            }
         task = ReviewTask(
             review_id=review_id,
             subject=subject,

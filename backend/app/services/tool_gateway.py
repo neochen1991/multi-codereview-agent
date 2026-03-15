@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 import re
 from typing import Any
@@ -7,6 +10,7 @@ from typing import Any
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.tool_plugin_loader import ToolPluginLoader
 from app.services.capability_gateway import CapabilityGateway
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
@@ -25,6 +29,7 @@ class ReviewToolGateway:
         self._gateway = CapabilityGateway()
         self._knowledge_retrieval = KnowledgeRetrievalService(root)
         self._diff_excerpt = DiffExcerptService()
+        self._plugin_loader = ToolPluginLoader(Path(__file__).resolve().parents[3] / "extensions" / "tools")
         self._register_defaults()
 
     def invoke_for_expert(
@@ -36,6 +41,8 @@ class ReviewToolGateway:
         file_path: str,
         line_start: int,
         related_files: list[str] | None = None,
+        design_docs: list[dict[str, Any]] | None = None,
+        extra_tools: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """按专家白名单执行本轮允许的运行时工具。"""
         runtime_allowlist = set(runtime.runtime_tool_allowlist)
@@ -50,22 +57,26 @@ class ReviewToolGateway:
             and "repo_context_search" not in allowed_tools
         ):
             allowed_tools.append("repo_context_search")
+        for tool_name in extra_tools or []:
+            if tool_name not in allowed_tools:
+                allowed_tools.append(tool_name)
         results: list[dict[str, Any]] = []
         for tool_name in allowed_tools:
+            payload = {
+                "expert": expert.model_dump(mode="json"),
+                "subject": subject.model_dump(mode="json"),
+                "runtime": runtime.model_dump(mode="json"),
+                "file_path": file_path,
+                "line_start": line_start,
+                "related_files": list(related_files or []),
+                "design_docs": list(design_docs or []),
+            }
             try:
-                output = self._gateway.invoke_binding(
-                    tool_name,
-                    {
-                        "expert": expert.model_dump(mode="json"),
-                        "subject": subject.model_dump(mode="json"),
-                        "runtime": runtime.model_dump(mode="json"),
-                        "file_path": file_path,
-                        "line_start": line_start,
-                        "related_files": list(related_files or []),
-                    },
-                )
+                output = self._gateway.invoke_binding(tool_name, payload)
             except KeyError:
-                continue
+                output = self._invoke_plugin_tool(tool_name, payload)
+                if output is None:
+                    continue
             results.append(
                 {
                     "tool_name": tool_name,
@@ -82,6 +93,28 @@ class ReviewToolGateway:
         self._gateway.register("test_surface_locator", "tool", self._test_surface_locator)
         self._gateway.register("dependency_surface_locator", "tool", self._dependency_surface_locator)
         self._gateway.register("repo_context_search", "tool", self._repo_context_search)
+
+    def _invoke_plugin_tool(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        plugin = self._plugin_loader.get(tool_name)
+        if plugin is None or plugin.runtime != "python":
+            return None
+        entry = Path(plugin.tool_path) / plugin.entry
+        if not entry.exists():
+            return None
+        completed = subprocess.run(
+            [sys.executable, str(entry)],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=plugin.timeout_seconds,
+        )
+        if completed.returncode != 0:
+            return {
+                "summary": completed.stderr.strip() or f"{tool_name} 执行失败",
+                "success": False,
+            }
+        return json.loads(completed.stdout or "{}")
 
     def _knowledge_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         expert = dict(payload.get("expert") or {})

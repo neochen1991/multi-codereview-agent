@@ -4,6 +4,7 @@ from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.review import ReviewSubject, ReviewTask
+from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.services.review_runner import ReviewRunner
 
@@ -258,6 +259,109 @@ def test_review_runner_fails_when_no_enabled_experts(storage_root: Path):
 
     assert review.status == "failed"
     assert review.phase == "failed"
+
+
+def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_context(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design-check",
+        target_ref="main",
+        title="Design consistency review",
+        changed_files=["apps/api/order/order.service.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/order/order.service.ts b/apps/api/order/order.service.ts\n"
+            "--- a/apps/api/order/order.service.ts\n"
+            "+++ b/apps/api/order/order.service.ts\n"
+            "@@ -8,6 +8,8 @@\n"
+            " export async function createOrder() {\n"
+            "+  const payload = { amount, currency };\n"
+            "+  return client.post('/api/orders', payload);\n"
+            " }\n"
+        ),
+        metadata={
+            "design_docs": [
+                {
+                    "doc_id": "doc_design",
+                    "title": "订单创建详细设计",
+                    "filename": "order-design.md",
+                    "content": "# API 定义\nPOST /api/orders\n\n# 入参字段\namount: number\ncurrency: string",
+                    "doc_type": "design_spec",
+                }
+            ]
+        },
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性"],
+        system_prompt="prompt",
+        review_spec="规则一\n规则二",
+    )
+    skill = ReviewSkillProfile(
+        skill_id="design-consistency-check",
+        name="详细设计一致性检查",
+        description="检查实现是否符合详细设计文档",
+        required_tools=["diff_inspector", "design_spec_alignment"],
+        prompt_body="必须检查设计文档中的 API、字段和业务流程是否一致。",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "apps/api/order/order.service.ts",
+        10,
+        tool_evidence=[],
+        runtime_tool_results=[
+            {
+                "tool_name": "design_spec_alignment",
+                "summary": "已解析 1 份详细设计文档，并发现 1 条缺失设计点。",
+                "design_alignment_status": "partially_aligned",
+            }
+        ],
+        repository_context={"summary": "目标分支中存在 order controller 和 dto 实现。"},
+        target_hunk={"hunk_header": "@@ -8,6 +8,8 @@", "excerpt": "+ return client.post('/api/orders', payload);"},
+        bound_documents=[],
+        disallowed_inference=["证据不足时不要假定接口已经完全打通"],
+        expected_checks=["校验 API 和字段定义是否一致"],
+        active_skills=[skill],
+    )
+
+    assert "已激活技能" in prompt
+    assert "design-consistency-check" in prompt
+    assert "运行时工具调用结果" in prompt
+    assert "design_spec_alignment" in prompt
+    assert "本次审核绑定的详细设计文档" in prompt
+    assert "订单创建详细设计" in prompt
+    assert "POST /api/orders" in prompt
+
+
+def test_review_runner_extract_design_alignment_returns_tool_payload(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    payload = runner._extract_design_alignment(
+        [
+            {"tool_name": "repo_context_search", "summary": "repo context ready"},
+            {
+                "tool_name": "design_spec_alignment",
+                "design_alignment_status": "misaligned",
+                "design_doc_titles": ["订单创建详细设计"],
+                "matched_implementation_points": ["已实现 create order API"],
+                "missing_implementation_points": ["缺少 currency 字段校验"],
+                "extra_implementation_points": ["新增 debug 字段"],
+                "conflicting_implementation_points": ["接口路径与设计文档不一致"],
+            },
+        ]
+    )
+
+    assert payload["design_alignment_status"] == "misaligned"
+    assert payload["design_doc_titles"] == ["订单创建详细设计"]
+    assert payload["missing_implementation_points"] == ["缺少 currency 字段校验"]
 
 
 def test_review_runner_builds_routing_summary_with_system_fallback(storage_root: Path):

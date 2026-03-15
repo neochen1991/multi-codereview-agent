@@ -18,6 +18,9 @@
 - SSE 事件回放接口
 - LangGraph 风格 graph shim 与 orchestrator 子图节点
 - 人工裁决 API 与工作台控制面板
+- `extensions/skills` + `extensions/tools` 可插拔扩展机制
+- 审核启动页可上传本次审核专属的详细设计文档（Markdown）
+- 正确性与业务专家可通过 `design-consistency-check` 检查代码与详细设计是否一致
 
 ## 目录
 
@@ -88,7 +91,7 @@ Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `http
 - Git / 代码仓 Access Token
 - HTTPS 证书校验、系统证书库和 CA Bundle 路径
 - 代码仓 clone 地址、本地路径和目标分支
-- 工具、skill、agent allowlist
+- 通用 tools、运行时 tools、agent allowlist
 - 默认辩论轮次和人工裁决开关
 - 前后端默认端口
 
@@ -131,7 +134,7 @@ Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `http
   },
   "allowlist": {
     "tools": ["local_diff", "schema_diff", "coverage_diff"],
-    "skills": [
+    "runtime_tools": [
       "knowledge_search",
       "diff_inspector",
       "test_surface_locator",
@@ -143,6 +146,146 @@ Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `http
   }
 }
 ```
+
+## Skill + Tool 插件扩展
+
+当前系统的专家扩展能力已经拆成两层：
+
+- `skill`
+  - 上层能力包
+  - 使用目录式 `SKILL.md`
+  - 负责定义“什么时候触发、依赖哪些运行时工具、要求专家如何输出”
+- `tool`
+  - 下层执行插件
+  - 默认使用 Python 实现
+  - 负责真正执行检索、结构化提取和一致性比对
+
+### 目录约定
+
+```text
+extensions/
+  skills/
+    design-consistency-check/
+      SKILL.md
+      metadata.json
+  tools/
+    design_spec_alignment/
+      tool.json
+      run.py
+      README.md
+```
+
+### skill 如何绑定到专家
+
+skill 绑定优先从 extension 目录读取，不需要再改内置专家源码。
+
+绑定入口：
+
+- `extensions/skills/<skill>/metadata.json`
+
+关键字段：
+
+- `bound_experts`
+
+例如：
+
+- [extensions/skills/design-consistency-check/metadata.json](/Users/neochen/multi-codereview-agent/extensions/skills/design-consistency-check/metadata.json)
+
+会把 `design-consistency-check` 绑定到：
+
+- `correctness_business`
+
+### skill 什么时候会被激活
+
+skill 不是在专家启动时全量加载，而是由 runtime 按规则激活。
+
+当前激活规则大致是：
+
+```text
+expert 已绑定该 skill
+AND 当前 expert 在 applicable_experts 内
+AND 当前分析模式允许
+AND required_doc_types 满足
+AND changed_files 命中 activation_hints
+AND 必要上下文存在
+=> 激活 skill
+```
+
+这意味着：
+
+- 是否加载 skill，不由 LLM 主观决定
+- 而是由后端根据 review 上下文稳定判断
+
+### tool 如何实现
+
+第一版 extension tool 统一使用 Python，约定：
+
+- `tool.json`
+  - 描述 tool id、名称、入口脚本、超时、输入输出 schema
+- `run.py`
+  - 从 stdin 读取 JSON
+  - 向 stdout 输出 JSON
+  - 出错时通过 stderr + 非 0 exit code 返回
+
+这样新增 tool 时，不需要改主审核流程源码。
+
+### 详细设计一致性检查示例
+
+当前首个完整落地的 skill 是：
+
+- `design-consistency-check`
+
+它会在正确性与业务专家执行前，自动展开：
+
+- `diff_inspector`
+- `repo_context_search`
+- `design_spec_alignment`
+
+其中 `design_spec_alignment` 会先从本次审核上传的详细设计 Markdown 中提取：
+
+- API 定义
+- 入参字段定义
+- 出参字段定义
+- 表结构定义
+- 业务逻辑时序
+- 性能要求
+- 安全要求
+
+再结合 MR diff 和源码仓上下文，输出：
+
+- `design_alignment_status`
+- `matched_implementation_points`
+- `missing_implementation_points`
+- `extra_implementation_points`
+- `conflicting_implementation_points`
+
+### 审核启动页中的详细设计文档
+
+详细设计文档现在直接在审核启动页上传，不需要先进入知识库。
+
+推荐流程：
+
+1. 在审核工作台填写 Git PR / MR / Commit 链接
+2. 直接上传本次审核对应的详细设计 `.md`
+3. 选择专家
+4. 启动审核
+
+这些文档会保存到本次 review 的：
+
+- `review.subject.metadata.design_docs`
+
+它们只参与本次审核，不会自动进入长期知识库。
+
+### 后续如何扩展
+
+如果后续开发者要新增一个专家能力，只需要改 `extensions/`：
+
+1. 新增 `extensions/skills/<skill>/SKILL.md`
+2. 新增 `extensions/skills/<skill>/metadata.json`
+3. 在 `metadata.json` 里声明 `bound_experts`
+4. 如需底层执行能力，再新增 `extensions/tools/<tool>/tool.json` 和 `run.py`
+
+不需要再修改内置专家源码，也不需要改主审核流程。
 
 Windows 下如果访问 GitHub、DashScope 等 HTTPS 链接出现证书校验失败，优先在 `config.json` 或设置页里调整这 3 个字段：
 

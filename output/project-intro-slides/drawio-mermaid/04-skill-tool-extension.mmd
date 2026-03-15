@@ -1,0 +1,8 @@
+flowchart LR
+  DEV["开发者"] --> SK["extensions/skills/<name>/SKILL.md"]
+  DEV --> META["metadata.json"]
+  DEV --> TOOL["extensions/tools/<tool>/run.py"]
+  META --> ACT["Skill Activation Engine"]
+  ACT --> CALL["Tool Execution"]
+  CALL --> EXP["Expert Prompt"]
+  EXP --> OUT["Finding / Issue / Report"]

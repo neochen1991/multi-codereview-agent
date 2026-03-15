@@ -40,6 +40,12 @@ class ReviewFinding(BaseModel):
     rule_based_reasoning: str = ""
     verification_needed: bool = True
     verification_plan: str = ""
+    design_alignment_status: str = ""
+    design_doc_titles: list[str] = Field(default_factory=list)
+    matched_design_points: list[str] = Field(default_factory=list)
+    missing_design_points: list[str] = Field(default_factory=list)
+    extra_implementation_points: list[str] = Field(default_factory=list)
+    design_conflicts: list[str] = Field(default_factory=list)
     remediation_strategy: str = ""
     remediation_suggestion: str = ""
     remediation_steps: list[str] = Field(default_factory=list)

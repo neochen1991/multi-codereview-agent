@@ -28,6 +28,7 @@ import {
   type ExpertProfile,
   type KnowledgeDocument,
   type ReviewArtifacts,
+  type ReviewDesignDocumentInput,
   type ReviewReplayBundle,
   type ReviewSummary,
   type RuntimeSettings,
@@ -58,11 +59,9 @@ const defaultFormState: ReviewFormState = {
   analysis_mode: "standard",
   mr_url: "",
   title: "",
-  repo_id: "",
-  project_id: "",
   source_ref: "",
   target_ref: "",
-  access_token: "",
+  design_docs: [],
   selected_experts: [
     "correctness_business",
     "architecture_design",
@@ -71,6 +70,20 @@ const defaultFormState: ReviewFormState = {
     "maintainability_code_health",
     "test_verification",
   ],
+};
+
+const normalizeDesignDocs = (value: unknown): ReviewDesignDocumentInput[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .map((item) => ({
+      doc_id: item.doc_id ? String(item.doc_id) : undefined,
+      title: String(item.title || item.filename || "详细设计文档"),
+      filename: String(item.filename || item.title || "design-spec.md"),
+      content: String(item.content || ""),
+      doc_type: "design_spec" as const,
+    }))
+    .filter((item) => item.content.trim());
 };
 
 const normalizeRoutingItems = (value: unknown): RoutingExpertItem[] => {
@@ -206,15 +219,15 @@ const ReviewWorkbenchPage: React.FC = () => {
         analysis_mode: detail.analysis_mode === "light" ? "light" : "standard",
         mr_url: detail.subject.mr_url || "",
         title: detail.subject.title || "",
-        repo_id: detail.subject.repo_id || "",
-        project_id: detail.subject.project_id || "",
         source_ref: detail.subject.source_ref || "",
         target_ref: detail.subject.target_ref || "main",
-        access_token: "",
         selected_experts:
           detail.selected_experts && detail.selected_experts.length > 0
             ? detail.selected_experts
             : defaultFormState.selected_experts,
+        design_docs: normalizeDesignDocs(
+          ((detail.subject.metadata || {}) as Record<string, unknown>).design_docs,
+        ),
       });
       setSelectedIssueId((prev) =>
         replayBundle.issues.some((item) => item.issue_id === prev) ? prev : replayBundle.issues[0]?.issue_id || "",
@@ -411,12 +424,10 @@ const ReviewWorkbenchPage: React.FC = () => {
     analysis_mode: form.analysis_mode,
     mr_url: form.mr_url.trim(),
     title: form.title.trim(),
-    repo_id: form.repo_id.trim(),
-    project_id: form.project_id.trim(),
     source_ref: form.source_ref.trim(),
     target_ref: form.target_ref.trim() || "main",
-    access_token: form.access_token.trim(),
     selected_experts: form.selected_experts,
+    design_docs: form.design_docs,
   });
 
   const createReview = async (autoStart: boolean) => {

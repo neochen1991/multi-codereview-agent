@@ -36,3 +36,11 @@ def test_file_expert_repository_preserves_builtin_review_spec_when_user_override
 
     assert loaded.system_prompt == "custom prompt"
     assert "架构与设计审视规范" in loaded.review_spec
+
+
+def test_file_expert_repository_merges_extension_bound_skills(storage_root: Path):
+    repository = FileExpertRepository(storage_root / "experts")
+
+    correctness = next(expert for expert in repository.list() if expert.expert_id == "correctness_business")
+
+    assert "design-consistency-check" in correctness.skill_bindings

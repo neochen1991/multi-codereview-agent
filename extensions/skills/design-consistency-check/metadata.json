@@ -1,0 +1,19 @@
+{
+  "skill_id": "design-consistency-check",
+  "name": "详细设计一致性检查",
+  "description": "检查代码实现是否符合本次绑定的 IT 详细设计文档",
+  "bound_experts": ["correctness_business"],
+  "applicable_experts": ["correctness_business"],
+  "required_tools": ["diff_inspector", "repo_context_search", "design_spec_alignment"],
+  "required_doc_types": ["design_spec"],
+  "activation_hints": ["service", "usecase", "handler", "workflow", "transformer", "output"],
+  "required_context": ["diff", "repo_context", "design_docs"],
+  "allowed_modes": ["standard", "light"],
+  "output_contract": {
+    "design_alignment_status": "aligned|partially_aligned|misaligned|insufficient_design_context",
+    "matched_design_points": "string[]",
+    "missing_design_points": "string[]",
+    "extra_implementation_points": "string[]",
+    "design_conflicts": "string[]"
+  }
+}

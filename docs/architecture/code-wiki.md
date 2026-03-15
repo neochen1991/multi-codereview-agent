@@ -142,7 +142,121 @@ flowchart LR
 - `dependency_surface_locator`
 - `repo_context_search`
 
-### 4.5 模型调用层
+除了这些内建运行时工具，系统还支持通过 `extensions/tools` 加载可插拔工具，例如：
+
+- `design_spec_alignment`
+
+### 4.5 Skill + Tool 插件扩展层
+
+这是当前代码审核系统新增的一层能力扩展机制，目标是：
+
+- 让专家能力通过插件扩展，而不是持续修改主审核流程
+- 新增能力时优先只改 `extensions/`
+- 让专家根据 review 上下文按需加载 skill，再展开对应 tools
+
+核心设计是双层结构：
+
+- `skill`
+  - 上层能力包
+  - 使用目录式 `SKILL.md`
+  - 负责定义：
+    - 适用专家
+    - 激活条件
+    - 依赖的 tools
+    - 输出契约
+- `tool`
+  - 下层执行插件
+  - 默认使用 Python 子进程实现
+  - 负责真正执行检索、提取、比对和结构化分析
+
+目录约定：
+
+```text
+extensions/
+  skills/
+    design-consistency-check/
+      SKILL.md
+      metadata.json
+  tools/
+    design_spec_alignment/
+      tool.json
+      run.py
+```
+
+关键实现：
+
+- [ReviewSkillProfile](/Users/neochen/multi-codereview-agent/backend/app/domain/models/review_skill.py)
+- [ReviewSkillRegistry](/Users/neochen/multi-codereview-agent/backend/app/services/review_skill_registry.py)
+- [ReviewSkillActivationService](/Users/neochen/multi-codereview-agent/backend/app/services/review_skill_activation_service.py)
+- [ReviewToolPlugin](/Users/neochen/multi-codereview-agent/backend/app/domain/models/review_tool_plugin.py)
+- [ToolPluginLoader](/Users/neochen/multi-codereview-agent/backend/app/services/tool_plugin_loader.py)
+
+#### skill 是如何绑定到专家的
+
+当前机制优先从 extension 目录的 `metadata.json` 读取 skill 绑定，而不是要求修改内置专家 yaml。
+
+关键字段：
+
+- `bound_experts`
+
+例如：
+
+- [extensions/skills/design-consistency-check/metadata.json](/Users/neochen/multi-codereview-agent/extensions/skills/design-consistency-check/metadata.json)
+
+会把 `design-consistency-check` 绑定到：
+
+- `correctness_business`
+
+运行时会把这些 extension 绑定合并进专家有效配置，因此专家中心可以同时展示：
+
+- `源码绑定`
+- `Extension 绑定`
+
+#### skill 什么时候被激活
+
+skill 不是在专家启动时全量加载，而是在专家开始执行前由 runtime 规则化判断。
+
+判定逻辑集中在：
+
+- [ReviewSkillActivationService](/Users/neochen/multi-codereview-agent/backend/app/services/review_skill_activation_service.py)
+
+当前采用的规则大致是：
+
+```text
+expert 已绑定该 skill
+AND 当前 expert 在 applicable_experts 内
+AND 当前模式在 allowed_modes 内
+AND required_doc_types 满足
+AND changed_files 命中 activation_hints
+AND required_context 满足
+=> 激活 skill
+```
+
+这意味着：
+
+- 是否加载 skill，不由 LLM 自己决定
+- 由 runtime 结合 review 上下文稳定判断
+
+#### skill 激活后如何工作
+
+skill 被激活后，运行时会：
+
+1. 读取 `SKILL.md` 正文
+2. 根据 `required_tools` 展开对应 tools
+3. 执行这些 tools
+4. 把以下内容一起注入专家 prompt：
+   - 当前 diff / hunk
+   - repo context
+   - review 绑定文档
+   - skill 规则
+   - tool 结果
+
+最终这条链主要落在：
+
+- [ReviewRunner](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+- [ReviewToolGateway](/Users/neochen/multi-codereview-agent/backend/app/services/tool_gateway.py)
+
+### 4.6 模型调用层
 
 关键类：
 
@@ -155,7 +269,7 @@ flowchart LR
 - JSON / SSE 两种响应格式兼容
 - 超时、重试、fallback 策略
 
-### 4.6 持久化层
+### 4.7 持久化层
 
 关键 repository：
 
@@ -229,17 +343,41 @@ flowchart TD
 ```mermaid
 flowchart TD
   A["MainAgentService.build_command"] --> B["expert_ack"]
-  B --> C["ReviewToolGateway.invoke_for_expert"]
-  C --> D["repo_context_search / knowledge_search / diff_inspector"]
-  D --> E["ReviewRunner._build_expert_prompt"]
-  E --> F["LLMChatService.complete_text"]
-  F --> G["ReviewRunner._parse_expert_analysis"]
-  G --> H["ReviewRunner._stabilize_expert_analysis"]
-  H --> I["FileFindingRepository.save"]
-  I --> J["expert_analysis message / finding_created event"]
+  B --> C["ReviewSkillActivationService.activate"]
+  C --> D["激活命中的 skill"]
+  D --> E["ReviewToolGateway.invoke_for_expert"]
+  E --> F["repo_context_search / knowledge_search / diff_inspector / extension tools"]
+  F --> G["ReviewRunner._build_expert_prompt"]
+  G --> H["LLMChatService.complete_text"]
+  H --> I["ReviewRunner._parse_expert_analysis"]
+  I --> J["ReviewRunner._stabilize_expert_analysis"]
+  J --> K["FileFindingRepository.save"]
+  K --> L["expert_analysis message / finding_created event"]
 ```
 
-### 6.3 收敛与结果
+### 6.3 详细设计一致性检查调用链
+
+```mermaid
+flowchart TD
+  A["审核启动页上传 design_spec.md"] --> B["ReviewService.create_review"]
+  B --> C["review.subject.metadata.design_docs"]
+  C --> D["correctness_business 派工"]
+  D --> E["ReviewSkillActivationService"]
+  E --> F["激活 design-consistency-check"]
+  F --> G["diff_inspector"]
+  F --> H["repo_context_search"]
+  F --> I["design_spec_alignment"]
+  I --> J["结构化提取设计文档"]
+  J --> K["API / 字段 / 表结构 / 时序 / 性能 / 安全要求"]
+  K --> L["实现一致性比对结果"]
+  G --> M["ReviewRunner 构建 prompt"]
+  H --> M
+  L --> M
+  M --> N["correctness_business 输出 finding"]
+  N --> O["design_alignment_status / missing_design_points / design_conflicts"]
+```
+
+### 6.4 收敛与结果
 
 ```mermaid
 flowchart TD
@@ -290,8 +428,38 @@ flowchart TD
   - 代码仓上下文
   - 绑定规范文档
   - 绑定参考文档
+  - 已激活的 skills
   - 运行时工具结果
 - 输出结构化 finding
+
+#### 专家如何消费 skill
+
+专家不会自己“想起”去加载 skill，而是消费 runtime 已经激活好的能力包。
+
+以 `correctness_business` 为例，如果本轮满足：
+
+- review 绑定了 `design_spec` 文档
+- changed_files 命中了 service / transformer / output 等激活线索
+- 当前分析模式允许
+
+那么 runtime 会自动激活：
+
+- `design-consistency-check`
+
+并为它展开：
+
+- `diff_inspector`
+- `repo_context_search`
+- `design_spec_alignment`
+
+最终正确性专家生成的 finding 会新增：
+
+- `design_alignment_status`
+- `design_doc_titles`
+- `matched_design_points`
+- `missing_design_points`
+- `extra_implementation_points`
+- `design_conflicts`
 
 ### Judge / Graph
 
@@ -334,6 +502,7 @@ flowchart TD
 - 输入 PR/MR/commit 链接
 - 选择分析模式
 - 选择专家
+- 上传本次审核专属的详细设计文档
 - 创建并启动审核
 
 #### 8.2 审核过程
@@ -495,4 +664,3 @@ flowchart TD
 如果只用一句话概括当前系统：
 
 > 这是一个以 `ReviewRunner + MainAgentService + ReviewToolGateway + ReviewWorkbench` 为核心的多专家代码审核平台；前端是它的控制台，后端是它的运行时。
-

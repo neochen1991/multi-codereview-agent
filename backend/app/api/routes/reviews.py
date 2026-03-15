@@ -27,6 +27,7 @@ class CreateReviewRequest(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     unified_diff: str = ""
     metadata: dict[str, object] = Field(default_factory=dict)
+    design_docs: list[dict[str, object]] = Field(default_factory=list)
 
 
 @router.post("/reviews", status_code=status.HTTP_201_CREATED)

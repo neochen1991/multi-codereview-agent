@@ -29,6 +29,8 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.orchestrator.graph import build_review_graph
+from app.services.review_skill_activation_service import ReviewSkillActivationService
+from app.services.review_skill_registry import ReviewSkillRegistry
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.tool_gateway import ReviewToolGateway
 
@@ -63,6 +65,8 @@ class ReviewRunner:
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
+        self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
+        self.review_skill_activation_service = ReviewSkillActivationService()
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.graph = build_review_graph()
 
@@ -730,6 +734,13 @@ class ReviewRunner:
         6. 落库 finding、analysis message 和 event
         """
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
+        active_skills = self.review_skill_activation_service.activate(
+            expert,
+            review.subject,
+            analysis_mode,
+            self.review_skill_registry.list_all(),
+        )
+        design_docs = self._review_design_docs(review.subject)
         runtime_tool_results = self.review_tool_gateway.invoke_for_expert(
             expert,
             review.subject,
@@ -737,6 +748,8 @@ class ReviewRunner:
             file_path=file_path,
             line_start=line_start,
             related_files=list(command_message.metadata.get("related_files", []) or []),
+            design_docs=design_docs,
+            extra_tools=self._collect_skill_tools(active_skills),
         )
         repository_context = dict(command_message.metadata.get("repository_context") or {})
         target_hunk = dict(command_message.metadata.get("target_hunk") or {})
@@ -787,6 +800,7 @@ class ReviewRunner:
                     "allowed_tools": expert.tool_bindings,
                     "allowed_runtime_tools": expert.runtime_tool_bindings,
                     "knowledge_sources": expert.knowledge_sources,
+                    "active_skills": [skill.skill_id for skill in active_skills],
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "related_files": command_message.metadata.get("related_files", []),
                     "target_hunk": target_hunk,
@@ -794,6 +808,10 @@ class ReviewRunner:
                     "expected_checks": command_message.metadata.get("expected_checks", []),
                     "disallowed_inference": command_message.metadata.get("disallowed_inference", []),
                     "runtime_tool_results": runtime_tool_results,
+                    "design_doc_titles": self._normalize_text_list(
+                        [item.get("title") for item in design_docs],
+                        [],
+                    ),
                     **self._expert_llm_metadata(expert, runtime_settings),
                 },
             )
@@ -840,20 +858,21 @@ class ReviewRunner:
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
         llm_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(expert, bound_documents),
-            user_prompt=self._build_expert_prompt(
-                review.subject,
-                expert,
-                file_path,
-                line_start,
+            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills),
+                user_prompt=self._build_expert_prompt(
+                    review.subject,
+                    expert,
+                    file_path,
+                    line_start,
                 tool_evidence,
                 runtime_tool_results,
                 repository_context,
                 target_hunk,
-                bound_documents,
-                list(command_message.metadata.get("disallowed_inference", []) or []),
-                list(command_message.metadata.get("expected_checks", []) or []),
-            ),
+                    bound_documents,
+                    list(command_message.metadata.get("disallowed_inference", []) or []),
+                    list(command_message.metadata.get("expected_checks", []) or []),
+                    active_skills,
+                ),
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
             runtime_settings=runtime_settings,
             fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
@@ -878,6 +897,7 @@ class ReviewRunner:
             line_start,
         )
         parsed = self._stabilize_expert_analysis(parsed, expert.expert_id, file_path, line_start, target_hunk)
+        design_alignment = self._extract_design_alignment(runtime_tool_results)
         severity = self._normalize_severity(parsed.get("severity"), severity)
         confidence = self._normalize_confidence(parsed.get("confidence"), confidence)
         parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
@@ -904,6 +924,27 @@ class ReviewRunner:
             rule_based_reasoning=str(parsed.get("rule_based_reasoning") or "").strip(),
             verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
             verification_plan=str(parsed.get("verification_plan") or "").strip(),
+            design_alignment_status=str(parsed.get("design_alignment_status") or design_alignment.get("design_alignment_status") or "").strip(),
+            design_doc_titles=self._normalize_text_list(
+                design_alignment.get("design_doc_titles"),
+                [],
+            ),
+            matched_design_points=self._normalize_text_list(
+                parsed.get("matched_design_points"),
+                self._normalize_text_list(design_alignment.get("matched_implementation_points"), []),
+            ),
+            missing_design_points=self._normalize_text_list(
+                parsed.get("missing_design_points"),
+                self._normalize_text_list(design_alignment.get("missing_implementation_points"), []),
+            ),
+            extra_implementation_points=self._normalize_text_list(
+                parsed.get("extra_implementation_points"),
+                self._normalize_text_list(design_alignment.get("extra_implementation_points"), []),
+            ),
+            design_conflicts=self._normalize_text_list(
+                parsed.get("design_conflicts"),
+                self._normalize_text_list(design_alignment.get("conflicting_implementation_points"), []),
+            ),
             remediation_strategy=str(
                 parsed.get("fix_strategy")
                 or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)
@@ -964,6 +1005,7 @@ class ReviewRunner:
                     "allowed_tools": expert.tool_bindings,
                     "allowed_runtime_tools": expert.runtime_tool_bindings,
                     "knowledge_sources": expert.knowledge_sources,
+                    "active_skills": [skill.skill_id for skill in active_skills],
                     "tool_evidence": tool_evidence,
                     "runtime_tool_results": runtime_tool_results,
                     "target_hunk": target_hunk,
@@ -975,6 +1017,12 @@ class ReviewRunner:
                     "matched_rules": finding.matched_rules,
                     "violated_guidelines": finding.violated_guidelines,
                     "rule_based_reasoning": finding.rule_based_reasoning,
+                    "design_alignment_status": finding.design_alignment_status,
+                    "design_doc_titles": finding.design_doc_titles,
+                    "matched_design_points": finding.matched_design_points,
+                    "missing_design_points": finding.missing_design_points,
+                    "extra_implementation_points": finding.extra_implementation_points,
+                    "design_conflicts": finding.design_conflicts,
                     "analysis_mode": analysis_mode,
                     **self._llm_message_metadata(llm_result),
                 },
@@ -1039,7 +1087,7 @@ class ReviewRunner:
                 file_path = issue_file_path
                 line_start = issue_line_start
                 llm_result = self.llm_chat_service.complete_text(
-                    system_prompt=self._build_expert_system_prompt(expert, bound_documents),
+                    system_prompt=self._build_expert_system_prompt(expert, bound_documents, []),
                     user_prompt=self._build_debate_prompt(
                         review.subject,
                         issue,
@@ -1610,6 +1658,7 @@ class ReviewRunner:
         bound_documents: list[object],
         disallowed_inference: list[str],
         expected_checks: list[str],
+        active_skills: list[object],
     ) -> str:
         """构造专家最终输入给 LLM 的用户提示词。
 
@@ -1618,11 +1667,13 @@ class ReviewRunner:
         """
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
-        skill_summary = self._build_runtime_tool_summary(runtime_tool_results)
+        runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
         repository_context_summary = self._build_repository_context_summary(repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
         review_spec_summary = self._build_review_spec_summary(expert.review_spec)
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
+        active_skill_summary = self._build_active_skill_summary(active_skills)
+        design_doc_summary = self._build_design_doc_summary(subject)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
@@ -1632,9 +1683,11 @@ class ReviewRunner:
             f"变更文件: {', '.join(subject.changed_files[:5]) or '未提供'}\n"
             f"能力约束:\n{capability_summary}\n"
             f"规范提要:\n{review_spec_summary}\n"
+            f"已激活技能:\n{active_skill_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
+            f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
-            f"运行时工具调用结果:\n{skill_summary}\n"
+            f"运行时工具调用结果:\n{runtime_tool_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
@@ -1645,17 +1698,24 @@ class ReviewRunner:
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
             f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
             f"JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"design_alignment_status":"aligned|partially_aligned|misaligned|insufficient_design_context","matched_design_points":["已经实现的设计点"],"missing_design_points":["缺失的设计点"],"extra_implementation_points":["超出设计的实现"],"design_conflicts":["与设计冲突的实现"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
-    def _build_expert_system_prompt(self, expert: ExpertProfile, bound_documents: list[object]) -> str:
+    def _build_expert_system_prompt(
+        self,
+        expert: ExpertProfile,
+        bound_documents: list[object],
+        active_skills: list[object] | None = None,
+    ) -> str:
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
         bound_documents_text = self._build_bound_documents_fulltext(bound_documents)
+        active_skill_text = self._build_active_skill_fulltext(active_skills or [])
         return (
             f"{base_prompt}\n\n"
             f"《审视规范文档》开始\n"
             f"{expert.review_spec or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
             f"《审视规范文档》结束\n\n"
+            f"{active_skill_text}\n\n"
             f"{bound_documents_text}\n\n"
             f"执行纪律：\n"
             f"1. 只在你的职责边界内下结论。\n"
@@ -1666,6 +1726,66 @@ class ReviewRunner:
             f"6. 必须显式引用命中的规范条款和违反的规范要求。\n"
             f"7. 输出必须遵守 JSON contract。"
         )
+
+    def _build_active_skill_summary(self, active_skills: list[object]) -> str:
+        if not active_skills:
+            return "本轮未激活额外 skill。"
+        lines: list[str] = []
+        for skill in active_skills:
+            skill_id = str(getattr(skill, "skill_id", "") or "").strip()
+            description = str(getattr(skill, "description", "") or "").strip()
+            required_tools = [str(item).strip() for item in list(getattr(skill, "required_tools", []) or []) if str(item).strip()]
+            lines.append(f"- {skill_id}: {description or '无描述'}")
+            if required_tools:
+                lines.append(f"  * tools: {' / '.join(required_tools[:6])}")
+        return "\n".join(lines)
+
+    def _build_active_skill_fulltext(self, active_skills: list[object]) -> str:
+        if not active_skills:
+            return "《已激活 Skills》开始\n本轮未激活额外 skill。\n《已激活 Skills》结束"
+        sections = ["《已激活 Skills》开始"]
+        for index, skill in enumerate(active_skills, start=1):
+            skill_id = str(getattr(skill, "skill_id", "") or "").strip() or f"skill-{index}"
+            name = str(getattr(skill, "name", "") or "").strip() or skill_id
+            sections.append(f"## Skill {index}: {name} ({skill_id})")
+            sections.append(str(getattr(skill, "prompt_body", "") or "").strip() or "无额外 skill 正文。")
+        sections.append("《已激活 Skills》结束")
+        return "\n".join(sections)
+
+    def _collect_skill_tools(self, active_skills: list[object]) -> list[str]:
+        tool_names: list[str] = []
+        for skill in active_skills:
+            for item in list(getattr(skill, "required_tools", []) or []):
+                tool_name = str(item).strip()
+                if tool_name and tool_name not in tool_names:
+                    tool_names.append(tool_name)
+        return tool_names
+
+    def _review_design_docs(self, subject: ReviewSubject) -> list[dict[str, object]]:
+        value = subject.metadata.get("design_docs", [])
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def _build_design_doc_summary(self, subject: ReviewSubject) -> str:
+        """把本次审核绑定的详细设计文档压缩成适合给专家阅读的摘要。"""
+        design_docs = self._review_design_docs(subject)
+        if not design_docs:
+            return "本次审核未绑定详细设计文档。"
+        lines: list[str] = []
+        for index, item in enumerate(design_docs[:4], start=1):
+            title = str(item.get("title") or item.get("filename") or f"设计文档 {index}").strip()
+            filename = str(item.get("filename") or "").strip()
+            content = str(item.get("content") or "").strip()
+            line = f"- {title}"
+            if filename:
+                line += f" · {filename}"
+            lines.append(line)
+            if content:
+                excerpt_lines = [text.strip() for text in content.splitlines() if text.strip()]
+                if excerpt_lines:
+                    lines.append(f"  * 摘要: {' '.join(excerpt_lines[:3])[:220]}")
+        return "\n".join(lines)
 
     def _parse_expert_analysis(
         self,
@@ -1704,6 +1824,11 @@ class ReviewRunner:
             "confidence": 0.0,
             "verification_needed": True,
             "verification_plan": "需要补充关联上下文、调用链和测试证据。",
+            "design_alignment_status": "insufficient_design_context",
+            "matched_design_points": [],
+            "missing_design_points": [],
+            "extra_implementation_points": [],
+            "design_conflicts": [],
         }
 
     def _stabilize_expert_analysis(
@@ -1806,6 +1931,11 @@ class ReviewRunner:
                 )
         result["context_files"] = [str(item).strip() for item in list(result.get("context_files") or []) if str(item).strip()]
         result["evidence"] = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        result["matched_design_points"] = self._normalize_text_list(result.get("matched_design_points"), [])
+        result["missing_design_points"] = self._normalize_text_list(result.get("missing_design_points"), [])
+        result["extra_implementation_points"] = self._normalize_text_list(result.get("extra_implementation_points"), [])
+        result["design_conflicts"] = self._normalize_text_list(result.get("design_conflicts"), [])
+        result["design_alignment_status"] = str(result.get("design_alignment_status") or "").strip()
         return result
 
     def _build_expert_fallback(
@@ -1994,6 +2124,14 @@ class ReviewRunner:
                 if text and self._is_meaningful_context_file(text) and text not in merged:
                     merged.append(text)
         return merged[:6]
+
+    def _extract_design_alignment(self, runtime_tool_results: list[dict[str, object]]) -> dict[str, object]:
+        """从 design_spec_alignment tool 结果里提取设计一致性信息。"""
+        for item in runtime_tool_results:
+            if str(item.get("tool_name") or "") != "design_spec_alignment":
+                continue
+            return dict(item)
+        return {}
 
     def _is_meaningful_context_file(self, path_text: str) -> bool:
         normalized = str(path_text or "").strip().replace("\\", "/")
