@@ -6,6 +6,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
+from app.repositories.file_message_repository import FileMessageRepository
 from app.services.review_runner import ReviewRunner
 
 
@@ -362,6 +363,71 @@ def test_review_runner_extract_design_alignment_returns_tool_payload(storage_roo
     assert payload["design_alignment_status"] == "misaligned"
     assert payload["design_doc_titles"] == ["订单创建详细设计"]
     assert payload["missing_implementation_points"] == ["缺少 currency 字段校验"]
+
+
+def test_review_runner_emits_design_skill_summary_message(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_design_summary",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/design-check",
+            target_ref="main",
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    runner._emit_skill_summary_messages(
+        review=review,
+        expert=expert,
+        file_path="apps/api/order/order.service.ts",
+        line_start=18,
+        active_skills=[
+            ReviewSkillProfile(
+                skill_id="design-consistency-check",
+                name="详细设计一致性检查",
+                description="desc",
+                required_tools=["design_spec_alignment"],
+            )
+        ],
+        runtime_tool_results=[
+            {
+                "tool_name": "design_spec_alignment",
+                "design_doc_titles": ["订单创建详细设计"],
+                "design_alignment_status": "partially_aligned",
+                "structured_design": {
+                    "api_definitions": ["POST /api/orders"],
+                    "response_fields": ["createdAt", "updatedAt"],
+                    "table_definitions": ["orders(id, created_at, updated_at)"],
+                    "business_sequences": ["创建订单后返回时间戳字段"],
+                },
+                "matched_implementation_points": ["已新增 createdAt 字段"],
+                "missing_implementation_points": ["未补 updatedAt 映射"],
+                "conflicting_implementation_points": ["transformer 未从源对象取值"],
+                "uncertain_points": ["性能要求待专项验证"],
+            }
+        ],
+        target_hunk={"hunk_header": "@@ -1,4 +1,8 @@"},
+        runtime_settings=runner.runtime_settings_service.get(),
+    )
+
+    messages = FileMessageRepository(storage_root).list("rev_design_summary")
+    summary_message = next(item for item in messages if item.message_type == "expert_skill_call")
+    assert summary_message.expert_id == "correctness_business"
+    assert summary_message.metadata["skill_name"] == "design-consistency-check"
+    assert summary_message.metadata["design_alignment_status"] == "partially_aligned"
+    assert "已完成详细设计解析" in summary_message.content
+    assert "POST /api/orders" in str(summary_message.metadata["skill_result"])
 
 
 def test_review_runner_builds_routing_summary_with_system_fallback(storage_root: Path):

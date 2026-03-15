@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +102,15 @@ class ReviewToolGateway:
         entry = Path(plugin.tool_path) / plugin.entry
         if not entry.exists():
             return None
+        repo_root = Path(__file__).resolve().parents[3]
+        backend_root = repo_root / "backend"
+        env = dict(os.environ)
+        pythonpath_items = [
+            str(backend_root),
+            str(repo_root),
+            *(env.get("PYTHONPATH", "").split(os.pathsep) if env.get("PYTHONPATH") else []),
+        ]
+        env["PYTHONPATH"] = os.pathsep.join(item for item in pythonpath_items if item)
         completed = subprocess.run(
             [sys.executable, str(entry)],
             input=json.dumps(payload, ensure_ascii=False),
@@ -108,6 +118,8 @@ class ReviewToolGateway:
             text=True,
             check=False,
             timeout=plugin.timeout_seconds,
+            cwd=str(repo_root),
+            env=env,
         )
         if completed.returncode != 0:
             return {

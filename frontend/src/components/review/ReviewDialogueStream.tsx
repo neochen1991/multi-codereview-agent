@@ -5,6 +5,16 @@ import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services
 
 const { Paragraph, Text } = Typography;
 
+type StructuredSection = {
+  label: string;
+  values: string[];
+};
+
+type StructuredGroup = {
+  title: string;
+  sections: StructuredSection[];
+};
+
 export type ReviewDialogueViewMessage = {
   id: string;
   timeText: string;
@@ -41,6 +51,43 @@ const buildCompactDetail = (value: string): { text: string; truncated: boolean }
   const compact = lines.slice(0, 3).join("\n");
   if (compact.length > 220) return { text: `${compact.slice(0, 220).trim()}...`, truncated: true };
   return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
+};
+
+const normalizeValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item == null) return "";
+      try {
+        return JSON.stringify(item);
+      } catch {
+        return String(item);
+      }
+    })
+    .filter(Boolean);
+};
+
+const normalizeSingleValue = (value: unknown): string[] => {
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+};
+
+const tryParseJsonBlock = (value: string): Record<string, unknown> | null => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = fenced ? fenced[1].trim() : raw;
+  if (!(candidate.startsWith("{") && candidate.endsWith("}"))) return null;
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 };
 
 const getDesignAlignmentLabel = (status: string): string => {
@@ -146,9 +193,9 @@ const buildInvocationDetail = (
     return formatInvocationDetail(`工具 ${toolName}`, content, toolResult);
   }
   if (eventType === "expert_skill_call") {
-    const skillName = typeof metadata.tool_name === "string" ? metadata.tool_name : typeof metadata.skill_name === "string" ? metadata.skill_name : "tool";
-    const skillResult = metadata.tool_result || metadata.skill_result;
-    return formatInvocationDetail(`运行时工具 ${skillName}`, content, skillResult);
+    const skillName = typeof metadata.skill_name === "string" ? metadata.skill_name : typeof metadata.tool_name === "string" ? metadata.tool_name : "skill";
+    const skillResult = metadata.skill_result || metadata.tool_result;
+    return formatInvocationDetail(`技能 ${skillName}`, content, skillResult);
   }
   return content;
 };
@@ -171,6 +218,187 @@ const formatInvocationDetail = (label: string, summary: string, result: unknown)
     });
   }
   return `${label}\n${lines.join("\n")}`;
+};
+
+const buildStructuredGroups = (
+  row: ReviewDialogueViewMessage,
+): { groups: StructuredGroup[]; summaryText?: string } => {
+  const metadata = row.metadata || {};
+  const toolResult =
+    metadata.tool_result && typeof metadata.tool_result === "object"
+      ? (metadata.tool_result as Record<string, unknown>)
+      : null;
+  const skillResult =
+    metadata.skill_result && typeof metadata.skill_result === "object"
+      ? (metadata.skill_result as Record<string, unknown>)
+      : null;
+  const parsedAnalysis = row.eventType === "expert_analysis" ? tryParseJsonBlock(row.detail) : null;
+
+  if (row.eventType === "expert_skill_call" && skillResult) {
+    const recognitionSections = [
+      { label: "设计文档", values: normalizeValueList(skillResult.design_doc_titles) },
+      { label: "业务目标", values: normalizeSingleValue(skillResult.business_goal) },
+      { label: "API 定义", values: normalizeValueList(skillResult.api_definitions) },
+      { label: "入参字段", values: normalizeValueList(skillResult.request_fields) },
+      { label: "关键出参", values: normalizeValueList(skillResult.response_fields) },
+      { label: "表结构", values: normalizeValueList(skillResult.table_definitions) },
+      { label: "业务时序", values: normalizeValueList(skillResult.business_sequences) },
+      { label: "性能要求", values: normalizeValueList(skillResult.performance_requirements) },
+      { label: "安全要求", values: normalizeValueList(skillResult.security_requirements) },
+      { label: "原始歧义点", values: normalizeValueList(skillResult.unknown_or_ambiguous_points) },
+    ].filter((section) => section.values.length > 0);
+    const comparisonSections = [
+      {
+        label: "一致性状态",
+        values:
+          typeof skillResult.design_alignment_status === "string"
+            ? [getDesignAlignmentLabel(String(skillResult.design_alignment_status))]
+            : [],
+      },
+      { label: "命中的设计点", values: normalizeValueList(skillResult.matched_design_points) },
+      { label: "缺失设计点", values: normalizeValueList(skillResult.missing_design_points) },
+      { label: "设计冲突", values: normalizeValueList(skillResult.design_conflicts) },
+      { label: "待专项验证", values: normalizeValueList(skillResult.uncertain_points) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: typeof skillResult.summary === "string" ? skillResult.summary : undefined,
+      groups: [
+        { title: "详细设计识别结果", sections: recognitionSections },
+        { title: "设计一致性对比结果", sections: comparisonSections },
+      ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  if (row.eventType === "expert_tool_call" && toolResult) {
+    const toolName = typeof metadata.tool_name === "string" ? metadata.tool_name : "";
+    if (toolName === "design_spec_alignment") {
+      const recognitionSections = [
+        { label: "设计文档", values: normalizeValueList(toolResult.design_doc_titles) },
+        { label: "API 定义", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).api_definitions : []) },
+        { label: "入参字段", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).request_fields : []) },
+        { label: "关键出参", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).response_fields : []) },
+        { label: "表结构", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).table_definitions : []) },
+        { label: "业务时序", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).business_sequences : []) },
+        { label: "性能要求", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).performance_requirements : []) },
+        { label: "安全要求", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).security_requirements : []) },
+      ].filter((section) => section.values.length > 0);
+      const comparisonSections = [
+        {
+          label: "一致性状态",
+          values:
+            typeof toolResult.design_alignment_status === "string"
+              ? [getDesignAlignmentLabel(String(toolResult.design_alignment_status))]
+              : [],
+        },
+        { label: "命中的实现点", values: normalizeValueList(toolResult.matched_implementation_points) },
+        { label: "缺失实现点", values: normalizeValueList(toolResult.missing_implementation_points) },
+        { label: "实现冲突点", values: normalizeValueList(toolResult.conflicting_implementation_points) },
+        { label: "待专项验证", values: normalizeValueList(toolResult.uncertain_points) },
+      ].filter((section) => section.values.length > 0);
+      return {
+        summaryText: typeof toolResult.summary === "string" ? toolResult.summary : undefined,
+        groups: [
+          { title: "详细设计识别结果", sections: recognitionSections },
+          { title: "设计一致性对比结果", sections: comparisonSections },
+        ].filter((group) => group.sections.length > 0),
+      };
+    }
+    if (toolName === "repo_context_search") {
+      return {
+        summaryText: typeof toolResult.summary === "string" ? toolResult.summary : undefined,
+        groups: [
+          {
+            title: "源码上下文",
+            sections: [
+              { label: "上下文文件", values: normalizeValueList(toolResult.context_files) },
+              { label: "关联上下文", values: normalizeValueList(toolResult.related_contexts) },
+              { label: "定义/引用", values: normalizeValueList(toolResult.symbol_contexts) },
+            ].filter((section) => section.values.length > 0),
+          },
+        ].filter((group) => group.sections.length > 0),
+      };
+    }
+    if (toolName === "knowledge_search") {
+      return {
+        summaryText: typeof toolResult.summary === "string" ? toolResult.summary : undefined,
+        groups: [
+          {
+            title: "知识命中结果",
+            sections: [
+              { label: "命中文档", values: normalizeValueList(toolResult.documents) },
+              { label: "命中摘要", values: normalizeValueList(toolResult.matches) },
+            ].filter((section) => section.values.length > 0),
+          },
+        ].filter((group) => group.sections.length > 0),
+      };
+    }
+  }
+
+  if (row.eventType === "expert_analysis" && parsedAnalysis) {
+      return {
+      summaryText: typeof parsedAnalysis.title === "string" ? parsedAnalysis.title : undefined,
+      groups: [
+        {
+          title: "专家结论",
+          sections: [
+            { label: "结论", values: normalizeSingleValue(parsedAnalysis.claim) },
+            { label: "命中规则", values: normalizeValueList(parsedAnalysis.matched_rules) },
+            { label: "违反规范", values: normalizeValueList(parsedAnalysis.violated_guidelines) },
+            { label: "直接证据", values: normalizeValueList(parsedAnalysis.evidence) },
+            { label: "跨文件证据", values: normalizeValueList(parsedAnalysis.cross_file_evidence) },
+          ].filter((section) => section.values.length > 0),
+        },
+        {
+          title: "设计一致性对比结果",
+          sections: [
+            { label: "命中的设计点", values: normalizeValueList(parsedAnalysis.matched_design_points) },
+            { label: "缺失设计点", values: normalizeValueList(parsedAnalysis.missing_design_points) },
+            { label: "设计冲突", values: normalizeValueList(parsedAnalysis.design_conflicts) },
+          ].filter((section) => section.values.length > 0),
+        },
+        {
+          title: "修复与验证建议",
+          sections: [
+            { label: "修复步骤", values: normalizeValueList(parsedAnalysis.change_steps) },
+            { label: "验证计划", values: normalizeSingleValue(parsedAnalysis.verification_plan) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  return { groups: [] };
+};
+
+const StructuredMessageCard: React.FC<{ row: ReviewDialogueViewMessage }> = ({ row }) => {
+  const { groups, summaryText } = useMemo(() => buildStructuredGroups(row), [row]);
+  if (!groups.length) return null;
+  return (
+    <div className="dialogue-structured-card">
+      {summaryText ? <Paragraph className="dialogue-structured-summary">{summaryText}</Paragraph> : null}
+      <div className="dialogue-structured-groups">
+        {groups.map((group) => (
+          <div key={`${row.id}-${group.title}`} className="dialogue-structured-group">
+            <div className="dialogue-structured-group-title">{group.title}</div>
+            <div className="dialogue-structured-grid">
+              {group.sections.map((section) => (
+                <div key={`${row.id}-${group.title}-${section.label}`} className="dialogue-structured-section">
+                  <Text className="dialogue-structured-label">{section.label}</Text>
+                  <div className="dialogue-structured-values">
+                    {section.values.map((value, index) => (
+                      <div key={`${row.id}-${group.title}-${section.label}-${index}`} className="dialogue-structured-item">
+                        {value}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 };
 
 const buildLiveWaitingRow = (
@@ -438,6 +666,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 </div>
               ) : null}
               {ruleBasedReasoning ? <Paragraph className="dialogue-rule-reason">{ruleBasedReasoning}</Paragraph> : null}
+              <StructuredMessageCard row={row} />
               <pre className={`dialogue-content dialogue-content-${row.messageKind}`}>
                 {isExpanded ? row.detail : compact.text || "暂无更多上下文"}
               </pre>

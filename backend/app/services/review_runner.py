@@ -855,6 +855,16 @@ class ReviewRunner:
                     payload={"expert_id": expert.expert_id, "tool_name": tool_name, "tool_category": "runtime"},
                 )
             )
+        self._emit_skill_summary_messages(
+            review=review,
+            expert=expert,
+            file_path=file_path,
+            line_start=line_start,
+            active_skills=active_skills,
+            runtime_tool_results=runtime_tool_results,
+            target_hunk=target_hunk,
+            runtime_settings=runtime_settings,
+        )
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
         llm_result = self.llm_chat_service.complete_text(
@@ -2132,6 +2142,211 @@ class ReviewRunner:
                 continue
             return dict(item)
         return {}
+
+    def _emit_skill_summary_messages(
+        self,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        active_skills: list[object],
+        runtime_tool_results: list[dict[str, object]],
+        target_hunk: dict[str, object],
+        runtime_settings,
+    ) -> None:
+        """把关键 skill 的执行结果转成更适合人看的专家消息。
+
+        tool 调用消息偏“过程取证”，这里额外补一条专家视角摘要，
+        帮用户快速看懂：专家到底从详细设计里解析出了什么。
+        """
+        skill_ids = {str(getattr(skill, "skill_id", "") or "") for skill in active_skills}
+        design_alignment = self._extract_design_alignment(runtime_tool_results)
+        if expert.expert_id != "correctness_business":
+            return
+        if "design-consistency-check" not in skill_ids:
+            return
+        if not design_alignment:
+            return
+
+        summary = self._build_design_skill_summary(design_alignment)
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_skill_call",
+                content=summary["content"],
+                metadata={
+                    "phase": "expert_review",
+                    "skill_name": "design-consistency-check",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "skill_result": summary["skill_result"],
+                    "design_alignment_status": design_alignment.get("design_alignment_status", ""),
+                    "design_doc_titles": design_alignment.get("design_doc_titles", []),
+                    "target_hunk": target_hunk,
+                    **self._expert_llm_metadata(expert, runtime_settings),
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="expert_skill_invoked",
+                phase="expert_review",
+                message=f"{expert.name_zh} 已输出详细设计解析摘要",
+                payload={
+                    "expert_id": expert.expert_id,
+                    "skill_name": "design-consistency-check",
+                    "design_alignment_status": design_alignment.get("design_alignment_status", ""),
+                    "design_doc_titles": design_alignment.get("design_doc_titles", []),
+                },
+            )
+        )
+
+    def _build_design_skill_summary(self, design_alignment: dict[str, object]) -> dict[str, object]:
+        """把 design_spec_alignment 结果压成对话流可读摘要。"""
+        structured = dict(design_alignment.get("structured_design") or {})
+        design_doc_titles = self._normalize_text_list(design_alignment.get("design_doc_titles", []), [])
+        business_goal = str(structured.get("business_goal") or "").strip()
+        api_definitions = self._format_design_api_definitions(structured.get("api_definitions", []))
+        request_fields = self._format_design_fields(structured.get("request_fields", []))
+        response_fields = self._format_design_fields(structured.get("response_fields", []))
+        table_definitions = self._format_design_tables(structured.get("table_definitions", []))
+        business_sequences = self._format_design_sequences(structured.get("business_sequences", []))
+        performance_requirements = self._format_design_requirements(structured.get("performance_requirements", []))
+        security_requirements = self._format_design_requirements(structured.get("security_requirements", []))
+        ambiguous_points = self._normalize_text_list(structured.get("unknown_or_ambiguous_points", []), [])
+        matched_points = self._normalize_text_list(design_alignment.get("matched_implementation_points", []), [])
+        missing_points = self._normalize_text_list(design_alignment.get("missing_implementation_points", []), [])
+        conflict_points = self._normalize_text_list(design_alignment.get("conflicting_implementation_points", []), [])
+        uncertain_points = self._normalize_text_list(design_alignment.get("uncertain_points", []), [])
+        status = str(design_alignment.get("design_alignment_status") or "").strip() or "insufficient_design_context"
+        status_label = {
+            "aligned": "设计一致",
+            "partially_aligned": "部分偏离设计",
+            "misaligned": "与设计冲突",
+            "insufficient_design_context": "设计上下文不足",
+        }.get(status, status)
+        content = (
+            f"已完成详细设计解析：{status_label}。"
+            f" 共识别 {len(api_definitions)} 个 API 定义、{len(response_fields)} 个关键出参字段、"
+            f"{len(table_definitions)} 组表结构定义、{len(business_sequences)} 条业务时序要点。"
+        )
+        skill_result = {
+            "summary": content,
+            "design_doc_titles": design_doc_titles,
+            "design_alignment_status": status,
+            "business_goal": business_goal,
+            "api_definitions": api_definitions[:4],
+            "request_fields": request_fields[:6],
+            "response_fields": response_fields[:6],
+            "table_definitions": table_definitions[:4],
+            "business_sequences": business_sequences[:5],
+            "performance_requirements": performance_requirements[:4],
+            "security_requirements": security_requirements[:4],
+            "unknown_or_ambiguous_points": ambiguous_points[:5],
+            "matched_design_points": matched_points[:5],
+            "missing_design_points": missing_points[:5],
+            "design_conflicts": conflict_points[:5],
+            "uncertain_points": uncertain_points[:5],
+        }
+        return {"content": content, "skill_result": skill_result}
+
+    def _format_design_api_definitions(self, value: object) -> list[str]:
+        lines: list[str] = []
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                text = str(item).strip()
+                if text:
+                    lines.append(text)
+                continue
+            method = str(item.get("method") or "").strip()
+            path = str(item.get("path") or "").strip()
+            purpose = str(item.get("purpose") or "").strip()
+            line = " ".join(part for part in [method, path] if part).strip()
+            if purpose:
+                line = f"{line} · {purpose}" if line else purpose
+            if line:
+                lines.append(line)
+        return lines
+
+    def _format_design_fields(self, value: object) -> list[str]:
+        lines: list[str] = []
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                text = str(item).strip()
+                if text:
+                    lines.append(text)
+                continue
+            name = str(item.get("name") or "").strip()
+            location = str(item.get("location") or "").strip()
+            field_type = str(item.get("field_type") or "").strip()
+            required = str(item.get("required") or "").strip()
+            description = str(item.get("description") or "").strip()
+            head = name or "未命名字段"
+            if field_type:
+                head += f": {field_type}"
+            extras = [item for item in [location, required, description] if item]
+            line = f"{head} · {' · '.join(extras)}" if extras else head
+            lines.append(line)
+        return lines
+
+    def _format_design_tables(self, value: object) -> list[str]:
+        lines: list[str] = []
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                text = str(item).strip()
+                if text:
+                    lines.append(text)
+                continue
+            table_name = str(item.get("table_name") or "").strip() or "未命名表"
+            fields = self._normalize_text_list(item.get("fields"), [])
+            constraints = self._normalize_text_list(item.get("constraints"), [])
+            indexes = self._normalize_text_list(item.get("indexes"), [])
+            extras: list[str] = []
+            if fields:
+                extras.append(f"字段: {', '.join(fields[:4])}")
+            if constraints:
+                extras.append(f"约束: {', '.join(constraints[:3])}")
+            if indexes:
+                extras.append(f"索引: {', '.join(indexes[:3])}")
+            lines.append(f"{table_name} · {' · '.join(extras)}" if extras else table_name)
+        return lines
+
+    def _format_design_sequences(self, value: object) -> list[str]:
+        lines: list[str] = []
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                text = str(item).strip()
+                if text:
+                    lines.append(text)
+                continue
+            step = str(item.get("step") or "").strip()
+            actor = str(item.get("actor") or "").strip()
+            action = str(item.get("action") or "").strip()
+            expected = str(item.get("expected_result") or "").strip()
+            line = " -> ".join(part for part in [actor, action, expected] if part).strip()
+            if step:
+                line = f"{step}. {line}" if line else step
+            if line:
+                lines.append(line)
+        return lines
+
+    def _format_design_requirements(self, value: object) -> list[str]:
+        lines: list[str] = []
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                text = str(item).strip()
+                if text:
+                    lines.append(text)
+                continue
+            title = str(item.get("title") or "").strip()
+            requirement = str(item.get("requirement") or "").strip()
+            line = f"{title} · {requirement}" if title and requirement else title or requirement
+            if line:
+                lines.append(line)
+        return lines
 
     def _is_meaningful_context_file(self, path_text: str) -> bool:
         normalized = str(path_text or "").strip().replace("\\", "/")
