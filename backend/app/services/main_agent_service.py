@@ -66,7 +66,7 @@ class MainAgentService:
             related_files,
             dict(target_focus.get("repo_hits") or {}),
         )
-        routeable, skip_reason = self._should_route_expert(expert, target_focus, file_path)
+        routeable, skip_reason = self._should_route_expert(subject, expert, target_focus, file_path)
         summary = self._build_command_fallback(
             subject,
             expert,
@@ -374,6 +374,7 @@ class MainAgentService:
             preferred = self._pick_correctness_chain_focus(subject, repository_service)
             if preferred:
                 return preferred
+        substantive_hunks_present = self._review_has_substantive_hunks(subject, changed_files)
         best_candidate: dict[str, object] | None = None
         best_score = -1
         for file_path in self._ordered_changed_files(subject, expert, changed_files):
@@ -391,6 +392,8 @@ class MainAgentService:
                     }
                 ]
             for hunk in hunks:
+                if substantive_hunks_present and self._is_low_signal_hunk(str(hunk.get("excerpt") or "")):
+                    continue
                 repo_hits = self._search_related_repo_context(repository_service, file_path, hunk)
                 score = self._capability_service.score_hunk_relevance(
                     expert,
@@ -398,6 +401,10 @@ class MainAgentService:
                     str(hunk.get("excerpt") or ""),
                     self._format_repo_matches(repo_hits),
                 )
+                if self._is_import_only_hunk(str(hunk.get("excerpt") or "")):
+                    score -= 6
+                if self._is_format_only_hunk(str(hunk.get("excerpt") or "")):
+                    score -= 8
                 if score <= best_score:
                     continue
                 changed_lines = [int(item) for item in list(hunk.get("changed_lines") or []) if isinstance(item, int)]
@@ -432,7 +439,7 @@ class MainAgentService:
             str(target_hunk.get("excerpt") or ""),
             self._format_repo_matches(dict(target_focus.get("repo_hits") or {})),
         )
-        routeable, skip_reason = self._should_route_expert(expert, target_focus, file_path)
+        routeable, skip_reason = self._should_route_expert(subject, expert, target_focus, file_path)
         return {
             **target_focus,
             "expert_id": expert.expert_id,
@@ -559,6 +566,7 @@ class MainAgentService:
 
     def _should_route_expert(
         self,
+        subject: ReviewSubject,
         expert: ExpertProfile,
         target_focus: dict[str, object],
         file_path: str,
@@ -571,34 +579,105 @@ class MainAgentService:
         expert_id = expert.expert_id
         lowered = file_path.lower()
         excerpt_lowered = str(target_hunk.get("excerpt") or "").lower()
+        global_diff_lowered = self._strip_non_diff_signal_lines(str(subject.unified_diff or "")).lower()
+        changed_files_lowered = "\n".join(subject.changed_files).lower()
+        global_blob = "\n".join([lowered, excerpt_lowered, changed_files_lowered, global_diff_lowered])
 
         if expert_id == "mq_analysis" and not any(token in f"{lowered}\n{excerpt_lowered}" for token in ["mq", "queue", "kafka", "rabbit", "consumer", "producer"]):
             return False, "当前变更未命中该中间件专家的关键线索"
         if expert_id == "redis_analysis" and not any(token in f"{lowered}\n{excerpt_lowered}" for token in ["redis", "cache", "ttl", "expire", "setnx", "pipeline"]):
             return False, "当前变更未命中该缓存专家的关键线索"
-        if expert_id == "security_compliance" and not any(token in f"{lowered}\n{excerpt_lowered}" for token in ["auth", "security", "permission", "token", "secret"]):
+        if expert_id == "security_compliance" and not any(
+            token in global_blob
+            for token in [
+                "auth",
+                "security",
+                "permission",
+                "token",
+                "secret",
+                "frame",
+                "decoder",
+                "encode",
+                "netty",
+                "memory",
+                "oom",
+                "payload",
+                "dos",
+                "denial",
+                "serialize",
+            ]
+        ):
             return False, "当前变更未命中安全相关线索"
         if expert_id == "frontend_accessibility" and "frontend" not in lowered:
             return False, "当前变更不属于前端可访问性审查范围"
-        if expert_id in {"ddd_specification", "architecture_design", "maintainability_code_health"} and import_only:
+        if expert_id in {"ddd_specification", "architecture_design", "maintainability_code_health", "security_compliance"} and import_only:
             return False, "当前 hunk 仅为 import 级调整，缺少足够的结构性审查信号"
         return True, ""
+
+    def _strip_non_diff_signal_lines(self, unified_diff: str) -> str:
+        kept_lines: list[str] = []
+        for line in str(unified_diff or "").splitlines():
+            if line.startswith(("diff --git ", "@@ ", "@@", "--- ", "+++ ", "+", "-")):
+                kept_lines.append(line)
+        return "\n".join(kept_lines)
 
     def _is_import_only_hunk(self, excerpt: str) -> bool:
         if not excerpt.strip():
             return False
         changed_lines: list[str] = []
         for line in excerpt.splitlines():
-            cleaned = line
-            if "|" in cleaned:
-                cleaned = cleaned.split("|", 1)[1]
-            cleaned = cleaned.strip()
+            cleaned = self._extract_changed_line(line)
             if cleaned.startswith("# "):
                 continue
             if not cleaned.startswith(("+", "-")):
                 continue
+            if cleaned in {"+", "-"}:
+                continue
             changed_lines.append(cleaned)
         return bool(changed_lines) and all(line.startswith(("+import", "-import")) for line in changed_lines)
+
+    def _is_format_only_hunk(self, excerpt: str) -> bool:
+        if not excerpt.strip():
+            return False
+        added: list[str] = []
+        removed: list[str] = []
+        for line in excerpt.splitlines():
+            cleaned = self._extract_changed_line(line)
+            cleaned = cleaned.rstrip()
+            if cleaned.startswith("# "):
+                continue
+            stripped = cleaned.lstrip()
+            if stripped.startswith("+"):
+                added.append(stripped[1:])
+            elif stripped.startswith("-"):
+                removed.append(stripped[1:])
+        if not added or not removed or len(added) != len(removed):
+            if not added or not removed:
+                return False
+
+        def normalize(value: str) -> str:
+            return re.sub(r"\s+", "", value)
+
+        return "".join(normalize(item) for item in added) == "".join(normalize(item) for item in removed)
+
+    def _extract_changed_line(self, line: str) -> str:
+        prefixed_match = re.match(r"^\s*(?P<prefix>[+-])\s*\|\s?(?P<body>.*)$", line)
+        if prefixed_match:
+            return f"{prefixed_match.group('prefix')}{prefixed_match.group('body')}".strip()
+        numbered_match = re.match(r"^\s*\d+\s*\|\s?(?P<body>[+-].*)$", line)
+        if numbered_match:
+            return numbered_match.group("body").strip()
+        return line.strip()
+
+    def _is_low_signal_hunk(self, excerpt: str) -> bool:
+        return self._is_import_only_hunk(excerpt) or self._is_format_only_hunk(excerpt)
+
+    def _review_has_substantive_hunks(self, subject: ReviewSubject, changed_files: list[str]) -> bool:
+        for file_path in changed_files:
+            for hunk in self._diff_excerpt_service.list_hunks(subject.unified_diff, file_path):
+                if not self._is_low_signal_hunk(str(hunk.get("excerpt") or "")):
+                    return True
+        return False
 
     def _llm_metadata(self, result: LLMTextResult) -> dict[str, object]:
         return {
@@ -762,7 +841,9 @@ class MainAgentService:
         repository_service: RepositoryContextService,
     ) -> list[dict[str, object]]:
         candidates: list[dict[str, object]] = []
-        for file_path in self._candidate_changed_files(subject, ""):
+        changed_files = self._candidate_changed_files(subject, "")
+        substantive_hunks_present = self._review_has_substantive_hunks(subject, changed_files)
+        for file_path in changed_files:
             hunks = self._diff_excerpt_service.list_hunks(subject.unified_diff, file_path)
             if not hunks:
                 fallback_line = self._pick_line_start(subject, "", file_path)
@@ -776,7 +857,31 @@ class MainAgentService:
                         "excerpt": self._diff_excerpt_service.extract_excerpt(subject.unified_diff, file_path, fallback_line),
                     }
                 ]
-            for index, hunk in enumerate(hunks[:3], start=1):
+            enriched_hunks: list[dict[str, object]] = []
+            for hunk in hunks[:3]:
+                excerpt = str(hunk.get("excerpt") or "")
+                enriched_hunks.append(
+                    {
+                        "hunk": hunk,
+                        "import_only": self._is_import_only_hunk(excerpt),
+                        "format_only": self._is_format_only_hunk(excerpt),
+                    }
+                )
+            has_substantive_hunk = any(
+                not item["import_only"] and not item["format_only"] for item in enriched_hunks
+            )
+            filtered_hunks = [
+                item
+                for item in enriched_hunks
+                if (
+                    not has_substantive_hunk
+                    or (not item["import_only"] and not item["format_only"])
+                )
+            ]
+            for index, item in enumerate(filtered_hunks, start=1):
+                if substantive_hunks_present and (item["import_only"] or item["format_only"]):
+                    continue
+                hunk = dict(item["hunk"])
                 changed_lines = [int(item) for item in list(hunk.get("changed_lines") or []) if isinstance(item, int)]
                 line_start = changed_lines[0] if changed_lines else int(hunk.get("start_line") or 1)
                 repo_hits = self._search_related_repo_context(repository_service, file_path, hunk)
@@ -787,6 +892,8 @@ class MainAgentService:
                         "line_start": line_start,
                         "hunk_header": str(hunk.get("hunk_header") or ""),
                         "excerpt": str(hunk.get("excerpt") or ""),
+                        "import_only": bool(item["import_only"]),
+                        "format_only": bool(item["format_only"]),
                         "repo_hits": repo_hits,
                     }
                 )

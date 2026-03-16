@@ -159,6 +159,44 @@ def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Pat
     assert any("constructor" in item for item in stabilized["assumptions"])
 
 
+def test_review_runner_downgrades_speculative_high_severity_claim(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "构造函数参数未同步修改，可能导致编译失败",
+            "claim": "当前 diff 未显示完整构造函数，若参数未同步则会导致注入失败。",
+            "finding_type": "direct_defect",
+            "severity": "blocker",
+            "confidence": 0.92,
+            "evidence": [
+                "字段声明已经改为 EventBus",
+                "当前 diff 未看到构造函数完整实现",
+            ],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": False,
+        },
+        "architecture_design",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        20,
+        {
+            "excerpt": (
+                "  19 | public class MySqlDomainEventsConsumer {\n"
+                "  20 | +    private final EventBus bus;\n"
+                "  21 | +    private final Integer CHUNKS = 200;\n"
+            )
+        },
+    )
+
+    assert stabilized["finding_type"] == "risk_hypothesis"
+    assert stabilized["verification_needed"] is True
+    assert stabilized["direct_evidence"] is False
+    assert stabilized["severity"] == "medium"
+    assert float(stabilized["confidence"]) <= 0.4
+    assert any("完整方法/类定义" in item for item in stabilized["assumptions"])
+
+
 def test_review_runner_merge_context_files_filters_noise(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -239,6 +277,32 @@ def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     )
 
     assert runner._should_skip_finding("performance_reliability", finding) is True
+
+
+def test_review_runner_suppresses_no_risk_formatting_findings(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        review_id="rev_demo",
+        expert_id="architecture_design",
+        title="代码格式化变更无架构风险",
+        summary="当前变更仅涉及缩进调整，无架构问题。",
+        finding_type="design_concern",
+        severity="low",
+        confidence=0.7,
+        file_path="sentinel-cluster/server/NettyTransportServer.java",
+        line_start=12,
+        evidence=["本次改动只调整了空格和换行"],
+        cross_file_evidence=[],
+        context_files=["sentinel-cluster/server/NettyTransportServer.java"],
+        remediation_strategy="无需处理",
+        remediation_suggestion="保持现状",
+        remediation_steps=[],
+        code_excerpt="12 |     // formatting only",
+        suggested_code="",
+        suggested_code_language="java",
+    )
+
+    assert runner._should_skip_finding("architecture_design", finding) is True
 
 
 def test_review_runner_build_evidence_scopes_domain_hints_by_file(storage_root: Path):

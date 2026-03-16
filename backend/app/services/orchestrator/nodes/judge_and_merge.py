@@ -12,6 +12,29 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
     merged_issues: list[dict[str, object]] = []
     for issue in next_state.get("issues", []):
         next_issue = dict(issue)
+        text_blob = "\n".join(
+            [
+                str(issue.get("title") or ""),
+                str(issue.get("summary") or ""),
+                str(issue.get("claim") or ""),
+                *[str(item) for item in list(issue.get("evidence") or [])],
+            ]
+        ).lower()
+        if any(
+            token in text_blob
+            for token in [
+                "无风险",
+                "没有风险",
+                "无架构风险",
+                "无可维护性风险",
+                "代码格式化",
+                "缩进调整",
+                "仅涉及格式化",
+                "whitespace",
+                "format only",
+            ]
+        ):
+            continue
         finding_type = str(issue.get("finding_type") or "risk_hypothesis")
         direct_evidence = bool(issue.get("direct_evidence"))
         tool_verified = bool(issue.get("tool_verified"))
@@ -27,7 +50,11 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         evidence = [
             str(item).strip() for item in list(issue.get("evidence") or []) if str(item).strip()
         ]
+        assumptions = [
+            str(item).strip() for item in list(issue.get("assumptions") or []) if str(item).strip()
+        ]
         evidence_strength = len(cross_file_evidence) + len(context_files) + len(evidence)
+        speculative_issue = bool(assumptions) and not direct_evidence
         if issue.get("needs_human"):
             next_issue["status"] = "needs_human"
             next_issue["resolution"] = next_issue.get("resolution") or "needs_human_review"
@@ -38,7 +65,11 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
             next_issue["resolution"] = "comment"
             next_issue["needs_human"] = False
         elif finding_type == "risk_hypothesis" and not direct_evidence:
-            if (tool_verified or verified) and evidence_strength >= 4:
+            if speculative_issue and confidence <= 0.5:
+                next_issue["status"] = "needs_verification"
+                next_issue["resolution"] = "needs_verification"
+                next_issue["needs_human"] = False
+            elif (tool_verified or verified) and evidence_strength >= 4:
                 next_issue["status"] = "resolved"
                 next_issue["resolution"] = next_issue.get("resolution") or "accepted_with_verification"
                 next_issue["needs_human"] = False

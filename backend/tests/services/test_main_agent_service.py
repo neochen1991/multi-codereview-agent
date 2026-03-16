@@ -532,6 +532,129 @@ def test_main_agent_does_not_route_security_from_patch_mail_headers():
     assert "安全" in command["skip_reason"]
 
 
+def test_main_agent_routes_security_for_java_decoder_memory_change():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=[
+            "sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java"
+        ],
+        unified_diff=(
+            "diff --git a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java "
+            "b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "--- a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "+++ b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "@@ -10,2 +10,5 @@ public class ParamFlowRequestDataDecoder {\n"
+            "+    if (frameLength > ServerConstants.NETTY_MAX_FRAME_LENGTH) {\n"
+            "+        throw new IllegalArgumentException(\"prevent memory issues\");\n"
+            "+    }\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["鉴权授权"],
+        activation_hints=["security", "decoder", "memory"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["routeable"] is True
+    assert "frameLength" in command["target_hunk"]["excerpt"]
+
+
+def test_main_agent_routes_security_when_java_memory_signal_is_in_related_hunk():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=[
+            "sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/NettyTransportServer.java",
+            "sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java",
+        ],
+        unified_diff=(
+            "diff --git a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/NettyTransportServer.java "
+            "b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/NettyTransportServer.java\n"
+            "--- a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/NettyTransportServer.java\n"
+            "+++ b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/NettyTransportServer.java\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-serverBootstrap.childHandler(childChannelHandler);\n"
+            "+serverBootstrap.childHandler(childChannelHandler).option(ChannelOption.SO_BACKLOG, 1024);\n"
+            "diff --git a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java "
+            "b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "--- a/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "+++ b/sentinel-cluster/sentinel-cluster-server-default/src/main/java/com/alibaba/csp/sentinel/cluster/server/codec/data/ParamFlowRequestDataDecoder.java\n"
+            "@@ -10,2 +10,5 @@ public class ParamFlowRequestDataDecoder {\n"
+            "+    if (frameLength > ServerConstants.NETTY_MAX_FRAME_LENGTH) {\n"
+            "+        throw new IllegalArgumentException(\"prevent memory issues\");\n"
+            "+    }\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["鉴权授权"],
+        activation_hints=["security", "decoder", "memory"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["routeable"] is True
+
+
+def test_main_agent_does_not_route_security_from_author_comment_noise():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["server/NettyTransportServer.java"],
+        unified_diff=(
+            "diff --git a/server/NettyTransportServer.java b/server/NettyTransportServer.java\n"
+            "--- a/server/NettyTransportServer.java\n"
+            "+++ b/server/NettyTransportServer.java\n"
+            "@@ -1,5 +1,5 @@\n"
+            " /**\n"
+            "  * @author Eric Zhao\n"
+            "  */\n"
+            "-import static server.ServerConstants.*;\n"
+            "+import static server.ServerConstants.NETTY_MAX_FRAME_LENGTH;\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["鉴权授权"],
+        activation_hints=["auth", "security"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["routeable"] is False
+    assert "import" in command["skip_reason"]
+
+
 def test_main_agent_skips_architecture_on_import_only_hunk():
     agent = MainAgentService()
     subject = ReviewSubject(
@@ -608,6 +731,170 @@ def test_main_agent_treats_import_change_with_context_lines_as_import_only():
 
     assert command["routeable"] is False
     assert "import" in command["skip_reason"]
+
+
+def test_main_agent_prefers_non_import_hunk_when_same_file_has_real_behavior_change():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"],
+        unified_diff=(
+            "diff --git a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "--- a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "+++ b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "@@ -6,3 +6,3 @@\n"
+            "-import tv.codely.shared.infrastructure.bus.event.spring.SpringApplicationEventBus;\n"
+            "+import tv.codely.shared.domain.bus.event.EventBus;\n"
+            "@@ -20,3 +20,3 @@ public class MySqlDomainEventsConsumer {\n"
+            "-    private final SpringApplicationEventBus bus;\n"
+            "+    private final EventBus bus;\n"
+            "@@ -30,2 +30,2 @@\n"
+            "-        SpringApplicationEventBus bus\n"
+            "+        EventBus bus\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构与设计专家",
+        role="architecture",
+        enabled=True,
+        focus_areas=["模块边界"],
+        activation_hints=["event", "bus", "domain", "application"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["routeable"] is True
+    assert "private final EventBus bus" in command["target_hunk"]["excerpt"]
+
+
+def test_main_agent_prefers_semantic_change_over_format_only_sql_hunk():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=[
+            "src/mooc/main/resources/database/mooc.sql",
+            "src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/mooc/main/resources/database/mooc.sql b/src/mooc/main/resources/database/mooc.sql\n"
+            "--- a/src/mooc/main/resources/database/mooc.sql\n"
+            "+++ b/src/mooc/main/resources/database/mooc.sql\n"
+            "@@ -1,4 +1,4 @@\n"
+            "-    id       CHAR(36)     NOT NULL,\n"
+            "+\tid CHAR(36) NOT NULL,\n"
+            "-    name     VARCHAR(255) NOT NULL,\n"
+            "+\tname VARCHAR(255) NOT NULL,\n"
+            "diff --git a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "--- a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "+++ b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "@@ -20,3 +20,3 @@ public class MySqlDomainEventsConsumer {\n"
+            "-    private final SpringApplicationEventBus bus;\n"
+            "+    private final EventBus bus;\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务规则"],
+        activation_hints=["event", "bus", "domain"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(subject, expert, RuntimeSettings(allow_llm_fallback=True))
+
+    assert command["file_path"] == "src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+    assert "EventBus" in command["target_hunk"]["excerpt"]
+
+
+def test_main_agent_candidate_hunks_drop_import_only_when_same_file_has_substantive_hunk():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"],
+        unified_diff=(
+            "diff --git a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "--- a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "+++ b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "@@ -6,3 +6,3 @@\n"
+            "-import tv.codely.shared.infrastructure.bus.event.spring.SpringApplicationEventBus;\n"
+            "+import tv.codely.shared.domain.bus.event.EventBus;\n"
+            "@@ -20,3 +20,3 @@ public class MySqlDomainEventsConsumer {\n"
+            "-    private final SpringApplicationEventBus bus;\n"
+            "+    private final EventBus bus;\n"
+        ),
+    )
+
+    candidates = agent._build_candidate_hunks(subject, agent._build_repository_service(RuntimeSettings()))
+
+    assert len(candidates) == 1
+    assert "private final EventBus bus" in candidates[0]["excerpt"]
+
+
+def test_main_agent_candidate_hunks_drop_format_only_file_when_review_has_substantive_change():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=[
+            "src/mooc/main/resources/database/mooc.sql",
+            "src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/mooc/main/resources/database/mooc.sql b/src/mooc/main/resources/database/mooc.sql\n"
+            "--- a/src/mooc/main/resources/database/mooc.sql\n"
+            "+++ b/src/mooc/main/resources/database/mooc.sql\n"
+            "@@ -1,4 +1,4 @@\n"
+            "-    id       CHAR(36)     NOT NULL,\n"
+            "+\tid CHAR(36) NOT NULL,\n"
+            "-    name     VARCHAR(255) NOT NULL,\n"
+            "+\tname VARCHAR(255) NOT NULL,\n"
+            "diff --git a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "--- a/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "+++ b/src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+            "@@ -20,3 +20,3 @@ public class MySqlDomainEventsConsumer {\n"
+            "-    private final SpringApplicationEventBus bus;\n"
+            "+    private final EventBus bus;\n"
+        ),
+    )
+
+    candidates = agent._build_candidate_hunks(subject, agent._build_repository_service(RuntimeSettings()))
+
+    assert len(candidates) == 1
+    assert candidates[0]["file_path"] == "src/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+    assert "EventBus" in candidates[0]["excerpt"]
+
+
+def test_main_agent_treats_sql_line_wrap_reflow_as_format_only():
+    agent = MainAgentService()
+    excerpt = (
+        "# src/mooc/main/resources/database/mooc.sql\n"
+        "   - | INSERT IGNORE INTO courses_counter (id, total, existing_courses) VALUES ('id', 0, '[]');\n"
+        "   1 | +INSERT IGNORE INTO courses_counter (id, total, existing_courses)\n"
+        "   2 | +VALUES ('id', 0, '[]');\n"
+    )
+
+    assert agent._is_format_only_hunk(excerpt) is True
 
 
 def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):

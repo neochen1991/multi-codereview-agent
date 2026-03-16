@@ -17,14 +17,14 @@
     "codehub_access_token": "codehub_example"
   },
   "code_repo": {
-    "clone_url": "https://github.com/calcom/cal.com.git",
-    "local_path": "/tmp/calcom-review-repo",
+    "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
+    "local_path": "/tmp/java-ddd-example-review-repo",
     "default_branch": "main",
-    "auto_sync": true
+    "auto_sync": false
   },
   "runtime": {
     "default_target_branch": "main",
-    "default_analysis_mode": "standard",
+    "default_analysis_mode": "light",
     "allow_llm_fallback": false,
     "allow_human_gate": true,
     "default_max_debate_rounds": 3,

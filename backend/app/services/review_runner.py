@@ -1914,9 +1914,23 @@ class ReviewRunner:
         import_inference_tokens = ["constructor", "注入", "依赖缺失", "未注入", "Cannot resolve dependency"]
         has_speculative_language = any(token in text_blob for token in speculative_tokens)
         has_import_inference = any(token in text_blob for token in import_inference_tokens)
-        if import_only_excerpt and has_import_inference:
+        if has_speculative_language:
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
+            result["direct_evidence"] = False
+            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4)
+            if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
+                result["severity"] = "medium"
+            assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+            assumption = "当前结论依赖 diff 片段外信息或未展示的实现细节，需要查看完整方法/类定义后再确认。"
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+            result["assumptions"] = assumptions
+            result["verification_plan"] = (
+                str(result.get("verification_plan") or "").strip()
+                or "需要回看完整 diff、相关方法实现和调用链，确认推断是否成立。"
+            )
+        if import_only_excerpt and has_import_inference:
             result["verification_plan"] = (
                 str(result.get("verification_plan") or "").strip()
                 or "需要检查完整类定义和 constructor 注入，不能仅凭 import 变化下结论。"
@@ -1929,10 +1943,6 @@ class ReviewRunner:
             result["confidence"] = min(float(result.get("confidence") or 0.0), 0.45)
             if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
                 result["severity"] = "medium"
-        elif has_speculative_language and str(result.get("finding_type") or "") == "direct_defect":
-            result["finding_type"] = "risk_hypothesis"
-            result["verification_needed"] = True
-            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.6)
         if expert_id == "performance_reliability":
             perf_tokens = [
                 "超时",
@@ -2410,6 +2420,16 @@ class ReviewRunner:
         return not normalized.endswith(banned_suffixes)
 
     def _should_skip_finding(self, expert_id: str, finding: ReviewFinding) -> bool:
+        if self._looks_like_non_issue_finding(finding):
+            logger.info(
+                "suppressing non-issue finding review_id=%s expert_id=%s file=%s line=%s title=%s",
+                finding.review_id,
+                expert_id,
+                finding.file_path,
+                finding.line_start,
+                finding.title,
+            )
+            return True
         if expert_id != "performance_reliability":
             return False
         text_blob = "\n".join(
@@ -2456,6 +2476,39 @@ class ReviewRunner:
             )
             return True
         return False
+
+    def _looks_like_non_issue_finding(self, finding: ReviewFinding) -> bool:
+        text_blob = "\n".join(
+            [
+                finding.title,
+                finding.summary,
+                finding.rule_based_reasoning,
+                *finding.evidence,
+                *finding.cross_file_evidence,
+            ]
+        ).lower()
+        no_issue_phrases = {
+            "无风险",
+            "没有风险",
+            "无架构风险",
+            "无可维护性风险",
+            "无需处理",
+            "保持现状",
+            "仅涉及格式化",
+            "仅为格式化",
+            "仅是格式化",
+            "代码格式化",
+            "缩进调整",
+            "空格调整",
+            "换行调整",
+        }
+        formatting_tokens = {"formatting", "format only", "whitespace", "indent", "reformat"}
+        has_no_issue_phrase = any(token in text_blob for token in no_issue_phrases | formatting_tokens)
+        if not has_no_issue_phrase:
+            return False
+        if finding.severity not in {"low", "medium"}:
+            return False
+        return True
 
     def _build_debate_prompt(
         self,
