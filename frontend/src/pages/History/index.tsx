@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Button, Card, Space, Table, Tag } from "antd";
+import { Button, Card, Popconfirm, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useNavigate } from "react-router-dom";
 
@@ -27,11 +27,20 @@ const formatAnalysisMode = (value?: string) => {
   return { label: "标准模式", color: "blue" as const };
 };
 
+const statusColor = (value?: string) => {
+  if (value === "running") return "processing";
+  if (value === "completed") return "success";
+  if (value === "failed") return "error";
+  if (value === "closed") return "warning";
+  return "default";
+};
+
 // 历史记录页用于回看审核结果，并从“查看工作台”跳回详情。
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [closingReviewId, setClosingReviewId] = useState("");
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -104,7 +113,7 @@ const HistoryPage: React.FC = () => {
       width: 120,
       render: (value: string, record) => (
         <Space size={6} wrap>
-          <Tag>{value}</Tag>
+          <Tag color={statusColor(value)}>{value}</Tag>
           {record.subject.metadata?.trigger_source === "auto_scheduler" ? <Tag color="purple">自动队列</Tag> : null}
         </Space>
       ),
@@ -157,6 +166,30 @@ const HistoryPage: React.FC = () => {
           <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "result")}>
             结果
           </Button>
+          {record.status === "running" ? (
+            <Popconfirm
+              title="确认关闭这个运行中的任务吗？"
+              description="关闭后会停止后续审核流程，并把任务状态更新为 closed。"
+              okText="确认关闭"
+              cancelText="取消"
+              onConfirm={async () => {
+                setClosingReviewId(record.review_id);
+                try {
+                  await reviewApi.close(record.review_id);
+                  message.success("任务已关闭");
+                  await loadReviews();
+                } catch (error: any) {
+                  message.error(error?.message || "关闭任务失败");
+                } finally {
+                  setClosingReviewId("");
+                }
+              }}
+            >
+              <Button type="link" size="small" danger loading={closingReviewId === record.review_id}>
+                关闭
+              </Button>
+            </Popconfirm>
+          ) : null}
         </Space>
       ),
     },

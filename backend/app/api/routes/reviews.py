@@ -52,10 +52,7 @@ def list_reviews() -> list[dict[str, object]]:
 def list_pending_queue() -> list[dict[str, object]]:
     """返回待处理队列（pending），供首页展示自动审核排队情况。"""
 
-    return [
-        item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_pending_queue()
-    ]
+    return review_service_module.review_service.list_pending_queue_with_diagnostics()
 
 
 @router.post("/reviews/queue/sync")
@@ -101,6 +98,28 @@ def start_review(review_id: str) -> dict[str, object]:
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
     updated = review_service_module.review_service.start_review_async(review_id)
+    return {"review_id": updated.review_id, "status": updated.status, "phase": updated.phase}
+
+
+@router.post("/reviews/{review_id}/queue-start", status_code=status.HTTP_202_ACCEPTED)
+def queue_start_review(review_id: str) -> dict[str, object]:
+    """手动启动待处理队列中的任务；若已有运行中任务，则先插队等待。"""
+
+    try:
+        updated, message = review_service_module.review_service.queue_start_review(review_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+    return {"review_id": updated.review_id, "status": updated.status, "phase": updated.phase, "message": message}
+
+
+@router.post("/reviews/{review_id}/close", status_code=status.HTTP_202_ACCEPTED)
+def close_review(review_id: str) -> dict[str, object]:
+    """关闭运行中或待处理中的审核任务。"""
+
+    try:
+        updated = review_service_module.review_service.close_review(review_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
     return {"review_id": updated.review_id, "status": updated.status, "phase": updated.phase}
 
 

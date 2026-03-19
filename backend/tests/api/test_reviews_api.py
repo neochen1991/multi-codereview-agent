@@ -121,3 +121,38 @@ def test_create_review_persists_into_sqlite_without_file_backed_review_json(clie
     assert row[1] == "pending"
 
     assert not (storage_root / "reviews" / review_id / "review.json").exists()
+
+
+def test_close_running_review_updates_status_to_closed(client, monkeypatch):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_close",
+            "project_id": "proj_close",
+            "source_ref": "feature/close",
+            "target_ref": "main",
+            "title": "close review",
+        },
+    ).json()
+
+    def fake_start(review_id: str):
+        review = client.app.state.auto_review_scheduler._review_service.get_review(review_id)  # type: ignore[attr-defined]
+        assert review is not None
+        review.status = "running"
+        review.phase = "expert_review"
+        client.app.state.auto_review_scheduler._review_service.review_repo.save(review)  # type: ignore[attr-defined]
+        return review
+
+    monkeypatch.setattr("app.api.routes.reviews.review_service_module.review_service.start_review_async", fake_start)
+    client.post(f"/api/reviews/{created['review_id']}/start")
+
+    response = client.post(f"/api/reviews/{created['review_id']}/close")
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "closed"
+    assert payload["phase"] == "closed"
+
+    review = client.get(f"/api/reviews/{created['review_id']}").json()
+    assert review["status"] == "closed"
+    assert review["phase"] == "closed"

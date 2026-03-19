@@ -11,6 +11,11 @@ export interface ReviewSummary {
   status: string;
   phase?: string;
   analysis_mode?: "standard" | "light";
+  queue_position?: number;
+  is_next_candidate?: boolean;
+  queue_blocker_code?: string;
+  queue_blocker_message?: string;
+  blocking_review_id?: string;
   failure_reason?: string;
   human_review_status?: string;
   pending_human_issue_ids?: string[];
@@ -370,6 +375,14 @@ export const reviewApi = {
   },
   async start(reviewId: string): Promise<{ review_id: string; status: string; phase: string }> {
     const { data } = await api.post(`/reviews/${reviewId}/start`);
+    return data;
+  },
+  async queueStart(reviewId: string): Promise<{ review_id: string; status: string; phase: string; message: string }> {
+    const { data } = await api.post(`/reviews/${reviewId}/queue-start`);
+    return data;
+  },
+  async close(reviewId: string): Promise<{ review_id: string; status: string; phase: string }> {
+    const { data } = await api.post(`/reviews/${reviewId}/close`);
     return data;
   },
   async listEvents(reviewId: string): Promise<ReviewEvent[]> {

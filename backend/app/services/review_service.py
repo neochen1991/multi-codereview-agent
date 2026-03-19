@@ -33,7 +33,7 @@ from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.knowledge_service import KnowledgeService
 from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
 from app.services.repository_context_service import RepositoryContextService
-from app.services.review_runner import ReviewRunner
+from app.services.review_runner import ReviewClosedError, ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,8 @@ class ReviewService:
             try:
                 logger.info("review background execution started review_id=%s", review_id)
                 self.runner.run_once(review_id)
+            except ReviewClosedError:
+                logger.info("review background execution stopped because review was closed review_id=%s", review_id)
             except Exception as exc:
                 logger.exception("review background execution failed review_id=%s error=%s", review_id, exc)
                 self._mark_failed(review_id, str(exc))
@@ -273,8 +275,59 @@ class ReviewService:
         """返回待处理队列（pending 状态）并按创建时间升序排列。"""
 
         queue = [item for item in self.review_repo.list() if item.status == "pending"]
-        queue.sort(key=lambda item: item.created_at)
+        queue.sort(key=self._pending_sort_key)
         return queue
+
+    def _pending_sort_key(self, review: ReviewTask) -> tuple[int, float]:
+        """支持手动插队：被手动提升优先级的 pending 任务会排到最前面。"""
+
+        metadata = dict(review.subject.metadata or {})
+        priority_at = str(metadata.get("queue_priority_at") or "").strip()
+        if priority_at:
+            try:
+                return (0, -datetime.fromisoformat(priority_at.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                return (0, -review.updated_at.timestamp())
+        return (1, review.created_at.timestamp())
+
+    def list_pending_queue_with_diagnostics(self) -> list[dict[str, object]]:
+        """返回待处理队列及每条任务当前未启动的原因说明。"""
+
+        reviews = self.review_repo.list()
+        pending = [item for item in reviews if item.status == "pending"]
+        pending.sort(key=self._pending_sort_key)
+        running = sorted(
+            [item for item in reviews if item.status == "running"],
+            key=lambda item: item.started_at or item.created_at,
+        )
+        active_running = running[0] if running else None
+
+        response: list[dict[str, object]] = []
+        for index, item in enumerate(pending):
+            blocker_code = "ready"
+            blocker_message = "已满足启动条件，等待调度器拉起审核任务。"
+            if active_running is not None and index == 0:
+                blocker_code = "blocked_by_running_review"
+                blocker_message = f"前序任务 {active_running.review_id} 正在执行，本任务会在它结束后自动启动。"
+            elif active_running is not None:
+                blocker_code = "waiting_for_turn_and_running_review"
+                blocker_message = (
+                    f"当前有任务 {active_running.review_id} 正在执行，且前方还有 {index} 条待处理任务，本任务需继续排队。"
+                )
+            elif index > 0:
+                blocker_code = "waiting_for_turn"
+                blocker_message = f"前方还有 {index} 条待处理任务，本任务会按顺序自动启动。"
+            response.append(
+                item.model_dump(mode="json")
+                | {
+                    "queue_position": index + 1,
+                    "is_next_candidate": index == 0 and active_running is None,
+                    "queue_blocker_code": blocker_code,
+                    "queue_blocker_message": blocker_message,
+                    "blocking_review_id": active_running.review_id if active_running is not None else "",
+                }
+            )
+        return response
 
     def enqueue_open_merge_requests(self, repo_url: str) -> list[ReviewTask]:
         """拉取仓库开放 MR/PR，并去重后加入待处理队列。"""
@@ -326,16 +379,115 @@ class ReviewService:
     def start_next_pending_review(self) -> ReviewTask | None:
         """在没有运行中任务时，按队列顺序启动下一条 pending 审核。"""
 
+        recovered = self.recover_interrupted_reviews()
+        if recovered:
+            logger.warning(
+                "auto queue recovered interrupted reviews review_ids=%s",
+                [item.review_id for item in recovered],
+            )
         reviews = self.review_repo.list()
         if any(item.status == "running" for item in reviews):
             return None
         pending = [item for item in reviews if item.status == "pending"]
         if not pending:
             return None
-        pending.sort(key=lambda item: item.created_at)
+        pending.sort(key=self._pending_sort_key)
         next_review = pending[0]
         logger.info("auto queue starting next review review_id=%s", next_review.review_id)
         return self.start_review_async(next_review.review_id)
+
+    def queue_start_review(self, review_id: str) -> tuple[ReviewTask, str]:
+        """手动启动队列任务；若当前已有运行中任务，则先插队并等待自动调度。"""
+
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        if review.status == "closed":
+            return review, "任务已关闭，不能再次启动。"
+        if review.status == "running":
+            return review, "任务已在运行中。"
+        if review.status in {"completed", "failed", "waiting_human"}:
+            return review, "当前任务不处于待启动状态。"
+
+        metadata = dict(review.subject.metadata or {})
+        metadata["queue_priority_at"] = datetime.now(UTC).isoformat()
+        metadata["queue_priority_source"] = "manual_queue_start"
+        review.subject.metadata = metadata
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+
+        reviews = self.review_repo.list()
+        running = next((item for item in reviews if item.status == "running" and item.review_id != review_id), None)
+        if running is not None:
+            logger.info(
+                "review manually prioritized review_id=%s blocked_by=%s",
+                review_id,
+                running.review_id,
+            )
+            return review, f"任务已插队，等待运行中的任务 {running.review_id} 结束后自动启动。"
+        started = self.start_review_async(review_id)
+        return started, "任务已立即启动。"
+
+    def close_review(self, review_id: str) -> ReviewTask:
+        """关闭 pending/running/waiting_human 任务，并通知后台执行链尽快停止。"""
+
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        if review.status == "closed":
+            return review
+        if review.status in {"completed", "failed"}:
+            return review
+
+        metadata = dict(review.subject.metadata or {})
+        metadata["close_requested"] = True
+        metadata["close_requested_at"] = datetime.now(UTC).isoformat()
+        review.subject.metadata = metadata
+        review.status = "closed"
+        review.phase = "closed"
+        review.failure_reason = ""
+        review.report_summary = review.report_summary or "任务已由用户手动关闭。"
+        review.completed_at = datetime.now(UTC)
+        review.duration_seconds = self._duration_seconds(review.started_at or review.created_at, review.completed_at)
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="review_closed",
+                phase="closed",
+                message="代码审核任务已被用户手动关闭",
+            )
+        )
+        logger.warning("review closed by user review_id=%s", review.review_id)
+        return review
+
+    def recover_interrupted_reviews(self) -> list[ReviewTask]:
+        """把异常退出后遗留的 running 任务恢复为 pending，避免阻塞自动队列。"""
+
+        recovered: list[ReviewTask] = []
+        with self._active_reviews_lock:
+            active_ids = set(self._active_reviews)
+        for review in self.review_repo.list():
+            if review.status != "running":
+                continue
+            if review.review_id in active_ids:
+                continue
+            review.status = "pending"
+            review.phase = "pending"
+            review.failure_reason = ""
+            review.updated_at = datetime.now(UTC)
+            self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="review_recovered",
+                    phase="pending",
+                    message="检测到上次运行异常中断，任务已恢复到待处理队列",
+                )
+            )
+            recovered.append(review)
+        return recovered
 
     def list_events(self, review_id: str) -> list[ReviewEvent]:
         return self.event_repo.list(review_id)

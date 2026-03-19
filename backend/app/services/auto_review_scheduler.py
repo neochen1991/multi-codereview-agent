@@ -23,6 +23,12 @@ class AutoReviewScheduler:
         if os.getenv("PYTEST_CURRENT_TEST"):
             logger.info("auto review scheduler skipped in pytest runtime")
             return
+        recovered = self._review_service.recover_interrupted_reviews()
+        if recovered:
+            logger.warning(
+                "auto review scheduler recovered interrupted reviews review_ids=%s",
+                [item.review_id for item in recovered],
+            )
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()

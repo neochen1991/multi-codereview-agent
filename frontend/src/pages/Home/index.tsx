@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Col, Row, Space, Statistic, Table, Tag, message } from "antd";
+import { Button, Card, Col, Row, Space, Statistic, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   ArrowRightOutlined,
@@ -19,6 +19,7 @@ const statusColor: Record<string, string> = {
   running: "processing",
   completed: "success",
   failed: "error",
+  closed: "warning",
 };
 
 type QuickEntry = {
@@ -33,6 +34,8 @@ type QuickEntry = {
 const buildReviewLabel = (record: ReviewSummary) =>
   record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`;
 
+const { Text } = Typography;
+
 // 首页现在承担平台入口职责：展示系统状态、最近审核和关键导航，不再直接创建审核。
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
@@ -40,6 +43,7 @@ const HomePage: React.FC = () => {
   const [pendingQueue, setPendingQueue] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncingQueue, setSyncingQueue] = useState(false);
+  const [queueStartingId, setQueueStartingId] = useState("");
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -305,7 +309,7 @@ const HomePage: React.FC = () => {
                 {
                   title: "排队顺序",
                   width: 100,
-                  render: (_, __, index) => index + 1,
+                  render: (_, record: ReviewSummary, index) => record.queue_position || index + 1,
                 },
                 {
                   title: "MR 标题",
@@ -338,14 +342,50 @@ const HomePage: React.FC = () => {
                 },
                 {
                   title: "状态",
-                  width: 120,
-                  render: (_, record: ReviewSummary) => <Tag color="default">{record.status}</Tag>,
+                  width: 320,
+                  render: (_, record: ReviewSummary) => (
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <Space size={6} wrap>
+                        <Tag color={record.is_next_candidate ? "processing" : "default"}>
+                          {record.is_next_candidate ? "等待自动启动" : "排队中"}
+                        </Tag>
+                        <Tag color="default">{record.status}</Tag>
+                      </Space>
+                      <Text type="secondary" style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
+                        {record.queue_blocker_message || "等待调度器拉起审核任务。"}
+                      </Text>
+                      {record.blocking_review_id ? (
+                        <Tooltip title={`当前阻塞任务：${record.blocking_review_id}`}>
+                          <Text type="secondary">阻塞任务：{record.blocking_review_id}</Text>
+                        </Tooltip>
+                      ) : null}
+                    </Space>
+                  ),
                 },
                 {
                   title: "操作",
-                  width: 180,
+                  width: 240,
                   render: (_, record: ReviewSummary) => (
                     <Space size={4} wrap>
+                      <Button
+                        type="primary"
+                        size="small"
+                        loading={queueStartingId === record.review_id}
+                        onClick={async () => {
+                          setQueueStartingId(record.review_id);
+                          try {
+                            const result = await reviewApi.queueStart(record.review_id);
+                            message.success(result.message || "任务启动请求已提交");
+                            await loadReviews();
+                          } catch (error: any) {
+                            message.error(error?.message || "启动队列任务失败");
+                          } finally {
+                            setQueueStartingId("");
+                          }
+                        }}
+                      >
+                        {record.is_next_candidate ? "立即启动" : "插队启动"}
+                      </Button>
                       <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "overview")}>
                         概览
                       </Button>

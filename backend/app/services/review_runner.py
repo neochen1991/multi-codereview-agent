@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 FALLBACK_EXPERT_ID = "architecture_design"
 
 
+class ReviewClosedError(RuntimeError):
+    """表示审核任务被用户主动关闭，应立即停止后续执行。"""
+
+
 class ReviewRunner:
     """审核执行引擎。
 
@@ -116,6 +120,7 @@ class ReviewRunner:
         review = self.review_repo.get(review_id)
         if review is None:
             raise KeyError(review_id)
+        self._abort_if_closed(review_id)
 
         review.status = "running"
         review.phase = "expert_review"
@@ -131,6 +136,7 @@ class ReviewRunner:
                 message="代码审核任务已启动",
             )
         )
+        self._abort_if_closed(review_id)
 
         runtime_settings = self.runtime_settings_service.get()
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
@@ -163,6 +169,7 @@ class ReviewRunner:
         }
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
+        self._abort_if_closed(review_id)
         selection_summary = self._build_expert_selection_summary(selection_plan)
         self.message_repo.append(
             ConversationMessage(
@@ -442,6 +449,7 @@ class ReviewRunner:
         }
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
+        self._abort_if_closed(review_id)
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,
@@ -453,6 +461,7 @@ class ReviewRunner:
         )
 
         self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
+        self._abort_if_closed(review_id)
         if not expert_jobs:
             reason = "用户选择的专家与当前变更相关性不足，且未能补入兜底专家，无法继续审核。"
             logger.error(
@@ -532,6 +541,7 @@ class ReviewRunner:
         ]
         self.issue_repo.save_all(review_id, issues)
         for issue in issues:
+            self._abort_if_closed(review_id)
             self._persist_issue_thread(
                 review=review,
                 issue=issue,
@@ -583,6 +593,7 @@ class ReviewRunner:
             issue_count=len(issues),
             pending_human_count=len(pending_human_issue_ids),
         )
+        self._abort_if_closed(review_id)
         final_summary, final_llm = self.main_agent_service.build_final_summary(
             review,
             issues,
@@ -619,6 +630,7 @@ class ReviewRunner:
                 },
             )
         )
+        self._abort_if_closed(review_id)
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
         logger.info(
@@ -631,6 +643,16 @@ class ReviewRunner:
         )
         self.artifact_service.publish(review, issues)
         return review
+
+    def _abort_if_closed(self, review_id: str) -> None:
+        """在关键阶段检查任务是否已被用户主动关闭。"""
+
+        latest = self.review_repo.get(review_id)
+        if latest is None:
+            return
+        metadata = dict(getattr(latest.subject, "metadata", {}) or {})
+        if latest.status == "closed" or bool(metadata.get("close_requested")):
+            raise ReviewClosedError(f"review {review_id} was closed by user")
 
     def _maybe_build_fallback_job(
         self,
@@ -861,6 +883,7 @@ class ReviewRunner:
         5. 解析并稳定化 finding
         6. 落库 finding、analysis message 和 event
         """
+        self._abort_if_closed(review.review_id)
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
         active_skills = self.review_skill_activation_service.activate(
             expert,
@@ -997,6 +1020,7 @@ class ReviewRunner:
             target_hunk=target_hunk,
             runtime_settings=runtime_settings,
         )
+        self._abort_if_closed(review.review_id)
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
         llm_result = self.llm_chat_service.complete_text(
@@ -1031,6 +1055,7 @@ class ReviewRunner:
                 "line_start": line_start,
             },
         )
+        self._abort_if_closed(review.review_id)
         parsed = self._parse_expert_analysis(
             llm_result.text,
             review.subject,
@@ -1127,6 +1152,7 @@ class ReviewRunner:
                 )
             )
             return
+        self._abort_if_closed(review.review_id)
         self.finding_repo.save(review.review_id, finding)
         self.message_repo.append(
             ConversationMessage(
@@ -1191,6 +1217,7 @@ class ReviewRunner:
         analysis_mode: Literal["standard", "light"],
         llm_request_options: dict[str, int | float],
     ) -> None:
+        self._abort_if_closed(review.review_id)
         self.event_repo.append(
             ReviewEvent(
                 review_id=review.review_id,
@@ -1222,6 +1249,7 @@ class ReviewRunner:
                 )
             )
             for index, participant_id in enumerate(debate_participants):
+                self._abort_if_closed(review.review_id)
                 expert = experts_by_id.get(participant_id)
                 if expert is None:
                     continue
@@ -1294,6 +1322,7 @@ class ReviewRunner:
                 )
                 previous_expert_id = participant_id
 
+        self._abort_if_closed(review.review_id)
         self.message_repo.append(
             ConversationMessage(
                 review_id=review.review_id,
