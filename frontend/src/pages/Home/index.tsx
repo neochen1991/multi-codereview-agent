@@ -30,16 +30,27 @@ type QuickEntry = {
   accentClass: string;
 };
 
+const buildReviewLabel = (record: ReviewSummary) =>
+  record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`;
+
 // 首页现在承担平台入口职责：展示系统状态、最近审核和关键导航，不再直接创建审核。
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
+  const [pendingQueue, setPendingQueue] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [syncingQueue, setSyncingQueue] = useState(false);
+
+  const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
+    navigate(`/review/${reviewId}?tab=${tab}`);
+  };
 
   const loadReviews = async () => {
     setLoading(true);
     try {
-      setReviews(await reviewApi.list());
+      const [allReviews, queueRows] = await Promise.all([reviewApi.list(), reviewApi.listQueue()]);
+      setReviews(allReviews);
+      setPendingQueue(queueRows);
     } catch (error: any) {
       message.error(error?.message || "加载审核列表失败");
     } finally {
@@ -55,14 +66,15 @@ const HomePage: React.FC = () => {
     const total = reviews.length;
     const completed = reviews.filter((item) => item.status === "completed").length;
     const running = reviews.filter((item) => item.status === "running").length;
+    const queued = pendingQueue.length;
     const pendingHuman = reviews.filter((item) => item.human_review_status === "requested").length;
     const completedIn24h = reviews.filter((item) => {
       if (item.status !== "completed") return false;
       const updatedAt = new Date(item.updated_at || item.completed_at || item.created_at || 0).getTime();
       return Number.isFinite(updatedAt) && Date.now() - updatedAt <= 24 * 60 * 60 * 1000;
     }).length;
-    return { total, completed, running, pendingHuman, completedIn24h };
-  }, [reviews]);
+    return { total, completed, running, queued, pendingHuman, completedIn24h };
+  }, [pendingQueue.length, reviews]);
 
   const quickEntries = useMemo<QuickEntry[]>(
     () => [
@@ -132,7 +144,12 @@ const HomePage: React.FC = () => {
     {
       title: "主题",
       key: "subject",
-      render: (_, record) => record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`,
+      width: 260,
+      render: (_, record) => (
+        <div className="review-table-title-cell" title={buildReviewLabel(record)}>
+          {buildReviewLabel(record)}
+        </div>
+      ),
     },
     {
       title: "状态",
@@ -156,11 +173,19 @@ const HomePage: React.FC = () => {
     {
       title: "操作",
       key: "action",
-      width: 140,
+      width: 220,
       render: (_, record) => (
-        <Button type="link" onClick={() => navigate(`/review/${record.review_id}`)}>
-          查看工作台
-        </Button>
+        <Space size={4} wrap>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "overview")}>
+            概览
+          </Button>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "process")}>
+            过程
+          </Button>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "result")}>
+            结果
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -186,6 +211,30 @@ const HomePage: React.FC = () => {
                 <Button size="large" icon={<HistoryOutlined />} onClick={() => navigate("/history")}>
                   查看历史记录
                 </Button>
+                <Button
+                  size="large"
+                  loading={syncingQueue}
+                  onClick={async () => {
+                    setSyncingQueue(true);
+                    try {
+                      const result = await reviewApi.syncQueue();
+                      if (result.message) {
+                        message.info(result.message);
+                      } else {
+                        message.success(
+                          `队列同步完成：新增 ${result.created_count} 条，${result.started_review_id ? `已启动 ${result.started_review_id}` : "当前未启动新任务"}`,
+                        );
+                      }
+                      await loadReviews();
+                    } catch (error: any) {
+                      message.error(error?.message || "同步待处理队列失败");
+                    } finally {
+                      setSyncingQueue(false);
+                    }
+                  }}
+                >
+                  立即同步 MR 队列
+                </Button>
                 <Button size="large" icon={<DashboardOutlined />} onClick={() => navigate("/governance")}>
                   查看治理中心
                 </Button>
@@ -197,6 +246,10 @@ const HomePage: React.FC = () => {
               <div className="home-hero-status-card">
                 <span className="home-hero-status-label">运行中</span>
                 <strong>{stats.running}</strong>
+              </div>
+              <div className="home-hero-status-card">
+                <span className="home-hero-status-label">待处理队列</span>
+                <strong>{stats.queued}</strong>
               </div>
               <div className="home-hero-status-card">
                 <span className="home-hero-status-label">待人工裁决</span>
@@ -228,12 +281,83 @@ const HomePage: React.FC = () => {
         </Col>
         <Col xs={24} md={6}>
           <Card className="module-card">
-            <Statistic title="已完成" value={stats.completed} />
+            <Statistic title="待处理队列" value={stats.queued} />
           </Card>
         </Col>
         <Col xs={24} md={6}>
           <Card className="module-card">
-            <Statistic title="待人工裁决" value={stats.pendingHuman} />
+            <Statistic title="已完成" value={stats.completed} />
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24}>
+          <Card className="module-card" title="待处理 MR 队列">
+            <Table
+              className="review-list-table"
+              rowKey="review_id"
+              loading={loading}
+              dataSource={pendingQueue}
+              pagination={false}
+              scroll={{ x: 1120 }}
+              columns={[
+                {
+                  title: "排队顺序",
+                  width: 100,
+                  render: (_, __, index) => index + 1,
+                },
+                {
+                  title: "MR 标题",
+                  key: "title",
+                  width: 260,
+                  render: (_, record: ReviewSummary) => (
+                    <div className="review-table-title-cell" title={buildReviewLabel(record)}>
+                      {buildReviewLabel(record)}
+                    </div>
+                  ),
+                },
+                {
+                  title: "MR 链接",
+                  dataIndex: ["subject", "mr_url"],
+                  width: 280,
+                  render: (value: string) =>
+                    value ? (
+                      <a className="review-table-link-cell" href={value} target="_blank" rel="noreferrer" title={value}>
+                        {value}
+                      </a>
+                    ) : (
+                      "-"
+                    ),
+                },
+                {
+                  title: "创建时间",
+                  width: 180,
+                  render: (_, record: ReviewSummary) =>
+                    new Date(record.created_at || record.updated_at || 0).toLocaleString("zh-CN"),
+                },
+                {
+                  title: "状态",
+                  width: 120,
+                  render: (_, record: ReviewSummary) => <Tag color="default">{record.status}</Tag>,
+                },
+                {
+                  title: "操作",
+                  width: 180,
+                  render: (_, record: ReviewSummary) => (
+                    <Space size={4} wrap>
+                      <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "overview")}>
+                        概览
+                      </Button>
+                      <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "process")}>
+                        过程
+                      </Button>
+                    </Space>
+                  ),
+                },
+              ]}
+              locale={{ emptyText: "当前没有待处理任务，自动调度会在后台持续拉取开放中的 MR。" }}
+            />
           </Card>
         </Col>
       </Row>
@@ -241,7 +365,15 @@ const HomePage: React.FC = () => {
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} xl={16}>
           <Card className="module-card" title="最近审核">
-            <Table rowKey="review_id" columns={columns} dataSource={recentReviews} loading={loading} pagination={false} />
+            <Table
+              className="review-list-table"
+              rowKey="review_id"
+              columns={columns}
+              dataSource={recentReviews}
+              loading={loading}
+              pagination={false}
+              scroll={{ x: 1020 }}
+            />
           </Card>
         </Col>
         <Col xs={24} xl={8}>

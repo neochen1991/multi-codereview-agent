@@ -5,6 +5,14 @@ import { UploadOutlined } from "@ant-design/icons";
 import type { ExpertProfile, ReviewDesignDocumentInput } from "@/services/api";
 
 const { Text } = Typography;
+const RECOMMENDED_EXPERT_IDS = [
+  "correctness_business",
+  "architecture_design",
+  "security_compliance",
+  "performance_reliability",
+  "maintainability_code_health",
+  "test_verification",
+];
 
 export type ReviewFormState = {
   subject_type: "mr" | "branch";
@@ -17,6 +25,20 @@ export type ReviewFormState = {
   design_docs: ReviewDesignDocumentInput[];
 };
 
+export type ReviewOverviewExpertSelectionSummary = {
+  requested_expert_ids: string[];
+  selected_experts: Array<{
+    expert_id: string;
+    expert_name?: string;
+    reason?: string;
+  }>;
+  skipped_experts: Array<{
+    expert_id: string;
+    expert_name?: string;
+    reason?: string;
+  }>;
+};
+
 type Props = {
   form: ReviewFormState;
   loading: boolean;
@@ -25,9 +47,17 @@ type Props = {
   status: string;
   readonly: boolean;
   experts: ExpertProfile[];
+  expertSelectionSummary?: ReviewOverviewExpertSelectionSummary | null;
   onChange: (patch: Partial<ReviewFormState>) => void;
   onStart: () => void;
   onCreateOnly: () => void;
+};
+
+const buildExpertSummary = (expert?: ExpertProfile): string => {
+  if (!expert) return "当前未找到该专家的职责摘要。";
+  const focus = expert.focus_areas.slice(0, 2).join(" / ");
+  const requiredCheck = expert.required_checks[0];
+  return [expert.role, focus, requiredCheck].filter(Boolean).join(" | ") || "当前未配置职责摘要。";
 };
 
 const ReviewOverviewPanel: React.FC<Props> = ({
@@ -38,6 +68,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   status,
   readonly,
   experts,
+  expertSelectionSummary,
   onChange,
   onStart,
   onCreateOnly,
@@ -50,6 +81,21 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   const hasReviewInput = Boolean(form.mr_url.trim() || form.source_ref.trim());
   const disableActions = loading || running || (!readonly && (!hasExperts || !hasSelectedExperts || !hasReviewInput));
   const designDocNames = form.design_docs.map((item) => item.filename || item.title);
+  const expertNameById = new Map(experts.map((item) => [item.expert_id, item.name_zh]));
+  const expertById = new Map(experts.map((item) => [item.expert_id, item]));
+  const requestedExpertIds =
+    expertSelectionSummary?.requested_expert_ids && expertSelectionSummary.requested_expert_ids.length > 0
+      ? expertSelectionSummary.requested_expert_ids
+      : form.selected_experts;
+  const selectedExperts = expertSelectionSummary?.selected_experts || [];
+  const skippedExperts = expertSelectionSummary?.skipped_experts || [];
+  const selectedExpertIds = selectedExperts.map((item) => item.expert_id);
+  const selectedExpertIdSet = new Set(selectedExpertIds);
+  const skippedExpertIdSet = new Set(skippedExperts.map((item) => item.expert_id));
+  const recommendedExpertIds = RECOMMENDED_EXPERT_IDS.filter((expertId) => expertById.has(expertId));
+  const selectedFromCandidates = requestedExpertIds.filter((expertId) => selectedExpertIdSet.has(expertId));
+  const removedFromCandidates = requestedExpertIds.filter((expertId) => skippedExpertIdSet.has(expertId));
+  const addedByModel = selectedExperts.filter((item) => !requestedExpertIds.includes(item.expert_id));
 
   return (
     <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
@@ -59,8 +105,8 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           showIcon
           message={
             readonly
-              ? "当前是审核记录查看模式。这里展示当时提交的审核对象与专家选择，过程细节请切到“审核过程”，最终结论请切到“结论与行动”。"
-              : "先输入 Codehub MR 链接，选择参与专家，再启动审核。启动后去“审核过程”查看主 Agent 调度、专家发言和裁决收敛。"
+              ? "当前是审核记录查看模式。这里展示当时提交的审核对象与候选专家，实际参与集合由大模型在启动后判定，过程细节请切到“审核过程”，最终结论请切到“结论与行动”。"
+              : "先输入 Codehub MR 链接并选择候选专家，再启动审核。启动后主 Agent 会先让大模型判定本次真正参与审核的专家集合，然后再进入派工与审查。"
           }
         />
         {!hasExperts ? (
@@ -149,12 +195,31 @@ const ReviewOverviewPanel: React.FC<Props> = ({
             />
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
+            {!readonly ? (
+              <div className="review-expert-quick-actions">
+                <Text strong>候选专家快捷选择</Text>
+                <Space wrap>
+                  <Button size="small" onClick={() => onChange({ selected_experts: recommendedExpertIds })}>
+                    推荐候选
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => onChange({ selected_experts: experts.map((expert) => expert.expert_id) })}
+                  >
+                    全部候选
+                  </Button>
+                  <Button size="small" onClick={() => onChange({ selected_experts: [] })}>
+                    清空
+                  </Button>
+                </Space>
+              </div>
+            ) : null}
             <Select
               mode="multiple"
               allowClear={!readonly}
               disabled={readonly}
               style={{ width: "100%" }}
-              placeholder="选择参与审核的专家"
+              placeholder="选择候选专家（启动后由大模型最终判定本次参与集合）"
               value={form.selected_experts}
               onChange={(value) => onChange({ selected_experts: value })}
               options={experts.map((expert) => ({
@@ -162,6 +227,136 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                 value: expert.expert_id,
               }))}
             />
+            <Space direction="vertical" size={8} style={{ width: "100%", marginTop: 12 }}>
+              <div className="review-design-docs-readonly">
+                <Text strong>候选专家</Text>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  {requestedExpertIds.length > 0 ? (
+                    requestedExpertIds.map((expertId) => (
+                      <Tag key={`candidate-${expertId}`} color="blue">
+                        {expertNameById.get(expertId) || expertId}
+                      </Tag>
+                    ))
+                  ) : (
+                    <Text type="secondary">当前还没有候选专家</Text>
+                  )}
+                </Space>
+              </div>
+              {requestedExpertIds.length > 0 ? (
+                <div className="review-design-docs-readonly">
+                  <Text strong>候选专家职责速览</Text>
+                  <div className="review-expert-summary-grid">
+                    {requestedExpertIds.map((expertId) => {
+                      const expert = expertById.get(expertId);
+                      const isSelected = selectedExpertIdSet.has(expertId);
+                      const isRemoved = skippedExpertIdSet.has(expertId);
+                      const stateClassName = isSelected
+                        ? "review-expert-summary-card-selected"
+                        : isRemoved
+                          ? "review-expert-summary-card-removed"
+                          : "review-expert-summary-card-candidate";
+                      return (
+                        <div key={`summary-${expertId}`} className={`review-expert-summary-card ${stateClassName}`}>
+                          <div className="review-expert-summary-card-head">
+                            <Text strong>{expert?.name_zh || expertId}</Text>
+                            <Space size={6} wrap>
+                              <Tag color="blue">候选</Tag>
+                              {isSelected ? <Tag color="green">已参与</Tag> : null}
+                              {isRemoved ? <Tag color="orange">未纳入</Tag> : null}
+                            </Space>
+                          </div>
+                          <Text type="secondary" className="review-expert-summary-text">
+                            {buildExpertSummary(expert)}
+                          </Text>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {reviewId ? (
+                <div className="review-design-docs-readonly">
+                  <Text strong>候选与最终参与差异</Text>
+                  <div className="review-expert-diff-grid">
+                    <div className="review-expert-diff-block">
+                      <Text strong>候选后被选中</Text>
+                      <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                        {selectedFromCandidates.length > 0 ? (
+                          selectedFromCandidates.map((expertId) => (
+                            <Tag key={`candidate-hit-${expertId}`} color="green">
+                              {expertNameById.get(expertId) || expertId}
+                            </Tag>
+                          ))
+                        ) : (
+                          <Text type="secondary">当前还没有命中的候选专家</Text>
+                        )}
+                      </Space>
+                    </div>
+                    <div className="review-expert-diff-block">
+                      <Text strong>候选后被剔除</Text>
+                      <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                        {removedFromCandidates.length > 0 ? (
+                          removedFromCandidates.map((expertId) => (
+                            <Tag key={`candidate-drop-${expertId}`} color="orange">
+                              {expertNameById.get(expertId) || expertId}
+                            </Tag>
+                          ))
+                        ) : (
+                          <Text type="secondary">当前没有被剔除的候选专家</Text>
+                        )}
+                      </Space>
+                    </div>
+                    {addedByModel.length > 0 ? (
+                      <div className="review-expert-diff-block">
+                        <Text strong>大模型补充纳入</Text>
+                        <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                          {addedByModel.map((item) => (
+                            <Tag key={`candidate-added-${item.expert_id}`} color="cyan">
+                              {item.expert_name || expertNameById.get(item.expert_id) || item.expert_id}
+                            </Tag>
+                          ))}
+                        </Space>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              {selectedExperts.length > 0 ? (
+                <div className="review-design-docs-readonly">
+                  <Text strong>大模型最终判定的参与专家</Text>
+                  <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                    {selectedExperts.map((item) => (
+                      <Tag key={`selected-${item.expert_id}`} color="green">
+                        {item.expert_name || expertNameById.get(item.expert_id) || item.expert_id}
+                      </Tag>
+                    ))}
+                  </Space>
+                  <Space direction="vertical" size={6} style={{ width: "100%", marginTop: 8 }}>
+                    {selectedExperts.map((item) => (
+                      <Text key={`selected-reason-${item.expert_id}`} type="secondary">
+                        {(item.expert_name || expertNameById.get(item.expert_id) || item.expert_id) + "："}
+                        {item.reason || "与当前 MR 变更高度相关"}
+                      </Text>
+                    ))}
+                  </Space>
+                </div>
+              ) : reviewId ? (
+                <Text type="secondary">审核启动后，主 Agent 会先调用大模型判定本次真正参与审核的专家集合。</Text>
+              ) : null}
+              {skippedExperts.length > 0 ? (
+                <div className="review-design-docs-readonly">
+                  <Text strong>未参与本轮</Text>
+                  <Space direction="vertical" size={6} style={{ width: "100%", marginTop: 8 }}>
+                    {skippedExperts.map((item) => (
+                      <Text key={`skipped-${item.expert_id}`} type="secondary">
+                        {(item.expert_name || expertNameById.get(item.expert_id) || item.expert_id) + "："}
+                        {item.reason || "大模型未将其纳入本次参与集合"}
+                      </Text>
+                    ))}
+                  </Space>
+                </div>
+              ) : null}
+            </Space>
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
             {readonly ? (

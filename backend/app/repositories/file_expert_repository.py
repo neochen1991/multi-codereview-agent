@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
+from app.db.sqlite import SqliteDatabase
 from app.domain.models.expert_profile import ExpertProfile
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,8 @@ class FileExpertRepository:
         """初始化用户自定义专家目录。"""
 
         self.root = Path(root)
+        self._db = SqliteDatabase(self.root.parent / "app.db")
+        self._db.initialize()
 
     def list(self) -> list[ExpertProfile]:
         """合并内置专家与用户专家配置，并返回完整专家列表。"""
@@ -28,7 +32,7 @@ class FileExpertRepository:
             Path(__file__).resolve().parents[3] / "extensions" / "skills"
         )
         builtin_payloads = self._load_payloads(packaged_root, mark_custom=False)
-        user_payloads = self._load_payloads(self.root, mark_custom=True)
+        user_payloads = self._load_user_payloads_from_sqlite()
 
         merged_ids = sorted(set(builtin_payloads) | set(user_payloads))
         for expert_id in merged_ids:
@@ -57,20 +61,28 @@ class FileExpertRepository:
         return items
 
     def save(self, expert: ExpertProfile) -> ExpertProfile:
-        """把专家配置、提示词和规范文档保存到用户目录。"""
+        """把专家可变配置保存到 SQLite（不改内置专家种子文件）。"""
 
-        target_dir = self.root / expert.expert_id
-        target_dir.mkdir(parents=True, exist_ok=True)
         payload = expert.model_dump(mode="json")
-        system_prompt = str(payload.pop("system_prompt", ""))
-        review_spec = str(payload.pop("review_spec", ""))
-        (target_dir / "expert.yaml").write_text(
-            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-        (target_dir / "prompt.md").write_text(system_prompt, encoding="utf-8")
-        if review_spec:
-            (target_dir / "review_spec.md").write_text(review_spec, encoding="utf-8")
+        now = datetime.now(UTC).isoformat()
+        with self._db.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO experts (
+                    expert_id,
+                    name,
+                    payload_json,
+                    updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    expert.expert_id,
+                    expert.name_zh or expert.name_en or expert.expert_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                ),
+            )
+            connection.commit()
         return expert
 
     def _load_extension_skill_bindings(self, root: Path) -> dict[str, list[str]]:
@@ -126,5 +138,31 @@ class FileExpertRepository:
             payload["system_prompt"] = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
             payload["review_spec"] = review_spec_path.read_text(encoding="utf-8") if review_spec_path.exists() else ""
             payload["custom"] = bool(payload.get("custom", mark_custom))
+            payloads[expert_id] = payload
+        return payloads
+
+    def _load_user_payloads_from_sqlite(self) -> dict[str, dict]:
+        """读取用户专家覆盖配置（SQLite 持久化）。"""
+
+        payloads: dict[str, dict] = {}
+        with self._db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT expert_id, payload_json
+                FROM experts
+                ORDER BY updated_at ASC
+                """
+            ).fetchall()
+        for row in rows:
+            expert_id = str(row["expert_id"] or "").strip()
+            if not expert_id:
+                continue
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                logger.warning("invalid expert payload in sqlite for %s", expert_id)
+                continue
+            payload["expert_id"] = expert_id
+            payload["custom"] = bool(payload.get("custom", True))
             payloads[expert_id] = payload
         return payloads

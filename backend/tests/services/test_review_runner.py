@@ -6,7 +6,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
-from app.repositories.file_message_repository import FileMessageRepository
+from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.review_runner import ReviewRunner
 
 
@@ -42,6 +42,47 @@ def test_review_runner_emits_main_agent_intake_before_routing_plan(storage_root:
         return original_build_routing_plan(subject, experts, runtime_settings)
 
     monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_intake_written_first)
+
+    runner.run_once(review_id)
+
+
+def test_review_runner_emits_expert_selection_before_routing_plan(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    original_build_routing_plan = runner.main_agent_service.build_routing_plan
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        return {
+            "requested_expert_ids": list(requested_expert_ids or []),
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": [experts[0].expert_id],
+            "selected_experts": [
+                {
+                    "expert_id": experts[0].expert_id,
+                    "expert_name": experts[0].name_zh,
+                    "reason": "该 MR 主要命中正确性问题",
+                    "confidence": 0.91,
+                }
+            ],
+            "skipped_experts": [],
+            "llm": {
+                "provider": "test",
+                "model": "test",
+                "base_url": "http://llm.test",
+                "api_key_env": "TEST_KEY",
+                "mode": "live",
+                "error": "",
+            },
+        }
+
+    def _assert_selection_written_first(subject, experts, runtime_settings):
+        messages = runner.message_repo.list(review_id)
+        selection_messages = [item for item in messages if item.message_type == "main_agent_expert_selection"]
+        assert selection_messages, "main_agent_expert_selection 应该在路由规划前就已写入"
+        return original_build_routing_plan(subject, experts, runtime_settings)
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_selection_written_first)
 
     runner.run_once(review_id)
 
@@ -514,7 +555,7 @@ def test_review_runner_emits_design_skill_summary_message(storage_root: Path):
         runtime_settings=runner.runtime_settings_service.get(),
     )
 
-    messages = FileMessageRepository(storage_root).list("rev_design_summary")
+    messages = SqliteMessageRepository(storage_root / "app.db").list("rev_design_summary")
     summary_message = next(item for item in messages if item.message_type == "expert_skill_call")
     assert summary_message.expert_id == "correctness_business"
     assert summary_message.metadata["skill_name"] == "design-consistency-check"

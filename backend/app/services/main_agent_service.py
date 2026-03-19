@@ -165,6 +165,82 @@ class MainAgentService:
             route["routing_llm"] = self._llm_metadata(result)
         return merged
 
+    def select_review_experts(
+        self,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        runtime_settings: RuntimeSettings,
+        *,
+        requested_expert_ids: list[str] | None = None,
+    ) -> dict[str, object]:
+        """让主 Agent 基于 MR 信息与专家画像决定本次真正参与审核的专家。"""
+        if not experts:
+            return {
+                "selected_expert_ids": [],
+                "selected_experts": [],
+                "skipped_experts": [],
+                "candidate_expert_ids": [],
+                "requested_expert_ids": list(requested_expert_ids or []),
+                "llm": self._llm_metadata(
+                    LLMTextResult(
+                        text="",
+                        mode="template",
+                        provider="main-agent-template",
+                        model="template",
+                        base_url="",
+                        api_key_env="",
+                    )
+                ),
+            }
+        candidate_expert_ids = [expert.expert_id for expert in experts]
+        fallback_ids = [
+            expert_id
+            for expert_id in list(requested_expert_ids or [])
+            if expert_id in candidate_expert_ids
+        ] or candidate_expert_ids
+        fallback_payload = {
+            "selected_experts": [
+                {
+                    "expert_id": expert_id,
+                    "reason": "fallback_selected",
+                    "confidence": 0.5,
+                }
+                for expert_id in fallback_ids
+            ],
+            "skipped_experts": [],
+        }
+        resolution = self._llm.resolve_main_agent(runtime_settings)
+        result = self._llm.complete_text(
+            system_prompt=self._build_expert_selection_system_prompt(),
+            user_prompt=self._build_expert_selection_user_prompt(
+                subject=subject,
+                experts=experts,
+                requested_expert_ids=list(requested_expert_ids or []),
+            ),
+            resolution=resolution,
+            runtime_settings=runtime_settings,
+            fallback_text=json.dumps(fallback_payload, ensure_ascii=False),
+            allow_fallback=self._allow_fallback(runtime_settings),
+            timeout_seconds=90.0,
+            max_attempts=2,
+            log_context={
+                "phase": "expert_selection",
+                "agent_id": self.agent_id,
+                "source_ref": subject.source_ref,
+                "target_ref": subject.target_ref,
+                "changed_file_count": len(subject.changed_files),
+            },
+        )
+        parsed = self._parse_json_payload(result.text)
+        merged = self._merge_expert_selection(
+            experts=experts,
+            requested_expert_ids=list(requested_expert_ids or []),
+            llm_payload=parsed,
+            fallback_ids=fallback_ids,
+        )
+        merged["llm"] = self._llm_metadata(result)
+        return merged
+
     def build_change_chain(self, subject: ReviewSubject) -> dict[str, object]:
         """基于 changed_files 推导一条粗粒度的关联变更链。"""
         changed_files = [item for item in subject.changed_files if item]
@@ -941,6 +1017,19 @@ class MainAgentService:
             "5. 输出必须使用提供的 candidate_id 或 file_path+line_start 对应真实候选 hunk。"
         )
 
+    def _build_expert_selection_system_prompt(self) -> str:
+        return (
+            "你是多专家代码审查系统的主Agent。"
+            "在正式派工前，你需要先根据 MR 信息、完整 diff 和专家画像，决定本次真正需要参与审核的专家集合。"
+            "请只输出 JSON，不要输出解释。"
+            "选择原则：1. 必须依据真实变更内容和专家职责边界选择；"
+            "2. 专家数量应尽量精简，只保留真正相关的专家；"
+            "3. 非前端改动不要选择前端专家；非安全线索不要强行选择安全专家；"
+            "4. 变更涉及跨文件契约、业务逻辑、结构设计时，应优先保留正确性/架构/可维护性等通用专家；"
+            "5. 如果某专家不需要参与，写入 skipped_experts 并说明原因；"
+            "6. selected_experts 至少返回 1 个。"
+        )
+
     def _build_routing_user_prompt(
         self,
         *,
@@ -1003,7 +1092,51 @@ class MainAgentService:
             "}"
         )
 
-    def _parse_routing_plan(self, text: str) -> dict[str, object]:
+    def _build_expert_selection_user_prompt(
+        self,
+        *,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+        requested_expert_ids: list[str],
+    ) -> str:
+        business_changed_files = self._candidate_changed_files(subject, "")
+        expert_sections = []
+        for expert in experts:
+            expert_sections.append(
+                "\n".join(
+                    [
+                        f"- expert_id: {expert.expert_id}",
+                        f"  名称: {expert.name_zh}",
+                        f"  角色: {expert.role}",
+                        f"  职责重点: {' / '.join(expert.focus_areas) or expert.role}",
+                        f"  触发线索: {' / '.join(expert.activation_hints) or '按变更语义判断'}",
+                        f"  必查项: {' / '.join(expert.required_checks) or '无'}",
+                        f"  越界边界: {' / '.join(expert.out_of_scope) or '无'}",
+                    ]
+                )
+            )
+        return (
+            f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
+            f"MR 链接: {subject.mr_url}\n"
+            f"源分支: {subject.source_ref}\n"
+            f"目标分支: {subject.target_ref}\n"
+            f"全部变更文件: {json.dumps(list(subject.changed_files), ensure_ascii=False)}\n"
+            f"业务变更文件: {json.dumps(business_changed_files, ensure_ascii=False)}\n"
+            f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
+            f"完整 diff:\n{subject.unified_diff[:12000]}\n\n"
+            f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
+            "请输出 JSON，格式为：\n"
+            "{\n"
+            '  "selected_experts": [\n'
+            '    {"expert_id": "correctness_business", "reason": "跨文件字段契约和业务语义变化明显", "confidence": 0.93}\n'
+            "  ],\n"
+            '  "skipped_experts": [\n'
+            '    {"expert_id": "security_compliance", "reason": "当前 diff 未出现认证、权限、密钥或输入校验相关信号"}\n'
+            "  ]\n"
+            "}"
+        )
+
+    def _parse_json_payload(self, text: str) -> dict[str, object]:
         content = str(text or "").strip()
         if "```json" in content:
             content = content.split("```json", 1)[1].split("```", 1)[0].strip()
@@ -1014,6 +1147,83 @@ class MainAgentService:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _parse_routing_plan(self, text: str) -> dict[str, object]:
+        return self._parse_json_payload(text)
+
+    def _merge_expert_selection(
+        self,
+        *,
+        experts: list[ExpertProfile],
+        requested_expert_ids: list[str],
+        llm_payload: dict[str, object],
+        fallback_ids: list[str],
+    ) -> dict[str, object]:
+        experts_by_id = {expert.expert_id: expert for expert in experts}
+        selected_entries: list[dict[str, object]] = []
+        selected_ids: list[str] = []
+        for item in list(llm_payload.get("selected_experts", []) or []):
+            if not isinstance(item, dict):
+                continue
+            expert_id = str(item.get("expert_id") or "").strip()
+            if not expert_id or expert_id not in experts_by_id or expert_id in selected_ids:
+                continue
+            selected_ids.append(expert_id)
+            selected_entries.append(
+                {
+                    "expert_id": expert_id,
+                    "expert_name": experts_by_id[expert_id].name_zh,
+                    "reason": str(item.get("reason") or "").strip(),
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "source": "llm_selected",
+                }
+            )
+        if not selected_ids:
+            selected_ids = list(fallback_ids)
+            selected_entries = [
+                {
+                    "expert_id": expert_id,
+                    "expert_name": experts_by_id[expert_id].name_zh,
+                    "reason": "LLM 未返回有效专家集合，已使用兜底集合",
+                    "confidence": 0.5,
+                    "source": "fallback_selected",
+                }
+                for expert_id in selected_ids
+                if expert_id in experts_by_id
+            ]
+        skipped_entries: list[dict[str, object]] = []
+        explicit_skipped_ids: set[str] = set()
+        for item in list(llm_payload.get("skipped_experts", []) or []):
+            if not isinstance(item, dict):
+                continue
+            expert_id = str(item.get("expert_id") or "").strip()
+            if not expert_id or expert_id not in experts_by_id or expert_id in explicit_skipped_ids:
+                continue
+            explicit_skipped_ids.add(expert_id)
+            skipped_entries.append(
+                {
+                    "expert_id": expert_id,
+                    "expert_name": experts_by_id[expert_id].name_zh,
+                    "reason": str(item.get("reason") or "").strip() or "大模型判定当前 MR 与该专家职责不匹配",
+                }
+            )
+        for expert in experts:
+            if expert.expert_id in selected_ids or expert.expert_id in explicit_skipped_ids:
+                continue
+            skipped_entries.append(
+                {
+                    "expert_id": expert.expert_id,
+                    "expert_name": expert.name_zh,
+                    "reason": "大模型未将该专家纳入本次 MR 的参与集合",
+                }
+            )
+        return {
+            "requested_expert_ids": requested_expert_ids,
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": selected_ids,
+            "selected_experts": selected_entries,
+            "skipped_experts": skipped_entries,
+        }
 
     def _merge_routing_plan(
         self,

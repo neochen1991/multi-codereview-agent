@@ -55,7 +55,7 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onExpertClick ? "overview-stat-button-clickable" : ""}`} onClick={onExpertClick}>
           <Card className="module-card">
-            <Statistic title="已启用专家" value={expertCount} />
+            <Statistic title="本次参与专家" value={expertCount} />
           </Card>
         </button>
       </Col>

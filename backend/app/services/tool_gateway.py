@@ -56,6 +56,7 @@ class ReviewToolGateway:
         related_files: list[str] | None = None,
         design_docs: list[dict[str, Any]] | None = None,
         extra_tools: list[str] | None = None,
+        active_skills: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """按专家白名单执行本轮允许的运行时工具。"""
         runtime_allowlist = set(runtime.runtime_tool_allowlist)
@@ -83,6 +84,7 @@ class ReviewToolGateway:
                 "line_start": line_start,
                 "related_files": list(related_files or []),
                 "design_docs": list(design_docs or []),
+                "active_skills": list(active_skills or []),
             }
             try:
                 output = self._gateway.invoke_binding(tool_name, payload)
@@ -107,6 +109,29 @@ class ReviewToolGateway:
         plugin = self._plugin_loader.get(tool_name)
         if plugin is None or plugin.runtime != "python":
             return None
+        expert_payload = dict(payload.get("expert") or {})
+        expert_id = str(expert_payload.get("expert_id") or "").strip()
+        if plugin.allowed_experts and expert_id not in plugin.allowed_experts:
+            return {
+                "summary": f"{tool_name} 未绑定到当前专家 {expert_id}，已跳过。",
+                "success": False,
+                "skipped": True,
+                "skip_reason": "expert_not_bound",
+            }
+        active_skill_ids = {
+            str(item).strip()
+            for item in list(payload.get("active_skills") or [])
+            if str(item).strip()
+        }
+        if plugin.bound_skills and not active_skill_ids.intersection(plugin.bound_skills):
+            return {
+                "summary": f"{tool_name} 未命中已激活 skill，已跳过。",
+                "success": False,
+                "skipped": True,
+                "skip_reason": "skill_not_bound",
+                "bound_skills": list(plugin.bound_skills),
+                "active_skills": sorted(active_skill_ids),
+            }
         entry = Path(plugin.tool_path) / plugin.entry
         if not entry.exists():
             return None

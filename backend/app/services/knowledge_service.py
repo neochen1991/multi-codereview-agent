@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument
-from app.repositories.file_knowledge_repository import FileKnowledgeRepository
+from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
 
@@ -14,7 +14,7 @@ class KnowledgeService:
     def __init__(self, root: Path) -> None:
         """初始化知识库仓储、写入服务和检索服务。"""
 
-        self._repository = FileKnowledgeRepository(root)
+        self._repository = SqliteKnowledgeRepository(Path(root) / "app.db")
         self._ingestion = KnowledgeIngestionService(root)
         self._retrieval = KnowledgeRetrievalService(root)
 

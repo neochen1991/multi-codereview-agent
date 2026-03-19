@@ -5,6 +5,9 @@ import { useNavigate } from "react-router-dom";
 
 import { reviewApi, type ReviewSummary } from "@/services/api";
 
+const buildReviewLabel = (record: ReviewSummary) =>
+  record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`;
+
 const formatDateTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "-";
 
@@ -29,6 +32,10 @@ const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
+    navigate(`/review/${reviewId}?tab=${tab}`);
+  };
 
   const loadReviews = async () => {
     setLoading(true);
@@ -57,7 +64,31 @@ const HistoryPage: React.FC = () => {
     {
       title: "标题",
       key: "title",
-      render: (_, record) => record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`,
+      width: 260,
+      render: (_, record) => (
+        <div className="review-table-title-cell" title={buildReviewLabel(record)}>
+          {buildReviewLabel(record)}
+        </div>
+      ),
+    },
+    {
+      title: "MR 链接",
+      key: "mr_url",
+      width: 280,
+      render: (_, record) =>
+        record.subject.mr_url ? (
+          <a
+            className="review-table-link-cell"
+            href={record.subject.mr_url}
+            target="_blank"
+            rel="noreferrer"
+            title={record.subject.mr_url}
+          >
+            {record.subject.mr_url}
+          </a>
+        ) : (
+          "-"
+        ),
     },
     {
       title: "阶段",
@@ -71,7 +102,12 @@ const HistoryPage: React.FC = () => {
       dataIndex: "status",
       key: "status",
       width: 120,
-      render: (value: string) => <Tag>{value}</Tag>,
+      render: (value: string, record) => (
+        <Space size={6} wrap>
+          <Tag>{value}</Tag>
+          {record.subject.metadata?.trigger_source === "auto_scheduler" ? <Tag color="purple">自动队列</Tag> : null}
+        </Space>
+      ),
     },
     {
       title: "模式",
@@ -109,10 +145,17 @@ const HistoryPage: React.FC = () => {
     {
       title: "操作",
       key: "action",
+      width: 220,
       render: (_, record) => (
-        <Space>
-          <Button type="link" onClick={() => navigate(`/review/${record.review_id}`)}>
-            查看工作台
+        <Space size={4} wrap>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "overview")}>
+            概览
+          </Button>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "process")}>
+            过程
+          </Button>
+          <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "result")}>
+            结果
           </Button>
         </Space>
       ),
@@ -129,7 +172,14 @@ const HistoryPage: React.FC = () => {
         </Button>
       }
     >
-      <Table rowKey="review_id" columns={columns} dataSource={reviews} loading={loading} />
+      <Table
+        className="review-list-table"
+        rowKey="review_id"
+        columns={columns}
+        dataSource={reviews}
+        loading={loading}
+        scroll={{ x: 1520 }}
+      />
     </Card>
   );
 };

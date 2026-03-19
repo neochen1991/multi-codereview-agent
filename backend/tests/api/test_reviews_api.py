@@ -1,3 +1,7 @@
+import sqlite3
+from pathlib import Path
+
+
 def test_create_review_returns_review_id(client):
     response = client.post(
         "/api/reviews",
@@ -88,3 +92,32 @@ def test_create_review_persists_design_docs_into_review_metadata(client):
     assert len(design_docs) == 1
     assert design_docs[0]["doc_type"] == "design_spec"
     assert design_docs[0]["filename"] == "order-create-design.md"
+
+
+def test_create_review_persists_into_sqlite_without_file_backed_review_json(client, storage_root: Path):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_sqlite",
+            "project_id": "proj_sqlite",
+            "source_ref": "feature/sqlite",
+            "target_ref": "main",
+            "title": "sqlite review",
+        },
+    ).json()
+
+    review_id = created["review_id"]
+    db_path = storage_root / "app.db"
+    assert db_path.exists()
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT review_id, status FROM reviews WHERE review_id = ?",
+            (review_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == review_id
+    assert row[1] == "pending"
+
+    assert not (storage_root / "reviews" / review_id / "review.json").exists()

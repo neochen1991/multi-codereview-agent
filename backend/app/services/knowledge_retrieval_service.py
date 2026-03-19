@@ -3,10 +3,9 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from app.domain.models.knowledge import KnowledgeDocument
-from app.repositories.file_knowledge_repository import FileKnowledgeRepository
+from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
 
 
 class KnowledgeRetrievalService:
@@ -16,7 +15,7 @@ class KnowledgeRetrievalService:
         """初始化知识仓储和检索缓存。"""
 
         self._root = Path(root)
-        self._repository = FileKnowledgeRepository(root)
+        self._repository = SqliteKnowledgeRepository(Path(root) / "app.db")
         self._cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[KnowledgeDocument]] = {}
 
     def retrieve(

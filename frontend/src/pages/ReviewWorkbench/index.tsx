@@ -16,7 +16,10 @@ import OverviewCards from "@/components/review/OverviewCards";
 import ReplayConsolePanel from "@/components/review/ReplayConsolePanel";
 import ReportSummaryPanel from "@/components/review/ReportSummaryPanel";
 import ReviewDialogueStream from "@/components/review/ReviewDialogueStream";
-import ReviewOverviewPanel, { type ReviewFormState } from "@/components/review/ReviewOverviewPanel";
+import ReviewOverviewPanel, {
+  type ReviewFormState,
+  type ReviewOverviewExpertSelectionSummary,
+} from "@/components/review/ReviewOverviewPanel";
 import ReviewSubjectPanel from "@/components/review/ReviewSubjectPanel";
 import ToolAuditPanel from "@/components/review/ToolAuditPanel";
 import {
@@ -53,6 +56,15 @@ type ExpertRoutingSummary = {
   fallback_expert_added: boolean;
 };
 
+type ExpertSelectionSummary = {
+  requested_expert_ids: string[];
+  candidate_expert_ids: string[];
+  selected_experts: RoutingExpertItem[];
+  skipped_experts: RoutingExpertItem[];
+};
+
+type WorkspaceTabKey = "overview" | "process" | "result";
+
 const { Paragraph, Text, Title } = Typography;
 
 const defaultFormState: ReviewFormState = {
@@ -72,6 +84,11 @@ const defaultFormState: ReviewFormState = {
     "test_verification",
   ],
 };
+
+const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result"];
+
+const isWorkspaceTabKey = (value: string | null): value is WorkspaceTabKey =>
+  Boolean(value && WORKSPACE_TAB_KEYS.includes(value as WorkspaceTabKey));
 
 const normalizeDesignDocs = (value: unknown): ReviewDesignDocumentInput[] => {
   if (!Array.isArray(value)) return [];
@@ -114,6 +131,43 @@ const readExpertRoutingSummary = (review?: ReviewSummary | null): ExpertRoutingS
     effective_experts: normalizeRoutingItems(payload.effective_experts),
     system_added_experts: normalizeRoutingItems(payload.system_added_experts),
     fallback_expert_added: Boolean(payload.fallback_expert_added),
+  };
+};
+
+const readExpertSelectionSummary = (review?: ReviewSummary | null): ExpertSelectionSummary | null => {
+  const metadata = review?.subject?.metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const selection = (metadata as Record<string, unknown>).expert_selection;
+  if (!selection || typeof selection !== "object") return null;
+  const payload = selection as Record<string, unknown>;
+  return {
+    requested_expert_ids: Array.isArray(payload.requested_expert_ids)
+      ? payload.requested_expert_ids.map((item) => String(item)).filter(Boolean)
+      : [],
+    candidate_expert_ids: Array.isArray(payload.candidate_expert_ids)
+      ? payload.candidate_expert_ids.map((item) => String(item)).filter(Boolean)
+      : [],
+    selected_experts: normalizeRoutingItems(payload.selected_experts),
+    skipped_experts: normalizeRoutingItems(payload.skipped_experts),
+  };
+};
+
+const toOverviewExpertSelectionSummary = (
+  summary: ExpertSelectionSummary | null,
+): ReviewOverviewExpertSelectionSummary | null => {
+  if (!summary) return null;
+  return {
+    requested_expert_ids: summary.requested_expert_ids,
+    selected_experts: summary.selected_experts.map((item) => ({
+      expert_id: item.expert_id,
+      expert_name: item.expert_name,
+      reason: item.reason,
+    })),
+    skipped_experts: summary.skipped_experts.map((item) => ({
+      expert_id: item.expert_id,
+      expert_name: item.expert_name,
+      reason: item.reason,
+    })),
   };
 };
 
@@ -175,6 +229,45 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
   );
 };
 
+const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }> = ({ summary }) => {
+  if (!summary) return null;
+  return (
+    <Card className="module-card expert-routing-card expert-routing-card-info" title="专家参与判定">
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        <Paragraph className="expert-routing-summary">
+          主Agent 已基于当前 MR 信息、完整 diff 和专家画像，先由大模型判定本次真正需要参与审核的专家集合。
+        </Paragraph>
+        <RoutingExpertTags title="大模型选中" items={summary.selected_experts} color="green" />
+        {summary.requested_expert_ids.length > 0 ? (
+          <div className="routing-group">
+            <Text className="routing-group-title">原始候选</Text>
+            <Space size={[8, 8]} wrap>
+              {summary.requested_expert_ids.map((item) => (
+                <Tag key={`requested-${item}`} color="blue">
+                  {item}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+        ) : null}
+        {summary.skipped_experts.length > 0 ? (
+          <div className="routing-group">
+            <Text className="routing-group-title">未参与本轮</Text>
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              {summary.skipped_experts.map((item) => (
+                <div key={`selection-skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
+                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text type="secondary">{item.reason || "大模型未将其纳入本次 MR 的审核集合"}</Text>
+                </div>
+              ))}
+            </Space>
+          </div>
+        ) : null}
+      </Space>
+    </Card>
+  );
+};
+
 const ReviewWorkbenchPage: React.FC = () => {
   // 这是前端真正的“审核工作台容器”。
   // 概览、过程、结果三个页签共用同一份 review/replay/artifact 状态，
@@ -183,7 +276,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const { reviewId = "" } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const [activeStep, setActiveStep] = useState("overview");
+  const [activeStep, setActiveStep] = useState<WorkspaceTabKey>("overview");
   const [review, setReview] = useState<ReviewSummary | null>(null);
   const [replay, setReplay] = useState<ReviewReplayBundle | null>(null);
   const [artifacts, setArtifacts] = useState<ReviewArtifacts | null>(null);
@@ -218,6 +311,26 @@ const ReviewWorkbenchPage: React.FC = () => {
   const resultHumanRef = useRef<HTMLDivElement | null>(null);
   const resultFindingsRef = useRef<HTMLDivElement | null>(null);
   const isReadonlyOverview = Boolean(reviewId);
+  const requestedTab = useMemo<WorkspaceTabKey | null>(() => {
+    const search = new URLSearchParams(location.search);
+    const value = search.get("tab");
+    return isWorkspaceTabKey(value) ? value : null;
+  }, [location.search]);
+
+  const syncTabToUrl = (nextTab: WorkspaceTabKey, replace = true) => {
+    const search = new URLSearchParams(location.search);
+    if (search.get("tab") === nextTab) return;
+    search.set("tab", nextTab);
+    const path = reviewId ? `/review/${reviewId}` : "/review";
+    const nextSearch = search.toString();
+    navigate(nextSearch ? `${path}?${nextSearch}` : path, { replace });
+  };
+
+  const openWorkspaceTab = (nextTab: WorkspaceTabKey, options?: { replace?: boolean; syncUrl?: boolean }) => {
+    setActiveStep(nextTab);
+    if (options?.syncUrl === false) return;
+    syncTabToUrl(nextTab, options?.replace ?? true);
+  };
 
   const loadReviewBundle = async (targetReviewId: string) => {
     // 工作台恢复和轮询刷新统一走这一条数据加载链，
@@ -301,7 +414,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setSelectedFindingId("");
       setDecisionComment("");
       setFindingModalOpen(false);
-      setActiveStep("overview");
+      setActiveStep(requestedTab || "overview");
       return;
     }
     setKnowledgeDocs([]);
@@ -310,12 +423,18 @@ const ReviewWorkbenchPage: React.FC = () => {
     setDecisionComment("");
     setFindingModalOpen(false);
     void loadReviewBundle(reviewId);
-  }, [reviewId, runtimeSettings]);
+  }, [requestedTab, reviewId, runtimeSettings]);
+
+  useEffect(() => {
+    if (!requestedTab || requestedTab === activeStep) return;
+    setActiveStep(requestedTab);
+  }, [activeStep, requestedTab]);
 
   useEffect(() => {
     // 根据 review 状态自动切换当前工作台页签：
     // - 运行中优先过程页
     // - 完成/失败优先结果页
+    if (requestedTab) return;
     if (!review) return;
     if (review.status === "completed" || review.status === "failed") {
       setActiveStep("result");
@@ -324,7 +443,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     if (reviewId) {
       setActiveStep("process");
     }
-  }, [review, reviewId]);
+  }, [requestedTab, review, reviewId]);
 
   useEffect(() => {
     // 过程页使用 SSE 增量刷新，保证主 Agent / 专家消息尽快出现在界面上。
@@ -349,6 +468,12 @@ const ReviewWorkbenchPage: React.FC = () => {
   const report = replay?.report || null;
   const findings = report?.findings || [];
   const allMessages = replay?.messages || [];
+  const expertSelectionSummary = useMemo(() => readExpertSelectionSummary(review), [review]);
+  const overviewExpertSelectionSummary = useMemo(
+    () => toOverviewExpertSelectionSummary(expertSelectionSummary),
+    [expertSelectionSummary],
+  );
+  const expertRoutingSummary = useMemo(() => readExpertRoutingSummary(review), [review]);
 
   const selectedIssue = useMemo(
     () => issues.find((item) => item.issue_id === selectedIssueId) || issues[0] || null,
@@ -375,7 +500,6 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
     [issues],
   );
-  const expertRoutingSummary = useMemo(() => readExpertRoutingSummary(review), [review]);
   const preferredHumanIssue = selectedFindingIssue?.needs_human
     ? selectedFindingIssue
     : selectedIssue?.needs_human
@@ -434,7 +558,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const currentTab = workspaceTabs.find((item) => item.key === activeStep) || workspaceTabs[0];
   const currentTabHint =
     reviewId && activeStep === "overview"
-      ? "当前是审核记录查看模式，可核对当时提交的审核对象、专家选择与 diff 上下文。"
+      ? "当前是审核记录查看模式，可核对当时提交的审核对象、候选专家、大模型判定的参与专家与 diff 上下文。"
       : currentTab.hint;
 
   const createPayload = (): Parameters<typeof reviewApi.create>[0] => ({
@@ -457,7 +581,12 @@ const ReviewWorkbenchPage: React.FC = () => {
     setStarting(true);
     try {
       const created = await reviewApi.create(createPayload());
-      navigate(`/review/${created.review_id}${autoStart ? "?auto_start=1" : ""}`);
+      const search = new URLSearchParams();
+      search.set("tab", autoStart ? "process" : "overview");
+      if (autoStart) {
+        search.set("auto_start", "1");
+      }
+      navigate(`/review/${created.review_id}?${search.toString()}`);
       setActiveStep(autoStart ? "process" : "overview");
       message.success(autoStart ? `审核已创建，正在启动：${created.review_id}` : `审核已创建：${created.review_id}`);
     } catch (error: any) {
@@ -473,12 +602,14 @@ const ReviewWorkbenchPage: React.FC = () => {
     const shouldAutoStart = search.get("auto_start") === "1";
     if (!shouldAutoStart || !reviewId || !review || starting) return;
     if (review.status !== "pending") {
-      if (location.search) navigate(`/review/${reviewId}`, { replace: true });
+      search.delete("auto_start");
+      search.set("tab", requestedTab || "process");
+      navigate(`/review/${reviewId}?${search.toString()}`, { replace: true });
       return;
     }
     if (autoStartTriggeredRef.current === reviewId) return;
     autoStartTriggeredRef.current = reviewId;
-    setActiveStep("process");
+    openWorkspaceTab("process", { replace: true });
     void (async () => {
       setStarting(true);
       try {
@@ -498,10 +629,12 @@ const ReviewWorkbenchPage: React.FC = () => {
         message.error(error?.message || "启动审核失败");
       } finally {
         setStarting(false);
-        navigate(`/review/${reviewId}`, { replace: true });
+        search.delete("auto_start");
+        search.set("tab", "process");
+        navigate(`/review/${reviewId}?${search.toString()}`, { replace: true });
       }
     })();
-  }, [location.search, navigate, review, reviewId, starting]);
+  }, [location.search, navigate, openWorkspaceTab, requestedTab, review, reviewId, starting]);
 
   const startExistingReview = async () => {
     // 历史记录里还处于 pending 的任务，可以从这里继续启动。
@@ -509,7 +642,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       await createReview(true);
       return;
     }
-    setActiveStep("process");
+    openWorkspaceTab("process");
     setStarting(true);
     try {
       const started = await reviewApi.start(reviewId);
@@ -537,13 +670,13 @@ const ReviewWorkbenchPage: React.FC = () => {
       target.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 80);
   };
-  const focusProcess = () => setActiveStep("process");
+  const focusProcess = () => openWorkspaceTab("process");
   const focusProcessDialogue = () => {
-    setActiveStep("process");
+    openWorkspaceTab("process");
     scrollToRef(processDialogueRef);
   };
   const focusProcessIssues = () => {
-    setActiveStep("process");
+    openWorkspaceTab("process");
     scrollToRef(processIssuesRef);
   };
   const focusResultGroup = (
@@ -560,16 +693,16 @@ const ReviewWorkbenchPage: React.FC = () => {
       | "design_concern",
   ) => {
     setFindingsActiveGroup(group);
-    setActiveStep("result");
+    openWorkspaceTab("result");
     scrollToRef(resultFindingsRef);
   };
   const focusResultSummary = () => {
-    setActiveStep("result");
+    openWorkspaceTab("result");
     scrollToRef(resultSummaryRef);
   };
   const focusResultHuman = () => {
     setFindingsActiveGroup("blocking");
-    setActiveStep("result");
+    openWorkspaceTab("result");
     scrollToRef(resultHumanRef);
   };
 
@@ -614,7 +747,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Tabs
             className="incident-workspace-tabs"
             activeKey={activeStep}
-            onChange={setActiveStep}
+            onChange={(key) => isWorkspaceTabKey(key) && openWorkspaceTab(key)}
             items={workspaceTabs.map((item) => ({
               key: item.key,
               label: item.label,
@@ -629,7 +762,11 @@ const ReviewWorkbenchPage: React.FC = () => {
         <OverviewCards
           status={review?.status || "idle"}
           phase={review?.phase || "not_started"}
-          expertCount={review?.selected_experts?.length || form.selected_experts.length}
+          expertCount={
+            expertSelectionSummary?.selected_experts.length ||
+            review?.selected_experts?.length ||
+            form.selected_experts.length
+          }
           findingCount={findings.length}
           issueCount={issues.length}
           humanGateCount={review?.pending_human_issue_ids?.length || 0}
@@ -654,6 +791,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 status={currentStatus}
                 readonly={isReadonlyOverview}
                 experts={experts}
+                expertSelectionSummary={overviewExpertSelectionSummary}
                 onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
                 onStart={() => void (reviewId ? startExistingReview() : createReview(true))}
                 onCreateOnly={() => void createReview(false)}
@@ -661,6 +799,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             </Col>
             <Col xs={24} xl={9}>
               <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                <ExpertSelectionPanel summary={expertSelectionSummary} />
                 <ReviewSubjectPanel review={review} />
                 <ArtifactSummaryPanel artifacts={artifacts} />
                 <DiffPreviewPanel diff={review?.subject?.unified_diff || ""} />
@@ -673,6 +812,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Row gutter={[16, 16]}>
             <Col xs={24} xl={17}>
               <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-main-stack">
+                <ExpertSelectionPanel summary={expertSelectionSummary} />
                 <ExpertRoutingPanel summary={expertRoutingSummary} />
                 <div ref={processDialogueRef}>
                   <Card className="module-card process-dialogue-card" title="专家对话流">

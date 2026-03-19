@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.config import settings
 from app.domain.models.feedback import FeedbackLabel
-from app.domain.models.issue import DebateIssue
-from app.domain.models.review import ReviewTask
-from app.repositories.file_feedback_repository import FileFeedbackRepository
-from app.repositories.file_issue_repository import FileIssueRepository
-from app.repositories.file_review_repository import FileReviewRepository
+from app.repositories.sqlite_feedback_repository import SqliteFeedbackRepository
+from app.repositories.sqlite_issue_repository import SqliteIssueRepository
+from app.repositories.sqlite_review_repository import SqliteReviewRepository
 
 
 class FeedbackLearnerService:
@@ -16,9 +15,19 @@ class FeedbackLearnerService:
     def __init__(self, storage_root: Path) -> None:
         """初始化审核、议题和反馈仓储。"""
 
-        self.review_repo = FileReviewRepository(storage_root)
-        self.issue_repo = FileIssueRepository(storage_root)
-        self.feedback_repo = FileFeedbackRepository(storage_root)
+        db_path = self._resolve_db_path(storage_root)
+        self.review_repo = SqliteReviewRepository(db_path)
+        self.issue_repo = SqliteIssueRepository(db_path)
+        self.feedback_repo = SqliteFeedbackRepository(db_path)
+
+    def _resolve_db_path(self, root: Path) -> Path:
+        """Resolve SQLite path from storage root, honoring global default when unchanged."""
+
+        resolved_root = Path(root).resolve()
+        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
+        if resolved_root == default_storage_root:
+            return Path(settings.SQLITE_DB_PATH)
+        return resolved_root / "app.db"
 
     def build_expert_metrics(self) -> list[dict[str, object]]:
         """汇总每个专家的误报、人工批准和工具核验指标。"""

@@ -41,6 +41,9 @@ class CodeRepoConfig(BaseModel):
     local_path: str = ""
     default_branch: str = "main"
     auto_sync: bool = False
+    auto_review_enabled: bool = False
+    auto_review_repo_url: str = ""
+    auto_review_poll_interval_seconds: int = 120
 
 
 class RuntimeConfig(BaseModel):
@@ -120,6 +123,9 @@ class AppConfig(BaseModel):
                 local_path=runtime.code_repo_local_path,
                 default_branch=runtime.code_repo_default_branch,
                 auto_sync=runtime.code_repo_auto_sync,
+                auto_review_enabled=runtime.auto_review_enabled,
+                auto_review_repo_url=runtime.auto_review_repo_url,
+                auto_review_poll_interval_seconds=runtime.auto_review_poll_interval_seconds,
             ),
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
@@ -162,6 +168,9 @@ class AppConfig(BaseModel):
             gitlab_access_token=self.git.gitlab_access_token or self.git.repo_access_token,
             codehub_access_token=self.git.codehub_access_token or self.git.repo_access_token,
             code_repo_auto_sync=self.code_repo.auto_sync,
+            auto_review_enabled=self.code_repo.auto_review_enabled,
+            auto_review_repo_url=self.code_repo.auto_review_repo_url,
+            auto_review_poll_interval_seconds=self.code_repo.auto_review_poll_interval_seconds,
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),
             runtime_tool_allowlist=list(self.allowlist.runtime_tools),

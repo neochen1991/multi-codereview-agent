@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -32,6 +32,14 @@ class ReviewPlatformProvider:
     def build_remote_diff_candidates(self, review_url: str) -> list[str]:
         raise NotImplementedError
 
+    def list_open_merge_requests(
+        self,
+        repo_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> list["OpenMergeRequest"]:
+        raise NotImplementedError
+
     def build_headers(self, access_token: str) -> dict[str, str]:
         headers = {"User-Agent": "multi-codereview-agent/1.0"}
         if access_token:
@@ -59,6 +67,18 @@ class ReviewPlatformProvider:
                 return text
             return ""
         return ""
+
+
+@dataclass(frozen=True)
+class OpenMergeRequest:
+    """描述代码平台上一个处于开启状态的 MR/PR。"""
+
+    mr_url: str
+    title: str
+    source_ref: str = ""
+    target_ref: str = "main"
+    number: str = ""
+    head_sha: str = ""
 
 
 class GitHubReviewProvider(ReviewPlatformProvider):
@@ -103,13 +123,86 @@ class GitHubReviewProvider(ReviewPlatformProvider):
             return [f"{review_url}.patch", f"{review_url}.diff"]
         return []
 
+    def list_open_merge_requests(
+        self,
+        repo_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> list[OpenMergeRequest]:
+        owner, repo = self._extract_repo_slug(repo_url)
+        if not owner or not repo:
+            return []
+        headers = self.build_headers(access_token)
+        headers["Accept"] = "application/vnd.github+json"
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100"
+        try:
+            with HttpClientFactory.create(
+                timeout=httpx.Timeout(30.0, connect=10.0, read=30.0),
+                runtime_settings=runtime_settings,
+                follow_redirects=True,
+            ) as client:
+                response = client.get(api_url, headers=headers)
+                response.raise_for_status()
+                rows = response.json()
+        except Exception as error:
+            logger.warning("list github open pull requests failed repo_url=%s error=%s", repo_url, error)
+            return []
+
+        merge_requests: list[OpenMergeRequest] = []
+        for item in rows if isinstance(rows, list) else []:
+            if not isinstance(item, dict):
+                continue
+            mr_url = str(item.get("html_url") or "").strip()
+            if not mr_url:
+                continue
+            merge_requests.append(
+                OpenMergeRequest(
+                    mr_url=mr_url,
+                    title=str(item.get("title") or f"Pull Request #{item.get('number', '')}").strip(),
+                    source_ref=str((item.get("head") or {}).get("ref") or "").strip(),
+                    target_ref=str((item.get("base") or {}).get("ref") or "main").strip() or "main",
+                    number=str(item.get("number") or "").strip(),
+                    head_sha=str((item.get("head") or {}).get("sha") or "").strip(),
+                )
+            )
+        merge_requests.sort(key=lambda item: int(item.number) if item.number.isdigit() else 0)
+        return merge_requests
+
+    def _extract_repo_slug(self, repo_url: str) -> tuple[str, str]:
+        candidate = repo_url.strip()
+        if candidate.startswith("git@"):
+            normalized = candidate.split("@", 1)[1]
+            host, _, path = normalized.partition(":")
+            candidate = f"https://{host}/{path}"
+        elif "://" not in candidate:
+            candidate = f"https://{candidate}"
+        parsed = urlparse(candidate)
+        path_parts = [segment for segment in parsed.path.split("/") if segment]
+        if path_parts and path_parts[-1].endswith(".git"):
+            path_parts[-1] = path_parts[-1][: -len(".git")]
+        if len(path_parts) < 2:
+            return "", ""
+        return path_parts[-2], path_parts[-1]
+
 
 class GitLabReviewProvider(ReviewPlatformProvider):
     def __init__(self) -> None:
         super().__init__(platform_kind="gitlab_like")
 
     def supports(self, review_url: str) -> bool:
-        return "merge_requests" in review_url or "/-/commit/" in review_url or "/commit/" in review_url
+        lowered = review_url.lower()
+        if "github.com" in lowered:
+            return False
+        return any(
+            token in lowered
+            for token in (
+                "gitlab",
+                "codehub",
+                "merge_requests",
+                "/-/commit/",
+                "/commit/",
+            )
+        )
 
     def fetch_remote_diff(
         self,
@@ -151,6 +244,82 @@ class GitLabReviewProvider(ReviewPlatformProvider):
         if "/-/commit/" in path or "/commit/" in path:
             return [f"{review_url}.patch", f"{review_url}.diff"]
         return []
+
+    def list_open_merge_requests(
+        self,
+        repo_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> list[OpenMergeRequest]:
+        web_url = self._normalize_repo_url(repo_url)
+        if not web_url:
+            return []
+        parsed = urlparse(web_url)
+        project_path = self._extract_project_path(parsed.path)
+        if not project_path:
+            return []
+        api_url = (
+            f"{parsed.scheme}://{parsed.netloc}/api/v4/projects/{quote(project_path, safe='')}"
+            "/merge_requests?state=opened&order_by=created_at&sort=asc&per_page=100"
+        )
+        headers = self.build_headers(access_token)
+        if access_token:
+            headers["PRIVATE-TOKEN"] = access_token
+        try:
+            with HttpClientFactory.create(
+                timeout=httpx.Timeout(30.0, connect=10.0, read=30.0),
+                runtime_settings=runtime_settings,
+                follow_redirects=True,
+            ) as client:
+                response = client.get(api_url, headers=headers)
+                response.raise_for_status()
+                rows = response.json()
+        except Exception as error:
+            logger.warning("list gitlab/codehub open merge requests failed repo_url=%s error=%s", repo_url, error)
+            return []
+
+        merge_requests: list[OpenMergeRequest] = []
+        for item in rows if isinstance(rows, list) else []:
+            if not isinstance(item, dict):
+                continue
+            mr_url = str(item.get("web_url") or "").strip()
+            if not mr_url:
+                continue
+            merge_requests.append(
+                OpenMergeRequest(
+                    mr_url=mr_url,
+                    title=str(item.get("title") or f"Merge Request !{item.get('iid', '')}").strip(),
+                    source_ref=str(item.get("source_branch") or "").strip(),
+                    target_ref=str(item.get("target_branch") or "main").strip() or "main",
+                    number=str(item.get("iid") or item.get("id") or "").strip(),
+                    head_sha=str(item.get("sha") or "").strip(),
+                )
+            )
+        merge_requests.sort(key=lambda item: int(item.number) if item.number.isdigit() else 0)
+        return merge_requests
+
+    def _normalize_repo_url(self, repo_url: str) -> str:
+        candidate = repo_url.strip()
+        if not candidate:
+            return ""
+        if candidate.startswith("git@"):
+            normalized = candidate.split("@", 1)[1]
+            host, _, path = normalized.partition(":")
+            candidate = f"https://{host}/{path}"
+        elif "://" not in candidate:
+            candidate = f"https://{candidate}"
+        if candidate.endswith(".git"):
+            candidate = candidate[: -len(".git")]
+        return candidate
+
+    def _extract_project_path(self, path: str) -> str:
+        parts = [segment for segment in path.split("/") if segment]
+        clean_parts: list[str] = []
+        for segment in parts:
+            if segment in {"-", "merge_requests", "pull", "commit"}:
+                break
+            clean_parts.append(segment)
+        return "/".join(clean_parts)
 
 
 class PlatformAdapter:
@@ -238,6 +407,20 @@ class PlatformAdapter:
                 "metadata": metadata,
             }
         )
+
+    def list_open_merge_requests(
+        self,
+        repo_url: str,
+        access_token: str,
+        runtime_settings: RuntimeSettings | None = None,
+    ) -> list[OpenMergeRequest]:
+        """从代码平台拉取仓库当前处于开启状态的 MR/PR 列表。"""
+
+        provider = self._resolve_provider(repo_url)
+        if provider is None:
+            logger.info("skip listing open merge requests for unsupported repo_url=%s", repo_url)
+            return []
+        return provider.list_open_merge_requests(repo_url, access_token, runtime_settings)
 
     def _infer_repo_project(self, repo_url: str, review_url: str) -> dict[str, str]:
         candidate = repo_url or review_url

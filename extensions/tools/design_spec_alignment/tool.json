@@ -6,6 +6,7 @@
   "entry": "run.py",
   "timeout_seconds": 300,
   "allowed_experts": ["correctness_business", "architecture_design", "database_analysis", "performance_reliability", "security_compliance"],
+  "bound_skills": ["design-consistency-check"],
   "input_schema": {
     "review_id": "string",
     "diff": "string",

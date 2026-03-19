@@ -1,7 +1,14 @@
 import React from "react";
-import { Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Row, Select, Switch, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Descriptions, Form, Input, InputNumber, Row, Select, Switch, Tabs, Typography, message } from "antd";
 
-import { expertApi, settingsApi, type ExpertProfile, type RuntimeSettings } from "@/services/api";
+import {
+  expertApi,
+  settingsApi,
+  type ExpertProfile,
+  type ExtensionSkill,
+  type ExtensionTool,
+  type RuntimeSettings,
+} from "@/services/api";
 
 const { Paragraph, Title } = Typography;
 
@@ -12,25 +19,81 @@ const parseList = (value: string) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const parseJsonObject = (value: string) => {
+  const text = String(value || "").trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
 // 设置页负责维护 config.json 对应的系统级运行参数和专家治理配置。
 const SettingsPage: React.FC = () => {
   const [form] = Form.useForm<RuntimeSettings>();
+  const [skillForm] = Form.useForm<ExtensionSkill & { bound_experts_text?: string; required_tools_text?: string; activation_hints_text?: string }>();
+  const [toolForm] = Form.useForm<
+    ExtensionTool & {
+      allowed_experts_text?: string;
+      bound_skills_text?: string;
+      input_schema_text?: string;
+      output_schema_text?: string;
+    }
+  >();
   const [loading, setLoading] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [experts, setExperts] = React.useState<ExpertProfile[]>([]);
   const [savingExpertId, setSavingExpertId] = React.useState("");
+  const [extensionSkills, setExtensionSkills] = React.useState<ExtensionSkill[]>([]);
+  const [extensionTools, setExtensionTools] = React.useState<ExtensionTool[]>([]);
+  const [savingSkill, setSavingSkill] = React.useState(false);
+  const [savingTool, setSavingTool] = React.useState(false);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList] = await Promise.all([settingsApi.getRuntime(), expertApi.list()]);
+      const [runtime, expertList, skills, tools] = await Promise.all([
+        settingsApi.getRuntime(),
+        expertApi.list(),
+        settingsApi.listExtensionSkills(),
+        settingsApi.listExtensionTools(),
+      ]);
       form.setFieldsValue(runtime);
       setExperts(expertList);
+      setExtensionSkills(skills);
+      setExtensionTools(tools);
+      if (skills.length > 0) {
+        const first = skills[0];
+        skillForm.setFieldsValue({
+          ...first,
+          bound_experts_text: stringifyList(first.bound_experts),
+          required_tools_text: stringifyList(first.required_tools),
+          activation_hints_text: stringifyList(first.activation_hints),
+        });
+      } else {
+        skillForm.resetFields();
+        skillForm.setFieldsValue({ allowed_modes: ["standard", "light"], prompt_body: "" });
+      }
+      if (tools.length > 0) {
+        const first = tools[0];
+        toolForm.setFieldsValue({
+          ...first,
+          allowed_experts_text: stringifyList(first.allowed_experts),
+          bound_skills_text: stringifyList(first.bound_skills),
+          input_schema_text: JSON.stringify(first.input_schema || {}, null, 2),
+          output_schema_text: JSON.stringify(first.output_schema || {}, null, 2),
+        });
+      } else {
+        toolForm.resetFields();
+        toolForm.setFieldsValue({ runtime: "python", entry: "run.py", timeout_seconds: 60, run_script: "" });
+      }
     } finally {
       setLoading(false);
     }
-  }, [form]);
+  }, [form, skillForm, toolForm]);
 
   React.useEffect(() => {
     void loadPage();
@@ -85,6 +148,9 @@ const SettingsPage: React.FC = () => {
                 gitlab_access_token: String(values.gitlab_access_token || "").trim() || undefined,
                 codehub_access_token: String(values.codehub_access_token || "").trim() || undefined,
                 code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
+                auto_review_enabled: Boolean(values.auto_review_enabled),
+                auto_review_repo_url: values.auto_review_repo_url || "",
+                auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
                 runtime_tool_allowlist: parseList(String(values.runtime_tool_allowlist || "")),
@@ -207,6 +273,15 @@ const SettingsPage: React.FC = () => {
           </Form.Item>
           <Form.Item name="code_repo_auto_sync" label="自动同步目标分支代码仓" valuePropName="checked">
             <Switch />
+          </Form.Item>
+          <Form.Item name="auto_review_enabled" label="启用系统启动后自动拉取 MR 并排队审核" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="auto_review_repo_url" label="自动拉取 MR 的仓库地址（支持 CodeHub/GitLab/GitHub）">
+            <Input placeholder="codehub-g.huawei.com/PIP/FND/projectname/merge_requests" />
+          </Form.Item>
+          <Form.Item name="auto_review_poll_interval_seconds" label="自动拉取轮询间隔（秒）">
+            <InputNumber min={15} max={3600} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item
             name="tool_allowlist"
@@ -353,6 +428,210 @@ const SettingsPage: React.FC = () => {
             </Col>
           ))}
         </Row>
+      </Card>
+
+      <Card className="module-card" title="扩展 Skill / Tool 编辑（extensions）" style={{ marginTop: 16 }} loading={loading}>
+        <Tabs
+          defaultActiveKey="skills"
+          items={[
+            {
+              key: "skills",
+              label: "Skill 编辑",
+              children: (
+                <Form
+                  form={skillForm}
+                  layout="vertical"
+                  onFinish={async (values) => {
+                    const skillId = String(values.skill_id || "").trim();
+                    if (!skillId) {
+                      message.warning("请先填写 skill_id");
+                      return;
+                    }
+                    setSavingSkill(true);
+                    try {
+                      await settingsApi.upsertExtensionSkill(skillId, {
+                        skill_id: skillId,
+                        name: String(values.name || skillId).trim(),
+                        description: String(values.description || "").trim(),
+                        bound_experts: parseList(String(values.bound_experts_text || "")),
+                        applicable_experts: [],
+                        required_tools: parseList(String(values.required_tools_text || "")),
+                        required_doc_types: [],
+                        activation_hints: parseList(String(values.activation_hints_text || "")),
+                        required_context: ["diff"],
+                        allowed_modes:
+                          Array.isArray(values.allowed_modes) && values.allowed_modes.length > 0
+                            ? values.allowed_modes
+                            : ["standard", "light"],
+                        output_contract: {},
+                        prompt_body: String(values.prompt_body || ""),
+                      });
+                      message.success(`Skill ${skillId} 已保存`);
+                      await loadPage();
+                    } catch (error: any) {
+                      message.error(error?.message || "保存 Skill 失败");
+                    } finally {
+                      setSavingSkill(false);
+                    }
+                  }}
+                >
+                  <Form.Item label="加载已有 Skill">
+                    <Select
+                      allowClear
+                      placeholder="选择一个已有 skill 加载到编辑器"
+                      options={extensionSkills.map((item) => ({ label: `${item.name} (${item.skill_id})`, value: item.skill_id }))}
+                      onChange={(value) => {
+                        const selected = extensionSkills.find((item) => item.skill_id === value);
+                        if (!selected) {
+                          skillForm.resetFields();
+                          skillForm.setFieldsValue({ allowed_modes: ["standard", "light"], prompt_body: "" });
+                          return;
+                        }
+                        skillForm.setFieldsValue({
+                          ...selected,
+                          bound_experts_text: stringifyList(selected.bound_experts),
+                          required_tools_text: stringifyList(selected.required_tools),
+                          activation_hints_text: stringifyList(selected.activation_hints),
+                        });
+                      }}
+                    />
+                  </Form.Item>
+                  <Form.Item name="skill_id" label="skill_id" rules={[{ required: true, message: "请输入 skill_id" }]}>
+                    <Input placeholder="design-consistency-check" />
+                  </Form.Item>
+                  <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+                    <Input placeholder="详细设计一致性检查" />
+                  </Form.Item>
+                  <Form.Item name="description" label="说明">
+                    <Input placeholder="该 skill 在专家审查中的职责说明" />
+                  </Form.Item>
+                  <Form.Item name="bound_experts_text" label="绑定专家（逗号分隔 expert_id）">
+                    <Input placeholder="correctness_business, architecture_design" />
+                  </Form.Item>
+                  <Form.Item name="required_tools_text" label="依赖工具（逗号分隔 tool_id）">
+                    <Input placeholder="design_spec_alignment, repo_context_search" />
+                  </Form.Item>
+                  <Form.Item name="activation_hints_text" label="激活提示词（逗号分隔）">
+                    <Input placeholder="design, api, schema" />
+                  </Form.Item>
+                  <Form.Item name="allowed_modes" label="可用模式">
+                    <Select
+                      mode="multiple"
+                      options={[
+                        { label: "standard", value: "standard" },
+                        { label: "light", value: "light" },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item name="prompt_body" label="SKILL.md 内容">
+                    <Input.TextArea rows={14} placeholder="在这里编辑 SKILL.md 内容" />
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" loading={savingSkill}>
+                    保存 Skill
+                  </Button>
+                </Form>
+              ),
+            },
+            {
+              key: "tools",
+              label: "Tool 编辑",
+              children: (
+                <Form
+                  form={toolForm}
+                  layout="vertical"
+                  onFinish={async (values) => {
+                    const toolId = String(values.tool_id || "").trim();
+                    if (!toolId) {
+                      message.warning("请先填写 tool_id");
+                      return;
+                    }
+                    setSavingTool(true);
+                    try {
+                      await settingsApi.upsertExtensionTool(toolId, {
+                        tool_id: toolId,
+                        name: String(values.name || toolId).trim(),
+                        description: String(values.description || "").trim(),
+                        runtime: String(values.runtime || "python").trim() || "python",
+                        entry: String(values.entry || "run.py").trim() || "run.py",
+                        timeout_seconds: Number(values.timeout_seconds || 60),
+                        allowed_experts: parseList(String(values.allowed_experts_text || "")),
+                        bound_skills: parseList(String(values.bound_skills_text || "")),
+                        input_schema: parseJsonObject(String(values.input_schema_text || "")),
+                        output_schema: parseJsonObject(String(values.output_schema_text || "")),
+                        run_script: String(values.run_script || ""),
+                      });
+                      message.success(`Tool ${toolId} 已保存`);
+                      await loadPage();
+                    } catch (error: any) {
+                      message.error(error?.message || "保存 Tool 失败");
+                    } finally {
+                      setSavingTool(false);
+                    }
+                  }}
+                >
+                  <Form.Item label="加载已有 Tool">
+                    <Select
+                      allowClear
+                      placeholder="选择一个已有 tool 加载到编辑器"
+                      options={extensionTools.map((item) => ({ label: `${item.name} (${item.tool_id})`, value: item.tool_id }))}
+                      onChange={(value) => {
+                        const selected = extensionTools.find((item) => item.tool_id === value);
+                        if (!selected) {
+                          toolForm.resetFields();
+                          toolForm.setFieldsValue({ runtime: "python", entry: "run.py", timeout_seconds: 60, run_script: "" });
+                          return;
+                        }
+                        toolForm.setFieldsValue({
+                          ...selected,
+                          allowed_experts_text: stringifyList(selected.allowed_experts),
+                          bound_skills_text: stringifyList(selected.bound_skills),
+                          input_schema_text: JSON.stringify(selected.input_schema || {}, null, 2),
+                          output_schema_text: JSON.stringify(selected.output_schema || {}, null, 2),
+                        });
+                      }}
+                    />
+                  </Form.Item>
+                  <Form.Item name="tool_id" label="tool_id" rules={[{ required: true, message: "请输入 tool_id" }]}>
+                    <Input placeholder="design_spec_alignment" />
+                  </Form.Item>
+                  <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+                    <Input placeholder="详细设计一致性检查工具" />
+                  </Form.Item>
+                  <Form.Item name="description" label="说明">
+                    <Input placeholder="该 tool 的执行目的与输出说明" />
+                  </Form.Item>
+                  <Form.Item name="runtime" label="运行时">
+                    <Input placeholder="python" />
+                  </Form.Item>
+                  <Form.Item name="entry" label="入口文件">
+                    <Input placeholder="run.py" />
+                  </Form.Item>
+                  <Form.Item name="timeout_seconds" label="超时（秒）">
+                    <InputNumber min={5} max={600} style={{ width: "100%" }} />
+                  </Form.Item>
+                  <Form.Item name="allowed_experts_text" label="允许专家（逗号分隔 expert_id）">
+                    <Input placeholder="correctness_business" />
+                  </Form.Item>
+                  <Form.Item name="bound_skills_text" label="绑定 Skill（逗号分隔 skill_id）">
+                    <Input placeholder="design-consistency-check" />
+                  </Form.Item>
+                  <Form.Item name="input_schema_text" label="输入 Schema（JSON）">
+                    <Input.TextArea rows={6} placeholder='{"type":"object","properties":{}}' />
+                  </Form.Item>
+                  <Form.Item name="output_schema_text" label="输出 Schema（JSON）">
+                    <Input.TextArea rows={6} placeholder='{"type":"object","properties":{}}' />
+                  </Form.Item>
+                  <Form.Item name="run_script" label="入口脚本内容">
+                    <Input.TextArea rows={14} placeholder="在这里编辑 run.py 内容" />
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" loading={savingTool}>
+                    保存 Tool
+                  </Button>
+                </Form>
+              ),
+            },
+          ]}
+        />
       </Card>
     </div>
   );

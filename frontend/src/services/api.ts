@@ -218,6 +218,9 @@ export interface RuntimeSettings {
   codehub_access_token?: string;
   codehub_access_token_configured?: boolean;
   code_repo_auto_sync: boolean;
+  auto_review_enabled: boolean;
+  auto_review_repo_url: string;
+  auto_review_poll_interval_seconds: number;
   tool_allowlist: string[];
   mcp_allowlist: string[];
   runtime_tool_allowlist: string[];
@@ -241,6 +244,37 @@ export interface RuntimeSettings {
   verify_ssl: boolean;
   use_system_trust_store: boolean;
   ca_bundle_path: string;
+}
+
+export interface ExtensionSkill {
+  skill_id: string;
+  name: string;
+  description: string;
+  bound_experts: string[];
+  applicable_experts: string[];
+  required_tools: string[];
+  required_doc_types: string[];
+  activation_hints: string[];
+  required_context: string[];
+  allowed_modes: string[];
+  output_contract: Record<string, any>;
+  prompt_body: string;
+  skill_path?: string;
+}
+
+export interface ExtensionTool {
+  tool_id: string;
+  name: string;
+  description: string;
+  runtime: string;
+  entry: string;
+  timeout_seconds: number;
+  allowed_experts: string[];
+  bound_skills: string[];
+  input_schema: Record<string, any>;
+  output_schema: Record<string, any>;
+  run_script: string;
+  tool_path?: string;
 }
 
 export interface KnowledgeDocument {
@@ -313,6 +347,21 @@ export const reviewApi = {
   },
   async list(): Promise<ReviewSummary[]> {
     const { data } = await api.get("/reviews");
+    return data;
+  },
+  async listQueue(): Promise<ReviewSummary[]> {
+    const { data } = await api.get("/reviews/queue");
+    return data;
+  },
+  async syncQueue(): Promise<{
+    enabled: boolean;
+    repo_url: string;
+    created_count: number;
+    created_review_ids: string[];
+    started_review_id: string;
+    message?: string;
+  }> {
+    const { data } = await api.post("/reviews/queue/sync");
     return data;
   },
   async get(reviewId: string): Promise<ReviewSummary> {
@@ -484,6 +533,22 @@ export const settingsApi = {
   },
   async updateRuntime(payload: RuntimeSettings): Promise<RuntimeSettings> {
     const { data } = await api.put("/settings/runtime", payload);
+    return data;
+  },
+  async listExtensionSkills(): Promise<ExtensionSkill[]> {
+    const { data } = await api.get("/settings/extensions/skills");
+    return data;
+  },
+  async upsertExtensionSkill(skillId: string, payload: ExtensionSkill): Promise<ExtensionSkill> {
+    const { data } = await api.put(`/settings/extensions/skills/${skillId}`, payload);
+    return data;
+  },
+  async listExtensionTools(): Promise<ExtensionTool[]> {
+    const { data } = await api.get("/settings/extensions/tools");
+    return data;
+  },
+  async upsertExtensionTool(toolId: string, payload: ExtensionTool): Promise<ExtensionTool> {
+    const { data } = await api.put(`/settings/extensions/tools/${toolId}`, payload);
     return data;
   },
 };

@@ -17,18 +17,21 @@ from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.message import ConversationMessage
 from app.domain.models.report import ReviewReport
 from app.domain.models.review import ReviewSubject, ReviewTask
+from app.domain.models.review_skill import ReviewSkillProfile
+from app.domain.models.review_tool_plugin import ReviewToolPlugin
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.repositories.file_event_repository import FileEventRepository
-from app.repositories.file_feedback_repository import FileFeedbackRepository
-from app.repositories.file_finding_repository import FileFindingRepository
-from app.repositories.file_issue_repository import FileIssueRepository
-from app.repositories.file_message_repository import FileMessageRepository
-from app.repositories.file_review_repository import FileReviewRepository
+from app.repositories.sqlite_event_repository import SqliteEventRepository
+from app.repositories.sqlite_feedback_repository import SqliteFeedbackRepository
+from app.repositories.sqlite_finding_repository import SqliteFindingRepository
+from app.repositories.sqlite_issue_repository import SqliteIssueRepository
+from app.repositories.sqlite_message_repository import SqliteMessageRepository
+from app.repositories.sqlite_review_repository import SqliteReviewRepository
 from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.expert_registry import ExpertRegistry
+from app.services.extension_editor_service import ExtensionEditorService
 from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.knowledge_service import KnowledgeService
-from app.services.platform_adapter import PlatformAdapter
+from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_runner import ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
@@ -46,12 +49,13 @@ class ReviewService:
 
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
-        self.review_repo = FileReviewRepository(self.storage_root)
-        self.event_repo = FileEventRepository(self.storage_root)
-        self.feedback_repo = FileFeedbackRepository(self.storage_root)
-        self.finding_repo = FileFindingRepository(self.storage_root)
-        self.issue_repo = FileIssueRepository(self.storage_root)
-        self.message_repo = FileMessageRepository(self.storage_root)
+        db_path = self._resolve_db_path(self.storage_root)
+        self.review_repo = SqliteReviewRepository(db_path)
+        self.event_repo = SqliteEventRepository(db_path)
+        self.feedback_repo = SqliteFeedbackRepository(db_path)
+        self.finding_repo = SqliteFindingRepository(db_path)
+        self.issue_repo = SqliteIssueRepository(db_path)
+        self.message_repo = SqliteMessageRepository(db_path)
         self.runner = ReviewRunner(self.storage_root)
         self.artifact_service = ArtifactService(self.storage_root)
         self.expert_registry = ExpertRegistry(self.storage_root / "experts")
@@ -59,8 +63,18 @@ class ReviewService:
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
+        self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
         self._active_reviews_lock = threading.Lock()
+
+    def _resolve_db_path(self, root: Path) -> Path:
+        """Resolve SQLite path from storage root, honoring global default when unchanged."""
+
+        resolved_root = Path(root).resolve()
+        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
+        if resolved_root == default_storage_root:
+            return Path(settings.SQLITE_DB_PATH)
+        return resolved_root / "app.db"
 
     def create_review(self, payload: dict[str, object]) -> ReviewTask:
         """创建审核任务并落盘为 pending。
@@ -249,6 +263,74 @@ class ReviewService:
     def list_reviews(self) -> list[ReviewTask]:
         return self.review_repo.list()
 
+    def list_pending_queue(self) -> list[ReviewTask]:
+        """返回待处理队列（pending 状态）并按创建时间升序排列。"""
+
+        queue = [item for item in self.review_repo.list() if item.status == "pending"]
+        queue.sort(key=lambda item: item.created_at)
+        return queue
+
+    def enqueue_open_merge_requests(self, repo_url: str) -> list[ReviewTask]:
+        """拉取仓库开放 MR/PR，并去重后加入待处理队列。"""
+
+        runtime = self.get_runtime_settings()
+        token = self._resolve_git_access_token(repo_url, runtime)
+        merge_requests = self.platform_adapter.list_open_merge_requests(repo_url, token, runtime)
+        if not merge_requests:
+            logger.info("auto queue scan returned no open merge requests repo_url=%s", repo_url)
+            return []
+
+        existing_keys = self._existing_auto_queue_keys()
+        created: list[ReviewTask] = []
+        for item in merge_requests:
+            queue_key = self._auto_queue_key(item)
+            if queue_key in existing_keys:
+                continue
+            review = self.create_review(
+                {
+                    "subject_type": "mr",
+                    "analysis_mode": runtime.default_analysis_mode,
+                    "repo_id": "",
+                    "project_id": "",
+                    "mr_url": item.mr_url,
+                    "source_ref": item.source_ref or "",
+                    "target_ref": item.target_ref or runtime.default_target_branch or "main",
+                    "title": item.title,
+                    "metadata": {
+                        "trigger_source": "auto_scheduler",
+                        "auto_queue_key": queue_key,
+                        "auto_queue_repo_url": repo_url,
+                        "auto_queue_mr_number": item.number,
+                        "auto_queue_head_sha": item.head_sha,
+                    },
+                }
+            )
+            created.append(review)
+            existing_keys.add(queue_key)
+
+        if created:
+            logger.info(
+                "auto queue enqueued %s merge requests repo_url=%s review_ids=%s",
+                len(created),
+                repo_url,
+                [item.review_id for item in created],
+            )
+        return created
+
+    def start_next_pending_review(self) -> ReviewTask | None:
+        """在没有运行中任务时，按队列顺序启动下一条 pending 审核。"""
+
+        reviews = self.review_repo.list()
+        if any(item.status == "running" for item in reviews):
+            return None
+        pending = [item for item in reviews if item.status == "pending"]
+        if not pending:
+            return None
+        pending.sort(key=lambda item: item.created_at)
+        next_review = pending[0]
+        logger.info("auto queue starting next review review_id=%s", next_review.review_id)
+        return self.start_review_async(next_review.review_id)
+
     def list_events(self, review_id: str) -> list[ReviewEvent]:
         return self.event_repo.list(review_id)
 
@@ -287,6 +369,21 @@ class ReviewService:
 
     def update_runtime_settings(self, payload: dict[str, object]) -> RuntimeSettings:
         return self.runtime_settings_service.update(payload)
+
+    def list_extension_skills(self) -> list[ReviewSkillProfile]:
+        return self.extension_editor_service.list_skills()
+
+    def upsert_extension_skill(self, skill_id: str, payload: dict[str, object]) -> ReviewSkillProfile:
+        return self.extension_editor_service.upsert_skill(skill_id, payload)
+
+    def list_extension_tools(self) -> list[ReviewToolPlugin]:
+        return self.extension_editor_service.list_tools()
+
+    def upsert_extension_tool(self, tool_id: str, payload: dict[str, object]) -> ReviewToolPlugin:
+        return self.extension_editor_service.upsert_tool(tool_id, payload)
+
+    def read_extension_tool_script(self, tool_id: str, entry: str = "run.py") -> str:
+        return self.extension_editor_service.read_tool_script(tool_id, entry)
 
     def build_repository_context_service(self) -> RepositoryContextService:
         runtime = self.get_runtime_settings()
@@ -403,6 +500,26 @@ class ReviewService:
             "report": self.build_report(review_id).model_dump(mode="json"),
             "feedback_labels": [item.model_dump(mode="json") for item in self.list_feedback_labels(review_id)],
         }
+
+    def _existing_auto_queue_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for review in self.review_repo.list():
+            metadata = review.subject.metadata or {}
+            has_auto_key = False
+            if isinstance(metadata, dict):
+                auto_key = str(metadata.get("auto_queue_key") or "").strip()
+                if auto_key:
+                    keys.add(auto_key)
+                    has_auto_key = True
+            mr_url = str(review.subject.mr_url or "").strip()
+            if mr_url and not has_auto_key:
+                keys.add(f"url:{mr_url}")
+        return keys
+
+    def _auto_queue_key(self, merge_request: OpenMergeRequest) -> str:
+        if merge_request.head_sha:
+            return f"url:{merge_request.mr_url}#sha:{merge_request.head_sha}"
+        return f"url:{merge_request.mr_url}"
 
     def record_human_decision(
         self, review_id: str, issue_id: str, decision: str, comment: str

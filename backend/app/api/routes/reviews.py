@@ -48,6 +48,41 @@ def list_reviews() -> list[dict[str, object]]:
     ]
 
 
+@router.get("/reviews/queue")
+def list_pending_queue() -> list[dict[str, object]]:
+    """返回待处理队列（pending），供首页展示自动审核排队情况。"""
+
+    return [
+        item.model_dump(mode="json")
+        for item in review_service_module.review_service.list_pending_queue()
+    ]
+
+
+@router.post("/reviews/queue/sync")
+def sync_auto_review_queue() -> dict[str, object]:
+    """手动触发一次开放 MR 同步并尝试启动下一条队列任务。"""
+
+    runtime = review_service_module.review_service.get_runtime_settings()
+    repo_url = str(runtime.auto_review_repo_url or runtime.code_repo_clone_url or "").strip()
+    if not repo_url:
+        return {
+            "enabled": runtime.auto_review_enabled,
+            "repo_url": "",
+            "created_count": 0,
+            "started_review_id": "",
+            "message": "未配置自动审核仓库地址",
+        }
+    created = review_service_module.review_service.enqueue_open_merge_requests(repo_url)
+    started = review_service_module.review_service.start_next_pending_review()
+    return {
+        "enabled": runtime.auto_review_enabled,
+        "repo_url": repo_url,
+        "created_count": len(created),
+        "created_review_ids": [item.review_id for item in created],
+        "started_review_id": started.review_id if started else "",
+    }
+
+
 @router.get("/reviews/{review_id}")
 def get_review(review_id: str) -> dict[str, object]:
     """返回单条审核任务详情。"""

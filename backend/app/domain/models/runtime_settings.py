@@ -20,6 +20,9 @@ class RuntimeSettings(BaseModel):
     gitlab_access_token: str | None = None
     codehub_access_token: str | None = None
     code_repo_auto_sync: bool = False
+    auto_review_enabled: bool = False
+    auto_review_repo_url: str = ""
+    auto_review_poll_interval_seconds: int = 120
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
     runtime_tool_allowlist: list[str] = Field(

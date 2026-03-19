@@ -16,11 +16,11 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
-from app.repositories.file_event_repository import FileEventRepository
-from app.repositories.file_finding_repository import FileFindingRepository
-from app.repositories.file_issue_repository import FileIssueRepository
-from app.repositories.file_message_repository import FileMessageRepository
-from app.repositories.file_review_repository import FileReviewRepository
+from app.repositories.sqlite_event_repository import SqliteEventRepository
+from app.repositories.sqlite_finding_repository import SqliteFindingRepository
+from app.repositories.sqlite_issue_repository import SqliteIssueRepository
+from app.repositories.sqlite_message_repository import SqliteMessageRepository
+from app.repositories.sqlite_review_repository import SqliteReviewRepository
 from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
@@ -52,11 +52,12 @@ class ReviewRunner:
 
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
-        self.review_repo = FileReviewRepository(self.storage_root)
-        self.event_repo = FileEventRepository(self.storage_root)
-        self.finding_repo = FileFindingRepository(self.storage_root)
-        self.issue_repo = FileIssueRepository(self.storage_root)
-        self.message_repo = FileMessageRepository(self.storage_root)
+        db_path = self._resolve_db_path(self.storage_root)
+        self.review_repo = SqliteReviewRepository(db_path)
+        self.event_repo = SqliteEventRepository(db_path)
+        self.finding_repo = SqliteFindingRepository(db_path)
+        self.issue_repo = SqliteIssueRepository(db_path)
+        self.message_repo = SqliteMessageRepository(db_path)
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.artifact_service = ArtifactService(self.storage_root)
@@ -69,6 +70,15 @@ class ReviewRunner:
         self.review_skill_activation_service = ReviewSkillActivationService()
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.graph = build_review_graph()
+
+    def _resolve_db_path(self, root: Path) -> Path:
+        """Resolve SQLite path from storage root, honoring global default when unchanged."""
+
+        resolved_root = Path(root).resolve()
+        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
+        if resolved_root == default_storage_root:
+            return Path(settings.SQLITE_DB_PATH)
+        return resolved_root / "app.db"
 
     def bootstrap_demo_review(self) -> str:
         review_id = f"rev_{uuid4().hex[:8]}"
@@ -126,13 +136,68 @@ class ReviewRunner:
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
         effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
-        selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
+        requested_selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
         enabled_experts = self.registry.list_enabled()
+        selection_plan = self.main_agent_service.select_review_experts(
+            review.subject,
+            enabled_experts,
+            effective_runtime_settings,
+            requested_expert_ids=requested_selected_ids,
+        )
+        selected_ids = [
+            expert_id
+            for expert_id in list(selection_plan.get("selected_expert_ids", []) or [])
+            if isinstance(expert_id, str) and expert_id.strip()
+        ]
         experts = [expert for expert in enabled_experts if expert.expert_id in selected_ids]
+        review.selected_experts = selected_ids
+        review.subject.metadata = {
+            **review.subject.metadata,
+            "expert_selection": {
+                "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
+                "candidate_expert_ids": list(selection_plan.get("candidate_expert_ids", []) or []),
+                "selected_experts": list(selection_plan.get("selected_experts", []) or []),
+                "skipped_experts": list(selection_plan.get("skipped_experts", []) or []),
+                "llm": dict(selection_plan.get("llm") or {}),
+            },
+        }
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        selection_summary = self._build_expert_selection_summary(selection_plan)
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_expert_selection",
+                content=selection_summary,
+                metadata={
+                    "phase": "coordination",
+                    "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
+                    "candidate_expert_ids": list(selection_plan.get("candidate_expert_ids", []) or []),
+                    "selected_experts": list(selection_plan.get("selected_experts", []) or []),
+                    "skipped_experts": list(selection_plan.get("skipped_experts", []) or []),
+                    **dict(selection_plan.get("llm") or {}),
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="main_agent_expert_selection",
+                phase="coordination",
+                message="主Agent 已基于 MR 信息和专家画像确定本次参与审核的专家",
+                payload={
+                    "selected_expert_ids": selected_ids,
+                    "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
+                },
+            )
+        )
         logger.info(
-            "review execution review_id=%s analysis_mode=%s selected_experts=%s enabled_experts=%s matched_experts=%s llm_timeout=%s llm_retries=%s max_parallel=%s",
+            "review execution review_id=%s analysis_mode=%s requested_experts=%s selected_experts=%s enabled_experts=%s matched_experts=%s llm_timeout=%s llm_retries=%s max_parallel=%s",
             review.review_id,
             analysis_mode,
+            requested_selected_ids,
             selected_ids,
             [expert.expert_id for expert in enabled_experts],
             [expert.expert_id for expert in experts],
@@ -365,7 +430,7 @@ class ReviewRunner:
             )
 
         routing_summary = self._build_routing_summary(
-            selected_ids=selected_ids,
+            selected_ids=requested_selected_ids,
             experts_by_id={expert.expert_id: expert for expert in enabled_experts},
             skipped_experts=skipped_experts,
             effective_experts=effective_experts,
@@ -696,6 +761,36 @@ class ReviewRunner:
             "fallback_expert_added": bool(system_added_experts),
         }
 
+    def _build_expert_selection_summary(self, selection_plan: dict[str, object]) -> str:
+        """生成“本次 MR 由哪些专家参与”的主 Agent 播报文案。"""
+        selected = [
+            item
+            for item in list(selection_plan.get("selected_experts", []) or [])
+            if isinstance(item, dict)
+        ]
+        skipped = [
+            item
+            for item in list(selection_plan.get("skipped_experts", []) or [])
+            if isinstance(item, dict)
+        ]
+        if not selected:
+            return "大模型未返回有效专家集合，本次审核将使用兜底专家集合继续执行。"
+        selected_text = "；".join(
+            [
+                f"{str(item.get('expert_name') or item.get('expert_id') or '').strip()}：{str(item.get('reason') or '与当前 MR 相关').strip()}"
+                for item in selected[:6]
+            ]
+        )
+        skipped_text = "；".join(
+            [
+                f"{str(item.get('expert_name') or item.get('expert_id') or '').strip()}：{str(item.get('reason') or '本轮无需参与').strip()}"
+                for item in skipped[:4]
+            ]
+        )
+        if skipped_text:
+            return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。未纳入本轮的专家包括：{skipped_text}。"
+        return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。"
+
     def _build_routing_summary_message(self, routing_summary: dict[str, object]) -> str:
         """生成前端提示条和事件时间线都会复用的路由摘要文案。"""
         skipped = routing_summary.get("skipped_experts", [])
@@ -783,6 +878,7 @@ class ReviewRunner:
             related_files=list(command_message.metadata.get("related_files", []) or []),
             design_docs=design_docs,
             extra_tools=self._collect_skill_tools(active_skills),
+            active_skills=[str(skill.skill_id) for skill in active_skills if str(getattr(skill, "skill_id", "")).strip()],
         )
         repository_context = dict(command_message.metadata.get("repository_context") or {})
         repository_context["routing_reason"] = command_message.metadata.get("routing_reason", "")

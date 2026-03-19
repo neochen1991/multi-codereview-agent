@@ -133,7 +133,12 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     : [];
   let messageKind: ReviewDialogueViewMessage["messageKind"] = "chat";
   if (eventType === "main_agent_command") messageKind = "command";
-  if (eventType === "judge_summary" || eventType === "main_agent_summary" || eventType === "main_agent_intake") messageKind = "status";
+  if (
+    eventType === "judge_summary" ||
+    eventType === "main_agent_summary" ||
+    eventType === "main_agent_intake" ||
+    eventType === "main_agent_expert_selection"
+  ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
   const categorySet = new Set<ReviewDialogueViewMessage["categories"][number]>([messageKind]);
@@ -169,6 +174,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("主Agent 已输出最终收敛播报");
   } else if (eventType === "main_agent_intake") {
     summaryParts.push("主Agent 已接收并整理本次审核输入");
+  } else if (eventType === "main_agent_expert_selection") {
+    summaryParts.push("主Agent 已基于 MR 信息判定本次参与审核的专家");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
@@ -309,6 +316,41 @@ const buildStructuredGroups = (
           sections: [
             { label: "全部变更文件", values: normalizeValueList(metadata.changed_files) },
             { label: "业务变更文件", values: normalizeValueList(metadata.business_changed_files) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  if (row.eventType === "main_agent_expert_selection") {
+    const selectedExperts = Array.isArray(metadata.selected_experts) ? metadata.selected_experts : [];
+    const skippedExperts = Array.isArray(metadata.skipped_experts) ? metadata.skipped_experts : [];
+    const formatExpertRows = (value: unknown): string[] => {
+      if (!Array.isArray(value)) return [];
+      return value
+        .map((item) => {
+          if (!item || typeof item !== "object") return "";
+          const payload = item as Record<string, unknown>;
+          const expertName = String(payload.expert_name || payload.expert_id || "").trim();
+          const reason = String(payload.reason || "").trim();
+          if (expertName && reason) return `${expertName} · ${reason}`;
+          return expertName || reason;
+        })
+        .filter(Boolean);
+    };
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "参与审核的专家",
+          sections: [
+            { label: "大模型选中", values: formatExpertRows(selectedExperts) },
+          ].filter((section) => section.values.length > 0),
+        },
+        {
+          title: "未参与本轮的专家",
+          sections: [
+            { label: "跳过原因", values: formatExpertRows(skippedExperts) },
           ].filter((section) => section.values.length > 0),
         },
       ].filter((group) => group.sections.length > 0),

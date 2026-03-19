@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import experts, governance, issues, knowledge, reviews, settings as settings_routes, streams, triggers
 from app.config import settings
+import app.services.review_service as review_service_module
+from app.services.auto_review_scheduler import AutoReviewScheduler
 
 
 def configure_logging() -> None:
@@ -54,6 +56,16 @@ def create_application() -> FastAPI:
     app.include_router(knowledge.router, prefix=settings.API_PREFIX)
     app.include_router(settings_routes.router, prefix=settings.API_PREFIX)
     app.include_router(governance.router, prefix=settings.API_PREFIX)
+    scheduler = AutoReviewScheduler(review_service_module.review_service)
+    app.state.auto_review_scheduler = scheduler
+
+    @app.on_event("startup")
+    def startup_scheduler() -> None:
+        scheduler.start()
+
+    @app.on_event("shutdown")
+    def shutdown_scheduler() -> None:
+        scheduler.stop()
 
     @app.get("/health")
     def health() -> dict[str, str]:

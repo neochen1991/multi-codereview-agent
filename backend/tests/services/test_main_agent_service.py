@@ -974,6 +974,88 @@ def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
     assert plan["architecture_design"]["file_path"] == "apps/api/orders/order.service.ts"
 
 
+def test_main_agent_select_review_experts_uses_llm_result(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/order.service.ts",
+            "packages/platform/types/order.output.ts",
+        ],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -10,3 +10,5 @@ export async function createOrder(payload) {\n"
+            "+  return mapOrderOutput(payload)\n"
+            " }\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="architecture_design",
+            name="Architecture",
+            name_zh="架构与设计专家",
+            role="architecture",
+            enabled=True,
+            focus_areas=["模块边界"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["安全边界"],
+            system_prompt="prompt",
+        ),
+    ]
+
+    def fake_complete_text(**_: object) -> LLMTextResult:
+        return LLMTextResult(
+            text=(
+                '{"selected_experts":['
+                '{"expert_id":"correctness_business","reason":"字段契约与业务语义变更明显","confidence":0.95},'
+                '{"expert_id":"architecture_design","reason":"服务层编排发生变化","confidence":0.82}'
+                '],"skipped_experts":['
+                '{"expert_id":"security_compliance","reason":"当前 diff 未出现安全相关信号"}'
+                ']}'
+            ),
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    plan = agent.select_review_experts(
+        subject,
+        experts,
+        RuntimeSettings(allow_llm_fallback=True),
+        requested_expert_ids=["correctness_business", "security_compliance"],
+    )
+
+    assert plan["selected_expert_ids"] == ["correctness_business", "architecture_design"]
+    assert plan["selected_experts"][0]["reason"] == "字段契约与业务语义变更明显"
+    assert plan["skipped_experts"][0]["expert_id"] == "security_compliance"
+
+
 def test_main_agent_command_accepts_route_hint_with_full_business_files():
     agent = MainAgentService()
     subject = ReviewSubject(

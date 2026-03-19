@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
@@ -23,6 +23,9 @@ class RuntimeSettingsRequest(BaseModel):
     gitlab_access_token: str | None = None
     codehub_access_token: str | None = None
     code_repo_auto_sync: bool = False
+    auto_review_enabled: bool = False
+    auto_review_repo_url: str = ""
+    auto_review_poll_interval_seconds: int = 120
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)
     runtime_tool_allowlist: list[str] = Field(
@@ -48,6 +51,39 @@ class RuntimeSettingsRequest(BaseModel):
     verify_ssl: bool = True
     use_system_trust_store: bool = True
     ca_bundle_path: str = ""
+
+
+class UpsertSkillRequest(BaseModel):
+    """定义扩展 skill 的创建/更新请求体。"""
+
+    skill_id: str
+    name: str
+    description: str = ""
+    bound_experts: list[str] = Field(default_factory=list)
+    applicable_experts: list[str] = Field(default_factory=list)
+    required_tools: list[str] = Field(default_factory=list)
+    required_doc_types: list[str] = Field(default_factory=list)
+    activation_hints: list[str] = Field(default_factory=list)
+    required_context: list[str] = Field(default_factory=list)
+    allowed_modes: list[str] = Field(default_factory=lambda: ["standard", "light"])
+    output_contract: dict[str, object] = Field(default_factory=dict)
+    prompt_body: str = ""
+
+
+class UpsertToolRequest(BaseModel):
+    """定义扩展 tool 的创建/更新请求体。"""
+
+    tool_id: str
+    name: str
+    description: str = ""
+    runtime: str = "python"
+    entry: str = "run.py"
+    timeout_seconds: int = 60
+    allowed_experts: list[str] = Field(default_factory=list)
+    bound_skills: list[str] = Field(default_factory=list)
+    input_schema: dict[str, object] = Field(default_factory=dict)
+    output_schema: dict[str, object] = Field(default_factory=dict)
+    run_script: str = ""
 
 
 @router.get("/settings/runtime")
@@ -95,4 +131,60 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     response["gitlab_access_token_configured"] = bool((runtime.gitlab_access_token or "").strip())
     response["codehub_access_token_configured"] = bool((runtime.codehub_access_token or "").strip())
     response["config_path"] = str(settings.CONFIG_PATH)
+    return response
+
+
+@router.get("/settings/extensions/skills")
+def list_extension_skills() -> list[dict[str, object]]:
+    """返回 extensions/skills 下的所有可编辑 skill。"""
+
+    return [item.model_dump(mode="json") for item in review_service_module.review_service.list_extension_skills()]
+
+
+@router.put("/settings/extensions/skills/{skill_id}")
+def upsert_extension_skill(skill_id: str, payload: UpsertSkillRequest) -> dict[str, object]:
+    """创建或更新一个扩展 skill。"""
+
+    try:
+        skill = review_service_module.review_service.upsert_extension_skill(
+            skill_id,
+            payload.model_dump() | {"skill_id": skill_id},
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return skill.model_dump(mode="json")
+
+
+@router.get("/settings/extensions/tools")
+def list_extension_tools() -> list[dict[str, object]]:
+    """返回 extensions/tools 下的所有可编辑 tool。"""
+
+    tools = review_service_module.review_service.list_extension_tools()
+    response: list[dict[str, object]] = []
+    for tool in tools:
+        payload = tool.model_dump(mode="json")
+        payload["run_script"] = review_service_module.review_service.read_extension_tool_script(
+            tool.tool_id,
+            tool.entry or "run.py",
+        )
+        response.append(payload)
+    return response
+
+
+@router.put("/settings/extensions/tools/{tool_id}")
+def upsert_extension_tool(tool_id: str, payload: UpsertToolRequest) -> dict[str, object]:
+    """创建或更新一个扩展 tool。"""
+
+    try:
+        tool = review_service_module.review_service.upsert_extension_tool(
+            tool_id,
+            payload.model_dump() | {"tool_id": tool_id},
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    response = tool.model_dump(mode="json")
+    response["run_script"] = review_service_module.review_service.read_extension_tool_script(
+        tool.tool_id,
+        tool.entry or "run.py",
+    )
     return response

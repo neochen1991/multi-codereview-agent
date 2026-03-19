@@ -13,6 +13,7 @@ class ReviewToolPlugin(BaseModel):
     entry: str = "run.py"
     timeout_seconds: int = 60
     allowed_experts: list[str] = Field(default_factory=list)
+    bound_skills: list[str] = Field(default_factory=list)
     input_schema: dict[str, object] = Field(default_factory=dict)
     output_schema: dict[str, object] = Field(default_factory=dict)
     tool_path: str = ""
