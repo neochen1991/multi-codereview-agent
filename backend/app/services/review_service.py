@@ -225,6 +225,12 @@ class ReviewService:
             return str(runtime_settings.codehub_access_token or runtime_settings.code_repo_access_token or "").strip()
         return str(runtime_settings.code_repo_access_token or "").strip()
 
+    def resolve_auto_review_repo_url(self, runtime: RuntimeSettings | None = None) -> str:
+        """自动审核统一复用 code_repo_clone_url；旧字段仅作兼容回退。"""
+
+        current = runtime or self.get_runtime_settings()
+        return str(current.code_repo_clone_url or current.auto_review_repo_url or "").strip()
+
     def _mark_failed(self, review_id: str, reason: str) -> ReviewTask:
         """统一把后台异常收口成 review 的 failed 状态。"""
         review = self.get_review(review_id)

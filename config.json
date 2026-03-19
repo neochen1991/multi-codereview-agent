@@ -20,7 +20,9 @@
     "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
     "local_path": "/tmp/java-ddd-example-review-repo",
     "default_branch": "main",
-    "auto_sync": false
+    "auto_sync": false,
+    "auto_review_enabled": true,
+    "auto_review_poll_interval_seconds": 120
   },
   "runtime": {
     "default_target_branch": "main",

@@ -104,7 +104,10 @@ const SettingsPage: React.FC = () => {
       <Card className="module-card">
         <Title level={3}>系统设置</Title>
         <Paragraph>
-          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、运行时工具和知识源绑定。设置页改动会直接影响审核 runtime，并同步写入项目根目录 config.json。
+          这里统一管理运行时默认配置，以及每个专家 agent 可真实调用的工具、运行时工具和知识源绑定。系统启动必需的配置会写入项目根目录
+          {" "}
+          <code>config.json</code>
+          ，设置页治理项会持久化到 SQLite，并在运行时与系统配置合并生效。
         </Paragraph>
         <Form.Item noStyle shouldUpdate>
           {() =>
@@ -114,7 +117,7 @@ const SettingsPage: React.FC = () => {
                 showIcon
                 style={{ marginTop: 12 }}
                 message={`当前统一配置文件：${String(form.getFieldValue("config_path"))}`}
-                description="默认 LLM 配置、Git Access Token 和代码仓配置都统一保存在这份 config.json 中。"
+                description="默认 LLM、Git/CodeHub Token、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准；审核治理参数仍可通过设置页持久化到 SQLite。"
               />
             ) : null
           }
@@ -149,7 +152,7 @@ const SettingsPage: React.FC = () => {
                 codehub_access_token: String(values.codehub_access_token || "").trim() || undefined,
                 code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
                 auto_review_enabled: Boolean(values.auto_review_enabled),
-                auto_review_repo_url: values.auto_review_repo_url || "",
+                auto_review_repo_url: values.code_repo_clone_url || "",
                 auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
@@ -277,9 +280,13 @@ const SettingsPage: React.FC = () => {
           <Form.Item name="auto_review_enabled" label="启用系统启动后自动拉取 MR 并排队审核" valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item name="auto_review_repo_url" label="自动拉取 MR 的仓库地址（支持 CodeHub/GitLab/GitHub）">
-            <Input placeholder="codehub-g.huawei.com/PIP/FND/projectname/merge_requests" />
-          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="自动审核会直接复用上面的“代码仓地址”"
+            description="系统启动后拉取开放中的 MR/PR 时，不再单独维护自动审核仓库地址，统一使用 config.json 中已经配置的代码仓地址。"
+          />
           <Form.Item name="auto_review_poll_interval_seconds" label="自动拉取轮询间隔（秒）">
             <InputNumber min={15} max={3600} style={{ width: "100%" }} />
           </Form.Item>

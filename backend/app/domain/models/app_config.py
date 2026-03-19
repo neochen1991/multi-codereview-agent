@@ -42,6 +42,7 @@ class CodeRepoConfig(BaseModel):
     default_branch: str = "main"
     auto_sync: bool = False
     auto_review_enabled: bool = False
+    # 仅保留向后兼容读取；自动审核仓库地址统一复用 clone_url。
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
 
@@ -124,7 +125,7 @@ class AppConfig(BaseModel):
                 default_branch=runtime.code_repo_default_branch,
                 auto_sync=runtime.code_repo_auto_sync,
                 auto_review_enabled=runtime.auto_review_enabled,
-                auto_review_repo_url=runtime.auto_review_repo_url,
+                auto_review_repo_url=runtime.code_repo_clone_url or runtime.auto_review_repo_url,
                 auto_review_poll_interval_seconds=runtime.auto_review_poll_interval_seconds,
             ),
             runtime=RuntimeConfig(
@@ -169,7 +170,7 @@ class AppConfig(BaseModel):
             codehub_access_token=self.git.codehub_access_token or self.git.repo_access_token,
             code_repo_auto_sync=self.code_repo.auto_sync,
             auto_review_enabled=self.code_repo.auto_review_enabled,
-            auto_review_repo_url=self.code_repo.auto_review_repo_url,
+            auto_review_repo_url=self.code_repo.clone_url or self.code_repo.auto_review_repo_url,
             auto_review_poll_interval_seconds=self.code_repo.auto_review_poll_interval_seconds,
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),

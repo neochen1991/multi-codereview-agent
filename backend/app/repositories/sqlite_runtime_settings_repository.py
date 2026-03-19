@@ -16,6 +16,14 @@ class SqliteRuntimeSettingsRepository:
         self._db.initialize()
 
     def get(self) -> RuntimeSettings | None:
+        payload = self.get_payload()
+        if payload is None:
+            return None
+        return RuntimeSettings.model_validate(payload)
+
+    def get_payload(self) -> dict[str, object] | None:
+        """读取 SQLite 中保存的原始运行时配置 payload。"""
+
         with self._db.connect() as connection:
             row = connection.execute(
                 """
@@ -27,10 +35,16 @@ class SqliteRuntimeSettingsRepository:
         if row is None:
             return None
         payload = json.loads(row["payload_json"] or "{}")
-        return RuntimeSettings.model_validate(payload)
+        return payload if isinstance(payload, dict) else {}
 
     def save(self, settings: RuntimeSettings) -> RuntimeSettings:
         payload = settings.model_dump(mode="json")
+        self.save_payload(payload)
+        return settings
+
+    def save_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        """直接写入原始 payload，便于服务层只持久化 SQLite 管理的字段。"""
+
         with self._db.connect() as connection:
             connection.execute(
                 """
@@ -47,4 +61,4 @@ class SqliteRuntimeSettingsRepository:
                 ),
             )
             connection.commit()
-        return settings
+        return payload

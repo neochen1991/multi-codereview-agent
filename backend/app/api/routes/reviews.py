@@ -63,7 +63,7 @@ def sync_auto_review_queue() -> dict[str, object]:
     """手动触发一次开放 MR 同步并尝试启动下一条队列任务。"""
 
     runtime = review_service_module.review_service.get_runtime_settings()
-    repo_url = str(runtime.auto_review_repo_url or runtime.code_repo_clone_url or "").strip()
+    repo_url = review_service_module.review_service.resolve_auto_review_repo_url(runtime)
     if not repo_url:
         return {
             "enabled": runtime.auto_review_enabled,

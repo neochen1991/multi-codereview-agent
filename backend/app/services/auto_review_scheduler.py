@@ -44,7 +44,7 @@ class AutoReviewScheduler:
         runtime = self._review_service.get_runtime_settings()
         if not runtime.auto_review_enabled:
             return
-        repo_url = str(runtime.auto_review_repo_url or runtime.code_repo_clone_url or "").strip()
+        repo_url = self._review_service.resolve_auto_review_repo_url(runtime)
         if not repo_url:
             logger.warning("auto review enabled but repo url is empty, skip this tick")
             return

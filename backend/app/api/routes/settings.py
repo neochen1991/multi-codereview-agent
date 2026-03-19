@@ -106,6 +106,7 @@ def get_runtime_settings() -> dict[str, object]:
     payload["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())
     payload["gitlab_access_token_configured"] = bool((runtime.gitlab_access_token or "").strip())
     payload["codehub_access_token_configured"] = bool((runtime.codehub_access_token or "").strip())
+    payload["auto_review_repo_url"] = str(runtime.code_repo_clone_url or runtime.auto_review_repo_url or "").strip()
     payload["config_path"] = str(settings.CONFIG_PATH)
     return payload
 
@@ -114,7 +115,10 @@ def get_runtime_settings() -> dict[str, object]:
 def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object]:
     """更新运行时配置并返回脱敏后的最新值。"""
 
-    runtime = review_service_module.review_service.update_runtime_settings(payload.model_dump())
+    update_payload = payload.model_dump()
+    if str(update_payload.get("code_repo_clone_url") or "").strip():
+        update_payload["auto_review_repo_url"] = str(update_payload.get("code_repo_clone_url") or "").strip()
+    runtime = review_service_module.review_service.update_runtime_settings(update_payload)
     response = runtime.model_dump(
         mode="json",
         exclude={
@@ -130,6 +134,7 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     response["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())
     response["gitlab_access_token_configured"] = bool((runtime.gitlab_access_token or "").strip())
     response["codehub_access_token_configured"] = bool((runtime.codehub_access_token or "").strip())
+    response["auto_review_repo_url"] = str(runtime.code_repo_clone_url or runtime.auto_review_repo_url or "").strip()
     response["config_path"] = str(settings.CONFIG_PATH)
     return response
 

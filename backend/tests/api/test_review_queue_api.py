@@ -53,3 +53,35 @@ def test_reviews_queue_sync_reports_missing_repo_url_when_not_configured(client)
     assert payload["created_count"] == 0
     assert payload["started_review_id"] == ""
     assert payload["message"] == "未配置自动审核仓库地址"
+
+
+def test_reviews_queue_sync_prefers_code_repo_clone_url(client, monkeypatch):
+    client.put(
+        "/api/settings/runtime",
+        json={
+            "auto_review_enabled": True,
+            "code_repo_clone_url": "codehub-g.huawei.com/PIP/FND/projectname/merge_requests",
+            "auto_review_repo_url": "",
+        },
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_enqueue(repo_url: str):
+        captured["repo_url"] = repo_url
+        return []
+
+    monkeypatch.setattr(
+        "app.api.routes.reviews.review_service_module.review_service.enqueue_open_merge_requests",
+        fake_enqueue,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.reviews.review_service_module.review_service.start_next_pending_review",
+        lambda: None,
+    )
+
+    response = client.post("/api/reviews/queue/sync")
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["repo_url"] == "codehub-g.huawei.com/PIP/FND/projectname/merge_requests"
+    assert payload["repo_url"] == "codehub-g.huawei.com/PIP/FND/projectname/merge_requests"
