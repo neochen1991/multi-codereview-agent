@@ -239,7 +239,7 @@ class GitLabReviewProvider(ReviewPlatformProvider):
     def build_remote_diff_candidates(self, review_url: str) -> list[str]:
         parsed = urlparse(review_url)
         path = parsed.path.rstrip("/")
-        if "/-/merge_requests/" in path:
+        if "/-/merge_requests/" in path or "/merge_requests/" in path:
             return [f"{review_url}.patch", f"{review_url}.diff"]
         if "/-/commit/" in path or "/commit/" in path:
             return [f"{review_url}.patch", f"{review_url}.diff"]
