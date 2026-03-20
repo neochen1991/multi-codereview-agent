@@ -71,7 +71,22 @@ const KnowledgePage: React.FC = () => {
                         </Button>
                       </Popconfirm>
                     </Space>
-                    <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                    {item.indexed_outline.length ? (
+                      <div className="knowledge-outline-block">
+                        <Text strong>章节索引</Text>
+                        <div className="knowledge-outline-list">
+                          {item.indexed_outline.map((outline) => (
+                            <div key={`${item.doc_id}-${outline}`} className="knowledge-outline-item">
+                              {outline}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    <Paragraph
+                      style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}
+                      ellipsis={{ rows: 10, expandable: "collapsible", symbol: "展开全文" }}
+                    >
                       {item.content}
                     </Paragraph>
                   </Space>

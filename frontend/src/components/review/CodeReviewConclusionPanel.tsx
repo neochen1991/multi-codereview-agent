@@ -56,6 +56,15 @@ const getDesignAlignmentColor = (status?: string): string => {
   return "default";
 };
 
+const hasDesignEvidence = (finding: ReviewFinding): boolean =>
+  Boolean(
+    (finding.design_doc_titles || []).length ||
+      (finding.matched_design_points || []).length ||
+      (finding.missing_design_points || []).length ||
+      (finding.extra_implementation_points || []).length ||
+      (finding.design_conflicts || []).length,
+  );
+
 const renderCodeLines = (
   codeExcerpt: string,
   targetLine: number,
@@ -227,11 +236,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
         </Paragraph>
       </div>
 
-      {(finding.design_alignment_status ||
-        (finding.design_doc_titles || []).length ||
-        (finding.matched_design_points || []).length ||
-        (finding.missing_design_points || []).length ||
-        (finding.design_conflicts || []).length) ? (
+      {hasDesignEvidence(finding) ? (
         <div style={{ marginTop: 16 }}>
           <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>详细设计一致性</Paragraph>
           <Space wrap style={{ marginBottom: 10 }}>

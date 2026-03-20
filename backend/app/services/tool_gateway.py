@@ -76,6 +76,17 @@ class ReviewToolGateway:
                 allowed_tools.append(tool_name)
         results: list[dict[str, Any]] = []
         for tool_name in allowed_tools:
+            if tool_name == "design_spec_alignment" and not list(design_docs or []):
+                results.append(
+                    {
+                        "tool_name": tool_name,
+                        "summary": "当前未上传详细设计文档，已跳过设计一致性检查。",
+                        "success": False,
+                        "skipped": True,
+                        "skip_reason": "design_docs_missing",
+                    }
+                )
+                continue
             payload = {
                 "expert": expert.model_dump(mode="json"),
                 "subject": subject.model_dump(mode="json"),

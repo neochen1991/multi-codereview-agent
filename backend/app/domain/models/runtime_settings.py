@@ -37,6 +37,10 @@ class RuntimeSettings(BaseModel):
     )
     agent_allowlist: list[str] = Field(default_factory=list)
     allow_human_gate: bool = True
+    issue_filter_enabled: bool = True
+    suppress_low_risk_hint_issues: bool = True
+    hint_issue_confidence_threshold: float = 0.85
+    hint_issue_evidence_cap: int = 2
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 60
     standard_llm_retry_count: int = 3

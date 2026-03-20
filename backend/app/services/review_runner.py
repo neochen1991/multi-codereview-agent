@@ -395,7 +395,25 @@ class ReviewRunner:
                     "runtime_settings": effective_runtime_settings,
                     "analysis_mode": analysis_mode,
                     "llm_request_options": llm_request_options,
-                    "bound_documents": self.knowledge_service.list_documents_for_expert(expert.expert_id),
+                    "bound_documents": self.knowledge_service.retrieve_for_expert(
+                        expert.expert_id,
+                        self._build_knowledge_review_context(
+                            review.subject,
+                            expert,
+                            file_path,
+                            line_start,
+                            dict(command_message.metadata.get("repository_context") or {}),
+                            dict(command_message.metadata.get("target_hunk") or {}),
+                        ),
+                    ),
+                    "knowledge_context": self._build_knowledge_review_context(
+                        review.subject,
+                        expert,
+                        file_path,
+                        line_start,
+                        dict(command_message.metadata.get("repository_context") or {}),
+                        dict(command_message.metadata.get("target_hunk") or {}),
+                    ),
                     "finding_payloads": finding_payloads,
                 }
             )
@@ -506,6 +524,19 @@ class ReviewRunner:
                 "changed_files": review.subject.changed_files,
                 "unified_diff": review.subject.unified_diff,
                 "selected_experts": selected_ids,
+                "issue_filter_config": {
+                    "issue_filter_enabled": bool(getattr(runtime_settings, "issue_filter_enabled", True)),
+                    "suppress_low_risk_hint_issues": bool(
+                        getattr(runtime_settings, "suppress_low_risk_hint_issues", True)
+                    ),
+                    "hint_issue_confidence_threshold": float(
+                        getattr(runtime_settings, "hint_issue_confidence_threshold", 0.85) or 0.85
+                    ),
+                    "hint_issue_evidence_cap": max(
+                        0,
+                        int(getattr(runtime_settings, "hint_issue_evidence_cap", 2) or 2),
+                    ),
+                },
                 "findings": finding_payloads,
             }
         )
@@ -539,6 +570,38 @@ class ReviewRunner:
             )
             for item in graph_result.get("issues", [])
         ]
+        issue_filter_decisions = [
+            item
+            for item in list(graph_result.get("issue_filter_decisions", []))
+            if isinstance(item, dict)
+        ]
+        if issue_filter_decisions:
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review_id,
+                    issue_id="review_orchestration",
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type="issue_filter_applied",
+                    content=f"本轮有 {len(issue_filter_decisions)} 组提示性或低风险问题被保留为 findings，未升级为 issues。",
+                    metadata={
+                        "phase": "coordination",
+                        "decision_count": len(issue_filter_decisions),
+                        "issue_filter_decisions": issue_filter_decisions,
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review_id,
+                    event_type="issue_filter_applied",
+                    phase="coordination",
+                    message="治理规则已筛出仅保留为 finding 的提示性问题",
+                    payload={
+                        "decision_count": len(issue_filter_decisions),
+                        "issue_filter_decisions": issue_filter_decisions,
+                    },
+                )
+            )
         self.issue_repo.save_all(review_id, issues)
         for issue in issues:
             self._abort_if_closed(review_id)
@@ -754,7 +817,25 @@ class ReviewRunner:
             "runtime_settings": effective_runtime_settings,
             "analysis_mode": analysis_mode,
             "llm_request_options": llm_request_options,
-            "bound_documents": self.knowledge_service.list_documents_for_expert(fallback_expert.expert_id),
+            "bound_documents": self.knowledge_service.retrieve_for_expert(
+                fallback_expert.expert_id,
+                self._build_knowledge_review_context(
+                    review.subject,
+                    fallback_expert,
+                    fallback_file,
+                    fallback_line,
+                    {},
+                    {},
+                ),
+            ),
+            "knowledge_context": self._build_knowledge_review_context(
+                review.subject,
+                fallback_expert,
+                fallback_file,
+                fallback_line,
+                {},
+                {},
+            ),
             "finding_payloads": finding_payloads,
         }
 
@@ -871,6 +952,7 @@ class ReviewRunner:
         analysis_mode: Literal["standard", "light"],
         llm_request_options: dict[str, int | float],
         bound_documents: list[object],
+        knowledge_context: dict[str, object],
         finding_payloads: list[dict[str, object]],
     ) -> None:
         """执行单个专家任务。
@@ -956,6 +1038,8 @@ class ReviewRunner:
                     "knowledge_sources": expert.knowledge_sources,
                     "active_skills": [skill.skill_id for skill in active_skills],
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
+                    "bound_documents": self._build_bound_document_metadata(bound_documents),
+                    "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                     "related_files": command_message.metadata.get("related_files", []),
                     "business_changed_files": command_message.metadata.get("business_changed_files", []),
                     "target_hunk": target_hunk,
@@ -1179,6 +1263,8 @@ class ReviewRunner:
                     "target_hunk": target_hunk,
                     "repository_context": repository_context,
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
+                    "bound_documents": self._build_bound_document_metadata(bound_documents),
+                    "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                     "finding_type": finding.finding_type,
                     "context_files": finding.context_files,
                     "assumptions": finding.assumptions,
@@ -1253,9 +1339,20 @@ class ReviewRunner:
                 expert = experts_by_id.get(participant_id)
                 if expert is None:
                     continue
-                bound_documents = self.knowledge_service.list_documents_for_expert(expert.expert_id)
                 file_path = issue_file_path
                 line_start = issue_line_start
+                knowledge_context = self._build_knowledge_review_context(
+                    review.subject,
+                    expert,
+                    file_path,
+                    line_start,
+                    {},
+                    {},
+                )
+                bound_documents = self.knowledge_service.retrieve_for_expert(
+                    expert.expert_id,
+                    knowledge_context,
+                )
                 llm_result = self.llm_chat_service.complete_text(
                     system_prompt=self._build_expert_system_prompt(expert, bound_documents, []),
                     user_prompt=self._build_debate_prompt(
@@ -1305,6 +1402,8 @@ class ReviewRunner:
                             "line_start": line_start,
                             "reply_to_expert_id": previous_expert_id,
                             "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
+                            "bound_documents": self._build_bound_document_metadata(bound_documents),
+                            "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                             "debate_turn": index + 1,
                             "analysis_mode": analysis_mode,
                             **self._llm_message_metadata(llm_result),
@@ -1845,8 +1944,23 @@ class ReviewRunner:
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
+        has_design_docs = bool(self._review_design_docs(subject))
         business_changed_files = self._business_changed_files(subject)
         routing_reason = str(repository_context.get("routing_reason") or "").strip()
+        design_contract = (
+            '"design_alignment_status":"aligned|partially_aligned|misaligned",'
+            '"matched_design_points":["已经实现的设计点"],'
+            '"missing_design_points":["缺失的设计点"],'
+            '"extra_implementation_points":["超出设计的实现"],'
+            '"design_conflicts":["与设计冲突的实现"],'
+            if has_design_docs
+            else ""
+        )
+        design_instruction = (
+            "本次已绑定详细设计文档，你需要严格核对实现与设计是否一致，并在 JSON 中输出设计一致性字段。\n"
+            if has_design_docs
+            else "本次未绑定详细设计文档，不要执行设计一致性检查，也不要输出任何 design_* / 设计一致性字段。\n"
+        )
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
@@ -1868,11 +1982,12 @@ class ReviewRunner:
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
             f"请基于真实 diff 做审查，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
+            f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
             f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
             f"JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],"design_alignment_status":"aligned|partially_aligned|misaligned|insufficient_design_context","matched_design_points":["已经实现的设计点"],"missing_design_points":["缺失的设计点"],"extra_implementation_points":["超出设计的实现"],"design_conflicts":["与设计冲突的实现"],"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
     def _build_expert_system_prompt(
@@ -1972,6 +2087,7 @@ class ReviewRunner:
         parsed = self._parse_json_object(text)
         if parsed:
             return parsed
+        has_design_docs = bool(self._review_design_docs(subject))
         return {
             "ack": self._extract_structured_field(text, "回应主Agent"),
             "title": self._extract_structured_field(text, "问题标题") or self._build_finding_title(expert),
@@ -1998,7 +2114,7 @@ class ReviewRunner:
             "confidence": 0.0,
             "verification_needed": True,
             "verification_plan": "需要补充关联上下文、调用链和测试证据。",
-            "design_alignment_status": "insufficient_design_context",
+            "design_alignment_status": "insufficient_design_context" if has_design_docs else "",
             "matched_design_points": [],
             "missing_design_points": [],
             "extra_implementation_points": [],
@@ -2231,6 +2347,35 @@ class ReviewRunner:
                     )
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
 
+    def _build_knowledge_review_context(
+        self,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> dict[str, object]:
+        """构造专家知识库章节召回使用的上下文。"""
+
+        query_terms: list[str] = [file_path, expert.role, expert.expert_id]
+        for value in [
+            target_hunk.get("hunk_header"),
+            target_hunk.get("excerpt"),
+            repository_context.get("routing_reason"),
+            repository_context.get("symbol_query"),
+            repository_context.get("primary_symbol"),
+        ]:
+            if isinstance(value, str) and value.strip():
+                query_terms.append(value.strip())
+        return {
+            "changed_files": list(subject.changed_files),
+            "query_terms": query_terms,
+            "knowledge_sources": list(expert.knowledge_sources or []),
+            "focus_file": file_path,
+            "focus_line": line_start,
+        }
+
     def _build_review_spec_summary(self, review_spec: str) -> str:
         if not review_spec.strip():
             return "未提供额外规范文档，请至少遵守职责边界、证据优先、修复建议可执行三条规则。"
@@ -2251,6 +2396,18 @@ class ReviewRunner:
                 line += f" · {source_filename}"
             if tags:
                 line += f" · 标签: {' / '.join(tags[:4])}"
+            matched_sections = list(getattr(item, "matched_sections", []) or [])
+            outline = [str(value).strip() for value in list(getattr(item, "indexed_outline", []) or []) if str(value).strip()]
+            if matched_sections:
+                matched_paths = [
+                    str(getattr(section, "path", "") or "").strip()
+                    for section in matched_sections[:2]
+                    if str(getattr(section, "path", "") or "").strip()
+                ]
+                if matched_paths:
+                    line += f" · 命中章节: {' / '.join(matched_paths)}"
+            elif outline:
+                line += f" · 章节索引: {' / '.join(outline[:3])}"
             lines.append(line)
         return "\n".join(lines)
 
@@ -2262,14 +2419,101 @@ class ReviewRunner:
             title = str(getattr(item, "title", "") or "").strip() or f"文档 {index}"
             doc_type = str(getattr(item, "doc_type", "") or "reference").strip()
             source_filename = str(getattr(item, "source_filename", "") or "").strip()
-            content = str(getattr(item, "content", "") or "").strip() or "空文档"
+            matched_sections = list(getattr(item, "matched_sections", []) or [])
+            outline = [str(value).strip() for value in list(getattr(item, "indexed_outline", []) or []) if str(value).strip()]
             sections.append(f"## 文档 {index}: {title}")
             sections.append(f"- 类型: {doc_type}")
             if source_filename:
                 sections.append(f"- 来源文件: {source_filename}")
-            sections.append(content)
+            if matched_sections:
+                sections.append("- 命中章节如下：")
+                for section in matched_sections[:6]:
+                    path = str(getattr(section, "path", "") or "").strip() or str(getattr(section, "title", "") or "").strip()
+                    summary = str(getattr(section, "summary", "") or "").strip()
+                    content = str(getattr(section, "content", "") or "").strip() or "空章节"
+                    sections.append(f"### {path}")
+                    if summary:
+                        sections.append(f"摘要: {summary}")
+                    sections.append(content[:1600])
+            elif outline:
+                sections.append("- 未命中具体章节，以下为文档目录索引：")
+                sections.extend([f"  - {value}" for value in outline[:12]])
+            else:
+                content = str(getattr(item, "content", "") or "").strip() or "空文档"
+                sections.append(content[:2000])
         sections.append("《专家绑定参考文档》结束")
         return "\n".join(sections)
+
+    def _build_bound_document_metadata(self, bound_documents: list[object]) -> list[dict[str, object]]:
+        """把绑定文档裁成前端友好的结构化摘要，避免过程页再次展示原始 JSON。"""
+
+        summaries: list[dict[str, object]] = []
+        for item in bound_documents[:6]:
+            title = str(getattr(item, "title", "") or "").strip()
+            if not title:
+                continue
+            outline = [
+                str(value).strip()
+                for value in list(getattr(item, "indexed_outline", []) or [])[:10]
+                if str(value).strip()
+            ]
+            matched_sections: list[dict[str, object]] = []
+            for section in list(getattr(item, "matched_sections", []) or [])[:4]:
+                path = str(getattr(section, "path", "") or getattr(section, "title", "") or "").strip()
+                summary = str(getattr(section, "summary", "") or "").strip()
+                content = str(getattr(section, "content", "") or "").strip()
+                snippet = summary or (content.splitlines()[0].strip() if content else "")
+                matched_sections.append(
+                    {
+                        "path": path,
+                        "summary": snippet,
+                        "score": round(float(getattr(section, "score", 0.0) or 0.0), 3),
+                        "matched_terms": [
+                            str(term).strip()
+                            for term in list(getattr(section, "matched_terms", []) or [])[:8]
+                            if str(term).strip()
+                        ],
+                        "matched_signals": [
+                            str(signal).strip()
+                            for signal in list(getattr(section, "matched_signals", []) or [])[:8]
+                            if str(signal).strip()
+                        ],
+                    }
+                )
+            summaries.append(
+                {
+                    "doc_id": str(getattr(item, "doc_id", "") or "").strip(),
+                    "title": title,
+                    "doc_type": str(getattr(item, "doc_type", "") or "").strip(),
+                    "source_filename": str(getattr(item, "source_filename", "") or "").strip(),
+                    "indexed_outline": outline,
+                    "matched_sections": matched_sections,
+                }
+            )
+        return summaries
+
+    def _build_knowledge_context_metadata(self, knowledge_context: dict[str, object]) -> dict[str, object]:
+        """裁剪知识检索上下文，供过程页展示诊断信息。"""
+
+        return {
+            "focus_file": str(knowledge_context.get("focus_file") or "").strip(),
+            "focus_line": int(knowledge_context.get("focus_line") or 0) if knowledge_context.get("focus_line") else 0,
+            "changed_files": [
+                str(item).strip()
+                for item in list(knowledge_context.get("changed_files", []) or [])[:8]
+                if str(item).strip()
+            ],
+            "query_terms": [
+                str(item).strip()
+                for item in list(knowledge_context.get("query_terms", []) or [])[:12]
+                if str(item).strip()
+            ],
+            "knowledge_sources": [
+                str(item).strip()
+                for item in list(knowledge_context.get("knowledge_sources", []) or [])[:8]
+                if str(item).strip()
+            ],
+        }
 
     def _build_hunk_summary(self, target_hunk: dict[str, object]) -> str:
         if not target_hunk:
@@ -2325,6 +2569,10 @@ class ReviewRunner:
         """从 design_spec_alignment tool 结果里提取设计一致性信息。"""
         for item in runtime_tool_results:
             if str(item.get("tool_name") or "") != "design_spec_alignment":
+                continue
+            if bool(item.get("skipped")) and str(item.get("skip_reason") or "") == "design_docs_missing":
+                continue
+            if not self._normalize_text_list(item.get("design_doc_titles"), []):
                 continue
             return dict(item)
         return {}

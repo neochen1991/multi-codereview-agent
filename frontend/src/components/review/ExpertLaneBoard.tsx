@@ -42,6 +42,9 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
   const targetExpertId = typeof metadata.target_expert_id === "string" ? metadata.target_expert_id : "";
   const designAlignmentStatus =
     typeof metadata.design_alignment_status === "string" ? metadata.design_alignment_status : "";
+  const designDocTitles = Array.isArray(metadata.design_doc_titles)
+    ? metadata.design_doc_titles.map((item) => String(item)).filter(Boolean)
+    : [];
   const titles: Record<Exclude<LaneCategory, "all">, string> = {
     command: `接收命令${targetExpertId ? ` · ${targetExpertId}` : ""}`,
     skill: `激活技能 ${toolName || "skill"}`,
@@ -53,7 +56,7 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
   if (typeof metadata.file_path === "string" && metadata.file_path) {
     summaryParts.push(metadata.file_path);
   }
-  if (designAlignmentStatus) {
+  if (designAlignmentStatus && designDocTitles.length > 0) {
     summaryParts.push(`设计一致性: ${designAlignmentStatus}`);
   }
   if (Array.isArray(metadata.active_skills) && metadata.active_skills.length > 0) {

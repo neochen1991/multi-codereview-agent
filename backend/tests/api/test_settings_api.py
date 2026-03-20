@@ -22,6 +22,10 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "runtime_tool_allowlist": ["frontend-design"],
             "agent_allowlist": ["judge"],
             "allow_human_gate": True,
+            "issue_filter_enabled": True,
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.9,
+            "hint_issue_evidence_cap": 3,
             "default_max_debate_rounds": 3,
             "standard_llm_timeout_seconds": 75,
             "standard_llm_retry_count": 4,
@@ -57,6 +61,10 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["gitlab_access_token_configured"] is True
     assert payload["codehub_access_token_configured"] is True
     assert payload["default_max_debate_rounds"] == 3
+    assert payload["issue_filter_enabled"] is True
+    assert payload["suppress_low_risk_hint_issues"] is True
+    assert payload["hint_issue_confidence_threshold"] == 0.9
+    assert payload["hint_issue_evidence_cap"] == 3
     assert payload["standard_llm_timeout_seconds"] == 75
     assert payload["standard_llm_retry_count"] == 4
     assert payload["standard_max_parallel_experts"] == 3

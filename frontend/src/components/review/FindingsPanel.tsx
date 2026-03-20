@@ -88,10 +88,18 @@ const buildRecommendedAction = (issue: DebateIssue | undefined, finding: ReviewF
   return "补充证据后再裁决";
 };
 
-const hasDesignMisalignment = (finding: ReviewFinding): boolean =>
-  ["misaligned", "partially_aligned"].includes(String(finding.design_alignment_status || "").trim()) ||
+const hasDesignEvidence = (finding: ReviewFinding): boolean =>
+  (finding.design_doc_titles?.length || 0) > 0 ||
+  (finding.matched_design_points?.length || 0) > 0 ||
   (finding.missing_design_points?.length || 0) > 0 ||
+  (finding.extra_implementation_points?.length || 0) > 0 ||
   (finding.design_conflicts?.length || 0) > 0;
+
+const hasDesignMisalignment = (finding: ReviewFinding): boolean =>
+  hasDesignEvidence(finding) &&
+  (["misaligned", "partially_aligned"].includes(String(finding.design_alignment_status || "").trim()) ||
+    (finding.missing_design_points?.length || 0) > 0 ||
+    (finding.design_conflicts?.length || 0) > 0);
 
 const getDesignAlignmentLabel = (value: string): string => {
   if (value === "misaligned") return "设计不一致";
@@ -310,7 +318,9 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       key: "design_alignment_status",
       width: 150,
       render: (_: unknown, item: StructuredFindingRow) =>
-        hasDesignMisalignment(item) ? (
+        !hasDesignEvidence(item) ? (
+          <span style={{ color: "var(--text-tertiary)" }}>-</span>
+        ) : hasDesignMisalignment(item) ? (
           <Tag color="magenta">{getDesignAlignmentLabel(item.design_alignment_status || "")}</Tag>
         ) : item.design_alignment_status ? (
           <Tag color="success">{getDesignAlignmentLabel(item.design_alignment_status || "")}</Tag>

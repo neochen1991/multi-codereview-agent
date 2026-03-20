@@ -130,6 +130,7 @@ const SettingsPage: React.FC = () => {
           <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
           <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
           <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
+          <Descriptions.Item label="Issue 治理">低风险、提示性、常见建议类问题可只保留在 findings，不升级为 issue / debate</Descriptions.Item>
         </Descriptions>
       </Card>
 
@@ -159,6 +160,10 @@ const SettingsPage: React.FC = () => {
                 runtime_tool_allowlist: parseList(String(values.runtime_tool_allowlist || "")),
                 agent_allowlist: parseList(String(values.agent_allowlist || "")),
                 allow_human_gate: Boolean(values.allow_human_gate),
+                issue_filter_enabled: Boolean(values.issue_filter_enabled),
+                suppress_low_risk_hint_issues: Boolean(values.suppress_low_risk_hint_issues),
+                hint_issue_confidence_threshold: Number(values.hint_issue_confidence_threshold || 0.85),
+                hint_issue_evidence_cap: Number(values.hint_issue_evidence_cap || 2),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
                 standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
                 standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
@@ -190,6 +195,13 @@ const SettingsPage: React.FC = () => {
             }
           }}
         >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Issue 过滤治理说明"
+            description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。建议把命名、注释、格式化、日志补充这类低风险提示保留在 findings 中，避免进入 debate / human gate。"
+          />
           <Form.Item name="default_target_branch" label="默认目标分支">
             <Input placeholder="main" />
           </Form.Item>
@@ -381,6 +393,31 @@ const SettingsPage: React.FC = () => {
           </Form.Item>
           <Form.Item name="allow_human_gate" label="允许人工 Gate" valuePropName="checked">
             <Switch />
+          </Form.Item>
+          <Form.Item name="issue_filter_enabled" label="启用 Issue 过滤治理" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="suppress_low_risk_hint_issues"
+            label="压制低风险提示类 Issue"
+            valuePropName="checked"
+            extra="关闭后，命名、注释、风格、日志补充这类提示性问题也会像高风险问题一样进入 issue 流程。"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="hint_issue_confidence_threshold"
+            label="提示类 Issue 置信度阈值"
+            extra="当提示类问题的平均置信度低于该值时，会优先只保留为 finding。"
+          >
+            <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item
+            name="hint_issue_evidence_cap"
+            label="提示类 Issue 最大证据条数"
+            extra="当证据条数不超过该值，且问题本身偏提示性时，会优先不升级为 issue。"
+          >
+            <InputNumber min={0} max={10} style={{ width: "100%" }} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={saving}>
             保存运行时设置

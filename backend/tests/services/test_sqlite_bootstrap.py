@@ -19,5 +19,6 @@ def test_sqlite_bootstrap_creates_expected_tables(tmp_path: Path) -> None:
     assert "issues" in tables
     assert "feedback" in tables
     assert "knowledge_documents" in tables
+    assert "knowledge_document_nodes" in tables
     assert "experts" in tables
     assert "runtime_settings" in tables

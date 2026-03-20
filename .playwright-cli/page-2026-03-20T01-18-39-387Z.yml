@@ -1,0 +1,366 @@
+- generic [ref=e4]:
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - img [ref=e9]:
+        - img [ref=e10]
+      - generic [ref=e13]:
+        - generic [ref=e14]: 多专家协同代码审核系统
+        - generic [ref=e15]: FastAPI + LangGraph-style Runtime
+    - generic [ref=e16]:
+      - generic [ref=e18]: expert-review
+      - link "GitHub" [ref=e20] [cursor=pointer]:
+        - /url: https://github.com
+        - img "github" [ref=e21]:
+          - img [ref=e22]
+  - generic [ref=e24]:
+    - complementary [ref=e25]:
+      - generic [ref=e26]:
+        - generic [ref=e27]: 导航
+        - menu [ref=e28]:
+          - menuitem "home 首页" [ref=e29] [cursor=pointer]:
+            - img "home" [ref=e30]:
+              - img [ref=e31]
+            - generic [ref=e33]: 首页
+          - menuitem "code 审核工作台" [ref=e34] [cursor=pointer]:
+            - img "code" [ref=e35]:
+              - img [ref=e36]
+            - generic [ref=e38]: 审核工作台
+          - menuitem "history 历史记录" [ref=e39] [cursor=pointer]:
+            - img "history" [ref=e40]:
+              - img [ref=e41]
+            - generic [ref=e43]: 历史记录
+          - menuitem "robot 专家中心" [ref=e44] [cursor=pointer]:
+            - img "robot" [ref=e45]:
+              - img [ref=e46]
+            - generic [ref=e48]: 专家中心
+          - menuitem "book 知识库" [ref=e49] [cursor=pointer]:
+            - img "book" [ref=e50]:
+              - img [ref=e51]
+            - generic [ref=e53]: 知识库
+          - menuitem "dashboard 治理中心" [ref=e54] [cursor=pointer]:
+            - img "dashboard" [ref=e55]:
+              - img [ref=e56]
+            - generic [ref=e58]: 治理中心
+          - menuitem "setting 设置" [ref=e59] [cursor=pointer]:
+            - img "setting" [ref=e60]:
+              - img [ref=e61]
+            - generic [ref=e63]: 设置
+      - img "left" [ref=e65] [cursor=pointer]:
+        - img [ref=e66]
+    - generic [ref=e68]:
+      - main [ref=e69]:
+        - generic [ref=e83]:
+          - generic [ref=e86]:
+            - generic [ref=e88]: Code Review Workbench
+            - generic [ref=e90]:
+              - generic [ref=e92]: completed
+              - generic [ref=e94]: "human: not_required"
+            - heading "E2E no design doc validation" [level=3] [ref=e96]
+            - generic [ref=e98]: 审核报告已生成，共收敛 3 条 findings，形成 1 个议题，其中 0 个待人工裁决。
+            - generic [ref=e100]:
+              - generic [ref=e102]: "Review ID: rev_6d93f109"
+              - button "刷 新" [ref=e104] [cursor=pointer]:
+                - generic [ref=e105]: 刷 新
+          - generic [ref=e107]:
+            - generic [ref=e108]:
+              - tablist [ref=e109]:
+                - generic [ref=e111]:
+                  - tab "概览与启动" [ref=e113] [cursor=pointer]
+                  - tab "审核过程" [ref=e115] [cursor=pointer]
+                  - tab "结论与行动" [selected] [ref=e117] [cursor=pointer]
+              - generic:
+                - generic:
+                  - tabpanel "结论与行动"
+            - text: 查看最终 Code Review 报告、问题清单、人工裁决和修复建议。
+          - generic [ref=e119]:
+            - button "状态 completed" [ref=e121]:
+              - generic [ref=e124] [cursor=pointer]:
+                - generic [ref=e125]: 状态
+                - generic [ref=e127]: completed
+            - button "当前阶段 completed" [ref=e129]:
+              - generic [ref=e132] [cursor=pointer]:
+                - generic [ref=e133]: 当前阶段
+                - generic [ref=e135]: completed
+            - button "本次参与专家 3" [ref=e137]:
+              - generic [ref=e140] [cursor=pointer]:
+                - generic [ref=e141]: 本次参与专家
+                - generic [ref=e143]: "3"
+            - button "审核发现 3 evidence-first" [ref=e145]:
+              - generic [ref=e148] [cursor=pointer]:
+                - generic [ref=e149]: 审核发现
+                - generic [ref=e150]:
+                  - generic [ref=e151]: "3"
+                  - generic [ref=e153]: evidence-first
+            - button "争议议题 1" [ref=e155]:
+              - generic [ref=e158] [cursor=pointer]:
+                - generic [ref=e159]: 争议议题
+                - generic [ref=e161]: "1"
+            - button "待人工确认 0 clear" [ref=e163]:
+              - generic [ref=e166] [cursor=pointer]:
+                - generic [ref=e167]: 待人工确认
+                - generic [ref=e168]:
+                  - generic [ref=e169]: "0"
+                  - generic [ref=e171]: clear
+          - generic [ref=e173]:
+            - generic [ref=e175]:
+              - generic [ref=e178]:
+                - generic [ref=e181]: Code Review 报告摘要
+                - generic [ref=e182]:
+                  - generic [ref=e183]:
+                    - generic [ref=e185]: Comment
+                    - generic [ref=e187]: 建议处理问题清单后合并
+                    - generic [ref=e189]: 建议优先级 P2
+                    - generic [ref=e191]: 无需人工裁决
+                    - generic [ref=e193]: 待人工 0
+                    - button "导出 Markdown 报告" [ref=e195] [cursor=pointer]:
+                      - generic [ref=e196]: 导出 Markdown 报告
+                  - generic [ref=e197]: 本次代码审核共收敛 3 条发现，形成 1 个争议/裁决议题，覆盖 3 个专家视角，当前状态为 completed。
+                  - generic [ref=e198]:
+                    - button "总问题数 3" [ref=e200] [cursor=pointer]:
+                      - generic [ref=e201]:
+                        - generic [ref=e202]: 总问题数
+                        - generic [ref=e204]: "3"
+                    - button "高风险问题 0" [ref=e206] [cursor=pointer]:
+                      - generic [ref=e207]:
+                        - generic [ref=e208]: 高风险问题
+                        - generic [ref=e210]: "0"
+                    - button "待人工裁决 0" [ref=e212] [cursor=pointer]:
+                      - generic [ref=e213]:
+                        - generic [ref=e214]: 待人工裁决
+                        - generic [ref=e216]: "0"
+                    - button "已核验问题 3" [ref=e218] [cursor=pointer]:
+                      - generic [ref=e219]:
+                        - generic [ref=e220]: 已核验问题
+                        - generic [ref=e222]: "3"
+                  - generic [ref=e223]:
+                    - generic [ref=e225]: Blocking 0
+                    - generic [ref=e227]: Should Fix 0
+                    - generic [ref=e229]: Non-blocking 3
+                    - generic [ref=e231]: 待验证风险 2
+                    - generic [ref=e233]: 直接缺陷 1
+                  - table [ref=e236]:
+                    - rowgroup [ref=e237]:
+                      - 'row "受影响文件数 : 1 高风险问题数 : 0" [ref=e238]':
+                        - 'cell "受影响文件数 : 1" [ref=e239]':
+                          - generic [ref=e240]:
+                            - generic [ref=e241]: "受影响文件数 :"
+                            - generic [ref=e242]: "1"
+                        - 'cell "高风险问题数 : 0" [ref=e243]':
+                          - generic [ref=e244]:
+                            - generic [ref=e245]: "高风险问题数 :"
+                            - generic [ref=e246]: "0"
+                      - 'row "合并建议 : 建议处理问题清单后合并 首要问题 : src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:20 · correctness_business" [ref=e247]':
+                        - 'cell "合并建议 : 建议处理问题清单后合并" [ref=e248]':
+                          - generic [ref=e249]:
+                            - generic [ref=e250]: "合并建议 :"
+                            - generic [ref=e251]: 建议处理问题清单后合并
+                        - 'cell "首要问题 : src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:20 · correctness_business" [ref=e252]':
+                          - generic [ref=e253]:
+                            - generic [ref=e254]: "首要问题 :"
+                            - generic [ref=e255]: src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:20 · correctness_business
+                      - 'row "建议优先级 : P2" [ref=e256]':
+                        - 'cell "建议优先级 : P2" [ref=e257]':
+                          - generic [ref=e258]:
+                            - generic [ref=e259]: "建议优先级 :"
+                            - generic [ref=e260]: P2
+              - generic [ref=e263]:
+                - generic [ref=e266]: 人工裁决
+                - generic [ref=e268]:
+                  - generic [ref=e270]:
+                    - generic [ref=e271]: not_required
+                    - generic [ref=e272]: 待人工议题 0 个
+                  - generic [ref=e274]:
+                    - img "暂无数据" [ref=e276]
+                    - generic [ref=e282]: 先从问题清单中选择一条需要人工确认的议题。
+            - generic [ref=e285]:
+              - generic [ref=e288]: Code Review 问题清单
+              - generic [ref=e289]:
+                - generic [ref=e290]:
+                  - button "全部 3" [ref=e292] [cursor=pointer]:
+                    - generic [ref=e293]: 全部 3
+                  - button "Blocking 0" [ref=e295] [cursor=pointer]:
+                    - generic [ref=e296]: Blocking 0
+                  - button "Should Fix 0" [ref=e298] [cursor=pointer]:
+                    - generic [ref=e299]: Should Fix 0
+                  - button "Non-blocking 3" [ref=e301] [cursor=pointer]:
+                    - generic [ref=e302]: Non-blocking 3
+                  - button "已核验 3" [ref=e304] [cursor=pointer]:
+                    - generic [ref=e305]: 已核验 3
+                  - button "设计不一致 0" [ref=e307] [cursor=pointer]:
+                    - generic [ref=e308]: 设计不一致 0
+                  - button "直接缺陷 1" [ref=e310] [cursor=pointer]:
+                    - generic [ref=e311]: 直接缺陷 1
+                  - button "待验证风险 2" [ref=e313] [cursor=pointer]:
+                    - generic [ref=e314]: 待验证风险 2
+                  - button "测试缺口 0" [ref=e316] [cursor=pointer]:
+                    - generic [ref=e317]: 测试缺口 0
+                  - button "设计关注 0" [ref=e319] [cursor=pointer]:
+                    - generic [ref=e320]: 设计关注 0
+                - table [ref=e327]:
+                  - rowgroup [ref=e342]:
+                    - row "代码文件 行号 问题类型 级别 提出专家 合并影响 优先级 裁决状态 核验状态 设计一致性 推荐动作 问题摘要 置信度" [ref=e343]:
+                      - columnheader "代码文件" [ref=e344]
+                      - columnheader "行号" [ref=e345]
+                      - columnheader "问题类型" [ref=e346]
+                      - columnheader "级别" [ref=e347]
+                      - columnheader "提出专家" [ref=e348]
+                      - columnheader "合并影响" [ref=e349]
+                      - columnheader "优先级" [ref=e350]
+                      - columnheader "裁决状态" [ref=e351]
+                      - columnheader "核验状态" [ref=e352]
+                      - columnheader "设计一致性" [ref=e353]
+                      - columnheader "推荐动作" [ref=e354]
+                      - columnheader "问题摘要" [ref=e355]
+                      - columnheader "置信度" [ref=e356]
+                  - rowgroup [ref=e357]:
+                    - row "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java L20 待验证风险 medium correctness_business Non-blocking P2 resolved accepted 已核验 - 按核验证据整改 常量CHUNKS被删除可能破坏事件消费批处理语义 private final Integer CHUNKS = 200; 被删除，若后续代码仍依赖该常量进行批量拉取/处理，将导致批处理逻辑失效或行为变更 40%" [ref=e358] [cursor=pointer]:
+                      - cell "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e359]:
+                        - button "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e360]:
+                          - generic [ref=e361]: src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+                      - cell "L20" [ref=e362]:
+                        - button "L20" [ref=e363]
+                      - cell "待验证风险" [ref=e364]:
+                        - generic [ref=e365]: 待验证风险
+                      - cell "medium" [ref=e366]:
+                        - generic [ref=e367]: medium
+                      - cell "correctness_business" [ref=e368]:
+                        - generic [ref=e369]: correctness_business
+                      - cell "Non-blocking" [ref=e370]:
+                        - generic [ref=e371]: Non-blocking
+                      - cell "P2" [ref=e372]:
+                        - generic [ref=e373]: P2
+                      - cell "resolved accepted" [ref=e374]:
+                        - generic [ref=e375]:
+                          - generic [ref=e376]: resolved
+                          - generic [ref=e377]: accepted
+                      - cell "已核验" [ref=e378]:
+                        - generic [ref=e379]: 已核验
+                      - cell "-" [ref=e380]
+                      - cell "按核验证据整改" [ref=e381]:
+                        - generic "按核验证据整改" [ref=e382]
+                      - cell "常量CHUNKS被删除可能破坏事件消费批处理语义 private final Integer CHUNKS = 200; 被删除，若后续代码仍依赖该常量进行批量拉取/处理，将导致批处理逻辑失效或行为变更" [ref=e383]:
+                        - generic [ref=e384]:
+                          - generic "常量CHUNKS被删除可能破坏事件消费批处理语义" [ref=e385]
+                          - generic "private final Integer CHUNKS = 200; 被删除，若后续代码仍依赖该常量进行批量拉取/处理，将导致批处理逻辑失效或行为变更" [ref=e386]
+                      - cell "40%" [ref=e387]
+                    - row "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java L20 待验证风险 medium architecture_design Non-blocking P2 resolved accepted 已核验 - 按核验证据整改 EventBus 抽象替换不完整，存在实现泄漏风险 当前 diff 仅显示删除了 SpringApplicationEventBus 字段声明，但未显示完整的替换逻辑（包括构造函数参数变更、@Qualifier 注解使用及 EventBus 接口导入）。由于关键代码片段被截断，无法确认是否彻底完成依赖倒置，存在抽象层级优化不完整的风险。 40%" [ref=e388] [cursor=pointer]:
+                      - cell "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e389]:
+                        - button "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e390]:
+                          - generic [ref=e391]: src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+                      - cell "L20" [ref=e392]:
+                        - button "L20" [ref=e393]
+                      - cell "待验证风险" [ref=e394]:
+                        - generic [ref=e395]: 待验证风险
+                      - cell "medium" [ref=e396]:
+                        - generic [ref=e397]: medium
+                      - cell "architecture_design" [ref=e398]:
+                        - generic [ref=e399]: architecture_design
+                      - cell "Non-blocking" [ref=e400]:
+                        - generic [ref=e401]: Non-blocking
+                      - cell "P2" [ref=e402]:
+                        - generic [ref=e403]: P2
+                      - cell "resolved accepted" [ref=e404]:
+                        - generic [ref=e405]:
+                          - generic [ref=e406]: resolved
+                          - generic [ref=e407]: accepted
+                      - cell "已核验" [ref=e408]:
+                        - generic [ref=e409]: 已核验
+                      - cell "-" [ref=e410]
+                      - cell "按核验证据整改" [ref=e411]:
+                        - generic "按核验证据整改" [ref=e412]
+                      - cell "EventBus 抽象替换不完整，存在实现泄漏风险 当前 diff 仅显示删除了 SpringApplicationEventBus 字段声明，但未显示完整的替换逻辑（包括构造函数参数变更、@Qualifier 注解使用及 EventBus 接口导入）。由于关键代码片段被截断，无法确认是否彻底完成依赖倒置，存在抽象层级优化不完整的风险。" [ref=e413]:
+                        - generic [ref=e414]:
+                          - generic "EventBus 抽象替换不完整，存在实现泄漏风险" [ref=e415]
+                          - generic "当前 diff 仅显示删除了 SpringApplicationEventBus 字段声明，但未显示完整的替换逻辑（包括构造函数参数变更、@Qualifier 注解使用及 EventBus 接口导入）。由于关键代码片段被截断，无法确认是否彻底完成依赖倒置，存在抽象层级优化不完整的风险。" [ref=e416]
+                      - cell "40%" [ref=e417]
+                    - row "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java L20 直接缺陷 medium maintainability_code_health Non-blocking P2 resolved accepted 已核验 - 按核验证据整改 实例字段CHUNKS命名违反常量约定且类型设计增加可变性风险 第20行private final Integer CHUNKS = 200作为实例字段使用全大写命名违反Java常量命名规范，且Integer包装类型相比int引入不必要的可变性风险，增加长期维护困惑 85%" [ref=e418] [cursor=pointer]:
+                      - cell "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e419]:
+                        - button "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e420]:
+                          - generic [ref=e421]: src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+                      - cell "L20" [ref=e422]:
+                        - button "L20" [ref=e423]
+                      - cell "直接缺陷" [ref=e424]:
+                        - generic [ref=e425]: 直接缺陷
+                      - cell "medium" [ref=e426]:
+                        - generic [ref=e427]: medium
+                      - cell "maintainability_code_health" [ref=e428]:
+                        - generic [ref=e429]: maintainability_code_health
+                      - cell "Non-blocking" [ref=e430]:
+                        - generic [ref=e431]: Non-blocking
+                      - cell "P2" [ref=e432]:
+                        - generic [ref=e433]: P2
+                      - cell "resolved accepted" [ref=e434]:
+                        - generic [ref=e435]:
+                          - generic [ref=e436]: resolved
+                          - generic [ref=e437]: accepted
+                      - cell "已核验" [ref=e438]:
+                        - generic [ref=e439]: 已核验
+                      - cell "-" [ref=e440]
+                      - cell "按核验证据整改" [ref=e441]:
+                        - generic "按核验证据整改" [ref=e442]
+                      - cell "实例字段CHUNKS命名违反常量约定且类型设计增加可变性风险 第20行private final Integer CHUNKS = 200作为实例字段使用全大写命名违反Java常量命名规范，且Integer包装类型相比int引入不必要的可变性风险，增加长期维护困惑" [ref=e443]:
+                        - generic [ref=e444]:
+                          - generic "实例字段CHUNKS命名违反常量约定且类型设计增加可变性风险" [ref=e445]
+                          - generic "第20行private final Integer CHUNKS = 200作为实例字段使用全大写命名违反Java常量命名规范，且Integer包装类型相比int引入不必要的可变性风险，增加长期维护困惑" [ref=e446]
+                      - cell "85%" [ref=e447]
+            - generic [ref=e449]:
+              - generic [ref=e452]: 审核对象
+              - table [ref=e456]:
+                - rowgroup [ref=e457]:
+                  - 'row "类型 : mr" [ref=e458]':
+                    - 'cell "类型 : mr" [ref=e459]':
+                      - generic [ref=e460]:
+                        - generic [ref=e461]: "类型 :"
+                        - generic [ref=e463]: mr
+                  - 'row "仓库 : java-ddd-example" [ref=e464]':
+                    - 'cell "仓库 : java-ddd-example" [ref=e465]':
+                      - generic [ref=e466]:
+                        - generic [ref=e467]: "仓库 :"
+                        - generic [ref=e468]: java-ddd-example
+                  - 'row "项目 : CodelyTV" [ref=e469]':
+                    - 'cell "项目 : CodelyTV" [ref=e470]':
+                      - generic [ref=e471]:
+                        - generic [ref=e472]: "项目 :"
+                        - generic [ref=e473]: CodelyTV
+                  - 'row "源分支 : mr/88" [ref=e474]':
+                    - 'cell "源分支 : mr/88" [ref=e475]':
+                      - generic [ref=e476]:
+                        - generic [ref=e477]: "源分支 :"
+                        - generic [ref=e478]: mr/88
+                  - 'row "目标分支 : main" [ref=e479]':
+                    - 'cell "目标分支 : main" [ref=e480]':
+                      - generic [ref=e481]:
+                        - generic [ref=e482]: "目标分支 :"
+                        - generic [ref=e483]: main
+                  - 'row "变更文件 : src/mooc/main/resources/database/mooc.sql, src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e484]':
+                    - 'cell "变更文件 : src/mooc/main/resources/database/mooc.sql, src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java" [ref=e485]':
+                      - generic [ref=e486]:
+                        - generic [ref=e487]: "变更文件 :"
+                        - generic [ref=e488]: src/mooc/main/resources/database/mooc.sql, src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+            - generic [ref=e490]:
+              - generic [ref=e493]: 产物快照
+              - table [ref=e497]:
+                - rowgroup [ref=e498]:
+                  - 'row "Summary Comment : 审核报告已生成，共收敛 3 条 findings，形成 1 个议题，其中 0 个待人工裁决。" [ref=e499]':
+                    - 'cell "Summary Comment : 审核报告已生成，共收敛 3 条 findings，形成 1 个议题，其中 0 个待人工裁决。" [ref=e500]':
+                      - generic [ref=e501]:
+                        - generic [ref=e502]: "Summary Comment :"
+                        - generic [ref=e504]: 审核报告已生成，共收敛 3 条 findings，形成 1 个议题，其中 0 个待人工裁决。
+                  - 'row "Check Run : completed completed" [ref=e505]':
+                    - 'cell "Check Run : completed completed" [ref=e506]':
+                      - generic [ref=e507]:
+                        - generic [ref=e508]: "Check Run :"
+                        - generic [ref=e509]:
+                          - generic [ref=e510]: completed
+                          - generic [ref=e511]: completed
+                  - 'row "产物状态 : completed · completed" [ref=e512]':
+                    - 'cell "产物状态 : completed · completed" [ref=e513]':
+                      - generic [ref=e514]:
+                        - generic [ref=e515]: "产物状态 :"
+                        - generic [ref=e516]: completed · completed
+                  - 'row "待人工议题 : 0" [ref=e517]':
+                    - 'cell "待人工议题 : 0" [ref=e518]':
+                      - generic [ref=e519]:
+                        - generic [ref=e520]: "待人工议题 :"
+                        - generic [ref=e521]: "0"
+      - contentinfo [ref=e82]: Multi Code Review Agent ©2026 · 多专家协同代码审核工作台

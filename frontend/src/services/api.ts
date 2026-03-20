@@ -231,6 +231,10 @@ export interface RuntimeSettings {
   runtime_tool_allowlist: string[];
   agent_allowlist: string[];
   allow_human_gate: boolean;
+  issue_filter_enabled: boolean;
+  suppress_low_risk_hint_issues: boolean;
+  hint_issue_confidence_threshold: number;
+  hint_issue_evidence_cap: number;
   default_max_debate_rounds: number;
   standard_llm_timeout_seconds: number;
   standard_llm_retry_count: number;
@@ -282,6 +286,21 @@ export interface ExtensionTool {
   tool_path?: string;
 }
 
+export interface KnowledgeDocumentSection {
+  node_id: string;
+  doc_id: string;
+  title: string;
+  path: string;
+  level: number;
+  line_start: number;
+  line_end: number;
+  summary: string;
+  content: string;
+  score?: number;
+  matched_terms?: string[];
+  matched_signals?: string[];
+}
+
 export interface KnowledgeDocument {
   doc_id: string;
   title: string;
@@ -291,6 +310,8 @@ export interface KnowledgeDocument {
   tags: string[];
   source_filename: string;
   storage_path: string;
+  indexed_outline: string[];
+  matched_sections: KnowledgeDocumentSection[];
   created_at: string;
 }
 

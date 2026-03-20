@@ -13,6 +13,8 @@ class ReviewState(TypedDict, total=False):
     change_slices: list[dict[str, Any]]
     unified_diff: str
     selected_experts: list[str]
+    issue_filter_config: dict[str, Any]
+    issue_filter_decisions: list[dict[str, Any]]
     findings: list[dict[str, Any]]
     conflicts: list[dict[str, Any]]
     issues: list[dict[str, Any]]

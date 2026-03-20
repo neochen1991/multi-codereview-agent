@@ -90,12 +90,55 @@ def test_tool_gateway_preserves_plugin_failure_result(storage_root: Path, monkey
         RuntimeSettings(runtime_tool_allowlist=["design_spec_alignment"]),
         file_path="apps/api/order/service.ts",
         line_start=12,
+        design_docs=[
+            {
+                "doc_id": "design_1",
+                "title": "订单详细设计",
+                "filename": "order-design.md",
+                "content": "# 订单详细设计",
+                "doc_type": "design_spec",
+            }
+        ],
         extra_tools=["design_spec_alignment"],
     )
 
     result = next(item for item in results if item["tool_name"] == "design_spec_alignment")
     assert result["success"] is False
     assert result["timed_out"] is True
+
+
+def test_tool_gateway_skips_design_alignment_when_design_docs_missing(storage_root: Path):
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="correctness-business",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        runtime_tool_bindings=[],
+        system_prompt="prompt",
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/demo",
+        target_ref="main",
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        RuntimeSettings(runtime_tool_allowlist=["design_spec_alignment"]),
+        file_path="apps/api/order/service.ts",
+        line_start=12,
+        extra_tools=["design_spec_alignment"],
+    )
+
+    result = next(item for item in results if item["tool_name"] == "design_spec_alignment")
+    assert result["success"] is False
+    assert result["skipped"] is True
+    assert result["skip_reason"] == "design_docs_missing"
 
 
 def test_tool_gateway_skips_plugin_when_bound_skill_not_active(storage_root: Path):
@@ -133,6 +176,15 @@ def test_tool_gateway_skips_plugin_when_bound_skill_not_active(storage_root: Pat
         RuntimeSettings(runtime_tool_allowlist=["design_spec_alignment"]),
         file_path="apps/api/order/service.ts",
         line_start=12,
+        design_docs=[
+            {
+                "doc_id": "design_1",
+                "title": "订单详细设计",
+                "filename": "order-design.md",
+                "content": "# 订单详细设计",
+                "doc_type": "design_spec",
+            }
+        ],
         extra_tools=["design_spec_alignment"],
         active_skills=["other-skill"],
     )

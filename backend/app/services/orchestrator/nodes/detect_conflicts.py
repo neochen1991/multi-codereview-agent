@@ -3,13 +3,47 @@ from __future__ import annotations
 from app.services.orchestrator.state import ReviewState
 
 
+LOW_RISK_HINT_TOKENS = {
+    "命名",
+    "命名约定",
+    "可读性",
+    "注释",
+    "风格",
+    "格式化",
+    "缩进",
+    "统一写法",
+    "常量约定",
+    "日志补充",
+    "文档说明",
+    "提示性",
+    "提醒",
+    "代码健康",
+}
+
+
+def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
+    """从状态图里读取 issue 过滤治理配置，并补齐默认值。"""
+
+    raw = state.get("issue_filter_config")
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "issue_filter_enabled": bool(raw.get("issue_filter_enabled", True)),
+        "suppress_low_risk_hint_issues": bool(raw.get("suppress_low_risk_hint_issues", True)),
+        "hint_issue_confidence_threshold": float(raw.get("hint_issue_confidence_threshold", 0.85) or 0.85),
+        "hint_issue_evidence_cap": max(0, int(raw.get("hint_issue_evidence_cap", 2) or 2)),
+    }
+
+
 def detect_conflicts(state: ReviewState) -> ReviewState:
     """按文件和行号窗口对 findings 做聚合，形成 conflict 候选。"""
 
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
+    issue_filter_config = _resolve_issue_filter_config(next_state)
     findings = list(next_state.get("findings", []))
     grouped: dict[str, list[dict[str, object]]] = {}
+    issue_filter_decisions: list[dict[str, object]] = []
     for finding in findings:
         file_path = str(finding.get("file_path", "")).strip() or "unknown"
         line_start = int(finding.get("line_start", 1) or 1)
@@ -18,6 +52,25 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         grouped.setdefault(key, []).append(finding)
     conflicts: list[dict[str, object]] = []
     for key, items in grouped.items():
+        skip_decision = _classify_issue_candidate(items, issue_filter_config)
+        if skip_decision is not None:
+            issue_filter_decisions.append(
+                {
+                    "topic": key,
+                    "rule_code": skip_decision["rule_code"],
+                    "rule_label": skip_decision["rule_label"],
+                    "reason": skip_decision["reason"],
+                    "severity": skip_decision["severity"],
+                    "finding_ids": [item.get("finding_id") for item in items],
+                    "finding_titles": [str(item.get("title") or "").strip() for item in items if str(item.get("title") or "").strip()],
+                    "expert_ids": [
+                        str(item.get("expert_id") or "").strip()
+                        for item in items
+                        if str(item.get("expert_id") or "").strip()
+                    ],
+                }
+            )
+            continue
         first = items[0]
         highest_severity = "medium"
         if any(str(item.get("severity")) in {"critical", "high"} for item in items):
@@ -47,4 +100,106 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             }
         )
     next_state["conflicts"] = conflicts
+    next_state["issue_filter_decisions"] = issue_filter_decisions
     return next_state
+
+
+def _classify_issue_candidate(
+    items: list[dict[str, object]],
+    config: dict[str, object],
+) -> dict[str, str] | None:
+    """判断当前 finding 组是否应仅保留为 finding，并返回治理原因。"""
+
+    if not items:
+        return {
+            "rule_code": "empty_group",
+            "rule_label": "空议题分组",
+            "reason": "当前分组没有有效 finding，已跳过 issue 升级。",
+            "severity": "low",
+        }
+    if not bool(config.get("issue_filter_enabled", True)):
+        return None
+    severities = [str(item.get("severity") or "medium").lower() for item in items]
+    highest_severity = "medium"
+    if any(level == "blocker" for level in severities):
+        highest_severity = "blocker"
+    elif any(level in {"critical", "high"} for level in severities):
+        highest_severity = "high"
+    elif all(level == "low" for level in severities):
+        highest_severity = "low"
+
+    if highest_severity == "low" and bool(config.get("suppress_low_risk_hint_issues", True)):
+        return {
+            "rule_code": "low_severity_hint",
+            "rule_label": "低风险提示保留为 finding",
+            "reason": "当前问题整体风险较低，仅保留在 findings 中提示，不升级为 issue。",
+            "severity": highest_severity,
+        }
+
+    finding_types = {str(item.get("finding_type") or "risk_hypothesis") for item in items}
+    direct_evidence = any(str(item.get("finding_type") or "") == "direct_defect" for item in items)
+    participant_count = len({str(item.get("expert_id") or "").strip() for item in items if str(item.get("expert_id") or "").strip()})
+    evidence_strength = sum(
+        len([value for value in list(item.get("evidence") or []) if str(value).strip()])
+        + len([value for value in list(item.get("cross_file_evidence") or []) if str(value).strip()])
+        + len([value for value in list(item.get("context_files") or []) if str(value).strip()])
+        for item in items
+    )
+    average_confidence = sum(float(item.get("confidence") or 0.0) for item in items) / max(len(items), 1)
+    all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
+    text_blob = "\n".join(
+        [
+            str(item.get("title") or "")
+            for item in items
+        ]
+        + [
+            str(item.get("summary") or "")
+            for item in items
+        ]
+        + [
+            str(rule)
+            for item in items
+            for rule in list(item.get("matched_rules") or [])
+        ]
+        + [
+            str(rule)
+            for item in items
+            for rule in list(item.get("violated_guidelines") or [])
+        ]
+    ).lower()
+    hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
+
+    if (
+        bool(config.get("suppress_low_risk_hint_issues", True))
+        and finding_types <= {"design_concern"}
+        and highest_severity in {"low", "medium"}
+    ):
+        return {
+            "rule_code": "design_concern_only",
+            "rule_label": "设计关注项保留为 finding",
+            "reason": "当前仅属于设计关注或建议项，缺少需要进入 debate 的直接风险证据。",
+            "severity": highest_severity,
+        }
+
+    if (
+        bool(config.get("suppress_low_risk_hint_issues", True))
+        and
+        highest_severity == "medium"
+        and not direct_evidence
+        and participant_count <= 1
+        and all_need_verification
+        and average_confidence < float(config.get("hint_issue_confidence_threshold", 0.85) or 0.85)
+        and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
+        and hint_like
+    ):
+        return {
+            "rule_code": "hint_like_medium",
+            "rule_label": "提示性中风险问题保留为 finding",
+            "reason": (
+                "当前问题更偏命名、注释、风格、日志补充等提示性建议，证据较弱且置信度未达到升级 issue 的阈值，"
+                "因此仅保留为 finding。"
+            ),
+            "severity": highest_severity,
+        }
+
+    return None

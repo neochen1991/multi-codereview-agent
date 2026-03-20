@@ -15,6 +15,26 @@ type StructuredGroup = {
   sections: StructuredSection[];
 };
 
+type BoundDocumentEntry = {
+  title: string;
+  sourceFilename: string;
+  docType: string;
+  indexedOutline: string[];
+  matchedSections: string[];
+  matchedTerms: string[];
+  matchedSignals: string[];
+};
+
+type IssueFilterDecisionEntry = {
+  topic: string;
+  ruleCode: string;
+  ruleLabel: string;
+  reason: string;
+  severity: string;
+  findingTitles: string[];
+  expertIds: string[];
+};
+
 export type ReviewDialogueViewMessage = {
   id: string;
   timeText: string;
@@ -91,6 +111,142 @@ const normalizeContextValueList = (value: unknown): string[] => {
   return value.map(formatContextEntry).filter(Boolean);
 };
 
+const normalizeBoundDocumentEntries = (value: unknown): BoundDocumentEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      const matchedSections = Array.isArray(payload.matched_sections)
+        ? payload.matched_sections
+            .map((section) => {
+              if (!section || typeof section !== "object") return "";
+              const sectionPayload = section as Record<string, unknown>;
+              const path = String(sectionPayload.path || sectionPayload.title || "").trim();
+              const summary = String(sectionPayload.summary || "").trim();
+              if (path && summary) return `${path} · ${summary}`;
+              return path || summary;
+            })
+            .filter(Boolean)
+        : [];
+      const matchedTerms = Array.isArray(payload.matched_sections)
+        ? payload.matched_sections
+            .flatMap((section) => {
+              if (!section || typeof section !== "object") return [];
+              return normalizeValueList((section as Record<string, unknown>).matched_terms);
+            })
+            .filter(Boolean)
+        : [];
+      const matchedSignals = Array.isArray(payload.matched_sections)
+        ? payload.matched_sections
+            .flatMap((section) => {
+              if (!section || typeof section !== "object") return [];
+              return normalizeValueList((section as Record<string, unknown>).matched_signals);
+            })
+            .filter(Boolean)
+        : [];
+      return {
+        title: String(payload.title || "").trim(),
+        sourceFilename: String(payload.source_filename || "").trim(),
+        docType: String(payload.doc_type || "").trim(),
+        indexedOutline: normalizeValueList(payload.indexed_outline),
+        matchedSections,
+        matchedTerms,
+        matchedSignals,
+      };
+    })
+    .filter((item): item is BoundDocumentEntry => Boolean(item && item.title));
+};
+
+const buildBoundDocumentGroup = (value: unknown): StructuredGroup | null => {
+  const documents = normalizeBoundDocumentEntries(value);
+  if (!documents.length) return null;
+  const documentRows = documents.map((item) =>
+    [item.title, item.sourceFilename ? `(${item.sourceFilename})` : "", item.docType ? `· ${item.docType}` : ""]
+      .join(" ")
+      .trim(),
+  );
+  const matchedSectionRows = documents.flatMap((item) =>
+    item.matchedSections.map((section) => `${item.title} · ${section}`),
+  );
+  const outlineRows = documents.flatMap((item) =>
+    item.indexedOutline.slice(0, 6).map((outline) => `${item.title} · ${outline}`),
+  );
+  const matchedTermRows = documents.flatMap((item) =>
+    item.matchedTerms.slice(0, 8).map((term) => `${item.title} · ${term}`),
+  );
+  const matchedSignalRows = documents.flatMap((item) =>
+    item.matchedSignals.slice(0, 8).map((signal) => `${item.title} · ${signal}`),
+  );
+  const sections = [
+    { label: "绑定文档", values: documentRows },
+    { label: "命中章节", values: matchedSectionRows },
+    { label: "命中关键词", values: matchedTermRows },
+    { label: "命中来源", values: matchedSignalRows },
+    { label: "章节索引", values: matchedSectionRows.length ? [] : outlineRows },
+  ].filter((section) => section.values.length > 0);
+  if (!sections.length) return null;
+  return { title: "知识文档命中", sections };
+};
+
+const buildKnowledgeContextGroup = (value: unknown): StructuredGroup | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const focusFile = typeof payload.focus_file === "string" ? payload.focus_file.trim() : "";
+  const focusLine = typeof payload.focus_line === "number" && payload.focus_line > 0 ? [`L${payload.focus_line}`] : [];
+  const sections = [
+    { label: "聚焦文件", values: focusFile ? [focusFile] : [] },
+    { label: "聚焦行", values: focusLine },
+    { label: "变更文件", values: normalizeValueList(payload.changed_files) },
+    { label: "召回关键词", values: normalizeValueList(payload.query_terms) },
+    { label: "知识源绑定", values: normalizeValueList(payload.knowledge_sources) },
+  ].filter((section) => section.values.length > 0);
+  if (!sections.length) return null;
+  return { title: "知识检索上下文", sections };
+};
+
+const normalizeIssueFilterDecisionEntries = (value: unknown): IssueFilterDecisionEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      return {
+        topic: String(payload.topic || "").trim(),
+        ruleCode: String(payload.rule_code || "").trim(),
+        ruleLabel: String(payload.rule_label || "").trim(),
+        reason: String(payload.reason || "").trim(),
+        severity: String(payload.severity || "").trim(),
+        findingTitles: normalizeValueList(payload.finding_titles),
+        expertIds: normalizeValueList(payload.expert_ids),
+      };
+    })
+    .filter((item): item is IssueFilterDecisionEntry => Boolean(item && item.reason));
+};
+
+const buildIssueFilterGroup = (value: unknown): StructuredGroup | null => {
+  const decisions = normalizeIssueFilterDecisionEntries(value);
+  if (!decisions.length) return null;
+  return {
+    title: "Issue 治理结果",
+    sections: [
+      { label: "治理规则", values: decisions.map((item) => `${item.ruleLabel}${item.ruleCode ? ` (${item.ruleCode})` : ""}`) },
+      { label: "保留原因", values: decisions.map((item) => item.reason) },
+      { label: "保留的 finding", values: decisions.flatMap((item) => item.findingTitles) },
+      { label: "涉及专家", values: decisions.flatMap((item) => item.expertIds) },
+      {
+        label: "定位主题",
+        values: decisions
+          .map((item) => {
+            const prefix = item.severity ? `[${item.severity}] ` : "";
+            return `${prefix}${item.topic}`;
+          })
+          .filter(Boolean),
+      },
+    ].filter((section) => section.values.length > 0),
+  };
+};
+
 const tryParseJsonBlock = (value: string): Record<string, unknown> | null => {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -123,6 +279,13 @@ const getDesignAlignmentLabel = (status: string): string => {
   }
 };
 
+const hasDesignEvidencePayload = (payload: Record<string, unknown>): boolean =>
+  normalizeValueList(payload.design_doc_titles).length > 0 ||
+  normalizeValueList(payload.matched_design_points).length > 0 ||
+  normalizeValueList(payload.missing_design_points).length > 0 ||
+  normalizeValueList(payload.extra_implementation_points).length > 0 ||
+  normalizeValueList(payload.design_conflicts).length > 0;
+
 const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => {
   // 把后端原始消息统一映射成聊天视图模型，
   // 这样主 Agent、专家、Judge、工具调用都能复用同一种渲染壳。
@@ -137,7 +300,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "judge_summary" ||
     eventType === "main_agent_summary" ||
     eventType === "main_agent_intake" ||
-    eventType === "main_agent_expert_selection"
+    eventType === "main_agent_expert_selection" ||
+    eventType === "issue_filter_applied"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
@@ -176,6 +340,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("主Agent 已接收并整理本次审核输入");
   } else if (eventType === "main_agent_expert_selection") {
     summaryParts.push("主Agent 已基于 MR 信息判定本次参与审核的专家");
+  } else if (eventType === "issue_filter_applied") {
+    summaryParts.push("主Agent 已按治理规则筛出仅保留为 finding 的提示性问题");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
@@ -260,8 +426,27 @@ const buildStructuredGroups = (
       ? (metadata.skill_result as Record<string, unknown>)
       : null;
   const parsedAnalysis = row.eventType === "expert_analysis" ? tryParseJsonBlock(row.detail) : null;
+  const boundDocumentGroup = buildBoundDocumentGroup(metadata.bound_documents);
+  const knowledgeContextGroup = buildKnowledgeContextGroup(metadata.knowledge_context);
+  const issueFilterGroup = buildIssueFilterGroup(metadata.issue_filter_decisions);
+
+  if (row.eventType === "expert_ack" && boundDocumentGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [boundDocumentGroup, ...(knowledgeContextGroup ? [knowledgeContextGroup] : [])],
+    };
+  }
+  if (row.eventType === "expert_ack" && knowledgeContextGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [knowledgeContextGroup],
+    };
+  }
 
   if (row.eventType === "expert_skill_call" && skillResult) {
+    if (!hasDesignEvidencePayload(skillResult)) {
+      return { groups: [] };
+    }
     const recognitionSections = [
       { label: "设计文档", values: normalizeValueList(skillResult.design_doc_titles) },
       { label: "业务目标", values: normalizeSingleValue(skillResult.business_goal) },
@@ -357,9 +542,19 @@ const buildStructuredGroups = (
     };
   }
 
+  if (row.eventType === "issue_filter_applied" && issueFilterGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [issueFilterGroup],
+    };
+  }
+
   if (row.eventType === "expert_tool_call" && toolResult) {
     const toolName = typeof metadata.tool_name === "string" ? metadata.tool_name : "";
     if (toolName === "design_spec_alignment") {
+      if (!hasDesignEvidencePayload(toolResult)) {
+        return { groups: [] };
+      }
       const recognitionSections = [
         { label: "设计文档", values: normalizeValueList(toolResult.design_doc_titles) },
         { label: "API 定义", values: normalizeValueList(toolResult.structured_design && typeof toolResult.structured_design === "object" ? (toolResult.structured_design as Record<string, unknown>).api_definitions : []) },
@@ -456,7 +651,22 @@ const buildStructuredGroups = (
             { label: "验证计划", values: normalizeSingleValue(parsedAnalysis.verification_plan) },
           ].filter((section) => section.values.length > 0),
         },
+        ...(boundDocumentGroup ? [boundDocumentGroup] : []),
+        ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),
       ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  if (row.eventType === "debate_message" && boundDocumentGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [boundDocumentGroup, ...(knowledgeContextGroup ? [knowledgeContextGroup] : [])],
+    };
+  }
+  if (row.eventType === "debate_message" && knowledgeContextGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [knowledgeContextGroup],
     };
   }
 
@@ -748,7 +958,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                   {`本轮已激活 ${activeSkills.length} 个技能，会据此自动展开工具调用并约束专家输出。`}
                 </Paragraph>
               ) : null}
-              {designAlignmentStatus ? (
+              {designAlignmentStatus && designDocTitles.length > 0 ? (
                 <div className="dialogue-rule-strip">
                   <Tag color="gold">{getDesignAlignmentLabel(designAlignmentStatus)}</Tag>
                   {designDocTitles.slice(0, 2).map((title) => (

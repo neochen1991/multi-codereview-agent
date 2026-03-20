@@ -81,3 +81,32 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert sqlite_payload["runtime_tool_allowlist"] == ["repo_context_search"]
     assert "code_repo_clone_url" not in sqlite_payload
     assert "auto_review_enabled" not in sqlite_payload
+
+
+def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sqlite(storage_root: Path) -> None:
+    service = RuntimeSettingsService(storage_root)
+
+    runtime = service.update(
+        {
+            "issue_filter_enabled": False,
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.91,
+            "hint_issue_evidence_cap": 4,
+        }
+    )
+
+    assert runtime.issue_filter_enabled is False
+    assert runtime.suppress_low_risk_hint_issues is False
+    assert runtime.hint_issue_confidence_threshold == 0.91
+    assert runtime.hint_issue_evidence_cap == 4
+
+    sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
+    assert sqlite_payload["issue_filter_enabled"] is False
+    assert sqlite_payload["suppress_low_risk_hint_issues"] is False
+    assert sqlite_payload["hint_issue_confidence_threshold"] == 0.91
+    assert sqlite_payload["hint_issue_evidence_cap"] == 4
+
+    config_repository = FileAppConfigRepository(config_path=storage_root.parent / "config.json", storage_root=storage_root)
+    config_runtime = config_repository.get_runtime_settings()
+    assert config_runtime.issue_filter_enabled is True
+    assert config_runtime.suppress_low_risk_hint_issues is True

@@ -84,6 +84,21 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_document_nodes (
+    node_id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    expert_id TEXT NOT NULL,
+    parent_node_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    level INTEGER NOT NULL DEFAULT 1,
+    line_start INTEGER NOT NULL DEFAULT 1,
+    line_end INTEGER NOT NULL DEFAULT 1,
+    summary TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    keywords_json TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE TABLE IF NOT EXISTS experts (
     expert_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

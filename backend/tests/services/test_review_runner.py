@@ -1,13 +1,21 @@
 from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
-from app.domain.models.knowledge import KnowledgeDocument
+from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.review_runner import ReviewRunner
+
+PERFORMANCE_SPEC_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "docs"
+    / "expert-specs-export"
+    / "performance_reliability"
+    / "performance-reliability-ultra-spec.md"
+)
 
 
 def test_review_runner_emits_finding_created_event(storage_root: Path):
@@ -87,6 +95,114 @@ def test_review_runner_emits_expert_selection_before_routing_plan(storage_root: 
     runner.run_once(review_id)
 
 
+def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_findings(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        first = experts[0]
+        return {
+            "requested_expert_ids": list(requested_expert_ids or []),
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": [first.expert_id],
+            "selected_experts": [{"expert_id": first.expert_id, "expert_name": first.name_zh, "reason": "演示治理过滤"}],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_build_routing_plan(subject, experts, runtime_settings):
+        first = experts[0]
+        return {
+            "jobs": [
+                {
+                    "expert": first,
+                    "review": runner.review_repo.get(review_id),
+                    "command_message": None,
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 42,
+                    "runtime_settings": runtime_settings,
+                    "analysis_mode": "standard",
+                    "llm_request_options": {"timeout_seconds": 1, "max_attempts": 1},
+                    "bound_documents": [],
+                    "knowledge_context": {},
+                    "finding_payloads": [],
+                }
+            ],
+            "summary": {"effective_experts": [{"expert_id": first.expert_id, "expert_name": first.name_zh}]},
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        for job in expert_jobs:
+            job["finding_payloads"].append(
+                {
+                    "finding_id": "fdg_hint_demo",
+                    "expert_id": "maintainability_code_health",
+                    "title": "建议统一日志补充方式",
+                    "summary": "这是一个常见的提示性建议，主要影响可读性与排障体验，运行时风险较低。",
+                    "finding_type": "risk_hypothesis",
+                    "severity": "medium",
+                    "confidence": 0.61,
+                    "verification_needed": True,
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 42,
+                    "evidence": ["日志模板风格不一致"],
+                    "cross_file_evidence": [],
+                    "context_files": [],
+                    "matched_rules": ["日志补充"],
+                    "violated_guidelines": ["统一写法"],
+                    "assumptions": [],
+                    "remediation_strategy": "统一日志输出模板",
+                    "remediation_suggestion": "补齐统一日志模板",
+                    "remediation_steps": [],
+                    "code_excerpt": 'logger.info("...")',
+                    "suggested_code": "",
+                    "suggested_code_language": "java",
+                }
+            )
+
+    def _fake_graph_invoke(state):
+        assert state["findings"][0]["title"] == "建议统一日志补充方式"
+        return {
+            "issues": [],
+            "issue_filter_decisions": [
+                {
+                    "topic": "src/app/service/OrderService.java::2",
+                    "rule_code": "hint_like_medium",
+                    "rule_label": "提示性中风险问题保留为 finding",
+                    "reason": "当前问题更偏命名、注释、风格、日志补充等提示性建议，因此仅保留为 finding。",
+                    "severity": "medium",
+                    "finding_ids": ["fdg_hint_demo"],
+                    "finding_titles": ["建议统一日志补充方式"],
+                    "expert_ids": ["maintainability_code_health"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _fake_build_routing_plan)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", _fake_graph_invoke)
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts: (
+            "演示总结",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    messages = runner.message_repo.list(review_id)
+    issue_filter_message = next(item for item in messages if item.message_type == "issue_filter_applied")
+    assert issue_filter_message.expert_id == "main_agent"
+    assert "未升级为 issues" in issue_filter_message.content
+    decisions = issue_filter_message.metadata.get("issue_filter_decisions", [])
+    assert isinstance(decisions, list) and decisions
+    assert decisions[0]["rule_code"] == "hint_like_medium"
+
+
 def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     parsed = runner._parse_expert_analysis(
@@ -132,6 +248,32 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     assert parsed["fix_strategy"] == "先统一 transformer 和输出 DTO"
     assert parsed["change_steps"] == ["补字段映射", "补回归测试"]
     assert parsed["suggested_code"] == "export function map() {}"
+
+
+def test_review_runner_parse_expert_analysis_omits_design_status_without_design_docs(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = runner._parse_expert_analysis(
+        "普通文本回复",
+        ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+        ),
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性",
+            role="correctness",
+            enabled=True,
+            system_prompt="prompt",
+        ),
+        "apps/api/schedules/output.service.ts",
+        12,
+    )
+
+    assert parsed["design_alignment_status"] == ""
 
 
 def test_review_runner_merge_context_files_uses_repo_context_and_skill_hits(storage_root: Path):
@@ -719,3 +861,144 @@ def test_review_runner_system_prompt_includes_review_spec(storage_root: Path):
     assert "必须检查索引与 migration 风险" in prompt
     assert "《专家绑定参考文档》开始" in prompt
     assert "数据库迁移补充规范" in prompt
+
+
+def test_review_runner_system_prompt_prefers_matched_sections_over_full_document(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构专家",
+        role="architecture",
+        enabled=True,
+        system_prompt="你是架构专家。",
+        review_spec="# 架构规范\n\n必须关注依赖方向。",
+    )
+    bound_docs = [
+        KnowledgeDocument(
+            title="架构补充规范",
+            expert_id="architecture_design",
+            doc_type="review_rule",
+            content="很长的原始全文，不应该整体注入。",
+            source_filename="architecture-review.md",
+            indexed_outline=["总则", "服务层", "仓储层"],
+            matched_sections=[
+                KnowledgeDocumentSection(
+                    node_id="node-1",
+                    doc_id="doc-1",
+                    title="服务层",
+                    path="总则 / 服务层",
+                    summary="服务层禁止直接依赖基础设施实现。",
+                    content="Service 不得直接 new 基础设施实现类。",
+                )
+            ],
+        )
+    ]
+
+    prompt = runner._build_expert_system_prompt(expert, bound_docs)
+
+    assert "总则 / 服务层" in prompt
+    assert "Service 不得直接 new 基础设施实现类" in prompt
+
+
+def test_review_runner_bound_document_metadata_prefers_matched_sections(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    metadata = runner._build_bound_document_metadata(
+        [
+            KnowledgeDocument(
+                title="架构补充规范",
+                expert_id="architecture_design",
+                doc_type="review_rule",
+                content="原始全文",
+                source_filename="architecture-review.md",
+                indexed_outline=["总则", "总则 / 服务层"],
+                matched_sections=[
+                    KnowledgeDocumentSection(
+                        node_id="node-1",
+                        doc_id="doc-1",
+                        title="服务层",
+                        path="总则 / 服务层",
+                        summary="服务层禁止直接依赖基础设施实现。",
+                        content="Service 不得直接 new 基础设施实现类。",
+                        score=8.6,
+                        matched_terms=["service", "基础设施"],
+                        matched_signals=["query_terms:service", "query_terms:基础设施"],
+                    )
+                ],
+            )
+        ]
+    )
+
+    assert metadata
+    assert metadata[0]["indexed_outline"] == ["总则", "总则 / 服务层"]
+    assert metadata[0]["matched_sections"]
+    assert metadata[0]["matched_sections"][0]["path"] == "总则 / 服务层"
+    assert metadata[0]["matched_sections"][0]["matched_terms"] == ["service", "基础设施"]
+    assert metadata[0]["matched_sections"][0]["matched_signals"] == ["query_terms:service", "query_terms:基础设施"]
+
+
+def test_review_runner_system_prompt_uses_matched_sections_from_large_performance_doc(storage_root: Path):
+    assert PERFORMANCE_SPEC_PATH.exists(), "长版性能规范文档尚未生成"
+    raw_content = PERFORMANCE_SPEC_PATH.read_text(encoding="utf-8")
+    assert len(raw_content.splitlines()) > 10000
+
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能与可靠性专家",
+        role="performance",
+        enabled=True,
+        system_prompt="你是性能与可靠性专家。",
+        review_spec="# 性能规范\n\n必须关注超时、连接池和批处理。",
+    )
+    ingestion = runner.knowledge_service._ingestion
+    retrieval = runner.knowledge_service._retrieval
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="性能与可靠性超长规范",
+            expert_id="performance_reliability",
+            doc_type="review_rule",
+            content=raw_content,
+            tags=["performance", "java", "jvm", "db", "cache"],
+            source_filename=PERFORMANCE_SPEC_PATH.name,
+        )
+    )
+    bound_docs = retrieval.retrieve(
+        "performance_reliability",
+        {
+            "changed_files": ["infra/pool/hikari-pool-tuning.conf"],
+            "query_terms": ["hikaricp", "maxpoolsize", "connectiontimeout", "validationtimeout"],
+            "focus_file": "infra/pool/hikari-pool-tuning.conf",
+            "focus_line": 88,
+        },
+    )
+
+    prompt = runner._build_expert_system_prompt(expert, bound_docs)
+
+    assert "HikariCP 连接池容量规划" in prompt
+    assert "虚拟线程 pinning 风险正反例" not in prompt
+    assert len(prompt) < len(raw_content) // 4
+
+
+def test_review_runner_builds_knowledge_context_metadata(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    metadata = runner._build_knowledge_context_metadata(
+        {
+            "focus_file": "src/app/service/order_service.py",
+            "focus_line": 42,
+            "changed_files": ["src/app/service/order_service.py", "src/app/repository/order_repository.py"],
+            "query_terms": ["order_service", "symbol_query", "routing_reason"],
+            "knowledge_sources": ["knowledge_search", "repo_context_search"],
+        }
+    )
+
+    assert metadata["focus_file"] == "src/app/service/order_service.py"
+    assert metadata["focus_line"] == 42
+    assert metadata["changed_files"] == [
+        "src/app/service/order_service.py",
+        "src/app/repository/order_repository.py",
+    ]
+    assert metadata["query_terms"] == ["order_service", "symbol_query", "routing_reason"]
+    assert metadata["knowledge_sources"] == ["knowledge_search", "repo_context_search"]

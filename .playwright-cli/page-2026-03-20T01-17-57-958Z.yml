@@ -1,0 +1,53 @@
+- generic [ref=e4]:
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - img [ref=e9]:
+        - img [ref=e10]
+      - generic [ref=e13]:
+        - generic [ref=e14]: 多专家协同代码审核系统
+        - generic [ref=e15]: FastAPI + LangGraph-style Runtime
+    - generic [ref=e16]:
+      - generic [ref=e18]: expert-review
+      - link "GitHub" [ref=e20] [cursor=pointer]:
+        - /url: https://github.com
+        - img "github" [ref=e21]:
+          - img [ref=e22]
+  - generic [ref=e24]:
+    - complementary [ref=e25]:
+      - generic [ref=e26]:
+        - generic [ref=e27]: 导航
+        - menu [ref=e28]:
+          - menuitem "home 首页" [ref=e29] [cursor=pointer]:
+            - img "home" [ref=e30]:
+              - img [ref=e31]
+            - generic [ref=e33]: 首页
+          - menuitem "code 审核工作台" [ref=e34] [cursor=pointer]:
+            - img "code" [ref=e35]:
+              - img [ref=e36]
+            - generic [ref=e38]: 审核工作台
+          - menuitem "history 历史记录" [ref=e39] [cursor=pointer]:
+            - img "history" [ref=e40]:
+              - img [ref=e41]
+            - generic [ref=e43]: 历史记录
+          - menuitem "robot 专家中心" [ref=e44] [cursor=pointer]:
+            - img "robot" [ref=e45]:
+              - img [ref=e46]
+            - generic [ref=e48]: 专家中心
+          - menuitem "book 知识库" [ref=e49] [cursor=pointer]:
+            - img "book" [ref=e50]:
+              - img [ref=e51]
+            - generic [ref=e53]: 知识库
+          - menuitem "dashboard 治理中心" [ref=e54] [cursor=pointer]:
+            - img "dashboard" [ref=e55]:
+              - img [ref=e56]
+            - generic [ref=e58]: 治理中心
+          - menuitem "setting 设置" [ref=e59] [cursor=pointer]:
+            - img "setting" [ref=e60]:
+              - img [ref=e61]
+            - generic [ref=e63]: 设置
+      - img "left" [ref=e65] [cursor=pointer]:
+        - img [ref=e66]
+    - generic [ref=e68]:
+      - main [ref=e69]:
+        - generic [ref=e81]: 页面加载中...
+      - contentinfo [ref=e82]: Multi Code Review Agent ©2026 · 多专家协同代码审核工作台

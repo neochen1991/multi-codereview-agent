@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
-from app.domain.models.knowledge import KnowledgeDocument
+from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
+from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
 from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
 
 
@@ -15,7 +15,9 @@ class KnowledgeRetrievalService:
         """初始化知识仓储和检索缓存。"""
 
         self._root = Path(root)
-        self._repository = SqliteKnowledgeRepository(Path(root) / "app.db")
+        db_path = Path(root) / "app.db"
+        self._repository = SqliteKnowledgeRepository(db_path)
+        self._node_repository = SqliteKnowledgeNodeRepository(db_path)
         self._cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[KnowledgeDocument]] = {}
 
     def retrieve(
@@ -35,20 +37,17 @@ class KnowledgeRetrievalService:
             if str(item).strip()
         }
         filtered = [doc for doc in candidates if self._matches_bound_sources(doc, bound_sources)] if bound_sources else candidates
-        query_terms = self._build_query_terms(review_context)
-        if not query_terms:
-            self._cache[cache_key] = [item.model_copy() for item in filtered]
-            return filtered
-        matched = self._rg_search(filtered, query_terms)
-        if matched:
-            self._cache[cache_key] = [item.model_copy() for item in matched]
-            return matched
-        contextual = [
-            doc
-            for doc in filtered
-            if any(term in doc.content.lower() or term in doc.title.lower() for term in query_terms)
-        ]
-        result = contextual or filtered
+        # 用户已经把文档绑定到该专家时，不应因为 knowledge_sources 命名不匹配而把全部文档过滤空。
+        if bound_sources and not filtered:
+            filtered = candidates
+        query_entries = self._build_query_entries(review_context)
+        query_terms = [item["term"] for item in query_entries]
+        nodes = self._node_repository.list_for_document_ids([doc.doc_id for doc in filtered])
+        if not query_terms or not nodes:
+            result = [self._attach_outline(doc, nodes) for doc in filtered]
+            self._cache[cache_key] = [item.model_copy() for item in result]
+            return result
+        result = self._retrieve_by_index(filtered, nodes, query_entries)
         self._cache[cache_key] = [item.model_copy() for item in result]
         return result
 
@@ -68,63 +67,120 @@ class KnowledgeRetrievalService:
         ).lower()
         return any(source in searchable for source in bound_sources)
 
-    def _build_query_terms(self, review_context: dict[str, object]) -> list[str]:
-        """从 changed_files 和显式 query_terms 里提取检索关键词。"""
+    def _build_query_entries(self, review_context: dict[str, object]) -> list[dict[str, str]]:
+        """从审核上下文提取检索词，并保留每个词来自哪类线索。"""
 
-        changed_files = [str(item) for item in review_context.get("changed_files", [])]
-        explicit_terms = [str(item) for item in review_context.get("query_terms", []) or []]
-        tokens: list[str] = []
-        for value in [*changed_files, *explicit_terms]:
-            for token in re.split(r"[^a-zA-Z0-9_]+", value.lower()):
-                if len(token) >= 3 and token not in tokens:
-                    tokens.append(token)
-        return tokens[:8]
+        entries: list[dict[str, str]] = []
+        for source_name, values in [
+            ("changed_files", review_context.get("changed_files", []) or []),
+            ("query_terms", review_context.get("query_terms", []) or []),
+            ("focus_file", [review_context.get("focus_file")] if review_context.get("focus_file") else []),
+            ("focus_line", [review_context.get("focus_line")] if review_context.get("focus_line") else []),
+        ]:
+            for value in values:
+                for token in re.split(r"[^a-zA-Z0-9_]+", str(value).lower()):
+                    normalized = token.strip()
+                    if len(normalized) < 3:
+                        continue
+                    if any(item["term"] == normalized for item in entries):
+                        continue
+                    entries.append({"term": normalized, "source": source_name})
+        return entries[:16]
 
-    def _rg_search(
+    def _retrieve_by_index(
         self,
         documents: list[KnowledgeDocument],
-        query_terms: list[str],
+        nodes: list[KnowledgeDocumentSection],
+        query_entries: list[dict[str, str]],
     ) -> list[KnowledgeDocument]:
-        """优先用 ripgrep 在 Markdown 文档正文中做高效匹配。"""
-
-        paths = [doc.storage_path for doc in documents if doc.storage_path]
-        existing_paths = [path for path in paths if Path(path).exists()]
-        if not existing_paths:
-            return []
-        pattern = "|".join(re.escape(term) for term in query_terms)
-        try:
-            completed = subprocess.run(
-                ["rg", "-n", "-i", "-m", "2", pattern, *existing_paths],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            return []
-        if completed.returncode not in {0, 1}:
-            return []
-        matches: dict[str, list[str]] = {}
-        for line in completed.stdout.splitlines():
-            try:
-                file_path, _line_no, snippet = line.split(":", 2)
-            except ValueError:
+        grouped: dict[str, list[KnowledgeDocumentSection]] = {}
+        for node in nodes:
+            score, matched_terms, matched_signals = self._score_node(node, query_entries)
+            if score <= 0:
                 continue
-            matches.setdefault(file_path, []).append(snippet.strip())
-        if not matches:
-            return []
-        matched_documents: list[KnowledgeDocument] = []
-        for document in documents:
-            snippets = matches.get(document.storage_path, [])
-            if not snippets:
-                continue
-            matched_documents.append(
-                document.model_copy(
+            grouped.setdefault(node.doc_id, []).append(
+                node.model_copy(
                     update={
-                        "content": "\n".join(snippets[:4]) or document.content,
+                        "score": score,
+                        "matched_terms": matched_terms,
+                        "matched_signals": matched_signals,
                     }
                 )
             )
-        return matched_documents
+
+        doc_map = {doc.doc_id: doc for doc in documents}
+        ordered: list[KnowledgeDocument] = []
+        for doc_id, matched_sections in sorted(
+            grouped.items(),
+            key=lambda item: max(section.score for section in item[1]),
+            reverse=True,
+        ):
+            document = doc_map.get(doc_id)
+            if document is None:
+                continue
+            ranked = sorted(
+                matched_sections,
+                key=lambda item: (-item.score, item.level, item.line_start),
+            )[:6]
+            compiled = "\n\n".join(
+                [
+                    f"### {item.path}\n摘要: {item.summary}\n内容:\n{item.content[:1200]}".strip()
+                    for item in ranked
+                ]
+            )
+            ordered.append(
+                document.model_copy(
+                    update={
+                        "indexed_outline": self._build_outline_for_document(document, nodes),
+                        "matched_sections": ranked,
+                        "content": compiled or document.content,
+                    }
+                )
+            )
+        if ordered:
+            return ordered
+        return [self._attach_outline(doc, nodes) for doc in documents]
+
+    def _score_node(
+        self,
+        node: KnowledgeDocumentSection,
+        query_entries: list[dict[str, str]],
+    ) -> tuple[float, list[str], list[str]]:
+        haystack_title = f"{node.title} {node.path}".lower()
+        haystack_body = f"{node.summary} {node.content[:1200]}".lower()
+        score = 0.0
+        matched_terms: list[str] = []
+        matched_signals: list[str] = []
+        for entry in query_entries:
+            normalized = str(entry.get("term") or "").lower().strip()
+            source_name = str(entry.get("source") or "query_terms").strip() or "query_terms"
+            if not normalized:
+                continue
+            matched = False
+            if normalized in haystack_title:
+                score += 3.0
+                matched = True
+            if normalized in haystack_body:
+                score += 1.0
+                matched = True
+            if matched and normalized not in matched_terms:
+                matched_terms.append(normalized)
+            if matched:
+                signal = f"{source_name}:{normalized}"
+                if signal not in matched_signals:
+                    matched_signals.append(signal)
+        return score, matched_terms, matched_signals
+
+    def _attach_outline(self, document: KnowledgeDocument, nodes: list[KnowledgeDocumentSection]) -> KnowledgeDocument:
+        return document.model_copy(update={"indexed_outline": self._build_outline_for_document(document, nodes)})
+
+    def _build_outline_for_document(
+        self,
+        document: KnowledgeDocument,
+        nodes: list[KnowledgeDocumentSection],
+    ) -> list[str]:
+        outline = [node.path for node in nodes if node.doc_id == document.doc_id][:12]
+        return outline or list(document.indexed_outline)
 
     def _build_cache_key(
         self,
@@ -134,5 +190,5 @@ class KnowledgeRetrievalService:
         """构造知识检索缓存键，避免重复扫描同一上下文。"""
 
         changed_files = tuple(sorted(str(item).strip() for item in review_context.get("changed_files", []) or [] if str(item).strip()))
-        query_terms = tuple(sorted(self._build_query_terms(review_context)))
+        query_terms = tuple(sorted(item["term"] for item in self._build_query_entries(review_context)))
         return (str(expert_id).strip(), changed_files, query_terms)
