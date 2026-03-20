@@ -1,7 +1,7 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
 
-import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
+import type { DebateIssue, IssueFilterDecision, ReviewFinding, RuleScreeningMetadata } from "@/services/api";
 
 const { Paragraph } = Typography;
 
@@ -9,6 +9,7 @@ type Props = {
   finding: ReviewFinding | null;
   issue: DebateIssue | null;
   governanceDecision?: IssueFilterDecision | null;
+  ruleScreening?: RuleScreeningMetadata | null;
   onJumpToProcess?: () => void;
 };
 
@@ -109,7 +110,13 @@ const renderSuggestedCode = (code: string) => (
 );
 
 // 结果弹窗负责把单条 finding 渲染成正式 Code Review 详情视图。
-const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, governanceDecision, onJumpToProcess }) => {
+const CodeReviewConclusionPanel: React.FC<Props> = ({
+  finding,
+  issue,
+  governanceDecision,
+  ruleScreening,
+  onJumpToProcess,
+}) => {
   const lineRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
 
   React.useEffect(() => {
@@ -248,6 +255,35 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, governance
           {finding.rule_based_reasoning || "当前还没有返回更详细的规范依据说明。"}
         </Paragraph>
       </div>
+
+      {ruleScreening && ruleScreening.total_rules > 0 ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>规则覆盖报告</Paragraph>
+          <Space wrap style={{ marginBottom: 10 }}>
+            <Tag color="purple">{`总规则 ${ruleScreening.total_rules}`}</Tag>
+            <Tag>{`启用 ${ruleScreening.enabled_rules || ruleScreening.total_rules}`}</Tag>
+            <Tag color="magenta">{`带入审查 ${ruleScreening.matched_rule_count}`}</Tag>
+            <Tag color="volcano">{`强命中 ${ruleScreening.must_review_count}`}</Tag>
+            <Tag color="blue">{`候选 ${ruleScreening.possible_hit_count}`}</Tag>
+          </Space>
+          {ruleScreening.matched_rules_for_llm?.length ? (
+            <>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>本轮带入审查的规则</Paragraph>
+              <ul className="review-remediation-steps">
+                {ruleScreening.matched_rules_for_llm.map((item) => (
+                  <li key={item.rule_id || item.title}>
+                    <strong>{`${item.priority ? `[${item.priority}] ` : ""}${item.title || item.rule_id}`}</strong>
+                    {item.reason ? `：${item.reason}` : ""}
+                    {item.matched_terms?.length ? ` · 关键词: ${item.matched_terms.join(" / ")}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <Paragraph style={{ marginBottom: 0 }}>本轮未命中需要带入深审的规则卡。</Paragraph>
+          )}
+        </div>
+      ) : null}
 
       {hasDesignEvidence(finding) ? (
         <div style={{ marginTop: 16 }}>

@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.db.sqlite import SqliteDatabase
-from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
+from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection, KnowledgeReviewRule
 from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
 from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
+from app.repositories.sqlite_knowledge_rule_repository import SqliteKnowledgeRuleRepository
 
 
 def test_sqlite_knowledge_repository_save_list_delete(tmp_path: Path) -> None:
@@ -65,3 +66,35 @@ def test_sqlite_knowledge_repository_delete_removes_nodes(tmp_path: Path) -> Non
     assert node_repository.list_for_document_ids([document.doc_id])
     assert repository.delete(document.doc_id) is True
     assert node_repository.list_for_document_ids([document.doc_id]) == []
+
+
+def test_sqlite_knowledge_repository_delete_removes_rules(tmp_path: Path) -> None:
+    db_path = tmp_path / "app.db"
+    SqliteDatabase(db_path).initialize()
+    repository = SqliteKnowledgeRepository(db_path)
+    rule_repository = SqliteKnowledgeRuleRepository(db_path)
+    document = repository.save(
+        KnowledgeDocument(
+            title="性能规则",
+            expert_id="performance_reliability",
+            content="## RULE: PERF-001 线程池扩容必须评估容量",
+            source_filename="perf-rules.md",
+        )
+    )
+    rule_repository.replace_for_document(
+        document.doc_id,
+        document.expert_id,
+        [
+            KnowledgeReviewRule(
+                rule_id="PERF-001",
+                doc_id=document.doc_id,
+                expert_id=document.expert_id,
+                title="线程池扩容必须评估容量",
+                priority="P1",
+            )
+        ],
+    )
+
+    assert rule_repository.list_for_document_ids([document.doc_id])
+    assert repository.delete(document.doc_id) is True
+    assert rule_repository.list_for_document_ids([document.doc_id]) == []

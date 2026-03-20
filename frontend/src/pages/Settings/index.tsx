@@ -229,6 +229,9 @@ const SettingsPage: React.FC = () => {
                 suppress_low_risk_hint_issues: Boolean(values.suppress_low_risk_hint_issues),
                 hint_issue_confidence_threshold: Number(values.hint_issue_confidence_threshold || 0.85),
                 hint_issue_evidence_cap: Number(values.hint_issue_evidence_cap || 2),
+                rule_screening_mode: values.rule_screening_mode || "llm",
+                rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
+                rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
                 standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
                 standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
@@ -410,7 +413,7 @@ const SettingsPage: React.FC = () => {
                       showIcon
                       style={{ marginBottom: 16 }}
                       message="Issue 过滤治理说明"
-                      description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。"
+                      description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
                     />
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
@@ -456,6 +459,30 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="hint_issue_evidence_cap" label="提示类 Issue 最大证据条数">
                           <InputNumber min={0} max={10} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="rule_screening_mode"
+                          label="规则筛选模式"
+                          extra="LLM 模式会先做语义筛选，失败时自动回退到启发式。"
+                        >
+                          <Select
+                            options={[
+                              { label: "LLM 语义筛选", value: "llm" },
+                              { label: "启发式筛选", value: "heuristic" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="rule_screening_batch_size" label="规则筛选批大小">
+                          <InputNumber min={4} max={24} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="rule_screening_llm_timeout_seconds" label="规则筛选 LLM 超时（秒）">
+                          <InputNumber min={15} max={300} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                     </Row>

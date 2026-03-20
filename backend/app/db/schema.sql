@@ -99,6 +99,29 @@ CREATE TABLE IF NOT EXISTS knowledge_document_nodes (
     keywords_json TEXT NOT NULL DEFAULT '[]'
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_review_rules (
+    rule_id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    expert_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'P2',
+    applicable_languages_json TEXT NOT NULL DEFAULT '[]',
+    applicable_layers_json TEXT NOT NULL DEFAULT '[]',
+    trigger_keywords_json TEXT NOT NULL DEFAULT '[]',
+    exclude_keywords_json TEXT NOT NULL DEFAULT '[]',
+    risk_types_json TEXT NOT NULL DEFAULT '[]',
+    objective TEXT NOT NULL DEFAULT '',
+    must_check_items_json TEXT NOT NULL DEFAULT '[]',
+    false_positive_guards_json TEXT NOT NULL DEFAULT '[]',
+    fix_guidance TEXT NOT NULL DEFAULT '',
+    good_example TEXT NOT NULL DEFAULT '',
+    bad_example TEXT NOT NULL DEFAULT '',
+    source_path TEXT NOT NULL DEFAULT '',
+    line_start INTEGER NOT NULL DEFAULT 1,
+    line_end INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS experts (
     expert_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

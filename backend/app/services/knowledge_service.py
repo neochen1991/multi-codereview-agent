@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument
+from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
 from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
+from app.services.knowledge_rule_screening_service import KnowledgeRuleScreeningService
 
 
 class KnowledgeService:
@@ -19,6 +21,7 @@ class KnowledgeService:
         self._node_repository = SqliteKnowledgeNodeRepository(Path(root) / "app.db")
         self._ingestion = KnowledgeIngestionService(root)
         self._retrieval = KnowledgeRetrievalService(root)
+        self._rule_screening = KnowledgeRuleScreeningService(root)
 
     def list_documents(self) -> list[KnowledgeDocument]:
         """列出知识库中的全部文档。"""
@@ -49,6 +52,24 @@ class KnowledgeService:
         """按专家和审核上下文检索最相关的知识文档。"""
 
         return self._retrieval.retrieve(expert_id, review_context)
+
+    def screen_rules_for_expert(
+        self,
+        expert_id: str,
+        review_context: dict[str, object],
+        runtime_settings: RuntimeSettings | None = None,
+        analysis_mode: str = "standard",
+        review_id: str = "",
+    ) -> dict[str, object]:
+        """遍历专家绑定的全部规则，对当前 MR 做程序化预筛查。"""
+
+        return self._rule_screening.screen(
+            expert_id,
+            review_context,
+            runtime_settings=runtime_settings,
+            analysis_mode=analysis_mode,
+            review_id=review_id,
+        )
 
     def _attach_indexed_outline(self, documents: list[KnowledgeDocument]) -> list[KnowledgeDocument]:
         """为知识文档补齐章节索引，便于知识库与审核过程统一展示。"""

@@ -114,3 +114,24 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
     assert config_runtime.issue_filter_enabled is True
     assert config_runtime.issue_min_priority_level == "P2"
     assert config_runtime.suppress_low_risk_hint_issues is True
+
+
+def test_runtime_settings_service_persists_rule_screening_fields_in_sqlite(storage_root: Path) -> None:
+    service = RuntimeSettingsService(storage_root)
+
+    runtime = service.update(
+        {
+            "rule_screening_mode": "llm",
+            "rule_screening_batch_size": 10,
+            "rule_screening_llm_timeout_seconds": 150,
+        }
+    )
+
+    assert runtime.rule_screening_mode == "llm"
+    assert runtime.rule_screening_batch_size == 10
+    assert runtime.rule_screening_llm_timeout_seconds == 150
+
+    sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
+    assert sqlite_payload["rule_screening_mode"] == "llm"
+    assert sqlite_payload["rule_screening_batch_size"] == 10
+    assert sqlite_payload["rule_screening_llm_timeout_seconds"] == 150

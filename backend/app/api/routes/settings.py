@@ -39,6 +39,9 @@ class RuntimeSettingsRequest(BaseModel):
     suppress_low_risk_hint_issues: bool = True
     hint_issue_confidence_threshold: float = 0.85
     hint_issue_evidence_cap: int = 2
+    rule_screening_mode: Literal["heuristic", "llm"] = "llm"
+    rule_screening_batch_size: int = 12
+    rule_screening_llm_timeout_seconds: int = 90
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 60
     standard_llm_retry_count: int = 3

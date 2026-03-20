@@ -22,6 +22,7 @@
     "default_branch": "main",
     "auto_sync": false,
     "auto_review_enabled": true,
+    "auto_review_repo_url": "https://github.com/CodelyTV/java-ddd-example.git",
     "auto_review_poll_interval_seconds": 120
   },
   "runtime": {

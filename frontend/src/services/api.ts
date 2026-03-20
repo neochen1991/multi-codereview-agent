@@ -124,6 +124,55 @@ export interface ConversationMessage {
   metadata: Record<string, unknown>;
 }
 
+export interface RuleScreeningMatchedRule {
+  rule_id: string;
+  title: string;
+  priority: string;
+  decision: string;
+  reason: string;
+  matched_terms: string[];
+}
+
+export interface RuleScreeningBatchInputRule {
+  rule_id: string;
+  title: string;
+  priority: string;
+}
+
+export interface RuleScreeningBatchDecision {
+  rule_id: string;
+  title: string;
+  priority: string;
+  decision: string;
+  reason: string;
+  matched_terms: string[];
+  matched_signals?: string[];
+}
+
+export interface RuleScreeningBatchMetadata {
+  batch_index: number;
+  batch_count: number;
+  screening_mode?: "heuristic" | "llm" | string;
+  input_rule_count: number;
+  must_review_count: number;
+  possible_hit_count: number;
+  no_hit_count: number;
+  input_rules: RuleScreeningBatchInputRule[];
+  decisions: RuleScreeningBatchDecision[];
+}
+
+export interface RuleScreeningMetadata {
+  total_rules: number;
+  enabled_rules: number;
+  must_review_count: number;
+  possible_hit_count: number;
+  matched_rule_count: number;
+  batch_count?: number;
+  screening_mode?: "heuristic" | "llm" | string;
+  screening_fallback_used?: boolean;
+  matched_rules_for_llm: RuleScreeningMatchedRule[];
+}
+
 export interface IssueFilterDecision {
   topic: string;
   rule_code: string;
@@ -272,6 +321,9 @@ export interface RuntimeSettings {
   suppress_low_risk_hint_issues: boolean;
   hint_issue_confidence_threshold: number;
   hint_issue_evidence_cap: number;
+  rule_screening_mode: "heuristic" | "llm";
+  rule_screening_batch_size: number;
+  rule_screening_llm_timeout_seconds: number;
   default_max_debate_rounds: number;
   standard_llm_timeout_seconds: number;
   standard_llm_retry_count: number;

@@ -3,10 +3,12 @@ from pathlib import Path
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
 from app.domain.models.finding import ReviewFinding
+from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
+from app.services.llm_chat_service import LLMTextResult
 from app.services.review_runner import ReviewRunner
 
 PERFORMANCE_SPEC_PATH = (
@@ -127,6 +129,137 @@ def test_review_runner_emits_phase_timing_messages(storage_root: Path):
     assert isinstance(selection_message.metadata.get("selection_elapsed_ms"), (int, float))
     assert isinstance(routing_ready_message.metadata.get("routing_elapsed_ms"), (int, float))
     assert isinstance(expert_execution_message.metadata.get("expert_execution_elapsed_ms"), (int, float))
+
+
+def test_review_runner_emits_rule_screening_batch_messages(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+
+    monkeypatch.setattr(runner.knowledge_service, "retrieve_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.knowledge_service,
+        "screen_rules_for_expert",
+        lambda *_args, **_kwargs: {
+            "total_rules": 4,
+            "enabled_rules": 4,
+            "must_review_count": 1,
+            "possible_hit_count": 1,
+            "matched_rule_count": 2,
+            "screening_mode": "llm",
+            "screening_fallback_used": False,
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "PERF-SQL-001",
+                    "title": "大结果集查询必须显式分页或限流",
+                    "priority": "P1",
+                    "scene_path": "数据库访问 / 查询性能 / 大结果集分页缺失",
+                    "description": "查询接口缺少分页限制时必须带入深审。",
+                    "language": "java",
+                    "problem_code_example": "findAll();",
+                    "problem_code_line": "findAll();",
+                    "false_positive_code": "findAll(PageRequest.of(0, 50));",
+                    "decision": "must_review",
+                    "reason": "存在 LIMIT 和连续查询模式",
+                    "matched_terms": ["limit"],
+                },
+                {
+                    "rule_id": "PERF-BATCH-001",
+                    "title": "批处理写入必须控制批大小与事务范围",
+                    "priority": "P1",
+                    "scene_path": "数据库访问 / 批处理 / 批处理事务范围过大",
+                    "description": "批处理逻辑要关注单事务范围。",
+                    "language": "java",
+                    "problem_code_example": "flush(records);",
+                    "problem_code_line": "flush(records);",
+                    "false_positive_code": "flush(records.subList(0, 100));",
+                    "decision": "possible_hit",
+                    "reason": "存在 chunk 批处理信号",
+                    "matched_terms": ["chunk"],
+                },
+            ],
+            "batch_summaries": [
+                {
+                    "batch_index": 1,
+                    "batch_count": 2,
+                    "screening_mode": "llm",
+                    "input_rule_count": 2,
+                    "must_review_count": 1,
+                    "possible_hit_count": 0,
+                    "no_hit_count": 1,
+                    "input_rules": [
+                        {"rule_id": "PERF-SQL-001", "title": "大结果集查询必须显式分页或限流", "priority": "P1"},
+                        {"rule_id": "PERF-SQL-002", "title": "N+1 查询风险必须在服务层被识别", "priority": "P1"},
+                    ],
+                    "decisions": [
+                        {
+                            "rule_id": "PERF-SQL-001",
+                            "title": "大结果集查询必须显式分页或限流",
+                            "priority": "P1",
+                            "decision": "must_review",
+                            "reason": "存在 LIMIT 和连续查询模式",
+                            "matched_terms": ["limit"],
+                            "matched_signals": ["semantic:sql"],
+                        },
+                        {
+                            "rule_id": "PERF-SQL-002",
+                            "title": "N+1 查询风险必须在服务层被识别",
+                            "priority": "P1",
+                            "decision": "no_hit",
+                            "reason": "当前改动未形成 N+1 信号",
+                            "matched_terms": [],
+                            "matched_signals": [],
+                        },
+                    ],
+                },
+                {
+                    "batch_index": 2,
+                    "batch_count": 2,
+                    "screening_mode": "llm",
+                    "input_rule_count": 2,
+                    "must_review_count": 0,
+                    "possible_hit_count": 1,
+                    "no_hit_count": 1,
+                    "input_rules": [
+                        {"rule_id": "PERF-BATCH-001", "title": "批处理写入必须控制批大小与事务范围", "priority": "P1"},
+                        {"rule_id": "PERF-JSON-001", "title": "大型对象序列化路径必须避免重复拷贝", "priority": "P2"},
+                    ],
+                    "decisions": [
+                        {
+                            "rule_id": "PERF-BATCH-001",
+                            "title": "批处理写入必须控制批大小与事务范围",
+                            "priority": "P1",
+                            "decision": "possible_hit",
+                            "reason": "存在 chunk 批处理信号",
+                            "matched_terms": ["chunk"],
+                            "matched_signals": ["semantic:batch"],
+                        },
+                        {
+                            "rule_id": "PERF-JSON-001",
+                            "title": "大型对象序列化路径必须避免重复拷贝",
+                            "priority": "P2",
+                            "decision": "no_hit",
+                            "reason": "当前改动未命中 JSON 热路径",
+                            "matched_terms": [],
+                            "matched_signals": [],
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+
+    runner.run_once(review_id)
+
+    messages = runner.message_repo.list(review_id)
+    batch_messages = [item for item in messages if item.message_type == "expert_rule_screening_batch"]
+    assert batch_messages
+    assert len(batch_messages) >= 2
+    first_batch = batch_messages[0]
+    assert first_batch.expert_id
+    assert "第 1/2 批" in first_batch.content
+    batch_metadata = first_batch.metadata.get("rule_screening_batch", {})
+    assert batch_metadata["batch_index"] == 1
+    assert batch_metadata["input_rule_count"] == 2
 
 
 def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_findings(storage_root: Path, monkeypatch):
@@ -393,6 +526,178 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     assert parsed["fix_strategy"] == "先统一 transformer 和输出 DTO"
     assert parsed["change_steps"] == ["补字段映射", "补回归测试"]
     assert parsed["suggested_code"] == "export function map() {}"
+
+
+def test_review_runner_expert_messages_include_rule_screening_metadata(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能与可靠性专家",
+        role="performance",
+        enabled=True,
+        focus_areas=["连接池与容量规划"],
+        system_prompt="你是性能专家",
+    )
+    review = ReviewTask(
+        review_id="rev_rule_screening_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/perf",
+            target_ref="main",
+            title="连接池扩容",
+            changed_files=["src/main/java/com/acme/HikariConfig.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/HikariConfig.java b/src/main/java/com/acme/HikariConfig.java\n"
+                "--- a/src/main/java/com/acme/HikariConfig.java\n"
+                "+++ b/src/main/java/com/acme/HikariConfig.java\n"
+                "@@ -10,1 +10,1 @@\n"
+                "- config.setMaximumPoolSize(16);\n"
+                "+ config.setMaximumPoolSize(256);\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    runner.knowledge_service.create_document(
+        {
+            "title": "性能规则",
+            "expert_id": expert.expert_id,
+            "doc_type": "review_rule",
+            "source_filename": "perf-rules.md",
+            "content": (
+                "## RULE: PERF-POOL-001 连接池扩容必须配套容量评估\n\n"
+                "### 一级场景\n数据库访问\n\n"
+                "### 二级场景\n连接池配置\n\n"
+                "### 三级场景\n连接池扩容缺少容量评估\n\n"
+                "### 描述\n检查连接池扩容是否同步评估下游容量。\n\n"
+                "### 问题代码示例\n```java\nconfig.setMaximumPoolSize(256);\n```\n\n"
+                "### 问题代码行\nconfig.setMaximumPoolSize(256);\n\n"
+                "### 误报代码\n```java\nconfig.setMaximumPoolSize(32);\n```\n\n"
+                "### 语言\njava\n\n"
+                "### 问题级别\nP1\n"
+            ),
+        }
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请重点检查连接池扩容风险",
+        metadata={
+            "file_path": "src/main/java/com/acme/HikariConfig.java",
+            "line_start": 10,
+            "related_files": [],
+            "business_changed_files": ["src/main/java/com/acme/HikariConfig.java"],
+            "target_hunk": {
+                "hunk_header": "@@ -10,1 +10,1 @@",
+                "excerpt": "- config.setMaximumPoolSize(16);\n+ config.setMaximumPoolSize(256);",
+            },
+            "repository_context": {"routing_reason": "连接池参数变更"},
+            "expected_checks": ["连接池容量评估"],
+            "disallowed_inference": [],
+        },
+    )
+    knowledge_context = runner._build_knowledge_review_context(
+        review.subject,
+        expert,
+        "src/main/java/com/acme/HikariConfig.java",
+        10,
+        {"routing_reason": "连接池参数变更"},
+        {"excerpt": "+ config.setMaximumPoolSize(256);"},
+    )
+    bound_documents = runner.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
+    rule_screening = runner.knowledge_service.screen_rules_for_expert(expert.expert_id, knowledge_context)
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"ack":"收到","title":"连接池扩容缺少容量评估","finding_type":"risk_hypothesis",'
+                '"claim":"连接池上限显著扩大，但当前 diff 未给出容量评估依据。","severity":"high",'
+                '"line_start":10,"line_end":10,"matched_rules":["PERF-POOL-001"],'
+                '"violated_guidelines":["连接池扩容必须配套容量评估"],'
+                '"rule_based_reasoning":"规则要求扩容时同步说明容量依据。",'
+                '"evidence":["maximumPoolSize 从 16 调整为 256","当前 diff 未看到容量评估说明"],'
+                '"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"why_it_matters":"可能压垮数据库连接上限","fix_strategy":"补齐容量评估并渐进扩容",'
+                '"suggested_fix":"补齐容量评估说明","change_steps":["补评估","分阶段扩容"],'
+                '"suggested_code":"config.setMaximumPoolSize(32);","confidence":0.92,'
+                '"verification_needed":true,"verification_plan":"核对数据库 max_connections"}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/HikariConfig.java",
+        line_start=10,
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=bound_documents,
+        knowledge_context=knowledge_context,
+        rule_screening=rule_screening,
+        finding_payloads=[],
+    )
+
+    messages = runner.message_repo.list(review.review_id)
+    ack = next(item for item in messages if item.message_type == "expert_ack")
+    analysis = next(item for item in messages if item.message_type == "expert_analysis")
+
+    assert ack.metadata["rule_screening"]["total_rules"] == 1
+    assert ack.metadata["rule_screening"]["matched_rule_count"] == 1
+    matched_rules = ack.metadata["rule_screening"]["matched_rules_for_llm"]
+    assert matched_rules and matched_rules[0]["rule_id"] == "PERF-POOL-001"
+    assert analysis.metadata["rule_screening"]["matched_rule_count"] == 1
+
+
+def test_review_runner_rule_screening_fulltext_contains_full_rule_fields(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    text = runner._build_rule_screening_fulltext(
+        {
+            "total_rules": 1,
+            "must_review_count": 1,
+            "possible_hit_count": 0,
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "PERF-POOL-001",
+                    "title": "连接池扩容必须配套容量评估",
+                    "priority": "P1",
+                    "scene_path": "数据库访问 / 连接池配置 / 连接池扩容缺少容量评估",
+                    "description": "检查连接池扩容是否同步评估下游容量。",
+                    "language": "java",
+                    "problem_code_example": "config.setMaximumPoolSize(256);",
+                    "problem_code_line": "config.setMaximumPoolSize(256);",
+                    "false_positive_code": "config.setMaximumPoolSize(32);",
+                    "matched_terms": ["maximumPoolSize"],
+                }
+            ],
+        }
+    )
+
+    assert "场景路径: 数据库访问 / 连接池配置 / 连接池扩容缺少容量评估" in text
+    assert "规则描述: 检查连接池扩容是否同步评估下游容量。" in text
+    assert "问题代码示例:" in text
+    assert "config.setMaximumPoolSize(256);" in text
+    assert "误报代码参考:" in text
 
 
 def test_review_runner_parse_expert_analysis_omits_design_status_without_design_docs(storage_root: Path):

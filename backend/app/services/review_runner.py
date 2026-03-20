@@ -464,6 +464,37 @@ class ReviewRunner:
                     "line_start": line_start,
                 }
             )
+            knowledge_context = self._build_knowledge_review_context(
+                review.subject,
+                expert,
+                file_path,
+                line_start,
+                dict(command_message.metadata.get("repository_context") or {}),
+                dict(command_message.metadata.get("target_hunk") or {}),
+            )
+            bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
+            rule_screening = self.knowledge_service.screen_rules_for_expert(
+                expert.expert_id,
+                knowledge_context,
+                runtime_settings=effective_runtime_settings,
+                analysis_mode=analysis_mode,
+                review_id=review.review_id,
+            )
+            logger.info(
+                "expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
+                review.review_id,
+                expert.expert_id,
+                file_path,
+                line_start,
+                int(rule_screening.get("total_rules") or 0),
+                int(rule_screening.get("matched_rule_count") or 0),
+                int(rule_screening.get("must_review_count") or 0),
+                int(rule_screening.get("possible_hit_count") or 0),
+                [
+                    str(item.get("rule_id") or "").strip()
+                    for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
+                ],
+            )
             expert_jobs.append(
                 {
                     "review": review,
@@ -474,25 +505,9 @@ class ReviewRunner:
                     "runtime_settings": effective_runtime_settings,
                     "analysis_mode": analysis_mode,
                     "llm_request_options": llm_request_options,
-                    "bound_documents": self.knowledge_service.retrieve_for_expert(
-                        expert.expert_id,
-                        self._build_knowledge_review_context(
-                            review.subject,
-                            expert,
-                            file_path,
-                            line_start,
-                            dict(command_message.metadata.get("repository_context") or {}),
-                            dict(command_message.metadata.get("target_hunk") or {}),
-                        ),
-                    ),
-                    "knowledge_context": self._build_knowledge_review_context(
-                        review.subject,
-                        expert,
-                        file_path,
-                        line_start,
-                        dict(command_message.metadata.get("repository_context") or {}),
-                        dict(command_message.metadata.get("target_hunk") or {}),
-                    ),
+                    "bound_documents": bound_documents,
+                    "knowledge_context": knowledge_context,
+                    "rule_screening": rule_screening,
                     "finding_payloads": finding_payloads,
                 }
             )
@@ -928,6 +943,40 @@ class ReviewRunner:
             fallback_expert.expert_id,
             [item["expert_id"] for item in skipped_experts],
         )
+        knowledge_context = self._build_knowledge_review_context(
+            review.subject,
+            fallback_expert,
+            fallback_file,
+            fallback_line,
+            {},
+            {},
+        )
+        bound_documents = self.knowledge_service.retrieve_for_expert(
+            fallback_expert.expert_id,
+            knowledge_context,
+        )
+        rule_screening = self.knowledge_service.screen_rules_for_expert(
+            fallback_expert.expert_id,
+            knowledge_context,
+            runtime_settings=effective_runtime_settings,
+            analysis_mode=analysis_mode,
+            review_id=review.review_id,
+        )
+        logger.info(
+            "fallback expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
+            review.review_id,
+            fallback_expert.expert_id,
+            fallback_file,
+            fallback_line,
+            int(rule_screening.get("total_rules") or 0),
+            int(rule_screening.get("matched_rule_count") or 0),
+            int(rule_screening.get("must_review_count") or 0),
+            int(rule_screening.get("possible_hit_count") or 0),
+            [
+                str(item.get("rule_id") or "").strip()
+                for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
+            ],
+        )
         return {
             "review": review,
             "expert": fallback_expert,
@@ -937,25 +986,9 @@ class ReviewRunner:
             "runtime_settings": effective_runtime_settings,
             "analysis_mode": analysis_mode,
             "llm_request_options": llm_request_options,
-            "bound_documents": self.knowledge_service.retrieve_for_expert(
-                fallback_expert.expert_id,
-                self._build_knowledge_review_context(
-                    review.subject,
-                    fallback_expert,
-                    fallback_file,
-                    fallback_line,
-                    {},
-                    {},
-                ),
-            ),
-            "knowledge_context": self._build_knowledge_review_context(
-                review.subject,
-                fallback_expert,
-                fallback_file,
-                fallback_line,
-                {},
-                {},
-            ),
+            "bound_documents": bound_documents,
+            "knowledge_context": knowledge_context,
+            "rule_screening": rule_screening,
             "finding_payloads": finding_payloads,
         }
 
@@ -1073,6 +1106,7 @@ class ReviewRunner:
         llm_request_options: dict[str, int | float],
         bound_documents: list[object],
         knowledge_context: dict[str, object],
+        rule_screening: dict[str, object],
         finding_payloads: list[dict[str, object]],
     ) -> None:
         """执行单个专家任务。
@@ -1137,6 +1171,29 @@ class ReviewRunner:
                     payload={"expert_id": expert.expert_id, "tool_name": tool_name},
                 )
             )
+        for batch_message in self._build_rule_screening_batch_messages(
+            review=review,
+            expert=expert,
+            file_path=file_path,
+            line_start=line_start,
+            rule_screening=rule_screening,
+            runtime_settings=runtime_settings,
+        ):
+            self.message_repo.append(batch_message)
+            batch_payload = dict(batch_message.metadata.get("rule_screening_batch") or {})
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_rule_screening_batch",
+                    phase="coordination",
+                    message=batch_message.content,
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "batch_index": int(batch_payload.get("batch_index") or 0),
+                        "batch_count": int(batch_payload.get("batch_count") or 0),
+                    },
+                )
+            )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review.review_id,
@@ -1160,6 +1217,7 @@ class ReviewRunner:
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "bound_documents": self._build_bound_document_metadata(bound_documents),
                     "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
+                    "rule_screening": self._build_rule_screening_metadata(rule_screening),
                     "related_files": command_message.metadata.get("related_files", []),
                     "business_changed_files": command_message.metadata.get("business_changed_files", []),
                     "target_hunk": target_hunk,
@@ -1228,21 +1286,22 @@ class ReviewRunner:
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
         llm_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills),
-                user_prompt=self._build_expert_prompt(
-                    review.subject,
-                    expert,
-                    file_path,
-                    line_start,
+            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
+            user_prompt=self._build_expert_prompt(
+                review.subject,
+                expert,
+                file_path,
+                line_start,
                 tool_evidence,
                 runtime_tool_results,
                 repository_context,
                 target_hunk,
-                    bound_documents,
-                    list(command_message.metadata.get("disallowed_inference", []) or []),
-                    list(command_message.metadata.get("expected_checks", []) or []),
-                    active_skills,
-                ),
+                bound_documents,
+                list(command_message.metadata.get("disallowed_inference", []) or []),
+                list(command_message.metadata.get("expected_checks", []) or []),
+                active_skills,
+                rule_screening,
+            ),
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
             runtime_settings=runtime_settings,
             fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
@@ -1385,6 +1444,7 @@ class ReviewRunner:
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "bound_documents": self._build_bound_document_metadata(bound_documents),
                     "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
+                    "rule_screening": self._build_rule_screening_metadata(rule_screening),
                     "finding_type": finding.finding_type,
                     "context_files": finding.context_files,
                     "assumptions": finding.assumptions,
@@ -2049,6 +2109,7 @@ class ReviewRunner:
         disallowed_inference: list[str],
         expected_checks: list[str],
         active_skills: list[object],
+        rule_screening: dict[str, object] | None = None,
     ) -> str:
         """构造专家最终输入给 LLM 的用户提示词。
 
@@ -2062,6 +2123,7 @@ class ReviewRunner:
         hunk_summary = self._build_hunk_summary(target_hunk)
         review_spec_summary = self._build_review_spec_summary(expert.review_spec)
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
+        rule_screening_summary = self._build_rule_screening_summary(rule_screening or {})
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
         has_design_docs = bool(self._review_design_docs(subject))
@@ -2093,6 +2155,7 @@ class ReviewRunner:
             f"规范提要:\n{review_spec_summary}\n"
             f"已激活技能:\n{active_skill_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
+            f"规则遍历结果:\n{rule_screening_summary}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
             f"运行时工具调用结果:\n{runtime_tool_summary}\n"
@@ -2115,10 +2178,12 @@ class ReviewRunner:
         expert: ExpertProfile,
         bound_documents: list[object],
         active_skills: list[object] | None = None,
+        rule_screening: dict[str, object] | None = None,
     ) -> str:
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
         bound_documents_text = self._build_bound_documents_fulltext(bound_documents)
         active_skill_text = self._build_active_skill_fulltext(active_skills or [])
+        rule_screening_text = self._build_rule_screening_fulltext(rule_screening or {})
         return (
             f"{base_prompt}\n\n"
             f"《审视规范文档》开始\n"
@@ -2126,6 +2191,7 @@ class ReviewRunner:
             f"《审视规范文档》结束\n\n"
             f"{active_skill_text}\n\n"
             f"{bound_documents_text}\n\n"
+            f"{rule_screening_text}\n\n"
             f"执行纪律：\n"
             f"1. 只在你的职责边界内下结论。\n"
             f"2. 结论必须绑定具体文件和代码行，禁止泛化空谈。\n"
@@ -2578,6 +2644,79 @@ class ReviewRunner:
         sections.append("《专家绑定参考文档》结束")
         return "\n".join(sections)
 
+    def _build_rule_screening_summary(self, rule_screening: dict[str, object]) -> str:
+        total_rules = int(rule_screening.get("total_rules") or 0)
+        if total_rules <= 0:
+            return "当前未绑定可执行规则卡。"
+        must_review_count = int(rule_screening.get("must_review_count") or 0)
+        possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
+        lines = [
+            f"- 已遍历规则: {total_rules}",
+            f"- 强命中规则: {must_review_count}",
+            f"- 候选规则: {possible_hit_count}",
+        ]
+        matched_rules = list(rule_screening.get("matched_rules_for_llm", []) or [])
+        if matched_rules:
+            lines.append("- 本轮优先带入审查的规则:")
+            for item in matched_rules[:5]:
+                title = str(item.get("title") or item.get("rule_id") or "").strip()
+                priority = str(item.get("priority") or "P2").strip()
+                scene_path = str(item.get("scene_path") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                if title:
+                    label = f"[{priority}] {title}"
+                    if scene_path:
+                        label = f"{label}（{scene_path}）"
+                    lines.append(f"  - {label} · {reason or '命中规则信号'}")
+        return "\n".join(lines)
+
+    def _build_rule_screening_fulltext(self, rule_screening: dict[str, object]) -> str:
+        total_rules = int(rule_screening.get("total_rules") or 0)
+        if total_rules <= 0:
+            return "《规则遍历结果》开始\n当前未绑定可执行规则卡。\n《规则遍历结果》结束"
+        sections = [
+            "《规则遍历结果》开始",
+            f"- 已遍历规则总数: {total_rules}",
+            f"- 强命中规则数: {int(rule_screening.get('must_review_count') or 0)}",
+            f"- 候选规则数: {int(rule_screening.get('possible_hit_count') or 0)}",
+        ]
+        matched_rules = list(rule_screening.get("matched_rules_for_llm", []) or [])
+        if matched_rules:
+            sections.append("- 本轮应优先遵守并逐条核查的规则卡：")
+            for item in matched_rules[:6]:
+                title = str(item.get("title") or item.get("rule_id") or "").strip()
+                priority = str(item.get("priority") or "P2").strip()
+                scene_path = str(item.get("scene_path") or "").strip()
+                description = str(item.get("description") or "").strip()
+                language = str(item.get("language") or "").strip()
+                matched_terms = [
+                    str(value).strip()
+                    for value in list(item.get("matched_terms", []) or [])[:6]
+                    if str(value).strip()
+                ]
+                sections.append(f"## [{priority}] {title}")
+                if scene_path:
+                    sections.append(f"场景路径: {scene_path}")
+                if description:
+                    sections.append(f"规则描述: {description}")
+                if language:
+                    sections.append(f"语言: {language}")
+                if matched_terms:
+                    sections.append(f"命中关键词: {' / '.join(matched_terms)}")
+                problem_code_example = str(item.get("problem_code_example") or "").strip()
+                problem_code_line = str(item.get("problem_code_line") or "").strip()
+                false_positive_code = str(item.get("false_positive_code") or "").strip()
+                if problem_code_example:
+                    sections.append("问题代码示例:")
+                    sections.append(problem_code_example[:800])
+                if problem_code_line:
+                    sections.append(f"重点关注代码行模式: {problem_code_line[:500]}")
+                if false_positive_code:
+                    sections.append("误报代码参考:")
+                    sections.append(false_positive_code[:800])
+        sections.append("《规则遍历结果》结束")
+        return "\n".join(sections)
+
     def _build_bound_document_metadata(self, bound_documents: list[object]) -> list[dict[str, object]]:
         """把绑定文档裁成前端友好的结构化摘要，避免过程页再次展示原始 JSON。"""
 
@@ -2625,6 +2764,130 @@ class ReviewRunner:
                 }
             )
         return summaries
+
+    def _build_rule_screening_metadata(self, rule_screening: dict[str, object]) -> dict[str, object]:
+        return {
+            "total_rules": int(rule_screening.get("total_rules") or 0),
+            "enabled_rules": int(rule_screening.get("enabled_rules") or 0),
+            "must_review_count": int(rule_screening.get("must_review_count") or 0),
+            "possible_hit_count": int(rule_screening.get("possible_hit_count") or 0),
+            "matched_rule_count": int(rule_screening.get("matched_rule_count") or 0),
+            "screening_mode": str(rule_screening.get("screening_mode") or "").strip(),
+            "screening_fallback_used": bool(rule_screening.get("screening_fallback_used")),
+            "batch_count": len(list(rule_screening.get("batch_summaries", []) or [])),
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": str(item.get("rule_id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "priority": str(item.get("priority") or "").strip(),
+                    "decision": str(item.get("decision") or "").strip(),
+                    "reason": str(item.get("reason") or "").strip(),
+                    "matched_terms": [
+                        str(value).strip()
+                        for value in list(item.get("matched_terms", []) or [])[:8]
+                        if str(value).strip()
+                    ],
+                }
+                for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:6]
+                if str(item.get("rule_id") or item.get("title") or "").strip()
+            ],
+        }
+
+    def _build_rule_screening_batch_messages(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        rule_screening: dict[str, object],
+        runtime_settings: RuntimeSettings,
+    ) -> list[ConversationMessage]:
+        batches = list(rule_screening.get("batch_summaries", []) or [])
+        if not batches:
+            return []
+        messages: list[ConversationMessage] = []
+        screening_mode = str(rule_screening.get("screening_mode") or "").strip() or "heuristic"
+        fallback_used = bool(rule_screening.get("screening_fallback_used"))
+        for raw_batch in batches:
+            if not isinstance(raw_batch, dict):
+                continue
+            batch_index = int(raw_batch.get("batch_index") or 0)
+            batch_count = int(raw_batch.get("batch_count") or 0)
+            input_rule_count = int(raw_batch.get("input_rule_count") or 0)
+            must_review_count = int(raw_batch.get("must_review_count") or 0)
+            possible_hit_count = int(raw_batch.get("possible_hit_count") or 0)
+            no_hit_count = int(raw_batch.get("no_hit_count") or 0)
+            selected_count = must_review_count + possible_hit_count
+            mode_label = "LLM" if screening_mode == "llm" else "启发式"
+            fallback_note = "，已回退启发式" if fallback_used else ""
+            content = (
+                f"规则筛选第 {batch_index}/{batch_count} 批已完成："
+                f"输入 {input_rule_count} 条规则，带入审查 {selected_count} 条"
+                f"（{mode_label}{fallback_note}）。"
+            )
+            messages.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_rule_screening_batch",
+                    content=content,
+                    metadata={
+                        "phase": "coordination",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "rule_screening_batch": self._build_rule_screening_batch_metadata(raw_batch),
+                        "rule_screening": self._build_rule_screening_metadata(rule_screening),
+                        **self._expert_llm_metadata(expert, runtime_settings),
+                    },
+                )
+            )
+        return messages
+
+    def _build_rule_screening_batch_metadata(self, batch: dict[str, object]) -> dict[str, object]:
+        decisions = []
+        for item in list(batch.get("decisions", []) or [])[:24]:
+            if not isinstance(item, dict):
+                continue
+            decisions.append(
+                {
+                    "rule_id": str(item.get("rule_id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "priority": str(item.get("priority") or "").strip(),
+                    "decision": str(item.get("decision") or "").strip(),
+                    "reason": str(item.get("reason") or "").strip(),
+                    "matched_terms": [
+                        str(value).strip()
+                        for value in list(item.get("matched_terms", []) or [])[:8]
+                        if str(value).strip()
+                    ],
+                    "matched_signals": [
+                        str(value).strip()
+                        for value in list(item.get("matched_signals", []) or [])[:8]
+                        if str(value).strip()
+                    ],
+                }
+            )
+        return {
+            "batch_index": int(batch.get("batch_index") or 0),
+            "batch_count": int(batch.get("batch_count") or 0),
+            "screening_mode": str(batch.get("screening_mode") or "").strip(),
+            "input_rule_count": int(batch.get("input_rule_count") or 0),
+            "must_review_count": int(batch.get("must_review_count") or 0),
+            "possible_hit_count": int(batch.get("possible_hit_count") or 0),
+            "no_hit_count": int(batch.get("no_hit_count") or 0),
+            "input_rules": [
+                {
+                    "rule_id": str(item.get("rule_id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "priority": str(item.get("priority") or "").strip(),
+                }
+                for item in list(batch.get("input_rules", []) or [])[:24]
+                if isinstance(item, dict) and str(item.get("rule_id") or item.get("title") or "").strip()
+            ],
+            "decisions": decisions,
+        }
 
     def _build_knowledge_context_metadata(self, knowledge_context: dict[str, object]) -> dict[str, object]:
         """裁剪知识检索上下文，供过程页展示诊断信息。"""

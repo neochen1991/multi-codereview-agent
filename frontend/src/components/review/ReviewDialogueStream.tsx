@@ -35,6 +35,25 @@ type IssueFilterDecisionEntry = {
   expertIds: string[];
 };
 
+type RuleScreeningEntry = {
+  ruleId: string;
+  title: string;
+  priority: string;
+  decision: string;
+  reason: string;
+  matchedTerms: string[];
+};
+
+type RuleScreeningBatchEntry = {
+  ruleId: string;
+  title: string;
+  priority: string;
+  decision: string;
+  reason: string;
+  matchedTerms: string[];
+  matchedSignals: string[];
+};
+
 export type ReviewDialogueViewMessage = {
   id: string;
   timeText: string;
@@ -271,6 +290,169 @@ const buildIssueFilterGroup = (value: unknown): StructuredGroup | null => {
   };
 };
 
+const normalizeRuleScreeningEntries = (value: unknown): RuleScreeningEntry[] => {
+  if (!value || typeof value !== "object") return [];
+  const payload = value as Record<string, unknown>;
+  const matched = Array.isArray(payload.matched_rules_for_llm) ? payload.matched_rules_for_llm : [];
+  return matched
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const entry = item as Record<string, unknown>;
+      return {
+        ruleId: String(entry.rule_id || "").trim(),
+        title: String(entry.title || "").trim(),
+        priority: String(entry.priority || "").trim(),
+        decision: String(entry.decision || "").trim(),
+        reason: String(entry.reason || "").trim(),
+        matchedTerms: normalizeValueList(entry.matched_terms),
+      };
+    })
+    .filter((item): item is RuleScreeningEntry => Boolean(item && (item.ruleId || item.title)));
+};
+
+const buildRuleScreeningGroup = (value: unknown): StructuredGroup | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const totalRules = typeof payload.total_rules === "number" ? payload.total_rules : 0;
+  const enabledRules = typeof payload.enabled_rules === "number" ? payload.enabled_rules : 0;
+  const mustReviewCount = typeof payload.must_review_count === "number" ? payload.must_review_count : 0;
+  const possibleHitCount = typeof payload.possible_hit_count === "number" ? payload.possible_hit_count : 0;
+  const matchedRuleCount = typeof payload.matched_rule_count === "number" ? payload.matched_rule_count : 0;
+  const screeningMode = typeof payload.screening_mode === "string" ? payload.screening_mode.trim() : "";
+  const fallbackUsed = Boolean(payload.screening_fallback_used);
+  const rules = normalizeRuleScreeningEntries(value);
+  if (totalRules <= 0 && !rules.length) return null;
+  return {
+    title: "规则覆盖报告",
+    sections: [
+      {
+        label: "覆盖统计",
+        values: [
+          `总规则 ${totalRules}`,
+          `启用规则 ${enabledRules || totalRules}`,
+          `强命中 ${mustReviewCount}`,
+          `候选 ${possibleHitCount}`,
+          `带入审查 ${matchedRuleCount}`,
+          screeningMode ? `筛选模式 ${screeningMode}` : "",
+          fallbackUsed ? "已回退到启发式" : "",
+        ].filter(Boolean),
+      },
+      {
+        label: "命中规则",
+        values: rules.map((item) => {
+          const priority = item.priority ? `[${item.priority}] ` : "";
+          const title = item.title || item.ruleId;
+          const decision = item.decision ? ` · ${item.decision}` : "";
+          return `${priority}${title}${decision}`;
+        }),
+      },
+      {
+        label: "命中原因",
+        values: rules.map((item) => {
+          const title = item.title || item.ruleId;
+          const reason = item.reason || "命中规则信号";
+          return `${title} · ${reason}`;
+        }),
+      },
+      {
+        label: "命中关键词",
+        values: rules.flatMap((item) =>
+          item.matchedTerms.map((term) => `${item.title || item.ruleId} · ${term}`),
+        ),
+      },
+    ].filter((section) => section.values.length > 0),
+  };
+};
+
+const normalizeRuleScreeningBatchEntries = (value: unknown): RuleScreeningBatchEntry[] => {
+  if (!value || typeof value !== "object") return [];
+  const payload = value as Record<string, unknown>;
+  const decisions = Array.isArray(payload.decisions) ? payload.decisions : [];
+  return decisions
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const entry = item as Record<string, unknown>;
+      return {
+        ruleId: String(entry.rule_id || "").trim(),
+        title: String(entry.title || "").trim(),
+        priority: String(entry.priority || "").trim(),
+        decision: String(entry.decision || "").trim(),
+        reason: String(entry.reason || "").trim(),
+        matchedTerms: normalizeValueList(entry.matched_terms),
+        matchedSignals: normalizeValueList(entry.matched_signals),
+      };
+    })
+    .filter((item): item is RuleScreeningBatchEntry => Boolean(item && (item.ruleId || item.title)));
+};
+
+const buildRuleScreeningBatchGroup = (value: unknown): StructuredGroup | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const batchIndex = typeof payload.batch_index === "number" ? payload.batch_index : 0;
+  const batchCount = typeof payload.batch_count === "number" ? payload.batch_count : 0;
+  const screeningMode = typeof payload.screening_mode === "string" ? payload.screening_mode.trim() : "";
+  const inputRuleCount = typeof payload.input_rule_count === "number" ? payload.input_rule_count : 0;
+  const mustReviewCount = typeof payload.must_review_count === "number" ? payload.must_review_count : 0;
+  const possibleHitCount = typeof payload.possible_hit_count === "number" ? payload.possible_hit_count : 0;
+  const noHitCount = typeof payload.no_hit_count === "number" ? payload.no_hit_count : 0;
+  const inputRules = Array.isArray(payload.input_rules) ? payload.input_rules : [];
+  const rules = normalizeRuleScreeningBatchEntries(value);
+  if (!batchIndex && !inputRuleCount && !rules.length) return null;
+  return {
+    title: "规则筛选批次",
+    sections: [
+      {
+        label: "批次统计",
+        values: [
+          batchIndex && batchCount ? `第 ${batchIndex}/${batchCount} 批` : "",
+          screeningMode ? `筛选模式 ${screeningMode}` : "",
+          inputRuleCount ? `输入规则 ${inputRuleCount}` : "",
+          `强命中 ${mustReviewCount}`,
+          `候选 ${possibleHitCount}`,
+          `跳过 ${noHitCount}`,
+        ].filter(Boolean),
+      },
+      {
+        label: "输入规则",
+        values: inputRules
+          .map((item) => {
+            if (!item || typeof item !== "object") return "";
+            const entry = item as Record<string, unknown>;
+            const title = String(entry.title || entry.rule_id || "").trim();
+            const priority = String(entry.priority || "").trim();
+            return `${priority ? `[${priority}] ` : ""}${title}`;
+          })
+          .filter(Boolean),
+      },
+      {
+        label: "筛选结果",
+        values: rules.map((item) => {
+          const title = item.title || item.ruleId;
+          const priority = item.priority ? `[${item.priority}] ` : "";
+          const decision = item.decision ? ` · ${item.decision}` : "";
+          return `${priority}${title}${decision}`;
+        }),
+      },
+      {
+        label: "筛选原因",
+        values: rules.map((item) => `${item.title || item.ruleId} · ${item.reason || "命中本批规则信号"}`),
+      },
+      {
+        label: "命中关键词",
+        values: rules.flatMap((item) =>
+          item.matchedTerms.map((term) => `${item.title || item.ruleId} · ${term}`),
+        ),
+      },
+      {
+        label: "命中信号",
+        values: rules.flatMap((item) =>
+          item.matchedSignals.map((signal) => `${item.title || item.ruleId} · ${signal}`),
+        ),
+      },
+    ].filter((section) => section.values.length > 0),
+  };
+};
+
 const tryParseJsonBlock = (value: string): Record<string, unknown> | null => {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -328,7 +510,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "main_agent_routing_preparing" ||
     eventType === "main_agent_routing_ready" ||
     eventType === "main_agent_expert_execution_completed" ||
-    eventType === "issue_filter_applied"
+    eventType === "issue_filter_applied" ||
+    eventType === "expert_rule_screening_batch"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
@@ -353,6 +536,15 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push(`${message.expert_id} 已接单，准备开始分析`);
   } else if (eventType === "expert_analysis") {
     summaryParts.push(`${message.expert_id} 已提交首轮分析`);
+  } else if (eventType === "expert_rule_screening_batch") {
+    const batch = metadata.rule_screening_batch && typeof metadata.rule_screening_batch === "object"
+      ? (metadata.rule_screening_batch as Record<string, unknown>)
+      : null;
+    const batchIndex = typeof batch?.batch_index === "number" ? batch.batch_index : 0;
+    const batchCount = typeof batch?.batch_count === "number" ? batch.batch_count : 0;
+    summaryParts.push(
+      `${message.expert_id} 已完成规则筛选${batchIndex && batchCount ? `第 ${batchIndex}/${batchCount} 批` : ""}`,
+    );
   } else if (eventType === "expert_tool_call") {
     summaryParts.push(`${message.expert_id} 正在调用工具 ${String(metadata.tool_name || "")}`);
   } else if (eventType === "expert_skill_call") {
@@ -461,18 +653,25 @@ const buildStructuredGroups = (
   const parsedAnalysis = row.eventType === "expert_analysis" ? tryParseJsonBlock(row.detail) : null;
   const boundDocumentGroup = buildBoundDocumentGroup(metadata.bound_documents);
   const knowledgeContextGroup = buildKnowledgeContextGroup(metadata.knowledge_context);
+  const ruleScreeningGroup = buildRuleScreeningGroup(metadata.rule_screening);
+  const ruleScreeningBatchGroup = buildRuleScreeningBatchGroup(metadata.rule_screening_batch);
   const issueFilterGroup = buildIssueFilterGroup(metadata.issue_filter_decisions);
 
-  if (row.eventType === "expert_ack" && boundDocumentGroup) {
+  if (row.eventType === "expert_ack" && (boundDocumentGroup || knowledgeContextGroup || ruleScreeningGroup)) {
     return {
       summaryText: row.summary,
-      groups: [boundDocumentGroup, ...(knowledgeContextGroup ? [knowledgeContextGroup] : [])],
+      groups: [
+        ...(ruleScreeningGroup ? [ruleScreeningGroup] : []),
+        ...(boundDocumentGroup ? [boundDocumentGroup] : []),
+        ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),
+      ],
     };
   }
-  if (row.eventType === "expert_ack" && knowledgeContextGroup) {
+
+  if (row.eventType === "expert_rule_screening_batch" && ruleScreeningBatchGroup) {
     return {
       summaryText: row.summary,
-      groups: [knowledgeContextGroup],
+      groups: [ruleScreeningBatchGroup],
     };
   }
 
@@ -769,22 +968,21 @@ const buildStructuredGroups = (
             { label: "验证计划", values: normalizeSingleValue(parsedAnalysis.verification_plan) },
           ].filter((section) => section.values.length > 0),
         },
+        ...(ruleScreeningGroup ? [ruleScreeningGroup] : []),
         ...(boundDocumentGroup ? [boundDocumentGroup] : []),
         ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),
       ].filter((group) => group.sections.length > 0),
     };
   }
 
-  if (row.eventType === "debate_message" && boundDocumentGroup) {
+  if (row.eventType === "debate_message" && (boundDocumentGroup || knowledgeContextGroup || ruleScreeningGroup)) {
     return {
       summaryText: row.summary,
-      groups: [boundDocumentGroup, ...(knowledgeContextGroup ? [knowledgeContextGroup] : [])],
-    };
-  }
-  if (row.eventType === "debate_message" && knowledgeContextGroup) {
-    return {
-      summaryText: row.summary,
-      groups: [knowledgeContextGroup],
+      groups: [
+        ...(ruleScreeningGroup ? [ruleScreeningGroup] : []),
+        ...(boundDocumentGroup ? [boundDocumentGroup] : []),
+        ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),
+      ],
     };
   }
 
@@ -999,6 +1197,14 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
         const activeSkills = Array.isArray(row.metadata.active_skills)
           ? row.metadata.active_skills.map((item) => String(item)).filter(Boolean)
           : [];
+        const ruleScreening =
+          row.metadata.rule_screening && typeof row.metadata.rule_screening === "object"
+            ? (row.metadata.rule_screening as Record<string, unknown>)
+            : null;
+        const totalRuleCount =
+          ruleScreening && typeof ruleScreening.total_rules === "number" ? ruleScreening.total_rules : 0;
+        const matchedRuleCount =
+          ruleScreening && typeof ruleScreening.matched_rule_count === "number" ? ruleScreening.matched_rule_count : 0;
         const designAlignmentStatus =
           typeof row.metadata.design_alignment_status === "string" ? row.metadata.design_alignment_status : "";
         const designDocTitles = Array.isArray(row.metadata.design_doc_titles)
@@ -1087,6 +1293,12 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                       {`skill ${skill}`}
                     </Tag>
                   ))}
+                </div>
+              ) : null}
+              {totalRuleCount > 0 ? (
+                <div className="dialogue-rule-strip">
+                  <Tag color="purple">{`规则 ${totalRuleCount}`}</Tag>
+                  <Tag color={matchedRuleCount > 0 ? "magenta" : "default"}>{`命中 ${matchedRuleCount}`}</Tag>
                 </div>
               ) : null}
               {activeSkills.length ? (

@@ -24,6 +24,7 @@ import {
   type ReviewDesignDocumentInput,
   type ReviewReplayBundle,
   type ReviewSummary,
+  type RuleScreeningMetadata,
   type RuntimeSettings,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
@@ -63,6 +64,12 @@ type ExpertSelectionSummary = {
   candidate_expert_ids: string[];
   selected_experts: RoutingExpertItem[];
   skipped_experts: RoutingExpertItem[];
+};
+
+type ExpertRuleCoverageSummary = {
+  expert_id: string;
+  expert_name: string;
+  rule_screening: RuleScreeningMetadata;
 };
 
 type WorkspaceTabKey = "overview" | "process" | "result";
@@ -182,6 +189,34 @@ const normalizeIssueFilterDecisions = (messages: { message_type: string; metadat
         }));
     });
 
+const normalizeRuleScreeningMetadata = (value: unknown): RuleScreeningMetadata | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const matchedRules = Array.isArray(payload.matched_rules_for_llm) ? payload.matched_rules_for_llm : [];
+  return {
+    total_rules: typeof payload.total_rules === "number" ? payload.total_rules : 0,
+    enabled_rules: typeof payload.enabled_rules === "number" ? payload.enabled_rules : 0,
+    must_review_count: typeof payload.must_review_count === "number" ? payload.must_review_count : 0,
+    possible_hit_count: typeof payload.possible_hit_count === "number" ? payload.possible_hit_count : 0,
+    matched_rule_count: typeof payload.matched_rule_count === "number" ? payload.matched_rule_count : 0,
+    batch_count: typeof payload.batch_count === "number" ? payload.batch_count : 0,
+    screening_mode: typeof payload.screening_mode === "string" ? payload.screening_mode : undefined,
+    screening_fallback_used: Boolean(payload.screening_fallback_used),
+    matched_rules_for_llm: matchedRules
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item) => ({
+        rule_id: String(item.rule_id || ""),
+        title: String(item.title || ""),
+        priority: String(item.priority || ""),
+        decision: String(item.decision || ""),
+        reason: String(item.reason || ""),
+        matched_terms: Array.isArray(item.matched_terms)
+          ? item.matched_terms.map((entry) => String(entry)).filter(Boolean)
+          : [],
+      })),
+  };
+};
+
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
 ): ReviewOverviewExpertSelectionSummary | null => {
@@ -254,6 +289,44 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
             </Space>
           </div>
         ) : null}
+      </Space>
+    </Card>
+  );
+};
+
+const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> = ({ items }) => {
+  if (items.length === 0) return null;
+  return (
+    <Card className="module-card" title="专家规则命中统计">
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        {items.map((item) => (
+          <Card key={item.expert_id} size="small">
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              <Space wrap>
+                <Tag color="geekblue">{item.expert_name}</Tag>
+                <Tag color="purple">{`总规则 ${item.rule_screening.total_rules}`}</Tag>
+                <Tag>{`启用 ${item.rule_screening.enabled_rules || item.rule_screening.total_rules}`}</Tag>
+                <Tag color="magenta">{`命中 ${item.rule_screening.matched_rule_count}`}</Tag>
+                <Tag color="volcano">{`强命中 ${item.rule_screening.must_review_count}`}</Tag>
+                <Tag color="blue">{`候选 ${item.rule_screening.possible_hit_count}`}</Tag>
+                {item.rule_screening.batch_count ? <Tag>{`批次 ${item.rule_screening.batch_count}`}</Tag> : null}
+                {item.rule_screening.screening_mode ? <Tag>{item.rule_screening.screening_mode}</Tag> : null}
+                {item.rule_screening.screening_fallback_used ? <Tag color="orange">fallback</Tag> : null}
+              </Space>
+              {item.rule_screening.matched_rules_for_llm?.length ? (
+                <Space wrap>
+                  {item.rule_screening.matched_rules_for_llm.map((rule) => (
+                    <Tag key={`${item.expert_id}-${rule.rule_id || rule.title}`} color="cyan">
+                      {`${rule.priority ? `[${rule.priority}] ` : ""}${rule.title || rule.rule_id}`}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                <Text type="secondary">本轮未命中需要带入深审的规则。</Text>
+              )}
+            </Space>
+          </Card>
+        ))}
       </Space>
     </Card>
   );
@@ -542,6 +615,40 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueFilterDecisionByFindingId, selectedFinding],
   );
+  const selectedFindingRuleScreening = useMemo(() => {
+    if (!selectedFinding || !replay?.messages?.length) return null;
+    const candidate = replay.messages
+      .slice()
+      .reverse()
+      .find((message) => {
+        if (!["expert_analysis", "expert_ack", "debate_message"].includes(message.message_type)) return false;
+        if (message.expert_id !== selectedFinding.expert_id) return false;
+        const metadata = message.metadata || {};
+        const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
+        if (filePath && selectedFinding.file_path && filePath !== selectedFinding.file_path) return false;
+        return Boolean(metadata.rule_screening);
+      });
+    return normalizeRuleScreeningMetadata(candidate?.metadata?.rule_screening);
+  }, [replay?.messages, selectedFinding]);
+  const expertRuleCoverage = useMemo(() => {
+    if (!replay?.messages?.length) return [] as ExpertRuleCoverageSummary[];
+    const expertNameById = new Map(experts.map((item) => [item.expert_id, item.name_zh || item.expert_id]));
+    const seen = new Set<string>();
+    const rows: ExpertRuleCoverageSummary[] = [];
+    for (const message of replay.messages.slice().reverse()) {
+      if (!["expert_analysis", "expert_ack", "debate_message"].includes(message.message_type)) continue;
+      if (!message.expert_id || seen.has(message.expert_id)) continue;
+      const ruleScreening = normalizeRuleScreeningMetadata(message.metadata?.rule_screening);
+      if (!ruleScreening || ruleScreening.total_rules <= 0) continue;
+      seen.add(message.expert_id);
+      rows.push({
+        expert_id: message.expert_id,
+        expert_name: expertNameById.get(message.expert_id) || message.expert_id,
+        rule_screening: ruleScreening,
+      });
+    }
+    return rows.sort((left, right) => right.rule_screening.matched_rule_count - left.rule_screening.matched_rule_count);
+  }, [experts, replay?.messages]);
   const pendingHumanIssues = useMemo(
     () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
     [issues],
@@ -1044,6 +1151,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 </div>
               </Col>
             </Row>
+            <ExpertRuleCoveragePanel items={expertRuleCoverage} />
             <div ref={resultFindingsRef}>
               <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
                 <FindingsPanel
@@ -1077,6 +1185,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                   finding={selectedFinding}
                   issue={selectedFindingIssue}
                   governanceDecision={selectedFindingGovernanceDecision}
+                  ruleScreening={selectedFindingRuleScreening}
                   onJumpToProcess={() => {
                     setFindingModalOpen(false);
                     setActiveStep("process");

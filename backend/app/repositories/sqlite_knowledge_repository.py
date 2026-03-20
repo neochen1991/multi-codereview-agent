@@ -80,6 +80,7 @@ class SqliteKnowledgeRepository:
     def delete(self, doc_id: str) -> bool:
         with self._db.connect() as connection:
             connection.execute("DELETE FROM knowledge_document_nodes WHERE doc_id = ?", (doc_id,))
+            connection.execute("DELETE FROM knowledge_review_rules WHERE doc_id = ?", (doc_id,))
             cursor = connection.execute("DELETE FROM knowledge_documents WHERE doc_id = ?", (doc_id,))
             connection.commit()
         return cursor.rowcount > 0
