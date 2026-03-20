@@ -16,7 +16,6 @@ const SettingsPage = lazy(() => import("@/pages/Settings"));
 const { Content, Footer } = Layout;
 
 const preloadCommonRoutes = () => {
-  void import("@/pages/ReviewWorkbench");
   void import("@/pages/History");
   void import("@/pages/Experts");
   void import("@/pages/Knowledge");
@@ -42,8 +41,15 @@ const RouteLoading: React.FC = () => (
 // 应用外壳统一承载头部、侧边导航和内容区域。
 const AppShell: React.FC = () => {
   React.useEffect(() => {
-    // 首页初始化后后台预加载高频页面，减少首次切页时的等待感。
-    preloadCommonRoutes();
+    // 仅在浏览器空闲时预加载较轻的高频页面，避免启动阶段把工作台重页面提前拉起。
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      const requestIdle = window.requestIdleCallback as (callback: IdleRequestCallback) => number;
+      const cancelIdle = window.cancelIdleCallback as (handle: number) => void;
+      const handle = requestIdle(() => preloadCommonRoutes());
+      return () => cancelIdle(handle);
+    }
+    const handle = globalThis.setTimeout(() => preloadCommonRoutes(), 1200);
+    return () => globalThis.clearTimeout(handle);
   }, []);
 
   return (

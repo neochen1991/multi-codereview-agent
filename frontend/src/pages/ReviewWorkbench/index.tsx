@@ -1,27 +1,15 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Button, Card, Col, Empty, Modal, Row, Space, Tabs, Tag, Typography } from "antd";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import ArtifactSummaryPanel from "@/components/review/ArtifactSummaryPanel";
-import CodeReviewConclusionPanel from "@/components/review/CodeReviewConclusionPanel";
-import DiffPreviewPanel from "@/components/review/DiffPreviewPanel";
 import EventTimeline from "@/components/review/EventTimeline";
-import ExpertLaneBoard from "@/components/review/ExpertLaneBoard";
-import FindingsPanel from "@/components/review/FindingsPanel";
-import HumanGatePanel from "@/components/review/HumanGatePanel";
-import IssueDetailPanel from "@/components/review/IssueDetailPanel";
-import IssueThreadList from "@/components/review/IssueThreadList";
-import KnowledgeRefPanel from "@/components/review/KnowledgeRefPanel";
 import OverviewCards from "@/components/review/OverviewCards";
-import ReplayConsolePanel from "@/components/review/ReplayConsolePanel";
-import ReportSummaryPanel from "@/components/review/ReportSummaryPanel";
-import ReviewDialogueStream from "@/components/review/ReviewDialogueStream";
 import ReviewOverviewPanel, {
   type ReviewFormState,
   type ReviewOverviewExpertSelectionSummary,
 } from "@/components/review/ReviewOverviewPanel";
 import ReviewSubjectPanel from "@/components/review/ReviewSubjectPanel";
-import ToolAuditPanel from "@/components/review/ToolAuditPanel";
 import {
   buildReviewEventStreamUrl,
   expertApi,
@@ -38,6 +26,19 @@ import {
   type RuntimeSettings,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
+
+const CodeReviewConclusionPanel = lazy(() => import("@/components/review/CodeReviewConclusionPanel"));
+const DiffPreviewPanel = lazy(() => import("@/components/review/DiffPreviewPanel"));
+const ExpertLaneBoard = lazy(() => import("@/components/review/ExpertLaneBoard"));
+const FindingsPanel = lazy(() => import("@/components/review/FindingsPanel"));
+const HumanGatePanel = lazy(() => import("@/components/review/HumanGatePanel"));
+const IssueDetailPanel = lazy(() => import("@/components/review/IssueDetailPanel"));
+const IssueThreadList = lazy(() => import("@/components/review/IssueThreadList"));
+const KnowledgeRefPanel = lazy(() => import("@/components/review/KnowledgeRefPanel"));
+const ReplayConsolePanel = lazy(() => import("@/components/review/ReplayConsolePanel"));
+const ReportSummaryPanel = lazy(() => import("@/components/review/ReportSummaryPanel"));
+const ReviewDialogueStream = lazy(() => import("@/components/review/ReviewDialogueStream"));
+const ToolAuditPanel = lazy(() => import("@/components/review/ToolAuditPanel"));
 
 type RoutingExpertItem = {
   expert_id: string;
@@ -86,6 +87,12 @@ const defaultFormState: ReviewFormState = {
 };
 
 const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result"];
+
+const WorkbenchPanelFallback: React.FC<{ description?: string }> = ({ description = "模块加载中..." }) => (
+  <Card className="module-card">
+    <Empty description={description} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+  </Card>
+);
 
 const isWorkspaceTabKey = (value: string | null): value is WorkspaceTabKey =>
   Boolean(value && WORKSPACE_TAB_KEYS.includes(value as WorkspaceTabKey));
@@ -802,7 +809,12 @@ const ReviewWorkbenchPage: React.FC = () => {
                 <ExpertSelectionPanel summary={expertSelectionSummary} />
                 <ReviewSubjectPanel review={review} />
                 <ArtifactSummaryPanel artifacts={artifacts} />
-                <DiffPreviewPanel diff={review?.subject?.unified_diff || ""} />
+                <Suspense fallback={<WorkbenchPanelFallback description="Diff 预览加载中..." />}>
+                  <DiffPreviewPanel
+                    diff={review?.subject?.unified_diff || ""}
+                    changedFileCount={review?.subject?.changed_files?.length}
+                  />
+                </Suspense>
               </Space>
             </Col>
           </Row>
@@ -817,29 +829,48 @@ const ReviewWorkbenchPage: React.FC = () => {
                 <div ref={processDialogueRef}>
                   <Card className="module-card process-dialogue-card" title="专家对话流">
                     {reviewId ? (
-                      <ReviewDialogueStream messages={allMessages} review={review} events={events} />
+                      <Suspense fallback={<Empty description="专家对话流加载中..." image={Empty.PRESENTED_IMAGE_SIMPLE} />}>
+                        <ReviewDialogueStream messages={allMessages} review={review} events={events} />
+                      </Suspense>
                     ) : (
                       <Empty description="请先在“概览与启动”创建一个审核任务。" />
                     )}
                   </Card>
                 </div>
-                <ExpertLaneBoard review={review} messages={allMessages} />
-                <DiffPreviewPanel diff={review?.subject?.unified_diff || ""} />
-                <ReplayConsolePanel replay={replay} />
+                <Suspense fallback={<WorkbenchPanelFallback description="专家泳道加载中..." />}>
+                  <ExpertLaneBoard review={review} messages={allMessages} />
+                </Suspense>
+                <Suspense fallback={<WorkbenchPanelFallback description="Diff 预览加载中..." />}>
+                  <DiffPreviewPanel
+                    diff={review?.subject?.unified_diff || ""}
+                    changedFileCount={review?.subject?.changed_files?.length}
+                  />
+                </Suspense>
+                <Suspense fallback={<WorkbenchPanelFallback description="回放控制台加载中..." />}>
+                  <ReplayConsolePanel replay={replay} />
+                </Suspense>
               </Space>
             </Col>
             <Col xs={24} xl={7}>
               <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-sidebar-stack">
                 <div ref={processIssuesRef}>
-                  <IssueThreadList
-                    issues={issues}
-                    selectedIssueId={selectedIssueId}
-                    onSelect={setSelectedIssueId}
-                  />
+                  <Suspense fallback={<WorkbenchPanelFallback description="Issue 列表加载中..." />}>
+                    <IssueThreadList
+                      issues={issues}
+                      selectedIssueId={selectedIssueId}
+                      onSelect={setSelectedIssueId}
+                    />
+                  </Suspense>
                 </div>
-                <IssueDetailPanel issue={selectedIssue} />
-                <ToolAuditPanel issue={selectedIssue} />
-                <KnowledgeRefPanel documents={knowledgeDocs} loading={knowledgeLoading} />
+                <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
+                  <IssueDetailPanel issue={selectedIssue} />
+                </Suspense>
+                <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
+                  <ToolAuditPanel issue={selectedIssue} />
+                </Suspense>
+                <Suspense fallback={<WorkbenchPanelFallback description="知识引用加载中..." />}>
+                  <KnowledgeRefPanel documents={knowledgeDocs} loading={knowledgeLoading} />
+                </Suspense>
                 <EventTimeline events={events} />
               </Space>
             </Col>
@@ -851,81 +882,87 @@ const ReviewWorkbenchPage: React.FC = () => {
             <Row gutter={[16, 16]} align="stretch">
               <Col xs={24} xl={15}>
                 <div ref={resultSummaryRef}>
-                  <ReportSummaryPanel
-                    className="result-top-card"
-                    report={report}
-                    findings={findings}
-                    issues={issues}
-                    onNavigateToGroup={focusResultGroup}
-                  />
+                  <Suspense fallback={<WorkbenchPanelFallback description="审核报告加载中..." />}>
+                    <ReportSummaryPanel
+                      className="result-top-card"
+                      report={report}
+                      findings={findings}
+                      issues={issues}
+                      onNavigateToGroup={focusResultGroup}
+                    />
+                  </Suspense>
                 </div>
               </Col>
               <Col xs={24} xl={9}>
                 <div ref={resultHumanRef}>
-                  <HumanGatePanel
-                    className="result-top-card"
-                    review={review}
-                    selectedIssue={activeHumanIssue}
-                    isFallbackIssue={humanGateUsingFallbackIssue}
-                    decisionComment={decisionComment}
-                    submitting={submittingDecision}
-                    onDecisionCommentChange={setDecisionComment}
-                    onApprove={async () => {
-                      const targetIssue = activeHumanIssue;
-                      if (!reviewId || !targetIssue) return;
-                      setSubmittingDecision(true);
-                      try {
-                        await reviewApi.submitHumanDecision(reviewId, {
-                          issue_id: targetIssue.issue_id,
-                          decision: "approved",
-                          comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
-                        });
-                        await loadReviewBundle(reviewId);
-                        setDecisionComment("");
-                        message.success("已记录人工批准结论");
-                      } catch (error: any) {
-                        message.error(error?.message || "提交人工结论失败");
-                      } finally {
-                        setSubmittingDecision(false);
-                      }
-                    }}
-                    onReject={async () => {
-                      const targetIssue = activeHumanIssue;
-                      if (!reviewId || !targetIssue) return;
-                      setSubmittingDecision(true);
-                      try {
-                        await reviewApi.submitHumanDecision(reviewId, {
-                          issue_id: targetIssue.issue_id,
-                          decision: "rejected",
-                          comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
-                        });
-                        await loadReviewBundle(reviewId);
-                        setDecisionComment("");
-                        message.success("已记录人工驳回结论");
-                      } catch (error: any) {
-                        message.error(error?.message || "提交人工结论失败");
-                      } finally {
-                        setSubmittingDecision(false);
-                      }
-                    }}
-                  />
+                  <Suspense fallback={<WorkbenchPanelFallback description="人工门禁加载中..." />}>
+                    <HumanGatePanel
+                      className="result-top-card"
+                      review={review}
+                      selectedIssue={activeHumanIssue}
+                      isFallbackIssue={humanGateUsingFallbackIssue}
+                      decisionComment={decisionComment}
+                      submitting={submittingDecision}
+                      onDecisionCommentChange={setDecisionComment}
+                      onApprove={async () => {
+                        const targetIssue = activeHumanIssue;
+                        if (!reviewId || !targetIssue) return;
+                        setSubmittingDecision(true);
+                        try {
+                          await reviewApi.submitHumanDecision(reviewId, {
+                            issue_id: targetIssue.issue_id,
+                            decision: "approved",
+                            comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
+                          });
+                          await loadReviewBundle(reviewId);
+                          setDecisionComment("");
+                          message.success("已记录人工批准结论");
+                        } catch (error: any) {
+                          message.error(error?.message || "提交人工结论失败");
+                        } finally {
+                          setSubmittingDecision(false);
+                        }
+                      }}
+                      onReject={async () => {
+                        const targetIssue = activeHumanIssue;
+                        if (!reviewId || !targetIssue) return;
+                        setSubmittingDecision(true);
+                        try {
+                          await reviewApi.submitHumanDecision(reviewId, {
+                            issue_id: targetIssue.issue_id,
+                            decision: "rejected",
+                            comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
+                          });
+                          await loadReviewBundle(reviewId);
+                          setDecisionComment("");
+                          message.success("已记录人工驳回结论");
+                        } catch (error: any) {
+                          message.error(error?.message || "提交人工结论失败");
+                        } finally {
+                          setSubmittingDecision(false);
+                        }
+                      }}
+                    />
+                  </Suspense>
                 </div>
               </Col>
             </Row>
             <div ref={resultFindingsRef}>
-              <FindingsPanel
-                findings={findings}
-                issues={issues}
-                selectedFindingId={selectedFindingId}
-                activeGroup={findingsActiveGroup}
-                onGroupChange={setFindingsActiveGroup}
-                onSelectFinding={(findingId) => {
-                  setSelectedFindingId(findingId);
-                  const issue = issueByFindingId.get(findingId);
-                  if (issue) setSelectedIssueId(issue.issue_id);
-                  setFindingModalOpen(true);
-                }}
-              />
+              <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
+                <FindingsPanel
+                  findings={findings}
+                  issues={issues}
+                  selectedFindingId={selectedFindingId}
+                  activeGroup={findingsActiveGroup}
+                  onGroupChange={setFindingsActiveGroup}
+                  onSelectFinding={(findingId) => {
+                    setSelectedFindingId(findingId);
+                    const issue = issueByFindingId.get(findingId);
+                    if (issue) setSelectedIssueId(issue.issue_id);
+                    setFindingModalOpen(true);
+                  }}
+                />
+              </Suspense>
             </div>
             <ReviewSubjectPanel review={review} />
             <ArtifactSummaryPanel artifacts={artifacts} />
@@ -937,15 +974,17 @@ const ReviewWorkbenchPage: React.FC = () => {
               width={1240}
               destroyOnClose={false}
             >
-              <CodeReviewConclusionPanel
-                finding={selectedFinding}
-                issue={selectedFindingIssue}
-                onJumpToProcess={() => {
-                  setFindingModalOpen(false);
-                  setActiveStep("process");
-                  if (selectedFindingIssue) setSelectedIssueId(selectedFindingIssue.issue_id);
-                }}
-              />
+              <Suspense fallback={<WorkbenchPanelFallback description="问题详情加载中..." />}>
+                <CodeReviewConclusionPanel
+                  finding={selectedFinding}
+                  issue={selectedFindingIssue}
+                  onJumpToProcess={() => {
+                    setFindingModalOpen(false);
+                    setActiveStep("process");
+                    if (selectedFindingIssue) setSelectedIssueId(selectedFindingIssue.issue_id);
+                  }}
+                />
+              </Suspense>
             </Modal>
           </Space>
         )}

@@ -7,6 +7,15 @@ type ReviewSubjectPanelProps = {
   review: ReviewSummary | null;
 };
 
+const MAX_CHANGED_FILE_PREVIEW = 12;
+
+const formatChangedFilesSummary = (files: string[] | undefined): string => {
+  if (!files?.length) return "-";
+  if (files.length <= MAX_CHANGED_FILE_PREVIEW) return files.join(", ");
+  const preview = files.slice(0, MAX_CHANGED_FILE_PREVIEW).join(", ");
+  return `${preview} ... 另 ${files.length - MAX_CHANGED_FILE_PREVIEW} 个文件`;
+};
+
 // 审核对象卡用于展示当前 review 对应的仓库、分支和变更文件。
 const ReviewSubjectPanel: React.FC<ReviewSubjectPanelProps> = ({ review }) => {
   return (
@@ -19,9 +28,7 @@ const ReviewSubjectPanel: React.FC<ReviewSubjectPanelProps> = ({ review }) => {
         <Descriptions.Item label="项目">{review?.subject.project_id || "-"}</Descriptions.Item>
         <Descriptions.Item label="源分支">{review?.subject.source_ref || "-"}</Descriptions.Item>
         <Descriptions.Item label="目标分支">{review?.subject.target_ref || "-"}</Descriptions.Item>
-        <Descriptions.Item label="变更文件">
-          {review?.subject.changed_files?.length ? review.subject.changed_files.join(", ") : "-"}
-        </Descriptions.Item>
+        <Descriptions.Item label="变更文件">{formatChangedFilesSummary(review?.subject.changed_files)}</Descriptions.Item>
       </Descriptions>
     </Card>
   );

@@ -88,6 +88,11 @@ const normalizeValueList = (value: unknown): string[] => {
     .filter(Boolean);
 };
 
+const limitValueList = (values: string[], maxItems = 12): string[] => {
+  if (values.length <= maxItems) return values;
+  return [...values.slice(0, maxItems), `... 另 ${values.length - maxItems} 项`];
+};
+
 const normalizeSingleValue = (value: unknown): string[] => {
   if (typeof value === "string" && value.trim()) return [value.trim()];
   return [];
@@ -213,9 +218,9 @@ const buildKnowledgeContextGroup = (value: unknown): StructuredGroup | null => {
   const sections = [
     { label: "聚焦文件", values: focusFile ? [focusFile] : [] },
     { label: "聚焦行", values: focusLine },
-    { label: "变更文件", values: normalizeValueList(payload.changed_files) },
-    { label: "召回关键词", values: normalizeValueList(payload.query_terms) },
-    { label: "知识源绑定", values: normalizeValueList(payload.knowledge_sources) },
+    { label: "变更文件", values: limitValueList(normalizeValueList(payload.changed_files), 10) },
+    { label: "召回关键词", values: limitValueList(normalizeValueList(payload.query_terms), 10) },
+    { label: "知识源绑定", values: limitValueList(normalizeValueList(payload.knowledge_sources), 10) },
   ].filter((section) => section.values.length > 0);
   if (!sections.length) return null;
   return { title: "知识检索上下文", sections };
@@ -317,6 +322,9 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "main_agent_summary" ||
     eventType === "main_agent_intake" ||
     eventType === "main_agent_expert_selection" ||
+    eventType === "main_agent_routing_preparing" ||
+    eventType === "main_agent_routing_ready" ||
+    eventType === "main_agent_expert_execution_completed" ||
     eventType === "issue_filter_applied"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
@@ -356,6 +364,12 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("主Agent 已接收并整理本次审核输入");
   } else if (eventType === "main_agent_expert_selection") {
     summaryParts.push("主Agent 已基于 MR 信息判定本次参与审核的专家");
+  } else if (eventType === "main_agent_routing_preparing") {
+    summaryParts.push("主Agent 正在构建派工上下文");
+  } else if (eventType === "main_agent_routing_ready") {
+    summaryParts.push("主Agent 已完成派工规划，准备下发专家任务");
+  } else if (eventType === "main_agent_expert_execution_completed") {
+    summaryParts.push("专家审查执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
     summaryParts.push("主Agent 已按治理规则筛出仅保留为 finding 的提示性问题");
   }
@@ -515,8 +529,8 @@ const buildStructuredGroups = (
         {
           title: "变更文件",
           sections: [
-            { label: "全部变更文件", values: normalizeValueList(metadata.changed_files) },
-            { label: "业务变更文件", values: normalizeValueList(metadata.business_changed_files) },
+            { label: "全部变更文件", values: limitValueList(normalizeValueList(metadata.changed_files), 16) },
+            { label: "业务变更文件", values: limitValueList(normalizeValueList(metadata.business_changed_files), 16) },
           ].filter((section) => section.values.length > 0),
         },
       ].filter((group) => group.sections.length > 0),
@@ -543,6 +557,18 @@ const buildStructuredGroups = (
       summaryText: row.summary,
       groups: [
         {
+          title: "阶段耗时",
+          sections: [
+            {
+              label: "专家判定耗时",
+              values:
+                typeof metadata.selection_elapsed_ms === "number"
+                  ? [`${metadata.selection_elapsed_ms} ms`]
+                  : [],
+            },
+          ].filter((section) => section.values.length > 0),
+        },
+        {
           title: "参与审核的专家",
           sections: [
             { label: "大模型选中", values: formatExpertRows(selectedExperts) },
@@ -555,6 +581,78 @@ const buildStructuredGroups = (
           ].filter((section) => section.values.length > 0),
         },
       ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  if (row.eventType === "main_agent_routing_preparing") {
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "派工准备",
+          sections: [
+            { label: "分析模式", values: normalizeSingleValue(metadata.analysis_mode) },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+            {
+              label: "变更文件数",
+              values:
+                typeof metadata.changed_file_count === "number"
+                  ? [String(metadata.changed_file_count)]
+                  : [],
+            },
+          ].filter((section) => section.values.length > 0),
+        },
+      ],
+    };
+  }
+
+  if (row.eventType === "main_agent_routing_ready") {
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "派工规划完成",
+          sections: [
+            {
+              label: "派工规划耗时",
+              values:
+                typeof metadata.routing_elapsed_ms === "number"
+                  ? [`${metadata.routing_elapsed_ms} ms`]
+                  : [],
+            },
+            { label: "分析模式", values: normalizeSingleValue(metadata.analysis_mode) },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ],
+    };
+  }
+
+  if (row.eventType === "main_agent_expert_execution_completed") {
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "专家执行耗时",
+          sections: [
+            {
+              label: "专家执行耗时",
+              values:
+                typeof metadata.expert_execution_elapsed_ms === "number"
+                  ? [`${metadata.expert_execution_elapsed_ms} ms`]
+                  : [],
+            },
+            {
+              label: "执行专家数",
+              values:
+                typeof metadata.expert_job_count === "number"
+                  ? [String(metadata.expert_job_count)]
+                  : [],
+            },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ],
     };
   }
 

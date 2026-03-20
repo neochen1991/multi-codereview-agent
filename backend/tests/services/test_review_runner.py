@@ -43,11 +43,11 @@ def test_review_runner_emits_main_agent_intake_before_routing_plan(storage_root:
     review_id = runner.bootstrap_demo_review()
     original_build_routing_plan = runner.main_agent_service.build_routing_plan
 
-    def _assert_intake_written_first(subject, experts, runtime_settings):
+    def _assert_intake_written_first(subject, experts, runtime_settings, analysis_mode="standard"):
         messages = runner.message_repo.list(review_id)
         intake_messages = [item for item in messages if item.message_type == "main_agent_intake"]
         assert intake_messages, "main_agent_intake 应该在路由规划前就已写入"
-        return original_build_routing_plan(subject, experts, runtime_settings)
+        return original_build_routing_plan(subject, experts, runtime_settings, analysis_mode=analysis_mode)
 
     monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_intake_written_first)
 
@@ -83,16 +83,50 @@ def test_review_runner_emits_expert_selection_before_routing_plan(storage_root: 
             },
         }
 
-    def _assert_selection_written_first(subject, experts, runtime_settings):
+    def _assert_selection_written_first(subject, experts, runtime_settings, analysis_mode="standard"):
         messages = runner.message_repo.list(review_id)
         selection_messages = [item for item in messages if item.message_type == "main_agent_expert_selection"]
         assert selection_messages, "main_agent_expert_selection 应该在路由规划前就已写入"
-        return original_build_routing_plan(subject, experts, runtime_settings)
+        return original_build_routing_plan(subject, experts, runtime_settings, analysis_mode=analysis_mode)
 
     monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
     monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_selection_written_first)
 
     runner.run_once(review_id)
+
+
+def test_review_runner_emits_routing_preparing_before_build_routing_plan(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    original_build_routing_plan = runner.main_agent_service.build_routing_plan
+
+    def _assert_routing_prepare_written_first(subject, experts, runtime_settings, analysis_mode="standard"):
+        messages = runner.message_repo.list(review_id)
+        preparing_messages = [item for item in messages if item.message_type == "main_agent_routing_preparing"]
+        assert preparing_messages, "main_agent_routing_preparing 应该在真正构建 routing_plan 前就已写入"
+        return original_build_routing_plan(subject, experts, runtime_settings, analysis_mode=analysis_mode)
+
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _assert_routing_prepare_written_first)
+
+    runner.run_once(review_id)
+
+
+def test_review_runner_emits_phase_timing_messages(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+
+    runner.run_once(review_id)
+
+    messages = runner.message_repo.list(review_id)
+    selection_message = next(item for item in messages if item.message_type == "main_agent_expert_selection")
+    routing_ready_message = next(item for item in messages if item.message_type == "main_agent_routing_ready")
+    expert_execution_message = next(
+        item for item in messages if item.message_type == "main_agent_expert_execution_completed"
+    )
+
+    assert isinstance(selection_message.metadata.get("selection_elapsed_ms"), (int, float))
+    assert isinstance(routing_ready_message.metadata.get("routing_elapsed_ms"), (int, float))
+    assert isinstance(expert_execution_message.metadata.get("expert_execution_elapsed_ms"), (int, float))
 
 
 def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_findings(storage_root: Path, monkeypatch):
@@ -110,7 +144,7 @@ def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_find
             "llm": {"provider": "test", "model": "test", "mode": "mock"},
         }
 
-    def _fake_build_routing_plan(subject, experts, runtime_settings):
+    def _fake_build_routing_plan(subject, experts, runtime_settings, analysis_mode="standard"):
         first = experts[0]
         return {
             "jobs": [

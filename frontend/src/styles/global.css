@@ -1262,6 +1262,7 @@ body {
   grid-template-columns: 300px minmax(0, 1fr);
   height: 540px;
   background: #fff;
+  contain: layout paint;
 }
 
 .github-diff-sidebar {
@@ -1271,6 +1272,7 @@ body {
   min-height: 0;
   background: #f6f8fa;
   border-right: 1px solid #d8dee4;
+  contain: layout paint;
 }
 
 .github-diff-sidebar-header {
@@ -1318,6 +1320,8 @@ body {
   min-height: 0;
   overflow: auto;
   padding: 8px 0 10px;
+  content-visibility: auto;
+  contain-intrinsic-size: 540px;
 }
 
 .github-diff-tree-node {
@@ -1398,6 +1402,7 @@ body {
   min-height: 0;
   overflow: auto;
   background: #ffffff;
+  contain: layout paint;
 }
 
 .github-diff-file {
@@ -1468,6 +1473,8 @@ body {
 
 .github-diff-file-body {
   background: #ffffff;
+  content-visibility: auto;
+  contain-intrinsic-size: 1200px;
 }
 
 .github-diff-line {

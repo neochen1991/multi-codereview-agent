@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from typing import Literal
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.issue import DebateIssue
@@ -30,6 +31,7 @@ class MainAgentService:
         self._llm = LLMChatService()
         self._diff_excerpt_service = DiffExcerptService()
         self._capability_service = ExpertCapabilityService()
+        self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
     def build_command(
         self,
@@ -108,6 +110,8 @@ class MainAgentService:
         subject: ReviewSubject,
         experts: list[ExpertProfile],
         runtime_settings: RuntimeSettings,
+        *,
+        analysis_mode: Literal["standard", "light"] = "standard",
     ) -> dict[str, dict[str, object]]:
         """基于完整业务变更和专家职责生成统一派工计划。
 
@@ -115,12 +119,23 @@ class MainAgentService:
         1. 先用现有规则挑出每个专家的 baseline route，作为兜底计划
         2. 再把全部业务变更、候选 hunk 和专家职责交给 LLM 做语义分工
         """
-
+        self._repo_context_cache.clear()
         repository_service = self._build_repository_service(runtime_settings)
         baseline_routes = {
             expert.expert_id: self._build_rule_route(subject, expert, repository_service)
             for expert in experts
         }
+        if analysis_mode == "light":
+            for route in baseline_routes.values():
+                route["routing_llm"] = {
+                    "provider": "main-agent-template",
+                    "model": "template",
+                    "base_url": "",
+                    "api_key_env": "",
+                    "mode": "rule_only_light",
+                    "error": "",
+                }
+            return baseline_routes
         candidate_hunks = self._build_candidate_hunks(subject, repository_service)
         if not candidate_hunks or not experts:
             return baseline_routes
@@ -874,6 +889,15 @@ class MainAgentService:
         queries = self._derive_repo_queries(file_path, hunk)
         if not queries:
             return {"queries": [], "matches": [], "symbol_contexts": []}
+        cache_key = (
+            str(service.local_path),
+            service.default_branch,
+            file_path,
+            tuple(sorted(queries[:4])),
+        )
+        cached = self._repo_context_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         search_result = service.search_many(queries, globs=None, limit_per_query=4, total_limit=8)
         filtered_matches = [
             item
@@ -901,11 +925,13 @@ class MainAgentService:
                     ],
                 }
             )
-        return {
+        result = {
             **search_result,
             "matches": filtered_matches,
             "symbol_contexts": filtered_symbol_contexts,
         }
+        self._repo_context_cache[cache_key] = dict(result)
+        return result
 
     def _derive_repo_queries(self, file_path: str, hunk: dict[str, object]) -> list[str]:
         tokens: list[str] = []

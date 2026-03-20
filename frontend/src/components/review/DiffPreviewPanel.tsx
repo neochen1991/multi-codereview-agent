@@ -1,16 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   CaretDownFilled,
   CaretRightFilled,
   FileTextOutlined,
   FolderOpenOutlined,
 } from "@ant-design/icons";
-import { Card, Empty, Typography } from "antd";
+import { Alert, Button, Card, Empty, Space, Typography } from "antd";
 
 const { Text } = Typography;
 
 type DiffPreviewPanelProps = {
   diff: string;
+  changedFileCount?: number;
 };
 
 type DiffLine = {
@@ -21,13 +22,14 @@ type DiffLine = {
   content: string;
 };
 
-type DiffFile = {
+type DiffFileSummary = {
   key: string;
   path: string;
-  lines: DiffLine[];
   additions: number;
   removals: number;
   hunkCount: number;
+  startIndex: number;
+  endIndex: number;
 };
 
 type FileTreeNode = {
@@ -41,45 +43,81 @@ type FileTreeNode = {
 
 type ExpandedState = Record<string, boolean>;
 
-const parseDiff = (diff: string): DiffFile[] => {
-  // 先把 unified diff 解析成“文件 -> diff 行”的结构，
-  // 左侧文件树和右侧详细 diff 都依赖这份中间态。
-  const lines = diff.replace(/\r/g, "").split("\n");
-  const files: DiffFile[] = [];
-  let currentFile: DiffFile | null = null;
-  let oldLine = 0;
-  let newLine = 0;
+type VisibleTreeNode = {
+  key: string;
+  node: FileTreeNode;
+  depth: number;
+};
 
-  const pushCurrent = () => {
-    if (currentFile && currentFile.lines.length > 0) files.push(currentFile);
+const LARGE_DIFF_FILE_THRESHOLD = 400;
+const LARGE_DIFF_LINE_THRESHOLD = 20000;
+const DEFER_PARSE_FILE_THRESHOLD = 1000;
+const DEFER_PARSE_CHAR_THRESHOLD = 1_500_000;
+const TREE_RENDER_BATCH_SIZE = 240;
+const MAX_ACTIVE_FILE_LINES = 1600;
+const ACTIVE_FILE_HEAD_LINES = 800;
+const ACTIVE_FILE_TAIL_LINES = 400;
+
+const parseDiffFiles = (lines: string[]): DiffFileSummary[] => {
+  const files: DiffFileSummary[] = [];
+  let currentFile: DiffFileSummary | null = null;
+
+  const pushCurrent = (endIndex: number) => {
+    if (!currentFile) return;
+    currentFile.endIndex = endIndex;
+    files.push(currentFile);
+    currentFile = null;
   };
 
-  for (const rawLine of lines) {
+  lines.forEach((rawLine, index) => {
     if (rawLine.startsWith("diff --git ")) {
-      pushCurrent();
+      pushCurrent(index);
       const match = rawLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
       currentFile = {
         key: `${files.length}-${rawLine}`,
         path: match?.[2] || match?.[1] || rawLine.replace("diff --git ", ""),
-        lines: [],
         additions: 0,
         removals: 0,
         hunkCount: 0,
+        startIndex: index,
+        endIndex: lines.length,
       };
-      oldLine = 0;
-      newLine = 0;
-      continue;
+      return;
     }
 
-    if (!currentFile) continue;
+    if (!currentFile) return;
+    if (rawLine.startsWith("@@")) {
+      currentFile.hunkCount += 1;
+      return;
+    }
+    if (rawLine.startsWith("+") && !rawLine.startsWith("+++ ")) {
+      currentFile.additions += 1;
+      return;
+    }
+    if (rawLine.startsWith("-") && !rawLine.startsWith("--- ")) {
+      currentFile.removals += 1;
+    }
+  });
+
+  pushCurrent(lines.length);
+  return files;
+};
+
+const parseActiveFileLines = (lines: string[], file: DiffFileSummary | null): { rows: DiffLine[]; truncated: boolean } => {
+  if (!file) return { rows: [], truncated: false };
+  const rows: DiffLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const rawLine of lines.slice(file.startIndex, file.endIndex)) {
+    if (rawLine.startsWith("diff --git ")) continue;
 
     if (rawLine.startsWith("@@")) {
       const match = rawLine.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       oldLine = Number(match?.[1] || 0);
       newLine = Number(match?.[2] || 0);
-      currentFile.hunkCount += 1;
-      currentFile.lines.push({
-        key: `${currentFile.key}-meta-${currentFile.lines.length}`,
+      rows.push({
+        key: `${file.key}-meta-${rows.length}`,
         type: "meta",
         oldNumber: null,
         newNumber: null,
@@ -95,8 +133,8 @@ const parseDiff = (diff: string): DiffFile[] => {
       rawLine.startsWith("new file mode ") ||
       rawLine.startsWith("deleted file mode ")
     ) {
-      currentFile.lines.push({
-        key: `${currentFile.key}-meta-${currentFile.lines.length}`,
+      rows.push({
+        key: `${file.key}-meta-${rows.length}`,
         type: "meta",
         oldNumber: null,
         newNumber: null,
@@ -106,9 +144,8 @@ const parseDiff = (diff: string): DiffFile[] => {
     }
 
     if (rawLine.startsWith("+")) {
-      currentFile.additions += 1;
-      currentFile.lines.push({
-        key: `${currentFile.key}-add-${currentFile.lines.length}`,
+      rows.push({
+        key: `${file.key}-add-${rows.length}`,
         type: "add",
         oldNumber: null,
         newNumber: newLine,
@@ -119,9 +156,8 @@ const parseDiff = (diff: string): DiffFile[] => {
     }
 
     if (rawLine.startsWith("-")) {
-      currentFile.removals += 1;
-      currentFile.lines.push({
-        key: `${currentFile.key}-remove-${currentFile.lines.length}`,
+      rows.push({
+        key: `${file.key}-remove-${rows.length}`,
         type: "remove",
         oldNumber: oldLine,
         newNumber: null,
@@ -131,8 +167,8 @@ const parseDiff = (diff: string): DiffFile[] => {
       continue;
     }
 
-    currentFile.lines.push({
-      key: `${currentFile.key}-context-${currentFile.lines.length}`,
+    rows.push({
+      key: `${file.key}-context-${rows.length}`,
       type: "context",
       oldNumber: oldLine || null,
       newNumber: newLine || null,
@@ -142,12 +178,30 @@ const parseDiff = (diff: string): DiffFile[] => {
     if (newLine) newLine += 1;
   }
 
-  pushCurrent();
-  return files;
+  if (rows.length <= MAX_ACTIVE_FILE_LINES) {
+    return { rows, truncated: false };
+  }
+
+  const head = rows.slice(0, ACTIVE_FILE_HEAD_LINES);
+  const tail = rows.slice(-ACTIVE_FILE_TAIL_LINES);
+  const omitted = rows.length - head.length - tail.length;
+  return {
+    rows: [
+      ...head,
+      {
+        key: `${file.key}-omitted`,
+        type: "meta",
+        oldNumber: null,
+        newNumber: null,
+        content: `... 省略 ${omitted} 行 diff 明细，避免大文件渲染卡顿 ...`,
+      },
+      ...tail,
+    ],
+    truncated: true,
+  };
 };
 
-const buildTree = (files: DiffFile[]): FileTreeNode[] => {
-  // 把平铺文件列表转成左侧目录树，便于复杂 PR 中按路径导航。
+const buildTree = (files: DiffFileSummary[]): FileTreeNode[] => {
   const roots: FileTreeNode[] = [];
   const nodeByKey = new Map<string, FileTreeNode>();
 
@@ -193,81 +247,63 @@ const buildTree = (files: DiffFile[]): FileTreeNode[] => {
   return roots;
 };
 
-const renderTree = (
-  nodes: FileTreeNode[],
-  selectedPath: string | undefined,
-  onSelect: (path: string) => void,
-  expandedKeys: ExpandedState,
-  onToggle: (key: string) => void,
-  depth = 0,
-): React.ReactNode =>
-  nodes.map((node) => {
-    const isFile = Boolean(node.path);
-    const isActive = node.path && node.path === selectedPath;
-    const isExpanded = expandedKeys[node.key] !== false;
-    return (
-      <div key={node.key} className="github-diff-tree-node">
-        <button
-          type="button"
-          className={`github-diff-tree-item${isActive ? " is-active" : ""}${isFile ? " is-file" : " is-folder"}`}
-          style={{ paddingLeft: `${14 + depth * 16}px` }}
-          onClick={() => {
-            if (node.path) {
-              onSelect(node.path);
-              return;
-            }
-            onToggle(node.key);
-          }}
-        >
-          <span className="github-diff-tree-label">
-            <span className="github-diff-tree-icon">
-              {isFile ? (
-                <FileTextOutlined />
-              ) : isExpanded ? (
-                <CaretDownFilled />
-              ) : (
-                <CaretRightFilled />
-              )}
-            </span>
-            {!isFile ? <span className="github-diff-tree-folder-icon"><FolderOpenOutlined /></span> : null}
-            <span className="github-diff-tree-text">{node.label}</span>
-          </span>
-          <span className="github-diff-tree-stats">
-            {node.additions > 0 ? <span className="github-diff-stat-add">+{node.additions}</span> : null}
-            {node.removals > 0 ? <span className="github-diff-stat-remove">-{node.removals}</span> : null}
-          </span>
-        </button>
-        {!isFile && isExpanded && node.children.length > 0
-          ? renderTree(node.children, selectedPath, onSelect, expandedKeys, onToggle, depth + 1)
-          : null}
-      </div>
-    );
-  });
+const buildInitialExpandedKeys = (nodes: FileTreeNode[], compactMode: boolean): ExpandedState => {
+  const nextExpanded: ExpandedState = {};
+  const walk = (items: FileTreeNode[], depth: number) => {
+    for (const item of items) {
+      if (!item.path) {
+        nextExpanded[item.key] = compactMode ? depth < 1 : true;
+        walk(item.children, depth + 1);
+      }
+    }
+  };
+  walk(nodes, 0);
+  return nextExpanded;
+};
 
-const DiffPreviewPanel: React.FC<DiffPreviewPanelProps> = ({ diff }) => {
-  // Diff 预览是过程页第二主视图：
-  // 左侧负责“选文件”，右侧负责“看当前文件的详细 diff”。
-  const files = useMemo(() => parseDiff(diff), [diff]);
+const flattenVisibleTree = (
+  nodes: FileTreeNode[],
+  expandedKeys: ExpandedState,
+  depth = 0,
+): VisibleTreeNode[] => {
+  const rows: VisibleTreeNode[] = [];
+  for (const node of nodes) {
+    rows.push({ key: node.key, node, depth });
+    if (!node.path && expandedKeys[node.key] !== false && node.children.length > 0) {
+      rows.push(...flattenVisibleTree(node.children, expandedKeys, depth + 1));
+    }
+  }
+  return rows;
+};
+
+const DiffPreviewPanel: React.FC<DiffPreviewPanelProps> = ({ diff, changedFileCount }) => {
+  const shouldDeferLargePreview = Boolean(
+    diff &&
+      ((changedFileCount || 0) >= DEFER_PARSE_FILE_THRESHOLD || diff.length >= DEFER_PARSE_CHAR_THRESHOLD),
+  );
+  const [previewEnabled, setPreviewEnabled] = useState(!shouldDeferLargePreview);
+  const deferredDiff = useDeferredValue(diff);
+  const rawLines = useMemo(
+    () => (previewEnabled ? deferredDiff.replace(/\r/g, "").split("\n") : []),
+    [deferredDiff, previewEnabled],
+  );
+  const files = useMemo(() => parseDiffFiles(rawLines), [rawLines]);
+  const compactMode = files.length >= LARGE_DIFF_FILE_THRESHOLD || rawLines.length >= LARGE_DIFF_LINE_THRESHOLD;
   const tree = useMemo(() => buildTree(files), [files]);
   const [selectedPath, setSelectedPath] = useState<string | undefined>(files[0]?.path);
   const [expandedKeys, setExpandedKeys] = useState<ExpandedState>({});
+  const [treeRenderLimit, setTreeRenderLimit] = useState(TREE_RENDER_BATCH_SIZE);
 
   const totalAdditions = useMemo(() => files.reduce((sum, file) => sum + file.additions, 0), [files]);
   const totalRemovals = useMemo(() => files.reduce((sum, file) => sum + file.removals, 0), [files]);
 
   useEffect(() => {
-    const nextExpanded: ExpandedState = {};
-    const walk = (nodes: FileTreeNode[]) => {
-      for (const node of nodes) {
-        if (!node.path) {
-          nextExpanded[node.key] = true;
-          walk(node.children);
-        }
-      }
-    };
-    walk(tree);
-    setExpandedKeys(nextExpanded);
-  }, [tree]);
+    setExpandedKeys(buildInitialExpandedKeys(tree, compactMode));
+  }, [tree, compactMode]);
+
+  useEffect(() => {
+    setTreeRenderLimit(TREE_RENDER_BATCH_SIZE);
+  }, [tree, compactMode, previewEnabled]);
 
   useEffect(() => {
     if (!files.length) {
@@ -279,7 +315,22 @@ const DiffPreviewPanel: React.FC<DiffPreviewPanelProps> = ({ diff }) => {
     }
   }, [files, selectedPath]);
 
-  const activeFile = files.find((file) => file.path === selectedPath) || files[0] || null;
+  const fileByPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+  const deferredSelectedPath = useDeferredValue(selectedPath);
+  const activeFile = (deferredSelectedPath ? fileByPath.get(deferredSelectedPath) : undefined) || files[0] || null;
+  const activeFileLines = useMemo(
+    () => parseActiveFileLines(rawLines, activeFile),
+    [activeFile, rawLines],
+  );
+  const visibleTreeRows = useMemo(
+    () => flattenVisibleTree(tree, expandedKeys),
+    [tree, expandedKeys],
+  );
+  const renderedTreeRows = useMemo(
+    () => visibleTreeRows.slice(0, treeRenderLimit),
+    [visibleTreeRows, treeRenderLimit],
+  );
+  const hiddenTreeRowCount = Math.max(visibleTreeRows.length - renderedTreeRows.length, 0);
 
   const toggleNode = (key: string) => {
     setExpandedKeys((current) => ({
@@ -288,57 +339,142 @@ const DiffPreviewPanel: React.FC<DiffPreviewPanelProps> = ({ diff }) => {
     }));
   };
 
+  useEffect(() => {
+    setPreviewEnabled(!shouldDeferLargePreview);
+  }, [shouldDeferLargePreview, diff]);
+
   return (
     <Card className="module-card diff-panel-card" title="Diff 预览">
-      {!diff || files.length === 0 ? (
+      {!diff ? (
+        <Empty description="当前审核没有可展示的 diff。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      ) : !previewEnabled ? (
+        <Alert
+          showIcon
+          type="warning"
+          message="当前变更规模过大，Diff 预览已切换为延迟加载模式"
+          description={
+            <Space direction="vertical" size={12}>
+              <Text type="secondary">
+                {`本次约 ${changedFileCount || "很多"} 个变更文件，统一 diff 长度约 ${diff.length.toLocaleString()} 字符。为避免页面无响应，系统默认不立即解析整份 diff。`}
+              </Text>
+              <Button type="primary" onClick={() => startTransition(() => setPreviewEnabled(true))}>
+                手动加载 Diff 预览
+              </Button>
+            </Space>
+          }
+        />
+      ) : files.length === 0 ? (
         <Empty description="当前审核没有可展示的 diff。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
       ) : (
-        <div className="github-diff-shell">
-          <aside className="github-diff-sidebar">
-            <div className="github-diff-sidebar-header">
-              <span>Changed files</span>
-              <span>{files.length}</span>
-            </div>
-            <div className="github-diff-sidebar-summary">
-              <span className="github-diff-sidebar-badge">+{totalAdditions}</span>
-              <span className="github-diff-sidebar-badge is-remove">-{totalRemovals}</span>
-            </div>
-            <div className="github-diff-tree">
-              {renderTree(tree, activeFile?.path, setSelectedPath, expandedKeys, toggleNode)}
-            </div>
-          </aside>
-          <section className="github-diff-detail">
-            {!activeFile ? (
-              <Empty description="请选择一个变更文件查看 diff 详情。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            ) : (
-              <div className="github-diff-file">
-                <header className="github-diff-file-header">
-                  <div className="github-diff-file-meta">
-                    <Text className="github-diff-file-path">{activeFile.path}</Text>
-                    <div className="github-diff-file-badges">
-                      <span className="github-diff-file-badge">File</span>
-                      <span className="github-diff-file-badge">Hunks {activeFile.hunkCount}</span>
-                      <span className="github-diff-file-badge github-diff-file-badge-add">+{activeFile.additions}</span>
-                      <span className="github-diff-file-badge github-diff-file-badge-remove">-{activeFile.removals}</span>
-                    </div>
-                  </div>
-                </header>
-                <div className="github-diff-file-body">
-                  {activeFile.lines.map((line) => (
-                    <div key={line.key} className={`github-diff-line github-diff-line-${line.type}`}>
-                      <span className="github-diff-line-number">{line.oldNumber ?? ""}</span>
-                      <span className="github-diff-line-number">{line.newNumber ?? ""}</span>
-                      <code className="github-diff-line-code">{line.content || " "}</code>
-                    </div>
-                  ))}
-                </div>
+        <>
+          {compactMode ? (
+            <Alert
+              showIcon
+              type="info"
+              style={{ marginBottom: 12 }}
+              message="当前变更文件很多，Diff 预览已切换为性能保护模式"
+              description={`本次共 ${files.length} 个文件、${rawLines.length} 行 diff。系统已改为按需解析当前文件明细，并默认折叠目录树，避免页面卡顿。`}
+            />
+          ) : null}
+          <div className="github-diff-shell">
+            <aside className="github-diff-sidebar">
+              <div className="github-diff-sidebar-header">
+                <span>Changed files</span>
+                <span>{files.length}</span>
               </div>
-            )}
-          </section>
-        </div>
+              <div className="github-diff-sidebar-summary">
+                <span className="github-diff-sidebar-badge">+{totalAdditions}</span>
+                <span className="github-diff-sidebar-badge is-remove">-{totalRemovals}</span>
+              </div>
+              <div className="github-diff-tree">
+                {renderedTreeRows.map(({ key, node, depth }) => {
+                  const isFile = Boolean(node.path);
+                  const isActive = node.path && node.path === activeFile?.path;
+                  const isExpanded = expandedKeys[node.key] !== false;
+                  return (
+                    <div key={key} className="github-diff-tree-node">
+                      <button
+                        type="button"
+                        className={`github-diff-tree-item${isActive ? " is-active" : ""}${isFile ? " is-file" : " is-folder"}`}
+                        style={{ paddingLeft: `${14 + depth * 16}px` }}
+                        onClick={() => {
+                          if (node.path) {
+                            startTransition(() => setSelectedPath(node.path));
+                            return;
+                          }
+                          toggleNode(node.key);
+                        }}
+                      >
+                        <span className="github-diff-tree-label">
+                          <span className="github-diff-tree-icon">
+                            {isFile ? <FileTextOutlined /> : isExpanded ? <CaretDownFilled /> : <CaretRightFilled />}
+                          </span>
+                          {!isFile ? (
+                            <span className="github-diff-tree-folder-icon">
+                              <FolderOpenOutlined />
+                            </span>
+                          ) : null}
+                          <span className="github-diff-tree-text">{node.label}</span>
+                        </span>
+                        <span className="github-diff-tree-stats">
+                          {node.additions > 0 ? <span className="github-diff-stat-add">+{node.additions}</span> : null}
+                          {node.removals > 0 ? <span className="github-diff-stat-remove">-{node.removals}</span> : null}
+                        </span>
+                      </button>
+                    </div>
+                  );
+                })}
+                {hiddenTreeRowCount > 0 ? (
+                  <div className="github-diff-tree-node">
+                    <Button type="link" size="small" onClick={() => setTreeRenderLimit((current) => current + TREE_RENDER_BATCH_SIZE)}>
+                      继续加载目录项（剩余 {hiddenTreeRowCount} 项）
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </aside>
+            <section className="github-diff-detail">
+              {!activeFile ? (
+                <Empty description="请选择一个变更文件查看 diff 详情。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              ) : (
+                <div className="github-diff-file">
+                  <header className="github-diff-file-header">
+                    <div className="github-diff-file-meta">
+                      <Text className="github-diff-file-path">{activeFile.path}</Text>
+                      <div className="github-diff-file-badges">
+                        <span className="github-diff-file-badge">File</span>
+                        <span className="github-diff-file-badge">Hunks {activeFile.hunkCount}</span>
+                        <span className="github-diff-file-badge github-diff-file-badge-add">+{activeFile.additions}</span>
+                        <span className="github-diff-file-badge github-diff-file-badge-remove">-{activeFile.removals}</span>
+                      </div>
+                    </div>
+                  </header>
+                  {activeFileLines.truncated ? (
+                    <Alert
+                      showIcon
+                      type="warning"
+                      style={{ margin: "0 16px 12px" }}
+                      message="当前文件 diff 很大，已截断中间部分"
+                      description="为避免浏览器长时间无响应，只渲染前段和尾段 diff 明细。"
+                    />
+                  ) : null}
+                  <div className="github-diff-file-body">
+                    {activeFileLines.rows.map((line) => (
+                      <div key={line.key} className={`github-diff-line github-diff-line-${line.type}`}>
+                        <span className="github-diff-line-number">{line.oldNumber ?? ""}</span>
+                        <span className="github-diff-line-number">{line.newNumber ?? ""}</span>
+                        <code className="github-diff-line-code">{line.content || " "}</code>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        </>
       )}
     </Card>
   );
 };
 
-export default DiffPreviewPanel;
+export default React.memo(DiffPreviewPanel);

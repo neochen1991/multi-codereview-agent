@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,12 +145,14 @@ class ReviewRunner:
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
         requested_selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
         enabled_experts = self.registry.list_enabled()
+        selection_started_at = time.perf_counter()
         selection_plan = self.main_agent_service.select_review_experts(
             review.subject,
             enabled_experts,
             effective_runtime_settings,
             requested_expert_ids=requested_selected_ids,
         )
+        selection_elapsed_ms = round((time.perf_counter() - selection_started_at) * 1000, 1)
         selected_ids = [
             expert_id
             for expert_id in list(selection_plan.get("selected_expert_ids", []) or [])
@@ -180,6 +183,7 @@ class ReviewRunner:
                 content=selection_summary,
                 metadata={
                     "phase": "coordination",
+                    "selection_elapsed_ms": selection_elapsed_ms,
                     "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
                     "candidate_expert_ids": list(selection_plan.get("candidate_expert_ids", []) or []),
                     "selected_experts": list(selection_plan.get("selected_experts", []) or []),
@@ -195,10 +199,18 @@ class ReviewRunner:
                 phase="coordination",
                 message="主Agent 已基于 MR 信息和专家画像确定本次参与审核的专家",
                 payload={
+                    "selection_elapsed_ms": selection_elapsed_ms,
                     "selected_expert_ids": selected_ids,
                     "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
                 },
             )
+        )
+        logger.info(
+            "main agent expert selection done review_id=%s analysis_mode=%s selected_experts=%s elapsed_ms=%s",
+            review.review_id,
+            analysis_mode,
+            selected_ids,
+            selection_elapsed_ms,
         )
         logger.info(
             "review execution review_id=%s analysis_mode=%s requested_experts=%s selected_experts=%s enabled_experts=%s matched_experts=%s llm_timeout=%s llm_retries=%s max_parallel=%s",
@@ -276,10 +288,77 @@ class ReviewRunner:
                 payload=intake_metadata,
             )
         )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_routing_preparing",
+                content="主Agent 正在构建派工上下文：扫描候选 hunk、检索代码仓上下文，并生成专家派工计划。",
+                metadata={
+                    "phase": "coordination",
+                    "selected_expert_ids": selected_ids,
+                    "analysis_mode": analysis_mode,
+                    "changed_file_count": len(review.subject.changed_files),
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="main_agent_routing_preparing",
+                phase="coordination",
+                message="主Agent 正在构建派工上下文",
+                payload={
+                    "selected_expert_ids": selected_ids,
+                    "analysis_mode": analysis_mode,
+                    "changed_file_count": len(review.subject.changed_files),
+                },
+            )
+        )
+        routing_started_at = time.perf_counter()
         routing_plan = self.main_agent_service.build_routing_plan(
             review.subject,
             experts,
             effective_runtime_settings,
+            analysis_mode=analysis_mode,
+        )
+        routing_elapsed_ms = round((time.perf_counter() - routing_started_at) * 1000, 1)
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_routing_ready",
+                content=f"主Agent 已完成派工规划，用时 {routing_elapsed_ms} ms，开始向专家下发任务。",
+                metadata={
+                    "phase": "coordination",
+                    "analysis_mode": analysis_mode,
+                    "routing_elapsed_ms": routing_elapsed_ms,
+                    "selected_expert_ids": selected_ids,
+                    "changed_file_count": len(review.subject.changed_files),
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="main_agent_routing_ready",
+                phase="coordination",
+                message="主Agent 已完成派工计划，开始向专家下发任务",
+                payload={
+                    "routing_elapsed_ms": routing_elapsed_ms,
+                    "selected_expert_ids": selected_ids,
+                    "analysis_mode": analysis_mode,
+                },
+            )
+        )
+        logger.info(
+            "main agent routing ready review_id=%s analysis_mode=%s selected_experts=%s elapsed_ms=%s",
+            review.review_id,
+            analysis_mode,
+            selected_ids,
+            routing_elapsed_ms,
         )
         for expert in experts:
             command = self.main_agent_service.build_command(
@@ -478,7 +557,45 @@ class ReviewRunner:
             )
         )
 
+        expert_execution_started_at = time.perf_counter()
         self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
+        expert_execution_elapsed_ms = round((time.perf_counter() - expert_execution_started_at) * 1000, 1)
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="main_agent_expert_execution_completed",
+                content=f"专家并行审查阶段已完成，用时 {expert_execution_elapsed_ms} ms，共执行 {len(expert_jobs)} 个专家任务。",
+                metadata={
+                    "phase": "coordination",
+                    "analysis_mode": analysis_mode,
+                    "expert_execution_elapsed_ms": expert_execution_elapsed_ms,
+                    "expert_job_count": len(expert_jobs),
+                    "selected_expert_ids": selected_ids,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="main_agent_expert_execution_completed",
+                phase="coordination",
+                message="专家审查执行阶段已完成",
+                payload={
+                    "expert_execution_elapsed_ms": expert_execution_elapsed_ms,
+                    "expert_job_count": len(expert_jobs),
+                    "selected_expert_ids": selected_ids,
+                },
+            )
+        )
+        logger.info(
+            "expert execution completed review_id=%s analysis_mode=%s expert_job_count=%s elapsed_ms=%s",
+            review.review_id,
+            analysis_mode,
+            len(expert_jobs),
+            expert_execution_elapsed_ms,
+        )
         self._abort_if_closed(review_id)
         if not expert_jobs:
             reason = "用户选择的专家与当前变更相关性不足，且未能补入兜底专家，无法继续审核。"

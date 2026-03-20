@@ -1166,6 +1166,51 @@ def test_main_agent_uses_runtime_timeout_for_routing_plan(monkeypatch):
     assert captured["max_attempts"] == 5
 
 
+def test_main_agent_light_mode_skips_llm_routing_plan(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=["apps/api/orders/order.service.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -1,2 +1,2 @@\n"
+            "+ return payload\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        )
+    ]
+
+    def fail_if_called(**_: object) -> LLMTextResult:
+        raise AssertionError("轻量模式下不应再调用 routing_plan LLM")
+
+    monkeypatch.setattr(agent._llm, "complete_text", fail_if_called)
+
+    plan = agent.build_routing_plan(
+        subject,
+        experts,
+        RuntimeSettings(allow_llm_fallback=True),
+        analysis_mode="light",
+    )
+
+    assert plan["correctness_business"]["routing_source"] == "rule"
+    assert plan["correctness_business"]["routing_llm"]["mode"] == "rule_only_light"
+
+
 def test_main_agent_command_accepts_route_hint_with_full_business_files():
     agent = MainAgentService()
     subject = ReviewSubject(
