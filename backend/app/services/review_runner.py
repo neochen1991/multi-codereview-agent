@@ -643,6 +643,9 @@ class ReviewRunner:
                 "selected_experts": selected_ids,
                 "issue_filter_config": {
                     "issue_filter_enabled": bool(getattr(runtime_settings, "issue_filter_enabled", True)),
+                    "issue_min_priority_level": str(
+                        getattr(runtime_settings, "issue_min_priority_level", "P2") or "P2"
+                    ).upper(),
                     "suppress_low_risk_hint_issues": bool(
                         getattr(runtime_settings, "suppress_low_risk_hint_issues", True)
                     ),

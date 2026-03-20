@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { Button, Card, Space, Table, Tag } from "antd";
 
-import type { DebateIssue, ReviewFinding } from "@/services/api";
+import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
 
 type FindingsPanelProps = {
   findings: ReviewFinding[];
   issues: DebateIssue[];
+  issueFilterDecisions?: IssueFilterDecision[];
   selectedFindingId?: string;
   activeGroup?:
     | "all"
@@ -49,6 +50,7 @@ type StructuredFindingRow = ReviewFinding & {
   verified: boolean;
   mergeImpact: string;
   priority: string;
+  governanceDecision?: IssueFilterDecision | null;
 };
 
 const getPriority = (finding: ReviewFinding): string => {
@@ -112,6 +114,7 @@ const getDesignAlignmentLabel = (value: string): string => {
 const FindingsPanel: React.FC<FindingsPanelProps> = ({
   findings,
   issues,
+  issueFilterDecisions = [],
   selectedFindingId,
   activeGroup: activeGroupProp,
   onSelectFinding,
@@ -156,6 +159,12 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       issueByFindingId.set(findingId, issue);
     }
   }
+  const governanceDecisionByFindingId = new Map<string, IssueFilterDecision>();
+  for (const decision of issueFilterDecisions) {
+    for (const findingId of decision.finding_ids || []) {
+      if (findingId) governanceDecisionByFindingId.set(findingId, decision);
+    }
+  }
 
   const rows: StructuredFindingRow[] = findings.map((finding) => {
     const issue = issueByFindingId.get(finding.finding_id);
@@ -168,6 +177,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       verified: Boolean(issue?.verified),
       mergeImpact: getMergeImpact(issue, finding),
       priority: getPriority(finding),
+      governanceDecision: governanceDecisionByFindingId.get(finding.finding_id) || null,
     };
   });
 
@@ -296,15 +306,34 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     {
       title: "裁决状态",
       key: "issue_status",
-      width: 180,
+      width: 240,
       render: (_: unknown, item: StructuredFindingRow) => (
         <div className="review-tag-stack">
           <Tag color={item.issueStatus === "resolved" ? "success" : item.needsHuman ? "error" : "processing"}>
             {item.issueStatus}
           </Tag>
           <Tag>{item.resolution}</Tag>
+          {item.governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
         </div>
       ),
+    },
+    {
+      title: "治理说明",
+      key: "governance",
+      width: 280,
+      render: (_: unknown, item: StructuredFindingRow) =>
+        item.governanceDecision ? (
+          <div className="review-summary-cell">
+            <div className="review-summary-title" title={item.governanceDecision.rule_label}>
+              {item.governanceDecision.rule_label}
+            </div>
+            <div className="review-summary-text" title={item.governanceDecision.reason}>
+              {item.governanceDecision.reason}
+            </div>
+          </div>
+        ) : (
+          <span style={{ color: "var(--text-tertiary)" }}>-</span>
+        ),
     },
     {
       title: "核验状态",
@@ -411,7 +440,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
         rowKey="finding_id"
         size="middle"
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
-        scroll={{ x: 1620 }}
+        scroll={{ x: 1900 }}
         columns={columns}
         dataSource={groupedRows}
         rowClassName={(record) => (record.finding_id === selectedFindingId ? "thread-selected" : "")}

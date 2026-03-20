@@ -20,6 +20,32 @@ LOW_RISK_HINT_TOKENS = {
     "代码健康",
 }
 
+NON_CODE_REVIEW_SCOPE_TOKENS = {
+    "业务背景不清晰",
+    "业务背景不明确",
+    "业务需求不清晰",
+    "业务需求不明确",
+    "业务需求没有说明",
+    "业务需求未说明",
+    "需求没有说明",
+    "需求未说明",
+    "需求不明确",
+    "缺少业务背景",
+    "缺少业务上下文",
+    "业务上下文不足",
+    "产品需求不明确",
+    "无法确认业务意图",
+    "未提供业务需求",
+}
+
+PRIORITY_ORDER = {
+    "blocker": 0,
+    "critical": 1,
+    "high": 1,
+    "medium": 2,
+    "low": 3,
+}
+
 
 def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
     """从状态图里读取 issue 过滤治理配置，并补齐默认值。"""
@@ -29,6 +55,7 @@ def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
         raw = {}
     return {
         "issue_filter_enabled": bool(raw.get("issue_filter_enabled", True)),
+        "issue_min_priority_level": str(raw.get("issue_min_priority_level", "P2") or "P2").upper(),
         "suppress_low_risk_hint_issues": bool(raw.get("suppress_low_risk_hint_issues", True)),
         "hint_issue_confidence_threshold": float(raw.get("hint_issue_confidence_threshold", 0.85) or 0.85),
         "hint_issue_evidence_cap": max(0, int(raw.get("hint_issue_evidence_cap", 2) or 2)),
@@ -127,6 +154,7 @@ def _classify_issue_candidate(
         highest_severity = "high"
     elif all(level == "low" for level in severities):
         highest_severity = "low"
+    min_priority_level = str(config.get("issue_min_priority_level", "P2") or "P2").upper()
 
     if highest_severity == "low" and bool(config.get("suppress_low_risk_hint_issues", True)):
         return {
@@ -168,6 +196,31 @@ def _classify_issue_candidate(
         ]
     ).lower()
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
+    non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
+
+    if non_code_review_scope and not direct_evidence:
+        return {
+            "rule_code": "non_code_review_scope",
+            "rule_label": "非代码检视范围问题不升级为 issue",
+            "reason": "当前问题主要是在追问业务背景、需求说明或产品上下文，不属于代码检视应升级处理的 issue，已仅保留为 finding。",
+            "severity": highest_severity,
+        }
+
+    highest_priority_rank = PRIORITY_ORDER.get(highest_severity, 2)
+    min_priority_rank = {
+        "P0": 0,
+        "P1": 1,
+        "P2": 2,
+        "P3": 3,
+    }.get(min_priority_level, 2)
+
+    if highest_priority_rank > min_priority_rank:
+        return {
+            "rule_code": "below_issue_priority_threshold",
+            "rule_label": "低于 issue 升级优先级阈值",
+            "reason": f"当前问题最高仅达到 {highest_severity.upper()} / { _severity_to_priority_label(highest_severity) }，低于设置页配置的 issue 升级阈值 {min_priority_level}，因此仅保留为 finding。",
+            "severity": highest_severity,
+        }
 
     if (
         bool(config.get("suppress_low_risk_hint_issues", True))
@@ -203,3 +256,13 @@ def _classify_issue_candidate(
         }
 
     return None
+
+
+def _severity_to_priority_label(severity: str) -> str:
+    if severity == "blocker":
+        return "P0"
+    if severity in {"critical", "high"}:
+        return "P1"
+    if severity == "medium":
+        return "P2"
+    return "P3"

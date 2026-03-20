@@ -23,6 +23,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "agent_allowlist": ["judge"],
             "allow_human_gate": True,
             "issue_filter_enabled": True,
+            "issue_min_priority_level": "P1",
             "suppress_low_risk_hint_issues": True,
             "hint_issue_confidence_threshold": 0.9,
             "hint_issue_evidence_cap": 3,
@@ -62,6 +63,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["codehub_access_token_configured"] is True
     assert payload["default_max_debate_rounds"] == 3
     assert payload["issue_filter_enabled"] is True
+    assert payload["issue_min_priority_level"] == "P1"
     assert payload["suppress_low_risk_hint_issues"] is True
     assert payload["hint_issue_confidence_threshold"] == 0.9
     assert payload["hint_issue_evidence_cap"] == 3

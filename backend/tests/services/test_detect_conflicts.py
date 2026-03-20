@@ -65,6 +65,7 @@ def test_detect_conflicts_respects_disabled_issue_filter():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
+            "issue_min_priority_level": "P2",
             "suppress_low_risk_hint_issues": True,
             "hint_issue_confidence_threshold": 0.85,
             "hint_issue_evidence_cap": 2,
@@ -94,3 +95,69 @@ def test_detect_conflicts_respects_disabled_issue_filter():
 
     assert len(result["conflicts"]) == 1
     assert result["conflicts"][0]["issue_id"] == "fdg_hint_2"
+
+
+def test_detect_conflicts_respects_issue_priority_threshold():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P1",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_medium_1",
+                "expert_id": "maintainability_code_health",
+                "title": "重复的空值分支增加维护成本",
+                "summary": "当前实现存在重复的空值分支，容易导致后续修改遗漏，但暂未形成直接运行时故障。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.89,
+                "verification_needed": True,
+                "file_path": "src/app/service/OrderService.java",
+                "line_start": 66,
+                "evidence": ["同一判空逻辑出现 3 次"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["重复逻辑应收敛"],
+                "violated_guidelines": ["维护性要求"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_issue_priority_threshold"
+    assert "P1" in result["issue_filter_decisions"][0]["reason"]
+
+
+def test_detect_conflicts_skips_non_code_review_scope_findings():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_scope_1",
+                "expert_id": "correctness_business",
+                "title": "业务背景不清晰，无法确认这里为何要新增这个分支",
+                "summary": "当前 MR 没有说明业务需求，缺少业务上下文，难以判断产品意图是否正确。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.92,
+                "verification_needed": True,
+                "file_path": "src/app/service/OrderService.java",
+                "line_start": 88,
+                "evidence": [],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            }
+        ]
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "non_code_review_scope"

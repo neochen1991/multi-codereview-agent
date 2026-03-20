@@ -45,6 +45,7 @@ class RuntimeSettingsService:
             "agent_allowlist",
             "allow_human_gate",
             "issue_filter_enabled",
+            "issue_min_priority_level",
             "suppress_low_risk_hint_issues",
             "hint_issue_confidence_threshold",
             "hint_issue_evidence_cap",

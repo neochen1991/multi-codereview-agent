@@ -124,6 +124,17 @@ export interface ConversationMessage {
   metadata: Record<string, unknown>;
 }
 
+export interface IssueFilterDecision {
+  topic: string;
+  rule_code: string;
+  rule_label: string;
+  reason: string;
+  severity: string;
+  finding_ids?: string[];
+  finding_titles?: string[];
+  expert_ids?: string[];
+}
+
 export interface FeedbackLabel {
   label_id: string;
   review_id: string;
@@ -257,6 +268,7 @@ export interface RuntimeSettings {
   agent_allowlist: string[];
   allow_human_gate: boolean;
   issue_filter_enabled: boolean;
+  issue_min_priority_level: "P0" | "P1" | "P2" | "P3";
   suppress_low_risk_hint_issues: boolean;
   hint_issue_confidence_threshold: number;
   hint_issue_evidence_cap: number;

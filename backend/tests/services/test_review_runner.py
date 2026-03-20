@@ -237,6 +237,117 @@ def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_find
     assert decisions[0]["rule_code"] == "hint_like_medium"
 
 
+def test_review_runner_reads_issue_filter_settings_from_runtime(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    runner.runtime_settings_service.update(
+        {
+          "default_analysis_mode": "light",
+          "issue_filter_enabled": True,
+          "issue_min_priority_level": "P1",
+          "suppress_low_risk_hint_issues": False,
+          "hint_issue_confidence_threshold": 0.93,
+          "hint_issue_evidence_cap": 5,
+          "light_llm_timeout_seconds": 210,
+          "light_llm_retry_count": 2,
+          "light_max_parallel_experts": 1,
+          "light_max_debate_rounds": 1,
+        }
+    )
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    review.analysis_mode = "light"
+    runner.review_repo.save(review)
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        first = experts[0]
+        return {
+            "requested_expert_ids": list(requested_expert_ids or []),
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": [first.expert_id],
+            "selected_experts": [{"expert_id": first.expert_id, "expert_name": first.name_zh, "reason": "校验设置联动"}],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_build_routing_plan(subject, experts, runtime_settings, analysis_mode="standard"):
+        assert analysis_mode == "light"
+        assert runtime_settings.light_llm_timeout_seconds == 210
+        first = experts[0]
+        return {
+            "jobs": [
+                {
+                    "expert": first,
+                    "review": runner.review_repo.get(review_id),
+                    "command_message": None,
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 18,
+                    "runtime_settings": runtime_settings,
+                    "analysis_mode": "light",
+                    "llm_request_options": {"timeout_seconds": 210, "max_attempts": 2},
+                    "bound_documents": [],
+                    "knowledge_context": {},
+                    "finding_payloads": [],
+                }
+            ],
+            "summary": {"effective_experts": [{"expert_id": first.expert_id, "expert_name": first.name_zh}]},
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        assert analysis_mode == "light"
+        assert runtime_settings.light_llm_timeout_seconds == 210
+        expert_jobs[0]["finding_payloads"].append(
+            {
+                "finding_id": "fdg_runtime_linked",
+                "expert_id": "maintainability_code_health",
+                "title": "重复逻辑应收敛",
+                "summary": "当前实现存在重复分支，维护成本偏高。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.89,
+                "verification_needed": True,
+                "file_path": "src/app/service/OrderService.java",
+                "line_start": 18,
+                "evidence": ["重复判空逻辑"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["重复逻辑应收敛"],
+                "violated_guidelines": ["维护性要求"],
+                "assumptions": [],
+                "remediation_strategy": "抽取公共函数",
+                "remediation_suggestion": "收敛重复逻辑",
+                "remediation_steps": [],
+                "code_excerpt": "if (x == null) { ... }",
+                "suggested_code": "",
+                "suggested_code_language": "java",
+            }
+        )
+
+    def _fake_graph_invoke(state):
+        assert state["analysis_mode"] == "light"
+        assert state["issue_filter_config"]["issue_filter_enabled"] is True
+        assert state["issue_filter_config"]["issue_min_priority_level"] == "P1"
+        assert state["issue_filter_config"]["suppress_low_risk_hint_issues"] is False
+        assert state["issue_filter_config"]["hint_issue_confidence_threshold"] == 0.93
+        assert state["issue_filter_config"]["hint_issue_evidence_cap"] == 5
+        return {"issues": [], "issue_filter_decisions": []}
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _fake_build_routing_plan)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", _fake_graph_invoke)
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts: (
+            "设置联动验证通过",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+
 def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     parsed = runner._parse_expert_analysis(

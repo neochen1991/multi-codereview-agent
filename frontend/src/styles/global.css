@@ -1773,6 +1773,111 @@ body {
   margin-top: 0 !important;
 }
 
+.settings-hero-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid #d8e3f2;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.settings-summary-card strong {
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.settings-summary-label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.settings-summary-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: #475569;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-collapse {
+  background: transparent;
+}
+
+.settings-collapse .ant-collapse-item {
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid #d8e3f2 !important;
+  border-radius: 14px !important;
+  background: #ffffff;
+}
+
+.settings-collapse .ant-collapse-header {
+  align-items: center !important;
+  min-height: 56px;
+}
+
+.settings-collapse .ant-collapse-content-box {
+  padding-top: 4px !important;
+}
+
+.settings-collapse-content {
+  padding-top: 4px;
+}
+
+.settings-section-tip {
+  margin-bottom: 16px !important;
+  color: #64748b;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.settings-expert-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-expert-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.settings-expert-title strong {
+  color: #0f172a;
+}
+
+.settings-expert-title span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .replay-note {
   margin-bottom: 0 !important;
   color: var(--text-secondary);
@@ -1788,6 +1893,15 @@ body {
 @media (max-width: 900px) {
   .incident-overview-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-expert-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .review-expert-summary-grid,

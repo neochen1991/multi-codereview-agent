@@ -18,6 +18,7 @@ import {
   settingsApi,
   type DebateIssue,
   type ExpertProfile,
+  type IssueFilterDecision,
   type KnowledgeDocument,
   type ReviewArtifacts,
   type ReviewDesignDocumentInput,
@@ -160,6 +161,26 @@ const readExpertSelectionSummary = (review?: ReviewSummary | null): ExpertSelect
     skipped_experts: normalizeRoutingItems(payload.skipped_experts),
   };
 };
+
+const normalizeIssueFilterDecisions = (messages: { message_type: string; metadata: Record<string, unknown> }[]): IssueFilterDecision[] =>
+  messages
+    .filter((message) => message.message_type === "issue_filter_applied")
+    .flatMap((message) => {
+      const raw = message.metadata?.issue_filter_decisions;
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+        .map((item) => ({
+          topic: String(item.topic || ""),
+          rule_code: String(item.rule_code || ""),
+          rule_label: String(item.rule_label || ""),
+          reason: String(item.reason || ""),
+          severity: String(item.severity || ""),
+          finding_ids: Array.isArray(item.finding_ids) ? item.finding_ids.map((entry) => String(entry)).filter(Boolean) : [],
+          finding_titles: Array.isArray(item.finding_titles) ? item.finding_titles.map((entry) => String(entry)).filter(Boolean) : [],
+          expert_ids: Array.isArray(item.expert_ids) ? item.expert_ids.map((entry) => String(entry)).filter(Boolean) : [],
+        }));
+    });
 
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
@@ -479,6 +500,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const report = replay?.report || null;
   const findings = report?.findings || [];
   const allMessages = replay?.messages || [];
+  const issueFilterDecisions = useMemo(() => normalizeIssueFilterDecisions(allMessages), [allMessages]);
   const expertSelectionSummary = useMemo(() => readExpertSelectionSummary(review), [review]);
   const overviewExpertSelectionSummary = useMemo(
     () => toOverviewExpertSelectionSummary(expertSelectionSummary),
@@ -506,6 +528,19 @@ const ReviewWorkbenchPage: React.FC = () => {
   const selectedFindingIssue = useMemo(
     () => (selectedFinding ? issueByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueByFindingId, selectedFinding],
+  );
+  const issueFilterDecisionByFindingId = useMemo(() => {
+    const map = new Map<string, IssueFilterDecision>();
+    for (const decision of issueFilterDecisions) {
+      for (const findingId of decision.finding_ids || []) {
+        if (findingId) map.set(findingId, decision);
+      }
+    }
+    return map;
+  }, [issueFilterDecisions]);
+  const selectedFindingGovernanceDecision = useMemo(
+    () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
+    [issueFilterDecisionByFindingId, selectedFinding],
   );
   const pendingHumanIssues = useMemo(
     () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
@@ -1014,6 +1049,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 <FindingsPanel
                   findings={findings}
                   issues={issues}
+                  issueFilterDecisions={issueFilterDecisions}
                   selectedFindingId={selectedFindingId}
                   activeGroup={findingsActiveGroup}
                   onGroupChange={setFindingsActiveGroup}
@@ -1040,6 +1076,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 <CodeReviewConclusionPanel
                   finding={selectedFinding}
                   issue={selectedFindingIssue}
+                  governanceDecision={selectedFindingGovernanceDecision}
                   onJumpToProcess={() => {
                     setFindingModalOpen(false);
                     setActiveStep("process");

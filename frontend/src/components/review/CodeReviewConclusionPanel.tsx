@@ -1,13 +1,14 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
 
-import type { DebateIssue, ReviewFinding } from "@/services/api";
+import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
 
 const { Paragraph } = Typography;
 
 type Props = {
   finding: ReviewFinding | null;
   issue: DebateIssue | null;
+  governanceDecision?: IssueFilterDecision | null;
   onJumpToProcess?: () => void;
 };
 
@@ -108,7 +109,7 @@ const renderSuggestedCode = (code: string) => (
 );
 
 // 结果弹窗负责把单条 finding 渲染成正式 Code Review 详情视图。
-const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToProcess }) => {
+const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, governanceDecision, onJumpToProcess }) => {
   const lineRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
 
   React.useEffect(() => {
@@ -158,6 +159,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
                   {issue?.status || "open"}
                 </Tag>
                 <Tag>{issue?.resolution || "pending"}</Tag>
+                {governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
               </>
             ),
           },
@@ -198,6 +200,17 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({ finding, issue, onJumpToPr
           ))}
         </Space>
       </div>
+
+      {governanceDecision ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>Issue 治理说明</Paragraph>
+          <Space wrap style={{ marginBottom: 8 }}>
+            <Tag color="default">{governanceDecision.rule_label}</Tag>
+            {governanceDecision.severity ? <Tag>{governanceDecision.severity}</Tag> : null}
+          </Space>
+          <Paragraph style={{ marginBottom: 0 }}>{governanceDecision.reason}</Paragraph>
+        </div>
+      ) : null}
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>
