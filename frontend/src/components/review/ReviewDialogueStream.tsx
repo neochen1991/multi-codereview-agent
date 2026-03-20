@@ -93,6 +93,22 @@ const normalizeSingleValue = (value: unknown): string[] => {
   return [];
 };
 
+const normalizeKeywordSourceEntries = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const keyword = typeof payload.keyword === "string" ? payload.keyword.trim() : "";
+      const sourceLabel = typeof payload.source_label === "string" ? payload.source_label.trim() : "";
+      const source = typeof payload.source === "string" ? payload.source.trim() : "";
+      if (keyword && sourceLabel) return `${keyword} · ${sourceLabel}`;
+      if (keyword && source) return `${keyword} · ${source}`;
+      return keyword;
+    })
+    .filter(Boolean);
+};
+
 const formatContextEntry = (value: unknown): string => {
   if (typeof value === "string") return value.trim();
   if (!value || typeof value !== "object") return "";
@@ -594,6 +610,7 @@ const buildStructuredGroups = (
             title: "源码上下文",
             sections: [
               { label: "检索关键词", values: normalizeValueList(toolResult.search_keywords) },
+              { label: "关键词来源", values: normalizeKeywordSourceEntries(toolResult.search_keyword_sources) },
               { label: "搜索命令", values: normalizeValueList(toolResult.search_commands) },
               { label: "上下文文件", values: normalizeValueList(toolResult.context_files) },
               { label: "关联上下文", values: normalizeContextValueList(toolResult.related_contexts) },

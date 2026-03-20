@@ -66,3 +66,8 @@ class SqliteFeedbackRepository:
             )
             for row in rows
         ]
+
+    def delete_for_review(self, review_id: str) -> None:
+        with self._db.connect() as connection:
+            connection.execute("DELETE FROM feedback WHERE review_id = ?", (review_id,))
+            connection.commit()

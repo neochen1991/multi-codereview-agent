@@ -123,6 +123,19 @@ def close_review(review_id: str) -> dict[str, object]:
     return {"review_id": updated.review_id, "status": updated.status, "phase": updated.phase}
 
 
+@router.post("/reviews/{review_id}/rerun", status_code=status.HTTP_202_ACCEPTED)
+def rerun_failed_review(review_id: str) -> dict[str, object]:
+    """对 failed 任务执行一次清理后重跑。"""
+
+    try:
+        updated, message = review_service_module.review_service.rerun_failed_review(review_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="only failed review can rerun") from error
+    return {"review_id": updated.review_id, "status": updated.status, "phase": updated.phase, "message": message}
+
+
 @router.get("/reviews/{review_id}/findings")
 def list_findings(review_id: str) -> list[dict[str, object]]:
     """返回某次审核产出的 finding 列表。"""

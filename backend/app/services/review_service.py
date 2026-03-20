@@ -464,6 +464,62 @@ class ReviewService:
         logger.warning("review closed by user review_id=%s", review.review_id)
         return review
 
+    def rerun_failed_review(self, review_id: str) -> tuple[ReviewTask, str]:
+        """重跑 failed 任务，清理上一轮运行产物后重新入队或立即启动。"""
+
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        if review.status != "failed":
+            raise ValueError("only_failed_review_can_rerun")
+
+        self._clear_review_runtime_outputs(review_id)
+
+        metadata = dict(review.subject.metadata or {})
+        for transient_key in (
+            "close_requested",
+            "close_requested_at",
+            "queue_priority_at",
+            "queue_priority_source",
+        ):
+            metadata.pop(transient_key, None)
+        metadata["rerun_count"] = int(metadata.get("rerun_count") or 0) + 1
+        metadata["last_rerun_at"] = datetime.now(UTC).isoformat()
+        metadata["last_rerun_source"] = "history_failed_rerun"
+        review.subject.metadata = metadata
+        review.status = "pending"
+        review.phase = "pending"
+        review.failure_reason = ""
+        review.report_summary = ""
+        review.human_review_status = "not_required"
+        review.pending_human_issue_ids = []
+        review.started_at = None
+        review.completed_at = None
+        review.duration_seconds = None
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="review_rerun_requested",
+                phase="pending",
+                message="失败任务已清理旧运行数据，准备重新发起审核",
+                payload={"rerun_count": metadata["rerun_count"]},
+            )
+        )
+        logger.info("failed review rerun requested review_id=%s rerun_count=%s", review.review_id, metadata["rerun_count"])
+        return self.queue_start_review(review.review_id)
+
+    def _clear_review_runtime_outputs(self, review_id: str) -> None:
+        """清理某次审核上一轮运行产生的临时输出，避免重跑时混入旧结果。"""
+
+        self.event_repo.delete_for_review(review_id)
+        self.message_repo.delete_for_review(review_id)
+        self.finding_repo.delete_for_review(review_id)
+        self.issue_repo.delete_for_review(review_id)
+        self.feedback_repo.delete_for_review(review_id)
+        self.artifact_service.clear(review_id)
+
     def recover_interrupted_reviews(self) -> list[ReviewTask]:
         """把异常退出后遗留的 running 任务恢复为 pending，避免阻塞自动队列。"""
 

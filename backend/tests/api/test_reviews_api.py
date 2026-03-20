@@ -156,3 +156,63 @@ def test_close_running_review_updates_status_to_closed(client, monkeypatch):
     review = client.get(f"/api/reviews/{created['review_id']}").json()
     assert review["status"] == "closed"
     assert review["phase"] == "closed"
+
+
+def test_rerun_failed_review_resets_task_and_starts_again(client, monkeypatch):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_failed",
+            "project_id": "proj_failed",
+            "source_ref": "feature/failed",
+            "target_ref": "main",
+            "title": "failed review",
+        },
+    ).json()
+
+    service = client.app.state.auto_review_scheduler._review_service  # type: ignore[attr-defined]
+    review = service.get_review(created["review_id"])
+    assert review is not None
+    review.status = "failed"
+    review.phase = "failed"
+    review.failure_reason = "llm timeout"
+    review.report_summary = "审核失败：llm timeout"
+    service.review_repo.save(review)
+
+    def fake_rerun(review_id: str):
+        task = service.get_review(review_id)
+        assert task is not None
+        task.status = "running"
+        task.phase = "queued"
+        task.failure_reason = ""
+        task.report_summary = ""
+        service.review_repo.save(task)
+        return task, "任务已立即启动。"
+
+    monkeypatch.setattr("app.api.routes.reviews.review_service_module.review_service.rerun_failed_review", fake_rerun)
+
+    response = client.post(f"/api/reviews/{created['review_id']}/rerun")
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["phase"] == "queued"
+    assert payload["message"] == "任务已立即启动。"
+
+
+def test_rerun_non_failed_review_returns_conflict(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_pending",
+            "project_id": "proj_pending",
+            "source_ref": "feature/pending",
+            "target_ref": "main",
+            "title": "pending review",
+        },
+    ).json()
+
+    response = client.post(f"/api/reviews/{created['review_id']}/rerun")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "only failed review can rerun"

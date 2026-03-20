@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from app.domain.models.issue import DebateIssue
@@ -77,3 +78,10 @@ class ArtifactService:
         if not payload:
             raise KeyError(review_id)
         return payload
+
+    def clear(self, review_id: str) -> None:
+        """删除某次审核历史运行产物，便于 failed 重跑时重新生成快照。"""
+
+        artifact_dir = self.storage_root / "reviews" / review_id / "artifacts"
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir, ignore_errors=True)

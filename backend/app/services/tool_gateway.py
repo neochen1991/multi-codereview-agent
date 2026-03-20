@@ -283,9 +283,13 @@ class ReviewToolGateway:
                 "context_files": [],
                 "matches": [],
         }
-        primary_context = service.load_file_context(file_path, line_start, radius=10)
+        primary_context = service.load_file_context(file_path, line_start, radius=20)
         excerpt = self._diff_excerpt.extract_excerpt(subject.unified_diff, file_path, line_start)
-        symbol_queries = self._extract_repo_search_terms(excerpt)
+        symbol_queries, keyword_sources = self._extract_repo_search_terms(
+            excerpt,
+            primary_context=primary_context,
+            file_path=file_path,
+        )
         symbol_contexts = [
             self._filter_symbol_context(
                 service.search_symbol_context(symbol, globs=None, definition_limit=2, reference_limit=4)
@@ -306,7 +310,7 @@ class ReviewToolGateway:
         search_matches = self._build_symbol_matches(symbol_contexts)
         search_commands = [self._build_repo_search_command(symbol) for symbol in symbol_queries[:3]]
         if not symbol_queries:
-            summary = "未从目标 diff hunk 中提取到方法名或类名，已跳过源码仓检索。"
+            summary = "未从目标 diff hunk、源码上下文或文件名中提取到方法名或类名，已跳过源码仓检索。"
         else:
             summary = (
                 f"已按 {len(symbol_queries[:3])} 个方法/类关键词检索目标分支代码仓，"
@@ -321,6 +325,7 @@ class ReviewToolGateway:
             "matches": search_matches[:8],
             "symbol_contexts": symbol_contexts,
             "search_keywords": symbol_queries[:3],
+            "search_keyword_sources": keyword_sources[:3],
             "search_commands": search_commands,
             "definition_hits": definition_hits[:6],
             "reference_hits": reference_hits[:6],
@@ -334,30 +339,124 @@ class ReviewToolGateway:
     def _repo_context_enabled(self, runtime: RuntimeSettings) -> bool:
         return bool(runtime.code_repo_clone_url and runtime.code_repo_local_path)
 
-    def _extract_repo_search_terms(self, excerpt: str) -> list[str]:
+    def _extract_repo_search_terms(
+        self,
+        excerpt: str,
+        *,
+        primary_context: dict[str, Any] | None = None,
+        file_path: str = "",
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        tokens: list[str] = []
+        token_sources: list[dict[str, str]] = []
         cleaned_lines = [
             re.sub(r"^\s*\d+\s+\|\s*[+\- ]?", "", line).strip()
             for line in str(excerpt or "").splitlines()
         ]
         cleaned_excerpt = "\n".join(line for line in cleaned_lines if line)
+        for token in self._extract_symbol_candidates(cleaned_excerpt):
+            self._append_keyword_source(
+                tokens,
+                token_sources,
+                token,
+                source="diff_hunk",
+                source_label="diff hunk",
+            )
+        context_snippet = self._clean_repo_search_text(str((primary_context or {}).get("snippet") or ""))
+        for token in self._extract_symbol_candidates(context_snippet):
+            self._append_keyword_source(
+                tokens,
+                token_sources,
+                token,
+                source="source_context",
+                source_label="源码上下文",
+            )
+        file_stem_token = self._extract_symbol_from_file_name(file_path, allow_when_tokens_exist=not not tokens)
+        self._append_keyword_source(
+            tokens,
+            token_sources,
+            file_stem_token,
+            source="file_name",
+            source_label="文件名类名兜底",
+        )
+        return tokens[:4], token_sources[:4]
+
+    def _extract_symbol_candidates(self, text: str) -> list[str]:
+        if not text.strip():
+            return []
         patterns = [
             r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?:interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"\bdef\s+([A-Za-z_][A-Za-z0-9_]*)",
             r"\b(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(",
+            r"\b(?:public|protected|private|static|final|abstract|synchronized|default|native|strictfp)\s+"
+            r"(?:<[^>{}\n]+>\s+)?(?:[A-Za-z_][A-Za-z0-9_<>,.?\[\]]*\s+)+([A-Za-z_][A-Za-z0-9_]*)"
+            r"\s*\([^;\n{}]*\)\s*(?:throws\s+[A-Za-z0-9_, .<>]+)?\{?",
+            r"\b(?:[A-Za-z_][A-Za-z0-9_<>,.?\[\]]+\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;\n{}]*\)\s*(?:throws\s+[A-Za-z0-9_, .<>]+)?\{",
             r"\b(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\([^)\n]*\)\s*\{",
         ]
         tokens: list[str] = []
         for pattern in patterns:
-            for match in re.findall(pattern, cleaned_excerpt):
+            for match in re.findall(pattern, text):
                 token = str(match).strip()
                 if not token:
                     continue
-                if token.lower() in {"if", "for", "while", "switch", "return", "catch"}:
+                if token.lower() in {
+                    "if",
+                    "for",
+                    "while",
+                    "switch",
+                    "return",
+                    "catch",
+                    "new",
+                    "throw",
+                    "else",
+                    "case",
+                    "try",
+                }:
                     continue
                 if token not in tokens:
                     tokens.append(token)
-        return tokens[:4]
+        return tokens[:6]
+
+    def _clean_repo_search_text(self, text: str) -> str:
+        lines = [
+            re.sub(r"^\s*\d+\s+\|\s*", "", line).strip()
+            for line in str(text or "").splitlines()
+        ]
+        return "\n".join(line for line in lines if line)
+
+    def _extract_symbol_from_file_name(self, file_path: str, *, allow_when_tokens_exist: bool) -> str:
+        path = Path(str(file_path or "").strip())
+        stem = path.stem.strip()
+        if not stem or self._is_test_like_path(path.as_posix()):
+            return ""
+        if allow_when_tokens_exist and path.suffix.lower() not in {".java", ".kt", ".kts", ".scala", ".groovy", ".cs"}:
+            return ""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stem):
+            return ""
+        return stem
+
+    def _append_keyword_source(
+        self,
+        tokens: list[str],
+        token_sources: list[dict[str, str]],
+        token: str,
+        *,
+        source: str,
+        source_label: str,
+    ) -> None:
+        normalized = str(token or "").strip()
+        if not normalized or normalized in tokens:
+            return
+        tokens.append(normalized)
+        token_sources.append(
+            {
+                "keyword": normalized,
+                "source": source,
+                "source_label": source_label,
+            }
+        )
 
     def _is_test_like_path(self, path: str) -> bool:
         parts = Path(str(path or "").replace("\\", "/")).parts

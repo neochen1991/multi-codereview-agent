@@ -1,5 +1,9 @@
 from pathlib import Path
 
+from app.domain.models.event import ReviewEvent
+from app.domain.models.finding import ReviewFinding
+from app.domain.models.issue import DebateIssue
+from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewTask
 from app.services.platform_adapter import OpenMergeRequest
 from app.services.review_service import ReviewService
@@ -110,3 +114,88 @@ def test_start_next_pending_review_recovers_interrupted_running_review(tmp_path:
     assert any(item.event_type == "review_recovered" for item in events)
     queue_ids = [item.review_id for item in service.list_pending_queue()]
     assert next_pending.review_id in queue_ids
+
+
+def test_rerun_failed_review_clears_previous_runtime_outputs_before_restart(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_failed",
+            "project_id": "proj_failed",
+            "source_ref": "feature/failed",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/21",
+            "title": "failed review",
+        }
+    )
+    review.status = "failed"
+    review.phase = "failed"
+    review.failure_reason = "llm timeout"
+    review.report_summary = "审核失败：llm timeout"
+    service.review_repo.save(review)
+    service.event_repo.append(
+        ReviewEvent(review_id=review.review_id, event_type="review_failed", phase="failed", message="执行失败")
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="",
+            expert_id="performance_reliability",
+            message_type="expert_analysis",
+            content="旧的失败消息",
+        )
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            expert_id="performance_reliability",
+            title="旧 finding",
+            summary="旧结论",
+        ),
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                title="旧 issue",
+                summary="旧议题",
+            )
+        ],
+    )
+    review.report_summary = "历史产物"
+    service.artifact_service.publish(review, [])
+
+    def fake_queue_start(review_id: str) -> tuple[ReviewTask, str]:
+        rerun = service.get_review(review_id)
+        assert rerun is not None
+        rerun.status = "running"
+        rerun.phase = "queued"
+        service.review_repo.save(rerun)
+        return rerun, "任务已立即启动。"
+
+    service.queue_start_review = fake_queue_start  # type: ignore[method-assign]
+
+    updated, message = service.rerun_failed_review(review.review_id)
+
+    assert updated.status == "running"
+    assert updated.phase == "queued"
+    assert message == "任务已立即启动。"
+
+    refreshed = service.get_review(review.review_id)
+    assert refreshed is not None
+    assert refreshed.failure_reason == ""
+    assert refreshed.completed_at is None
+    assert refreshed.duration_seconds is None
+    assert refreshed.human_review_status == "not_required"
+    assert refreshed.pending_human_issue_ids == []
+    assert refreshed.subject.metadata["rerun_count"] == 1
+    assert service.list_findings(review.review_id) == []
+    assert service.list_issues(review.review_id) == []
+    assert service.list_all_messages(review.review_id) == []
+    events = service.list_events(review.review_id)
+    assert len(events) == 1
+    assert events[0].event_type == "review_rerun_requested"
+    assert service.get_artifacts(review.review_id) == {}

@@ -62,3 +62,8 @@ class SqliteFindingRepository:
                 (review_id,),
             ).fetchall()
         return [ReviewFinding.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def delete_for_review(self, review_id: str) -> None:
+        with self._db.connect() as connection:
+            connection.execute("DELETE FROM findings WHERE review_id = ?", (review_id,))
+            connection.commit()

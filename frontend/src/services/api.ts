@@ -431,6 +431,10 @@ export const reviewApi = {
     const { data } = await api.post(`/reviews/${reviewId}/close`);
     return data;
   },
+  async rerun(reviewId: string): Promise<{ review_id: string; status: string; phase: string; message: string }> {
+    const { data } = await api.post(`/reviews/${reviewId}/rerun`);
+    return data;
+  },
   async listEvents(reviewId: string): Promise<ReviewEvent[]> {
     const { data } = await api.get(`/reviews/${reviewId}/events`);
     return data;

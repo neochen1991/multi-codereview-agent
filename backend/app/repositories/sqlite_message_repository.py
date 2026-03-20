@@ -73,3 +73,8 @@ class SqliteMessageRepository:
 
     def list_by_issue(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return [item for item in self.list(review_id) if item.issue_id == issue_id]
+
+    def delete_for_review(self, review_id: str) -> None:
+        with self._db.connect() as connection:
+            connection.execute("DELETE FROM messages WHERE review_id = ?", (review_id,))
+            connection.commit()

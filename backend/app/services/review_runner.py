@@ -2333,6 +2333,20 @@ class ReviewRunner:
                             formatted.append(f"{path}:{line_number}")
                 if formatted:
                     lines.append(f"- 代码仓命中: {' / '.join(formatted)}")
+            keyword_sources = item.get("search_keyword_sources")
+            if isinstance(keyword_sources, list) and keyword_sources:
+                formatted_keywords: list[str] = []
+                for keyword_source in keyword_sources[:3]:
+                    if not isinstance(keyword_source, dict):
+                        continue
+                    keyword = str(keyword_source.get("keyword") or "").strip()
+                    source_label = str(keyword_source.get("source_label") or keyword_source.get("source") or "").strip()
+                    if keyword and source_label:
+                        formatted_keywords.append(f"{keyword}({source_label})")
+                    elif keyword:
+                        formatted_keywords.append(keyword)
+                if formatted_keywords:
+                    lines.append(f"- Repo 关键词来源: {' / '.join(formatted_keywords)}")
             symbol_contexts = item.get("symbol_contexts")
             if isinstance(symbol_contexts, list) and symbol_contexts:
                 for symbol_context in symbol_contexts[:2]:

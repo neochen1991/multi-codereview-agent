@@ -41,6 +41,7 @@ const HistoryPage: React.FC = () => {
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [closingReviewId, setClosingReviewId] = useState("");
+  const [rerunningReviewId, setRerunningReviewId] = useState("");
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -187,6 +188,30 @@ const HistoryPage: React.FC = () => {
             >
               <Button type="link" size="small" danger loading={closingReviewId === record.review_id}>
                 关闭
+              </Button>
+            </Popconfirm>
+          ) : null}
+          {record.status === "failed" ? (
+            <Popconfirm
+              title="确认重跑这个失败任务吗？"
+              description="系统会清理上一轮失败时生成的过程数据，并重新发起审核。"
+              okText="确认重跑"
+              cancelText="取消"
+              onConfirm={async () => {
+                setRerunningReviewId(record.review_id);
+                try {
+                  const result = await reviewApi.rerun(record.review_id);
+                  message.success(result.message || "任务已重新发起");
+                  await loadReviews();
+                } catch (error: any) {
+                  message.error(error?.message || "重跑任务失败");
+                } finally {
+                  setRerunningReviewId("");
+                }
+              }}
+            >
+              <Button type="link" size="small" loading={rerunningReviewId === record.review_id}>
+                重跑
               </Button>
             </Popconfirm>
           ) : null}
