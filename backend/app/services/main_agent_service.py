@@ -143,8 +143,8 @@ class MainAgentService:
             runtime_settings=runtime_settings,
             fallback_text=json.dumps(fallback_payload, ensure_ascii=False),
             allow_fallback=self._allow_fallback(runtime_settings),
-            timeout_seconds=120.0,
-            max_attempts=2,
+            timeout_seconds=self._main_agent_timeout_seconds(runtime_settings),
+            max_attempts=self._main_agent_max_attempts(runtime_settings),
             log_context={
                 "phase": "routing_plan",
                 "agent_id": self.agent_id,
@@ -221,8 +221,8 @@ class MainAgentService:
             runtime_settings=runtime_settings,
             fallback_text=json.dumps(fallback_payload, ensure_ascii=False),
             allow_fallback=self._allow_fallback(runtime_settings),
-            timeout_seconds=90.0,
-            max_attempts=2,
+            timeout_seconds=self._main_agent_timeout_seconds(runtime_settings),
+            max_attempts=self._main_agent_max_attempts(runtime_settings),
             log_context={
                 "phase": "expert_selection",
                 "agent_id": self.agent_id,
@@ -343,6 +343,20 @@ class MainAgentService:
 
     def _allow_fallback(self, runtime_settings: RuntimeSettings) -> bool:
         return bool(runtime_settings.allow_llm_fallback or os.getenv("PYTEST_CURRENT_TEST"))
+
+    def _main_agent_timeout_seconds(self, runtime_settings: RuntimeSettings) -> float:
+        """主 Agent 的专家选择/派工 prompt 更长，优先采用运行时中的较大超时。"""
+
+        standard_timeout = float(getattr(runtime_settings, "standard_llm_timeout_seconds", 60) or 60)
+        light_timeout = float(getattr(runtime_settings, "light_llm_timeout_seconds", 120) or 120)
+        return float(max(60.0, standard_timeout, light_timeout))
+
+    def _main_agent_max_attempts(self, runtime_settings: RuntimeSettings) -> int:
+        """主 Agent 遇到内网抖动时，优先使用当前运行时允许的较大重试次数。"""
+
+        standard_retries = int(getattr(runtime_settings, "standard_llm_retry_count", 3) or 3)
+        light_retries = int(getattr(runtime_settings, "light_llm_retry_count", 2) or 2)
+        return max(1, standard_retries, light_retries)
 
     def _build_command_fallback(
         self,

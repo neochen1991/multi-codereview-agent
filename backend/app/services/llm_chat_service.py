@@ -97,12 +97,15 @@ class LLMChatService:
         last_error = ""
         safe_attempts = max(1, int(max_attempts or 1))
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
+        client_timeout = self._build_http_timeout(safe_timeout)
         request_preview = self._build_request_preview(request_body, system_prompt=system_prompt, user_prompt=user_prompt)
         context_preview = self._stringify_context(log_context)
+        total_started_at = time.perf_counter()
         for attempt in range(1, safe_attempts + 1):
+            attempt_started_at = time.perf_counter()
             try:
                 logger.info(
-                    "llm request send context=%s attempt=%s/%s provider=%s model=%s endpoint=%s timeout_seconds=%s request=%s",
+                    "llm request send context=%s attempt=%s/%s provider=%s model=%s endpoint=%s timeout_seconds=%s connect_timeout=%s read_timeout=%s write_timeout=%s pool_timeout=%s request=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
@@ -110,10 +113,14 @@ class LLMChatService:
                     resolution.model,
                     endpoint,
                     safe_timeout,
+                    client_timeout.connect,
+                    client_timeout.read,
+                    client_timeout.write,
+                    client_timeout.pool,
                     request_preview,
                 )
                 with HttpClientFactory.create(
-                    timeout=httpx.Timeout(safe_timeout, connect=min(10.0, safe_timeout), read=safe_timeout),
+                    timeout=client_timeout,
                     runtime_settings=runtime_settings,
                 ) as client:
                     response = client.post(
@@ -128,13 +135,15 @@ class LLMChatService:
                     response_text = getattr(response, "text", "")
                     response_preview = self._truncate(response_text)
                     content_type = str((getattr(response, "headers", {}) or {}).get("Content-Type", ""))
+                    attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                     logger.info(
-                        "llm response received context=%s attempt=%s/%s status=%s content_type=%s body=%s",
+                        "llm response received context=%s attempt=%s/%s status=%s content_type=%s attempt_elapsed_ms=%s body=%s",
                         context_preview,
                         attempt,
                         safe_attempts,
                         getattr(response, "status_code", "unknown"),
                         content_type,
+                        attempt_elapsed_ms,
                         response_preview,
                     )
                     try:
@@ -160,46 +169,66 @@ class LLMChatService:
                     break
             except httpx.TimeoutException as exc:  # pragma: no cover - network dependent
                 last_error = f"request_timeout:{exc}"
+                timeout_kind = self._classify_timeout_exception(exc)
+                attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
+                total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
                 logger.warning(
-                    "llm request timeout context=%s attempt=%s/%s provider=%s model=%s error=%s",
+                    "llm request timeout context=%s attempt=%s/%s provider=%s model=%s timeout_kind=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
+                    timeout_kind,
+                    attempt_elapsed_ms,
+                    total_elapsed_ms,
                     exc,
                 )
                 if attempt < safe_attempts:
-                    time.sleep(1.5 * attempt)
+                    time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
                     continue
             except httpx.HTTPStatusError as exc:  # pragma: no cover - network dependent
                 last_error = f"http_status:{exc.response.status_code}"
+                attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                 logger.warning(
-                    "llm request status failure context=%s attempt=%s/%s provider=%s model=%s status=%s body=%s",
+                    "llm request status failure context=%s attempt=%s/%s provider=%s model=%s status=%s attempt_elapsed_ms=%s body=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
                     exc.response.status_code,
+                    attempt_elapsed_ms,
                     self._truncate(getattr(exc.response, "text", "")),
                 )
                 if 500 <= exc.response.status_code < 600 and attempt < safe_attempts:
-                    time.sleep(1.5 * attempt)
+                    time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
                     continue
                 break
             except Exception as exc:  # pragma: no cover - network dependent
                 last_error = f"request_failed:{exc}"
+                attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                 logger.exception(
-                    "llm request failed context=%s attempt=%s/%s provider=%s model=%s",
+                    "llm request failed context=%s attempt=%s/%s provider=%s model=%s attempt_elapsed_ms=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
+                    attempt_elapsed_ms,
                 )
                 break
         if payload is None:
+            total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
+            logger.warning(
+                "llm request exhausted context=%s provider=%s model=%s attempts=%s total_elapsed_ms=%s error=%s",
+                context_preview,
+                resolution.provider,
+                resolution.model,
+                safe_attempts,
+                total_elapsed_ms,
+                last_error or "request_failed:unknown",
+            )
             return self._handle_failure(
                 resolution=resolution,
                 fallback_text=fallback_text,
@@ -224,12 +253,14 @@ class LLMChatService:
                 error="empty_content",
                 allow_fallback=allow_fallback,
             )
+        total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
         logger.info(
-            "llm response parsed context=%s provider=%s model=%s choices=%s content=%s",
+            "llm response parsed context=%s provider=%s model=%s choices=%s total_elapsed_ms=%s content=%s",
             context_preview,
             resolution.provider,
             resolution.model,
             len(choices),
+            total_elapsed_ms,
             self._truncate(content),
         )
         return LLMTextResult(
@@ -240,6 +271,35 @@ class LLMChatService:
             base_url=resolution.base_url,
             api_key_env=resolution.api_key_env,
         )
+
+    def _build_http_timeout(self, timeout_seconds: float) -> httpx.Timeout:
+        """针对内网和流式响应构造更稳妥的 httpx 超时参数。"""
+
+        safe_timeout = max(10.0, float(timeout_seconds or 60.0))
+        connect_timeout = min(45.0, max(15.0, round(safe_timeout * 0.3, 2)))
+        read_timeout = round(safe_timeout + max(20.0, connect_timeout - 6.0), 2)
+        write_timeout = connect_timeout
+        pool_timeout = connect_timeout
+        return httpx.Timeout(
+            timeout=safe_timeout,
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+            pool=pool_timeout,
+        )
+
+    def _classify_timeout_exception(self, exc: httpx.TimeoutException) -> str:
+        """把 httpx 超时异常归类成更易排查的日志标签。"""
+
+        if isinstance(exc, httpx.ConnectTimeout):
+            return "connect_timeout"
+        if isinstance(exc, httpx.ReadTimeout):
+            return "read_timeout"
+        if isinstance(exc, httpx.WriteTimeout):
+            return "write_timeout"
+        if isinstance(exc, httpx.PoolTimeout):
+            return "pool_timeout"
+        return "timeout"
 
     def _handle_failure(
         self,

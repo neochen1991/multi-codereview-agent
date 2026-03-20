@@ -166,6 +166,31 @@ export interface GovernanceMetrics {
   false_positive_count: number;
 }
 
+export interface LlmTimeoutSample {
+  timestamp: string;
+  timeout_kind: string;
+  provider: string;
+  model: string;
+  phase: string;
+  review_id: string;
+  expert_id: string;
+  attempt_elapsed_ms: number;
+  total_elapsed_ms: number;
+}
+
+export interface LlmTimeoutMetrics {
+  timeout_count: number;
+  connect_timeout_count: number;
+  read_timeout_count: number;
+  write_timeout_count: number;
+  pool_timeout_count: number;
+  other_timeout_count: number;
+  success_count: number;
+  avg_success_elapsed_ms: number;
+  max_success_elapsed_ms: number;
+  recent_timeouts: LlmTimeoutSample[];
+}
+
 export interface ExpertMetricRow {
   expert_id: string;
   issue_count: number;
@@ -556,6 +581,10 @@ export const governanceApi = {
   },
   async getExpertMetrics(): Promise<ExpertMetricRow[]> {
     const { data } = await api.get("/governance/expert-metrics");
+    return data;
+  },
+  async getLlmTimeoutMetrics(): Promise<LlmTimeoutMetrics> {
+    const { data } = await api.get("/governance/llm-timeout-metrics");
     return data;
   },
 };

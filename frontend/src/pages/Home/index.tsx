@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Col, Row, Space, Statistic, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Button, Card, Col, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   ArrowRightOutlined,
@@ -271,29 +271,6 @@ const HomePage: React.FC = () => {
           </Col>
         </Row>
       </Card>
-
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} md={6}>
-          <Card className="module-card">
-            <Statistic title="总审核数" value={stats.total} />
-          </Card>
-        </Col>
-        <Col xs={24} md={6}>
-          <Card className="module-card">
-            <Statistic title="运行中" value={stats.running} />
-          </Card>
-        </Col>
-        <Col xs={24} md={6}>
-          <Card className="module-card">
-            <Statistic title="待处理队列" value={stats.queued} />
-          </Card>
-        </Col>
-        <Col xs={24} md={6}>
-          <Card className="module-card">
-            <Statistic title="已完成" value={stats.completed} />
-          </Card>
-        </Col>
-      </Row>
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24}>

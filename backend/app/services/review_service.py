@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
 import os
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -595,6 +597,104 @@ class ReviewService:
 
     def build_expert_metrics(self) -> list[dict[str, object]]:
         return self.feedback_learner_service.build_expert_metrics()
+
+    def build_llm_timeout_metrics(self, *, tail_lines: int = 4000) -> dict[str, object]:
+        """从后端日志中聚合最近一段时间的 LLM timeout 与耗时概览。"""
+
+        log_path = settings.LOGS_ROOT / "backend.log"
+        empty_payload = {
+            "timeout_count": 0,
+            "connect_timeout_count": 0,
+            "read_timeout_count": 0,
+            "write_timeout_count": 0,
+            "pool_timeout_count": 0,
+            "other_timeout_count": 0,
+            "success_count": 0,
+            "avg_success_elapsed_ms": 0.0,
+            "max_success_elapsed_ms": 0.0,
+            "recent_timeouts": [],
+        }
+        if not log_path.exists():
+            return empty_payload
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(100, tail_lines) :]
+        except Exception:
+            return empty_payload
+
+        timeout_counters = {
+            "connect_timeout": 0,
+            "read_timeout": 0,
+            "write_timeout": 0,
+            "pool_timeout": 0,
+            "timeout": 0,
+        }
+        recent_timeouts: list[dict[str, object]] = []
+        success_elapsed: list[float] = []
+        for line in lines:
+            if "llm request timeout " in line:
+                timeout_kind = self._extract_log_field(line, "timeout_kind") or "timeout"
+                counter_key = timeout_kind if timeout_kind in timeout_counters else "timeout"
+                timeout_counters[counter_key] += 1
+                recent_timeouts.append(
+                    {
+                        "timestamp": self._extract_log_timestamp(line),
+                        "timeout_kind": timeout_kind,
+                        "provider": self._extract_log_field(line, "provider"),
+                        "model": self._extract_log_field(line, "model"),
+                        "phase": self._extract_context_field(line, "phase"),
+                        "review_id": self._extract_context_field(line, "review_id"),
+                        "expert_id": self._extract_context_field(line, "expert_id")
+                        or self._extract_context_field(line, "agent_id"),
+                        "attempt_elapsed_ms": self._extract_float_log_field(line, "attempt_elapsed_ms"),
+                        "total_elapsed_ms": self._extract_float_log_field(line, "total_elapsed_ms"),
+                    }
+                )
+            elif "llm response parsed " in line:
+                elapsed = self._extract_float_log_field(line, "total_elapsed_ms")
+                if elapsed > 0:
+                    success_elapsed.append(elapsed)
+
+        timeout_count = sum(timeout_counters.values())
+        avg_success = round(sum(success_elapsed) / len(success_elapsed), 2) if success_elapsed else 0.0
+        max_success = round(max(success_elapsed), 2) if success_elapsed else 0.0
+        return {
+            "timeout_count": timeout_count,
+            "connect_timeout_count": timeout_counters["connect_timeout"],
+            "read_timeout_count": timeout_counters["read_timeout"],
+            "write_timeout_count": timeout_counters["write_timeout"],
+            "pool_timeout_count": timeout_counters["pool_timeout"],
+            "other_timeout_count": timeout_counters["timeout"],
+            "success_count": len(success_elapsed),
+            "avg_success_elapsed_ms": avg_success,
+            "max_success_elapsed_ms": max_success,
+            "recent_timeouts": recent_timeouts[-10:],
+        }
+
+    def _extract_log_timestamp(self, line: str) -> str:
+        match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})", line)
+        return match.group(1) if match else ""
+
+    def _extract_log_field(self, line: str, field: str) -> str:
+        match = re.search(rf"{re.escape(field)}=([^\s]+)", line)
+        return match.group(1).strip().strip(",") if match else ""
+
+    def _extract_float_log_field(self, line: str, field: str) -> float:
+        raw = self._extract_log_field(line, field)
+        try:
+            return float(raw)
+        except Exception:
+            return 0.0
+
+    def _extract_context_field(self, line: str, field: str) -> str:
+        match = re.search(r"context=(\{.*?\})(?:\s+\w+=|$)", line)
+        if not match:
+            return ""
+        try:
+            payload = json.loads(match.group(1))
+        except Exception:
+            return ""
+        value = payload.get(field)
+        return str(value).strip() if value is not None else ""
 
     def create_knowledge_document(self, payload: dict[str, object]) -> KnowledgeDocument:
         return self.knowledge_service.create_document(payload)

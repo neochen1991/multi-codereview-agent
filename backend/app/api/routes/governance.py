@@ -19,3 +19,10 @@ def expert_metrics() -> list[dict[str, object]]:
     """返回专家维度指标，供治理页对比分析。"""
 
     return review_service_module.review_service.build_expert_metrics()
+
+
+@router.get("/governance/llm-timeout-metrics")
+def llm_timeout_metrics() -> dict[str, object]:
+    """返回最近一段时间的 LLM timeout 与耗时分布。"""
+
+    return review_service_module.review_service.build_llm_timeout_metrics()

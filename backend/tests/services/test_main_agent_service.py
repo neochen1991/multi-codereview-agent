@@ -1056,6 +1056,116 @@ def test_main_agent_select_review_experts_uses_llm_result(monkeypatch):
     assert plan["skipped_experts"][0]["expert_id"] == "security_compliance"
 
 
+def test_main_agent_uses_runtime_timeout_for_expert_selection(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=["apps/api/orders/order.service.ts"],
+        unified_diff="diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n",
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        )
+    ]
+    captured: dict[str, object] = {}
+
+    def fake_complete_text(**kwargs: object) -> LLMTextResult:
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        captured["max_attempts"] = kwargs.get("max_attempts")
+        return LLMTextResult(
+            text='{"selected_experts":[{"expert_id":"correctness_business","reason":"ok","confidence":0.9}],"skipped_experts":[]}',
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    runtime = RuntimeSettings(
+        allow_llm_fallback=True,
+        standard_llm_timeout_seconds=150,
+        standard_llm_retry_count=4,
+        light_llm_timeout_seconds=220,
+        light_llm_retry_count=2,
+    )
+    plan = agent.select_review_experts(subject, experts, runtime, requested_expert_ids=["correctness_business"])
+
+    assert plan["selected_expert_ids"] == ["correctness_business"]
+    assert captured["timeout_seconds"] == 220.0
+    assert captured["max_attempts"] == 4
+
+
+def test_main_agent_uses_runtime_timeout_for_routing_plan(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/design",
+        target_ref="main",
+        changed_files=["apps/api/orders/order.service.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -1,2 +1,2 @@\n"
+            "+ return payload\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        )
+    ]
+    captured: dict[str, object] = {}
+
+    def fake_complete_text(**kwargs: object) -> LLMTextResult:
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        captured["max_attempts"] = kwargs.get("max_attempts")
+        return LLMTextResult(
+            text='{"expert_routes":[{"expert_id":"correctness_business","candidate_id":"apps/api/orders/order.service.ts:1:1","routeable":true,"reason":"ok","confidence":0.9}],"skipped_experts":[]}',
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    runtime = RuntimeSettings(
+        allow_llm_fallback=True,
+        standard_llm_timeout_seconds=140,
+        standard_llm_retry_count=5,
+        light_llm_timeout_seconds=210,
+        light_llm_retry_count=2,
+    )
+    plan = agent.build_routing_plan(subject, experts, runtime)
+
+    assert plan["correctness_business"]["routing_source"] == "llm"
+    assert captured["timeout_seconds"] == 210.0
+    assert captured["max_attempts"] == 5
+
+
 def test_main_agent_command_accepts_route_hint_with_full_business_files():
     agent = MainAgentService()
     subject = ReviewSubject(

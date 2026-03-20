@@ -168,6 +168,8 @@ def test_llm_chat_logs_request_and_response_previews(monkeypatch, tmp_path: Path
     assert "llm request send" in caplog.text
     assert "llm response received" in caplog.text
     assert "llm response parsed" in caplog.text
+    assert "attempt_elapsed_ms=" in caplog.text
+    assert "total_elapsed_ms=" in caplog.text
     assert '"review_id": "rev_test"' in caplog.text
 
 
@@ -333,3 +335,106 @@ def test_llm_chat_accepts_json_with_list_content_blocks(monkeypatch, tmp_path: P
 
     assert result.mode == "live"
     assert result.text == "first second"
+
+
+def test_llm_chat_uses_intranet_friendly_httpx_timeouts(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    result = service.complete_text(
+        system_prompt="system prompt",
+        user_prompt="user prompt",
+        resolution=service.resolve_main_agent(runtime),
+        fallback_text="fallback",
+        allow_fallback=False,
+        timeout_seconds=120,
+    )
+
+    timeout = captured["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 36.0
+    assert timeout.read == 150.0
+    assert timeout.write == 36.0
+    assert timeout.pool == 36.0
+    assert result.mode == "live"
+
+
+def test_llm_chat_logs_timeout_kind_and_elapsed(monkeypatch, tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]):
+            raise httpx.ReadTimeout("stream stalled")
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            fallback_text="fallback",
+            allow_fallback=True,
+            max_attempts=1,
+            log_context={"review_id": "rev_timeout"},
+        )
+
+    assert result.mode == "fallback"
+    assert "timeout_kind=read_timeout" in caplog.text
+    assert "attempt_elapsed_ms=" in caplog.text
+    assert "total_elapsed_ms=" in caplog.text
+    assert "llm request exhausted" in caplog.text
