@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { Card, Empty, Segmented, Space, Tag, Typography } from "antd";
+import { Button, Card, Empty, Segmented, Space, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ReviewSummary } from "@/services/api";
 
@@ -20,6 +20,9 @@ type LaneEntry = {
   title: string;
   summary: string;
 };
+
+const INITIAL_VISIBLE_LANE_ROWS = 24;
+const VISIBLE_LANE_ROWS_STEP = 24;
 
 const categorizeMessage = (message: ConversationMessage): Exclude<LaneCategory, "all"> => {
   const metadata = message.metadata || {};
@@ -75,6 +78,7 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
 
 const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) => {
   const [categoryFilter, setCategoryFilter] = React.useState<LaneCategory>("all");
+  const [laneVisibleCount, setLaneVisibleCount] = React.useState<Record<string, number>>({});
   const expertIds = useMemo(() => {
     const selected = review?.selected_experts || [];
     const fromMessages = Array.from(
@@ -87,6 +91,20 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
     return Array.from(new Set([...selected, ...fromMessages]));
   }, [messages, review?.selected_experts]);
   const laneEntries = useMemo(() => messages.map(buildLaneEntry), [messages]);
+  const rowsByExpert = useMemo(() => {
+    const grouped = new Map<string, LaneEntry[]>();
+    laneEntries.forEach((item) => {
+      if (categoryFilter !== "all" && item.category !== categoryFilter) return;
+      const rows = grouped.get(item.expertId) || [];
+      rows.push(item);
+      grouped.set(item.expertId, rows);
+    });
+    return grouped;
+  }, [categoryFilter, laneEntries]);
+
+  React.useEffect(() => {
+    setLaneVisibleCount({});
+  }, [categoryFilter, messages.length]);
 
   return (
     <Card className="module-card expert-lane-card" title="专家泳道">
@@ -108,9 +126,10 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
         ) : (
           <div className="expert-lane-grid">
             {expertIds.map((expertId) => {
-              const rows = laneEntries.filter(
-                (item) => item.expertId === expertId && (categoryFilter === "all" || item.category === categoryFilter),
-              );
+              const rows = rowsByExpert.get(expertId) || [];
+              const visibleCount = laneVisibleCount[expertId] || INITIAL_VISIBLE_LANE_ROWS;
+              const visibleRows = rows.slice(-visibleCount);
+              const hiddenCount = Math.max(rows.length - visibleRows.length, 0);
               return (
                 <div key={expertId} className="expert-lane-column">
                   <div className="expert-lane-header">
@@ -118,10 +137,25 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
                     <Text type="secondary">{rows.length > 0 ? `${rows.length} 条记录` : "暂无记录"}</Text>
                   </div>
                   <div className="expert-lane-body">
+                    {hiddenCount > 0 ? (
+                      <Button
+                        type="link"
+                        size="small"
+                        style={{ paddingInline: 0, marginBottom: 8 }}
+                        onClick={() =>
+                          setLaneVisibleCount((current) => ({
+                            ...current,
+                            [expertId]: visibleCount + VISIBLE_LANE_ROWS_STEP,
+                          }))
+                        }
+                      >
+                        {`加载更早记录（剩余 ${hiddenCount} 条）`}
+                      </Button>
+                    ) : null}
                     {rows.length === 0 ? (
                       <div className="expert-lane-empty">当前筛选下没有命中记录</div>
                     ) : (
-                      rows.map((row) => (
+                      visibleRows.map((row) => (
                         <div key={row.id} className={`expert-lane-node expert-lane-node-${row.category}`}>
                           <div className="expert-lane-node-meta">
                             <Tag className="expert-lane-node-tag">{row.category}</Tag>

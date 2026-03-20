@@ -58,6 +58,9 @@ type Props = {
   events?: ReviewEvent[];
 };
 
+const INITIAL_VISIBLE_DIALOGUE_ROWS = 160;
+const VISIBLE_DIALOGUE_ROWS_STEP = 160;
+
 const normalizeText = (value: string): string =>
   value
     .replace(/\r/g, "")
@@ -868,6 +871,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [categoryFilter, setCategoryFilter] = useState<"all" | "command" | "chat" | "tool" | "skill" | "status">("all");
   const [expertFilter, setExpertFilter] = useState<string>("all");
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_DIALOGUE_ROWS);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo(
     () =>
@@ -909,12 +913,24 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
       }),
     [categoryFilter, displayRows, expertFilter],
   );
+  const visibleRows = useMemo(
+    () => filteredRows.slice(-visibleCount),
+    [filteredRows, visibleCount],
+  );
+  const hiddenRowCount = Math.max(filteredRows.length - visibleRows.length, 0);
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE_DIALOGUE_ROWS);
+  }, [categoryFilter, expertFilter, messages.length]);
 
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
-    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-  }, [filteredRows.length]);
+    node.scrollTo({
+      top: node.scrollHeight,
+      behavior: visibleRows.length > 120 ? "auto" : "smooth",
+    });
+  }, [visibleRows.length]);
 
   if (displayRows.length === 0) {
     return <Empty description="暂无专家对话流。" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
@@ -943,13 +959,18 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
             className="dialogue-expert-filter"
             popupMatchSelectWidth={false}
           />
+          {hiddenRowCount > 0 ? (
+            <Button type="link" size="small" onClick={() => setVisibleCount((current) => current + VISIBLE_DIALOGUE_ROWS_STEP)}>
+              {`加载更早消息（剩余 ${hiddenRowCount} 条）`}
+            </Button>
+          ) : null}
         </Space>
       </div>
       <div ref={scrollRef} className="dialogue-stream dialogue-stream-scroll discord-thread">
         {filteredRows.length === 0 ? (
           <Empty description="当前筛选条件下暂无对话记录。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : null}
-        {filteredRows.map((row) => {
+        {visibleRows.map((row) => {
         const compact = buildCompactDetail(row.detail);
         const isExpanded = Boolean(expandedIds[row.id]);
         const filePath = typeof row.metadata.file_path === "string" ? row.metadata.file_path : "";
