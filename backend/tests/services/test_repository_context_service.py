@@ -120,3 +120,45 @@ def test_repository_context_service_ignores_git_and_lock_noise(tmp_path: Path):
     assert result["matches"]
     assert all(".git/" not in item["path"] for item in result["matches"])
     assert all(not item["path"].endswith("yarn.lock") for item in result["matches"])
+
+
+def test_repository_context_service_ignores_compiled_class_artifacts(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    class_file = repo_root / "target" / "classes" / "OrderService.class"
+    source_file = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    class_file.parent.mkdir(parents=True)
+    source_file.parent.mkdir(parents=True)
+    class_file.write_text("processOrder\n", encoding="utf-8")
+    source_file.write_text("public class OrderService { void processOrder() {} }\n", encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    result = service.search("processOrder")
+
+    assert result["matches"]
+    assert all(not item["path"].endswith(".class") for item in result["matches"])
+
+
+def test_repository_context_service_ignores_java_test_named_files(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    test_named_file = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderServiceTest.java"
+    source_file = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    test_named_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    test_named_file.write_text("public class OrderServiceTest { void processOrder() {} }\n", encoding="utf-8")
+    source_file.write_text("public class OrderService { void processOrder() {} }\n", encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    result = service.search("processOrder")
+
+    assert result["matches"]
+    assert all(not item["path"].endswith("OrderServiceTest.java") for item in result["matches"])

@@ -121,6 +121,255 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
     assert "不是 AST 级静态分析" in repo_result["symbol_match_explanation"]
 
 
+def test_skill_gateway_repo_context_search_only_returns_source_file_names_for_hits(tmp_path: Path):
+    storage_root = tmp_path / "storage"
+    repo_root = tmp_path / "repo"
+    primary = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    consumer = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderConsumer.java"
+    compiled = repo_root / "target" / "classes" / "com" / "example" / "OrderConsumer.class"
+    test_file = repo_root / "src" / "test" / "java" / "com" / "example" / "OrderConsumerTest.java"
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    consumer.parent.mkdir(parents=True, exist_ok=True)
+    compiled.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    primary.write_text(
+        "\n".join(
+            [
+                "package com.example;",
+                "public class OrderService {",
+                "    public void processOrder() {}",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    consumer.write_text(
+        "\n".join(
+            [
+                "package com.example;",
+                "public class OrderConsumer {",
+                "    private final OrderService orderService = new OrderService();",
+                "    public void consume() {",
+                "        orderService.processOrder();",
+                "    }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    compiled.write_text("processOrder\n", encoding="utf-8")
+    test_file.write_text("new OrderService().processOrder();\n", encoding="utf-8")
+
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能",
+        role="performance",
+        enabled=True,
+        focus_areas=["性能热点"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/order",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -2,1 +2,1 @@\n"
+            "-    public void processOrder() {}\n"
+            "+    public void processOrder() { audit(); }\n"
+        ),
+    )
+    runtime = RuntimeSettings(
+        code_repo_clone_url="https://github.com/example/repo.git",
+        code_repo_local_path=str(repo_root),
+        code_repo_default_branch="main",
+        runtime_tool_allowlist=["repo_context_search"],
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        runtime,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=2,
+    )
+
+    repo_result = next(item for item in results if item["tool_name"] == "repo_context_search")
+    assert "src/main/java/com/example/OrderService.java" in repo_result["definition_hits"]
+    assert "src/main/java/com/example/OrderConsumer.java" in repo_result["reference_hits"]
+    assert len(repo_result["definition_hits"]) == len(set(repo_result["definition_hits"]))
+    assert len(repo_result["reference_hits"]) == len(set(repo_result["reference_hits"]))
+    assert all(item.endswith((".java", ".kt", ".groovy", ".scala", ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rb", ".php")) for item in repo_result["definition_hits"] + repo_result["reference_hits"])
+
+
+def test_skill_gateway_repo_context_search_filters_test_named_java_classes(tmp_path: Path):
+    storage_root = tmp_path / "storage"
+    repo_root = tmp_path / "repo"
+    primary = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    prod_ref = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderConsumer.java"
+    test_named_ref = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderConsumerTest.java"
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    prod_ref.parent.mkdir(parents=True, exist_ok=True)
+    test_named_ref.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text(
+        "public class OrderService { public void processOrder() {} }\n",
+        encoding="utf-8",
+    )
+    prod_ref.write_text(
+        "public class OrderConsumer { void consume(OrderService s) { s.processOrder(); } }\n",
+        encoding="utf-8",
+    )
+    test_named_ref.write_text(
+        "public class OrderConsumerTest { void verify(OrderService s) { s.processOrder(); } }\n",
+        encoding="utf-8",
+    )
+
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能",
+        role="performance",
+        enabled=True,
+        focus_areas=["性能热点"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/order",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-public class OrderService { public void processOrder() {} }\n"
+            "+public class OrderService { public void processOrder() { audit(); } }\n"
+        ),
+    )
+    runtime = RuntimeSettings(
+        code_repo_clone_url="https://github.com/example/repo.git",
+        code_repo_local_path=str(repo_root),
+        code_repo_default_branch="main",
+        runtime_tool_allowlist=["repo_context_search"],
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        runtime,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=1,
+    )
+
+    repo_result = next(item for item in results if item["tool_name"] == "repo_context_search")
+    assert "src/main/java/com/example/OrderConsumer.java" in repo_result["reference_hits"]
+    assert all("Test.java" not in item for item in repo_result["definition_hits"])
+    assert all("Test.java" not in item for item in repo_result["reference_hits"])
+
+
+def test_skill_gateway_repo_context_search_collects_related_source_snippets_for_prompt(tmp_path: Path):
+    storage_root = tmp_path / "storage"
+    repo_root = tmp_path / "repo"
+    primary = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    consumer = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderConsumer.java"
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    consumer.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text(
+        "\n".join(
+            [
+                "package com.example;",
+                "public class OrderService {",
+                "    public void processOrder(String id) {",
+                "        audit(id);",
+                "    }",
+                "    private void audit(String id) {}",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    consumer.write_text(
+        "\n".join(
+            [
+                "package com.example;",
+                "public class OrderConsumer {",
+                "    private final OrderService orderService = new OrderService();",
+                "    public void consume(String id) {",
+                "        orderService.processOrder(id);",
+                "    }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能",
+        role="performance",
+        enabled=True,
+        focus_areas=["性能热点"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/order",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -3,1 +3,1 @@\n"
+            "-        audit(id);\n"
+            "+        audit(id.trim());\n"
+        ),
+    )
+    runtime = RuntimeSettings(
+        code_repo_clone_url="https://github.com/example/repo.git",
+        code_repo_local_path=str(repo_root),
+        code_repo_default_branch="main",
+        runtime_tool_allowlist=["repo_context_search"],
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        runtime,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=3,
+    )
+
+    repo_result = next(item for item in results if item["tool_name"] == "repo_context_search")
+    assert repo_result["related_source_snippets"]
+    assert any(
+        item["path"] == "src/main/java/com/example/OrderConsumer.java" and "processOrder" in item["snippet"]
+        for item in repo_result["related_source_snippets"]
+    )
+
+
 def test_skill_gateway_repo_context_search_derives_java_method_from_source_context(tmp_path: Path):
     storage_root = tmp_path / "storage"
     repo_root = tmp_path / "repo"

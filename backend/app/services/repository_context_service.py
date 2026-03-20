@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,6 +38,31 @@ class RepositoryContextService:
         "poetry.lock",
         "Pipfile.lock",
         "composer.lock",
+    }
+    EXCLUDED_SUFFIXES = {
+        ".lock",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".class",
+        ".jar",
+        ".war",
+        ".ear",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".exe",
+        ".o",
+        ".a",
+        ".pyc",
+        ".pyo",
     }
 
     def __init__(
@@ -302,8 +328,26 @@ class RepositoryContextService:
         path = Path(normalized)
         if any(part in self.EXCLUDED_PATH_PARTS for part in path.parts):
             return False
+        if self._looks_like_test_file(path):
+            return False
         if path.name in self.EXCLUDED_FILENAMES:
             return False
-        if path.suffix.lower() in {".lock", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".gz", ".ico", ".woff", ".woff2"}:
+        if path.suffix.lower() in self.EXCLUDED_SUFFIXES:
             return False
         return True
+
+    def _looks_like_test_file(self, path: Path) -> bool:
+        lower_parts = [part.lower() for part in path.parts]
+        if any(part in {"test", "tests", "__tests__", "__mocks__", "spec", "specs", "fixtures"} for part in lower_parts):
+            return True
+        name = path.name
+        stem = path.stem
+        lower_name = name.lower()
+        lower_stem = stem.lower()
+        if any(token in lower_name for token in [".test.", ".tests.", ".spec.", ".specs.", ".it."]):
+            return True
+        if lower_stem in {"test", "tests", "spec", "specs"}:
+            return True
+        if any(lower_stem.endswith(suffix) for suffix in ("_test", "_tests", "_spec", "_specs", "-test", "-tests", "-spec", "-specs")):
+            return True
+        return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))

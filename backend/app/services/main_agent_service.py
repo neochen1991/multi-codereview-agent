@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from typing import Literal
 
 from app.domain.models.expert_profile import ExpertProfile
@@ -866,8 +867,21 @@ class MainAgentService:
         return business_files or changed_files
 
     def _is_test_like_path(self, path: str) -> bool:
-        parts = str(path or "").replace("\\", "/").split("/")
-        return any(part.lower() in self.TEST_PATH_MARKERS for part in parts)
+        normalized = Path(str(path or "").replace("\\", "/"))
+        parts = normalized.parts
+        if any(part.lower() in self.TEST_PATH_MARKERS for part in parts):
+            return True
+        name = normalized.name
+        stem = normalized.stem
+        lower_name = name.lower()
+        lower_stem = stem.lower()
+        if any(token in lower_name for token in [".test.", ".tests.", ".spec.", ".specs.", ".it."]):
+            return True
+        if lower_stem in {"test", "tests", "spec", "specs"}:
+            return True
+        if any(lower_stem.endswith(suffix) for suffix in ("_test", "_tests", "_spec", "_specs", "-test", "-tests", "-spec", "-specs")):
+            return True
+        return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
 
     def _build_repository_service(self, runtime_settings: RuntimeSettings) -> RepositoryContextService:
         return RepositoryContextService(
@@ -1352,7 +1366,7 @@ class MainAgentService:
             path = str(item.get("path") or "").strip()
             snippet = str(item.get("snippet") or "").strip()
             if path:
-                fragments.append(f"{path} {snippet}".strip())
+                fragments.append(f"{path} {snippet}".strip() if snippet else path)
         for symbol_context in list(repo_hits.get("symbol_contexts", []) or [])[:2]:
             if not isinstance(symbol_context, dict):
                 continue

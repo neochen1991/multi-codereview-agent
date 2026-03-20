@@ -272,7 +272,7 @@ class ReviewToolGateway:
             if (
                 str(item).strip()
                 and str(item).strip() != file_path
-                and not self._is_test_like_path(str(item).strip())
+                and self._is_source_like_path(str(item).strip())
             )
         ]
         if not service.is_ready():
@@ -296,6 +296,12 @@ class ReviewToolGateway:
             )
             for symbol in symbol_queries[:3]
         ]
+        related_source_snippets = self._build_related_source_snippets(
+            service,
+            symbol_contexts,
+            primary_file_path=file_path,
+        )
+        compact_symbol_contexts = self._compact_symbol_contexts(symbol_contexts)
         related_contexts = [
             service.load_file_context(related_path, 1, radius=8)
             for related_path in related_files[:3]
@@ -303,19 +309,19 @@ class ReviewToolGateway:
         context_files = [
             item
             for item in [file_path, *related_files[:3]]
-            if item and not self._is_test_like_path(item)
+            if item and self._is_source_like_path(item)
         ]
-        definition_hits = self._flatten_symbol_hits(symbol_contexts, "definitions")
-        reference_hits = self._flatten_symbol_hits(symbol_contexts, "references")
-        search_matches = self._build_symbol_matches(symbol_contexts)
+        definition_hits = self._flatten_symbol_hits(compact_symbol_contexts, "definitions")
+        reference_hits = self._flatten_symbol_hits(compact_symbol_contexts, "references")
+        search_matches = self._build_symbol_matches(compact_symbol_contexts)
         search_commands = [self._build_repo_search_command(symbol) for symbol in symbol_queries[:3]]
         if not symbol_queries:
             summary = "未从目标 diff hunk、源码上下文或文件名中提取到方法名或类名，已跳过源码仓检索。"
         else:
             summary = (
                 f"已按 {len(symbol_queries[:3])} 个方法/类关键词检索目标分支代码仓，"
-                f"命中 {len(definition_hits)} 条定义、{len(reference_hits)} 条引用，"
-                "并已自动排除 test/spec 等测试代码。"
+                f"命中 {len(definition_hits)} 个定义文件、{len(reference_hits)} 个引用文件，"
+                "并已自动排除 test/spec 与编译产物等噪音文件。"
             )
         return {
             "summary": summary,
@@ -323,16 +329,17 @@ class ReviewToolGateway:
             "related_contexts": related_contexts,
             "context_files": context_files,
             "matches": search_matches[:8],
-            "symbol_contexts": symbol_contexts,
+            "symbol_contexts": compact_symbol_contexts,
             "search_keywords": symbol_queries[:3],
             "search_keyword_sources": keyword_sources[:3],
             "search_commands": search_commands,
-            "definition_hits": definition_hits[:6],
-            "reference_hits": reference_hits[:6],
+            "definition_hits": definition_hits[:10],
+            "reference_hits": reference_hits[:10],
+            "related_source_snippets": related_source_snippets[:4],
             "symbol_match_strategy": "文本检索命中 + 轻量定义特征判断",
             "symbol_match_explanation": (
                 "先在目标分支源码仓里搜索 symbol 文本命中，再根据 function/class/const/export 等定义特征，"
-                "把结果拆成 definitions 和 references。当前不是 AST 级静态分析。"
+                "把结果拆成 definitions 和 references。当前不是 AST 级静态分析，展示仅保留命中的源码文件名，不再展开命中行与 snippet。"
             ),
         }
 
@@ -459,8 +466,30 @@ class ReviewToolGateway:
         )
 
     def _is_test_like_path(self, path: str) -> bool:
-        parts = Path(str(path or "").replace("\\", "/")).parts
-        return any(str(part).lower() in self.TEST_PATH_MARKERS for part in parts)
+        normalized_path = Path(str(path or "").replace("\\", "/"))
+        parts = normalized_path.parts
+        if any(str(part).lower() in self.TEST_PATH_MARKERS for part in parts):
+            return True
+        name = normalized_path.name
+        stem = normalized_path.stem
+        lower_name = name.lower()
+        lower_stem = stem.lower()
+        if any(token in lower_name for token in [".test.", ".tests.", ".spec.", ".specs.", ".it."]):
+            return True
+        if lower_stem in {"test", "tests", "spec", "specs"}:
+            return True
+        if any(lower_stem.endswith(suffix) for suffix in ("_test", "_tests", "_spec", "_specs", "-test", "-tests", "-spec", "-specs")):
+            return True
+        return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
+
+    def _is_source_like_path(self, path: str) -> bool:
+        normalized = str(path or "").strip()
+        if not normalized or self._is_test_like_path(normalized):
+            return False
+        suffix = Path(normalized).suffix.lower()
+        if suffix in {".class", ".jar", ".war", ".ear", ".dll", ".so", ".dylib", ".exe", ".o", ".a", ".pyc", ".pyo"}:
+            return False
+        return True
 
     def _filter_symbol_context(self, context: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -468,45 +497,119 @@ class ReviewToolGateway:
             "definitions": [
                 item
                 for item in list(context.get("definitions") or [])
-                if isinstance(item, dict) and not self._is_test_like_path(str(item.get("path") or ""))
+                if isinstance(item, dict) and self._is_source_like_path(str(item.get("path") or ""))
             ],
             "references": [
                 item
                 for item in list(context.get("references") or [])
-                if isinstance(item, dict) and not self._is_test_like_path(str(item.get("path") or ""))
+                if isinstance(item, dict) and self._is_source_like_path(str(item.get("path") or ""))
             ],
         }
 
-    def _flatten_symbol_hits(self, symbol_contexts: list[dict[str, Any]], key: str) -> list[str]:
-        hits: list[str] = []
+    def _compact_symbol_contexts(self, symbol_contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        compact_contexts: list[dict[str, Any]] = []
         for context in symbol_contexts:
             symbol = str(context.get("symbol") or "").strip()
-            for item in list(context.get(key) or []):
-                if not isinstance(item, dict):
-                    continue
-                path = str(item.get("path") or "").strip()
-                line_number = int(item.get("line_number") or 0)
-                snippet = str(item.get("snippet") or "").strip()
-                if not path:
-                    continue
-                hits.append(f"{symbol} -> {path}:{line_number} · {snippet}")
-        return hits
+            if not symbol:
+                continue
+            definition_files = self._collect_symbol_hit_files(context, "definitions")
+            reference_files = self._collect_symbol_hit_files(context, "references")
+            compact_contexts.append(
+                {
+                    "symbol": symbol,
+                    "definitions": [{"path": path} for path in definition_files],
+                    "references": [{"path": path} for path in reference_files],
+                }
+            )
+        return compact_contexts
 
-    def _build_symbol_matches(self, symbol_contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        matches: list[dict[str, Any]] = []
+    def _collect_symbol_hit_files(self, context: dict[str, Any], key: str) -> list[str]:
+        files: list[str] = []
+        for item in list(context.get(key) or []):
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path or not self._is_source_like_path(path) or path in files:
+                continue
+            files.append(path)
+        return files
+
+    def _build_related_source_snippets(
+        self,
+        service: RepositoryContextService,
+        symbol_contexts: list[dict[str, Any]],
+        *,
+        primary_file_path: str,
+        max_snippets: int = 4,
+    ) -> list[dict[str, Any]]:
+        snippets: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
         for context in symbol_contexts:
             symbol = str(context.get("symbol") or "").strip()
             for kind in ("definitions", "references"):
                 for item in list(context.get(kind) or []):
                     if not isinstance(item, dict):
                         continue
-                    matches.append({"query": symbol, "kind": kind, **item})
+                    path = str(item.get("path") or "").strip()
+                    if (
+                        not path
+                        or path == primary_file_path
+                        or path in seen_paths
+                        or not self._is_source_like_path(path)
+                    ):
+                        continue
+                    line_number = int(item.get("line_number") or 1)
+                    context_snippet = service.load_file_context(path, line_number, radius=10)
+                    snippet = str(context_snippet.get("snippet") or "").strip()
+                    if not snippet:
+                        continue
+                    snippets.append(
+                        {
+                            "path": path,
+                            "symbol": symbol,
+                            "kind": "definition" if kind == "definitions" else "reference",
+                            "line_start": line_number,
+                            "snippet": snippet,
+                        }
+                    )
+                    seen_paths.add(path)
+                    if len(snippets) >= max_snippets:
+                        return snippets
+        return snippets
+
+    def _flatten_symbol_hits(self, symbol_contexts: list[dict[str, Any]], key: str) -> list[str]:
+        hits: list[str] = []
+        for context in symbol_contexts:
+            for item in list(context.get(key) or []):
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                if not path or not self._is_source_like_path(path) or path in hits:
+                    continue
+                hits.append(path)
+        return hits
+
+    def _build_symbol_matches(self, symbol_contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for context in symbol_contexts:
+            symbol = str(context.get("symbol") or "").strip()
+            for kind in ("definitions", "references"):
+                for item in list(context.get(kind) or []):
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get("path") or "").strip()
+                    key = (symbol, kind, path)
+                    if not path or key in seen:
+                        continue
+                    seen.add(key)
+                    matches.append({"query": symbol, "kind": kind, "path": path})
         return matches
 
     def _build_repo_search_command(self, symbol: str) -> str:
         return (
             f"rg --line-number --no-heading --glob '!.git/**' --glob '!**/*test*/**' "
-            f"--glob '!**/*spec*/**' --glob '!**/__tests__/**' \"{symbol}\""
+            f"--glob '!**/*spec*/**' --glob '!**/__tests__/**' --glob '!**/*.class' \"{symbol}\""
         )
 
 

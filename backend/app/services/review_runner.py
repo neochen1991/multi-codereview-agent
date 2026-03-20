@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -2516,7 +2517,7 @@ class ReviewRunner:
                         path = str(match.get("path") or "").strip()
                         line_number = match.get("line_number")
                         if path:
-                            formatted.append(f"{path}:{line_number}")
+                            formatted.append(f"{path}:{line_number}" if line_number else path)
                 if formatted:
                     lines.append(f"- 代码仓命中: {' / '.join(formatted)}")
             keyword_sources = item.get("search_keyword_sources")
@@ -2545,6 +2546,23 @@ class ReviewRunner:
                         f"- Repo 符号: {symbol} · 定义 {len(list(symbol_context.get('definitions') or []))} · "
                         f"引用 {len(list(symbol_context.get('references') or []))}"
                     )
+            related_source_snippets = item.get("related_source_snippets")
+            if isinstance(related_source_snippets, list) and related_source_snippets:
+                lines.append("- 关联源码片段:")
+                for snippet_item in related_source_snippets[:3]:
+                    if not isinstance(snippet_item, dict):
+                        continue
+                    path = str(snippet_item.get("path") or "").strip()
+                    kind = str(snippet_item.get("kind") or "").strip()
+                    symbol = str(snippet_item.get("symbol") or "").strip()
+                    snippet = str(snippet_item.get("snippet") or "").strip()
+                    if not path or not snippet:
+                        continue
+                    header = path
+                    if kind or symbol:
+                        header += f"（{kind or 'context'} / {symbol or 'n/a'}）"
+                    lines.append(f"  * {header}")
+                    lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
 
     def _build_knowledge_review_context(
@@ -2951,8 +2969,21 @@ class ReviewRunner:
         return merged[:6]
 
     def _is_test_like_path(self, path: str) -> bool:
-        parts = str(path or "").replace("\\", "/").split("/")
-        return any(part.lower() in {"test", "tests", "__tests__", "__mocks__", "spec", "specs", "fixtures", "playwright", "cypress"} for part in parts)
+        normalized = Path(str(path or "").replace("\\", "/"))
+        parts = normalized.parts
+        if any(part.lower() in {"test", "tests", "__tests__", "__mocks__", "spec", "specs", "fixtures", "playwright", "cypress"} for part in parts):
+            return True
+        name = normalized.name
+        stem = normalized.stem
+        lower_name = name.lower()
+        lower_stem = stem.lower()
+        if any(token in lower_name for token in [".test.", ".tests.", ".spec.", ".specs.", ".it."]):
+            return True
+        if lower_stem in {"test", "tests", "spec", "specs"}:
+            return True
+        if any(lower_stem.endswith(suffix) for suffix in ("_test", "_tests", "_spec", "_specs", "-test", "-tests", "-spec", "-specs")):
+            return True
+        return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
 
     def _business_changed_files(self, subject: ReviewSubject) -> list[str]:
         business_files = [

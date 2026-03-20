@@ -755,6 +755,71 @@ def test_review_runner_merge_context_files_uses_repo_context_and_skill_hits(stor
     ]
 
 
+def test_review_runner_prompt_includes_related_source_snippets(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/order",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -3,1 +3,1 @@\n"
+            "-        audit(id);\n"
+            "+        audit(id.trim());\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能",
+        role="performance",
+        enabled=True,
+        focus_areas=["性能热点"],
+        system_prompt="prompt",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/example/OrderService.java",
+        3,
+        tool_evidence=[],
+        runtime_tool_results=[
+            {
+                "tool_name": "repo_context_search",
+                "summary": "已按 1 个方法/类关键词检索目标分支代码仓，命中 1 个定义文件、1 个引用文件。",
+                "related_source_snippets": [
+                    {
+                        "path": "src/main/java/com/example/OrderConsumer.java",
+                        "symbol": "processOrder",
+                        "kind": "reference",
+                        "line_start": 5,
+                        "snippet": "   4 | public void consume(String id) {\n   5 |     orderService.processOrder(id);\n   6 | }",
+                    }
+                ],
+            }
+        ],
+        repository_context={
+            "summary": "目标分支中存在 OrderConsumer 对 processOrder 的调用。",
+            "routing_reason": "需要确认跨文件调用链上的性能影响",
+        },
+        target_hunk={"hunk_header": "@@ -3,1 +3,1 @@", "excerpt": "+        audit(id.trim());"},
+        bound_documents=[],
+        disallowed_inference=["证据不足时不要假定调用方一定安全"],
+        expected_checks=["检查跨文件调用链上的性能与异常处理风险"],
+        active_skills=[],
+    )
+
+    assert "关联源码片段" in prompt
+    assert "src/main/java/com/example/OrderConsumer.java" in prompt
+    assert "orderService.processOrder(id);" in prompt
+
+
 def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
