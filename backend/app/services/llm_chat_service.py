@@ -237,15 +237,38 @@ class LLMChatService:
                     continue
                 break
             except Exception as exc:  # pragma: no cover - network dependent
+                generic_error_kind = self._classify_generic_transport_exception(exc)
+                if generic_error_kind:
+                    last_error = f"request_transport_error:{generic_error_kind}:{exc}"
+                    attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
+                    total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
+                    logger.warning(
+                        "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s exc_type=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
+                        context_preview,
+                        attempt,
+                        safe_attempts,
+                        resolution.provider,
+                        resolution.model,
+                        generic_error_kind,
+                        type(exc).__name__,
+                        attempt_elapsed_ms,
+                        total_elapsed_ms,
+                        exc,
+                    )
+                    if attempt < safe_attempts:
+                        time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
+                        continue
+                    break
                 last_error = f"request_failed:{exc}"
                 attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                 logger.exception(
-                    "llm request failed context=%s attempt=%s/%s provider=%s model=%s attempt_elapsed_ms=%s",
+                    "llm request failed context=%s attempt=%s/%s provider=%s model=%s exc_type=%s attempt_elapsed_ms=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
+                    type(exc).__name__,
                     attempt_elapsed_ms,
                 )
                 break
@@ -348,8 +371,10 @@ class LLMChatService:
         """把 httpx 传输层异常归类成更易排查的日志标签。"""
 
         text = self._collect_exception_text(exc).lower()
-        if "10053" in text or "software caused connection abort" in text or "aborted by the software in your host machine" in text:
+        if self._is_connection_aborted_text(text):
             return "connection_aborted"
+        if self._is_connection_reset_text(text):
+            return "connection_reset"
         if isinstance(exc, httpx.ConnectError):
             return "connect_error"
         if isinstance(exc, httpx.ReadError):
@@ -363,6 +388,39 @@ class LLMChatService:
         if isinstance(exc, httpx.LocalProtocolError):
             return "local_protocol_error"
         return "request_error"
+
+    def _classify_generic_transport_exception(self, exc: BaseException) -> str:
+        """识别未被 httpx 包装、但本质仍属于可重试传输层的异常。"""
+
+        text = self._collect_exception_text(exc).lower()
+        if self._is_connection_aborted_text(text) or isinstance(exc, ConnectionAbortedError):
+            return "connection_aborted"
+        if self._is_connection_reset_text(text) or isinstance(exc, ConnectionResetError):
+            return "connection_reset"
+        if isinstance(exc, BrokenPipeError):
+            return "broken_pipe"
+        if isinstance(exc, OSError):
+            winerror = getattr(exc, "winerror", None)
+            errno = getattr(exc, "errno", None)
+            if winerror == 10053 or errno == 10053:
+                return "connection_aborted"
+            if winerror == 10054 or errno in {54, 104, 10054}:
+                return "connection_reset"
+        return ""
+
+    def _is_connection_aborted_text(self, text: str) -> bool:
+        return (
+            "10053" in text
+            or "software caused connection abort" in text
+            or "aborted by the software in your host machine" in text
+        )
+
+    def _is_connection_reset_text(self, text: str) -> bool:
+        return (
+            "10054" in text
+            or "connection reset by peer" in text
+            or "existing connection was forcibly closed by the remote host" in text
+        )
 
     def _collect_exception_text(self, exc: BaseException) -> str:
         parts: list[str] = []
