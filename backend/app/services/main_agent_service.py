@@ -787,12 +787,16 @@ class MainAgentService:
 
     def _llm_metadata(self, result: LLMTextResult) -> dict[str, object]:
         return {
+            "llm_call_id": result.call_id,
             "provider": result.provider,
             "model": result.model,
             "base_url": result.base_url,
             "api_key_env": result.api_key_env,
             "mode": result.mode,
             "error": result.error,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
         }
 
     def _build_repository_context(

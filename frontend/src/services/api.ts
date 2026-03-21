@@ -205,6 +205,13 @@ export interface ConfidenceSummary {
   design_concern_count?: number;
 }
 
+export interface LlmUsageSummary {
+  total_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface ReviewReport {
   review_id: string;
   status: string;
@@ -214,6 +221,7 @@ export interface ReviewReport {
   issues: DebateIssue[];
   issue_count: number;
   confidence_summary: ConfidenceSummary;
+  llm_usage_summary: LlmUsageSummary;
   human_review_status: string;
 }
 

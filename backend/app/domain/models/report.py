@@ -20,6 +20,15 @@ class ConfidenceSummary(BaseModel):
     design_concern_count: int = 0
 
 
+class LlmUsageSummary(BaseModel):
+    """审核任务内的大模型调用与 token 汇总。"""
+
+    total_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
 class ReviewReport(BaseModel):
     """面向前端结果页输出的最终 Code Review 报告模型。"""
 
@@ -32,4 +41,5 @@ class ReviewReport(BaseModel):
     issues: list[DebateIssue] = Field(default_factory=list)
     issue_count: int = 0
     confidence_summary: ConfidenceSummary = Field(default_factory=ConfidenceSummary)
+    llm_usage_summary: LlmUsageSummary = Field(default_factory=LlmUsageSummary)
     human_review_status: str = "not_required"

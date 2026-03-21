@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from uuid import uuid4
 
 import httpx
 
@@ -34,6 +35,10 @@ class LLMTextResult:
     base_url: str
     api_key_env: str
     error: str = ""
+    call_id: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 class LLMChatService:
@@ -98,6 +103,10 @@ class LLMChatService:
         safe_attempts = max(1, int(max_attempts or 1))
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
         client_timeout = self._build_http_timeout(safe_timeout)
+        call_id = f"llm_{uuid4().hex[:12]}"
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
         request_preview = self._build_request_preview(request_body, system_prompt=system_prompt, user_prompt=user_prompt)
         context_preview = self._stringify_context(log_context)
         total_started_at = time.perf_counter()
@@ -151,6 +160,7 @@ class LLMChatService:
                             response_text=response_text,
                             content_type=content_type,
                         )
+                        prompt_tokens, completion_tokens, total_tokens = self._extract_usage(payload)
                     except ValueError as exc:
                         last_error = (
                             "invalid_json_response:"
@@ -205,6 +215,27 @@ class LLMChatService:
                     time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
                     continue
                 break
+            except httpx.RequestError as exc:  # pragma: no cover - network dependent
+                request_error_kind = self._classify_request_exception(exc)
+                last_error = f"request_transport_error:{request_error_kind}:{exc}"
+                attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
+                total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
+                logger.warning(
+                    "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
+                    context_preview,
+                    attempt,
+                    safe_attempts,
+                    resolution.provider,
+                    resolution.model,
+                    request_error_kind,
+                    attempt_elapsed_ms,
+                    total_elapsed_ms,
+                    exc,
+                )
+                if attempt < safe_attempts:
+                    time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
+                    continue
+                break
             except Exception as exc:  # pragma: no cover - network dependent
                 last_error = f"request_failed:{exc}"
                 attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
@@ -234,6 +265,10 @@ class LLMChatService:
                 fallback_text=fallback_text,
                 error=last_error or "request_failed:unknown",
                 allow_fallback=allow_fallback,
+                call_id=call_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
             )
 
         choices = payload.get("choices") or []
@@ -255,12 +290,16 @@ class LLMChatService:
             )
         total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
         logger.info(
-            "llm response parsed context=%s provider=%s model=%s choices=%s total_elapsed_ms=%s content=%s",
+            "llm response parsed context=%s provider=%s model=%s call_id=%s choices=%s total_elapsed_ms=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s content=%s",
             context_preview,
             resolution.provider,
             resolution.model,
+            call_id,
             len(choices),
             total_elapsed_ms,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
             self._truncate(content),
         )
         return LLMTextResult(
@@ -270,6 +309,10 @@ class LLMChatService:
             model=resolution.model,
             base_url=resolution.base_url,
             api_key_env=resolution.api_key_env,
+            call_id=call_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
         )
 
     def _build_http_timeout(self, timeout_seconds: float) -> httpx.Timeout:
@@ -301,6 +344,36 @@ class LLMChatService:
             return "pool_timeout"
         return "timeout"
 
+    def _classify_request_exception(self, exc: httpx.RequestError) -> str:
+        """把 httpx 传输层异常归类成更易排查的日志标签。"""
+
+        text = self._collect_exception_text(exc).lower()
+        if "10053" in text or "software caused connection abort" in text or "aborted by the software in your host machine" in text:
+            return "connection_aborted"
+        if isinstance(exc, httpx.ConnectError):
+            return "connect_error"
+        if isinstance(exc, httpx.ReadError):
+            return "read_error"
+        if isinstance(exc, httpx.WriteError):
+            return "write_error"
+        if isinstance(exc, httpx.CloseError):
+            return "close_error"
+        if isinstance(exc, httpx.RemoteProtocolError):
+            return "remote_protocol_error"
+        if isinstance(exc, httpx.LocalProtocolError):
+            return "local_protocol_error"
+        return "request_error"
+
+    def _collect_exception_text(self, exc: BaseException) -> str:
+        parts: list[str] = []
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            parts.append(str(current))
+            current = current.__cause__ or current.__context__
+        return " | ".join(part for part in parts if part)
+
     def _handle_failure(
         self,
         *,
@@ -308,9 +381,21 @@ class LLMChatService:
         fallback_text: str,
         error: str,
         allow_fallback: bool,
+        call_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
     ) -> LLMTextResult:
         if allow_fallback:
-            return self._fallback(resolution, fallback_text, error)
+            return self._fallback(
+                resolution,
+                fallback_text,
+                error,
+                call_id=call_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
         raise RuntimeError(
             f"LLM live call required but failed for model={resolution.model}, provider={resolution.provider}: {error}"
         )
@@ -365,6 +450,7 @@ class LLMChatService:
     def _decode_sse_payload(self, response_text: str) -> dict[str, object]:
         chunks: list[dict[str, object]] = []
         accumulated_text_parts: list[str] = []
+        latest_usage: dict[str, object] | None = None
         for raw_line in response_text.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(":"):
@@ -379,6 +465,8 @@ class LLMChatService:
             chunk = json.loads(data)
             if isinstance(chunk, dict):
                 chunks.append(chunk)
+                if isinstance(chunk.get("usage"), dict):
+                    latest_usage = dict(chunk.get("usage") or {})
                 chunk_text = self._extract_text_from_chunk(chunk)
                 if chunk_text:
                     accumulated_text_parts.append(chunk_text)
@@ -391,10 +479,12 @@ class LLMChatService:
             message = choices[0].get("message") or {}
             content = self._extract_content(message.get("content")).strip()
             if content:
+                if latest_usage and not isinstance(chunk.get("usage"), dict):
+                    chunk = {**chunk, "usage": latest_usage}
                 return chunk
         accumulated_text = "".join(accumulated_text_parts).strip()
         if accumulated_text:
-            return {
+            payload = {
                 "choices": [
                     {
                         "message": {
@@ -403,7 +493,27 @@ class LLMChatService:
                     }
                 ]
             }
+            if latest_usage:
+                payload["usage"] = latest_usage
+            return payload
         raise ValueError("sse_no_message_content")
+
+    def _extract_usage(self, payload: dict[str, object]) -> tuple[int, int, int]:
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return 0, 0, 0
+        prompt_tokens = self._safe_int(usage.get("prompt_tokens"))
+        completion_tokens = self._safe_int(usage.get("completion_tokens"))
+        total_tokens = self._safe_int(usage.get("total_tokens"))
+        if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+            total_tokens = prompt_tokens + completion_tokens
+        return prompt_tokens, completion_tokens, total_tokens
+
+    def _safe_int(self, value: object) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
 
     def _extract_text_from_chunk(self, chunk: dict[str, object]) -> str:
         choices = chunk.get("choices") or []
@@ -451,6 +561,11 @@ class LLMChatService:
         resolution: LLMResolution,
         fallback_text: str,
         error: str,
+        *,
+        call_id: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
     ) -> LLMTextResult:
         return LLMTextResult(
             text=fallback_text,
@@ -460,4 +575,8 @@ class LLMChatService:
             base_url=resolution.base_url,
             api_key_env=resolution.api_key_env,
             error=error,
+            call_id=call_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
         )

@@ -1634,12 +1634,16 @@ class ReviewRunner:
 
     def _llm_message_metadata(self, llm_result) -> dict[str, object]:
         return {
+            "llm_call_id": llm_result.call_id,
             "provider": llm_result.provider,
             "model": llm_result.model,
             "base_url": llm_result.base_url,
             "api_key_env": llm_result.api_key_env,
             "mode": llm_result.mode,
             "llm_error": llm_result.error,
+            "prompt_tokens": llm_result.prompt_tokens,
+            "completion_tokens": llm_result.completion_tokens,
+            "total_tokens": llm_result.total_tokens,
         }
 
     def _score_finding(self, subject: ReviewSubject, expert_id: str) -> tuple[str, float]:
@@ -2830,6 +2834,7 @@ class ReviewRunner:
         for raw_batch in batches:
             if not isinstance(raw_batch, dict):
                 continue
+            batch_llm_metadata = self._build_rule_screening_batch_llm_metadata(raw_batch)
             batch_index = int(raw_batch.get("batch_index") or 0)
             batch_count = int(raw_batch.get("batch_count") or 0)
             input_rule_count = int(raw_batch.get("input_rule_count") or 0)
@@ -2857,11 +2862,28 @@ class ReviewRunner:
                         "line_start": line_start,
                         "rule_screening_batch": self._build_rule_screening_batch_metadata(raw_batch),
                         "rule_screening": self._build_rule_screening_metadata(rule_screening),
-                        **self._expert_llm_metadata(expert, runtime_settings),
+                        **(batch_llm_metadata or self._expert_llm_metadata(expert, runtime_settings)),
                     },
                 )
             )
         return messages
+
+    def _build_rule_screening_batch_llm_metadata(self, batch: dict[str, object]) -> dict[str, object]:
+        llm = batch.get("llm")
+        if not isinstance(llm, dict):
+            return {}
+        return {
+            "llm_call_id": str(llm.get("llm_call_id") or "").strip(),
+            "provider": str(llm.get("provider") or "").strip(),
+            "model": str(llm.get("model") or "").strip(),
+            "base_url": str(llm.get("base_url") or "").strip(),
+            "api_key_env": str(llm.get("api_key_env") or "").strip(),
+            "mode": str(llm.get("mode") or "").strip(),
+            "llm_error": str(llm.get("llm_error") or "").strip(),
+            "prompt_tokens": int(llm.get("prompt_tokens") or 0),
+            "completion_tokens": int(llm.get("completion_tokens") or 0),
+            "total_tokens": int(llm.get("total_tokens") or 0),
+        }
 
     def _build_rule_screening_batch_metadata(self, batch: dict[str, object]) -> dict[str, object]:
         decisions = []
@@ -2891,6 +2913,7 @@ class ReviewRunner:
             "batch_index": int(batch.get("batch_index") or 0),
             "batch_count": int(batch.get("batch_count") or 0),
             "screening_mode": str(batch.get("screening_mode") or "").strip(),
+            **self._build_rule_screening_batch_llm_metadata(batch),
             "input_rule_count": int(batch.get("input_rule_count") or 0),
             "must_review_count": int(batch.get("must_review_count") or 0),
             "possible_hit_count": int(batch.get("possible_hit_count") or 0),

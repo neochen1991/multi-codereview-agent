@@ -8,7 +8,7 @@ from pathlib import Path
 from app.domain.models.knowledge import KnowledgeReviewRule
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.sqlite_knowledge_rule_repository import SqliteKnowledgeRuleRepository
-from app.services.llm_chat_service import LLMChatService
+from app.services.llm_chat_service import LLMChatService, LLMTextResult
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +232,7 @@ class KnowledgeRuleScreeningService:
                     parsed=parsed,
                     batch_index=human_batch_index,
                     batch_count=total_batches,
+                    llm_result=llm_result,
                 )
             )
         return self._finalize_llm_result(
@@ -373,6 +374,7 @@ class KnowledgeRuleScreeningService:
         parsed: list[dict[str, object]],
         batch_index: int,
         batch_count: int,
+        llm_result: LLMTextResult,
     ) -> dict[str, object]:
         decisions: list[dict[str, object]] = []
         parsed_by_rule_id = {
@@ -418,6 +420,18 @@ class KnowledgeRuleScreeningService:
             "batch_index": batch_index,
             "batch_count": batch_count,
             "screening_mode": "llm",
+            "llm": {
+                "llm_call_id": llm_result.call_id,
+                "provider": llm_result.provider,
+                "model": llm_result.model,
+                "base_url": llm_result.base_url,
+                "api_key_env": llm_result.api_key_env,
+                "mode": llm_result.mode,
+                "llm_error": llm_result.error,
+                "prompt_tokens": llm_result.prompt_tokens,
+                "completion_tokens": llm_result.completion_tokens,
+                "total_tokens": llm_result.total_tokens,
+            },
             "input_rule_count": len(batch),
             "input_rules": [
                 {

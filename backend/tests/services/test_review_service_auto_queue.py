@@ -199,3 +199,73 @@ def test_rerun_failed_review_clears_previous_runtime_outputs_before_restart(tmp_
     assert len(events) == 1
     assert events[0].event_type == "review_rerun_requested"
     assert service.get_artifacts(review.review_id) == {}
+
+
+def test_build_report_aggregates_llm_calls_and_tokens_without_double_counting(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_usage",
+            "project_id": "proj_usage",
+            "source_ref": "feature/usage",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/99",
+            "title": "llm usage review",
+        }
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="main_agent_expert_selection",
+            content="selection",
+            metadata={
+                "llm_call_id": "llm_call_main",
+                "mode": "live",
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="main_agent_command",
+            content="command",
+            metadata={
+                "llm_call_id": "llm_call_main",
+                "mode": "live",
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="finding_1",
+            expert_id="performance_reliability",
+            message_type="expert_analysis",
+            content="analysis",
+            metadata={
+                "llm_call_id": "llm_call_expert",
+                "mode": "fallback",
+                "prompt_tokens": 300,
+                "completion_tokens": 40,
+                "total_tokens": 340,
+            },
+        )
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.llm_usage_summary.total_calls == 2
+    assert report.llm_usage_summary.prompt_tokens == 400
+    assert report.llm_usage_summary.completion_tokens == 60
+    assert report.llm_usage_summary.total_tokens == 460

@@ -19,6 +19,7 @@ def test_review_report_endpoint_returns_structured_payload(client):
     assert isinstance(payload["findings"], list)
     assert isinstance(payload["issues"], list)
     assert "confidence_summary" in payload
+    assert "llm_usage_summary" in payload
     assert "human_review_status" in payload
     assert "summary" in payload
     assert payload["findings"][0]["remediation_strategy"]

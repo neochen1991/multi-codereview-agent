@@ -180,6 +180,12 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
   const verdict = getVerdict(report, findings);
   const humanReview = getHumanReviewTone(report?.human_review_status || "not_required");
   const pendingHumanCount = report?.confidence_summary.needs_human_count || 0;
+  const llmUsage = report?.llm_usage_summary || {
+    total_calls: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+  };
   const typeCounts = findings.reduce<Record<string, number>>((acc, item) => {
     const key = item.finding_type || "risk_hypothesis";
     acc[key] = (acc[key] || 0) + 1;
@@ -252,11 +258,31 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
             children: mergeDecision,
           },
           {
+            key: "llm_calls",
+            label: "LLM 调用次数",
+            children: llmUsage.total_calls,
+          },
+          {
+            key: "llm_tokens",
+            label: "LLM 总 Token",
+            children: llmUsage.total_tokens,
+          },
+          {
             key: "top",
             label: "首要问题",
             children: topFinding
               ? `${topFinding.file_path}:${topFinding.line_start} · ${topFinding.expert_id}`
               : "尚无问题",
+          },
+          {
+            key: "llm_prompt_tokens",
+            label: "Prompt Tokens",
+            children: llmUsage.prompt_tokens,
+          },
+          {
+            key: "llm_completion_tokens",
+            label: "Completion Tokens",
+            children: llmUsage.completion_tokens,
           },
           {
             key: "priority",

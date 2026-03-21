@@ -337,6 +337,66 @@ def test_llm_chat_accepts_json_with_list_content_blocks(monkeypatch, tmp_path: P
     assert result.text == "first second"
 
 
+def test_llm_chat_extracts_usage_tokens_and_logs_them(monkeypatch, tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = (
+            '{"choices":[{"message":{"content":"ok"}}],'
+            '"usage":{"prompt_tokens":123,"completion_tokens":45,"total_tokens":168}}'
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            fallback_text="fallback",
+            allow_fallback=False,
+            log_context={"review_id": "rev_usage"},
+        )
+
+    assert result.mode == "live"
+    assert result.prompt_tokens == 123
+    assert result.completion_tokens == 45
+    assert result.total_tokens == 168
+    assert result.call_id.startswith("llm_")
+    assert "prompt_tokens=123" in caplog.text
+    assert "completion_tokens=45" in caplog.text
+    assert "total_tokens=168" in caplog.text
+
+
 def test_llm_chat_uses_intranet_friendly_httpx_timeouts(monkeypatch, tmp_path: Path):
     service = LLMChatService()
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
@@ -437,4 +497,122 @@ def test_llm_chat_logs_timeout_kind_and_elapsed(monkeypatch, tmp_path: Path, cap
     assert "timeout_kind=read_timeout" in caplog.text
     assert "attempt_elapsed_ms=" in caplog.text
     assert "total_elapsed_ms=" in caplog.text
+    assert "llm request exhausted" in caplog.text
+
+
+def test_llm_chat_retries_request_transport_errors_and_succeeds(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    attempts = {"count": 0}
+    request = httpx.Request("POST", "https://coding.dashscope.aliyuncs.com/v1/chat/completions")
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok after retry"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise httpx.ConnectError("temporary connect failure", request=request)
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            fallback_text="fallback",
+            allow_fallback=False,
+            max_attempts=2,
+            log_context={"review_id": "rev_transport_retry"},
+        )
+
+    assert attempts["count"] == 2
+    assert result.mode == "live"
+    assert result.text == "ok after retry"
+    assert "llm request transport failure" in caplog.text
+    assert "request_error_kind=connect_error" in caplog.text
+
+
+def test_llm_chat_classifies_windows_connection_abort_as_request_error(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    request = httpx.Request("POST", "https://coding.dashscope.aliyuncs.com/v1/chat/completions")
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]):
+            raise httpx.ReadError(
+                "[WinError 10053] An established connection was aborted by the software in your host machine",
+                request=request,
+            )
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            fallback_text="fallback",
+            allow_fallback=True,
+            max_attempts=1,
+            log_context={"review_id": "rev_win_10053"},
+        )
+
+    assert result.mode == "fallback"
+    assert result.error.startswith("request_transport_error:connection_aborted:")
+    assert "request_error_kind=connection_aborted" in caplog.text
     assert "llm request exhausted" in caplog.text

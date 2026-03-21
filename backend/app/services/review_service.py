@@ -741,6 +741,12 @@ class ReviewService:
         except Exception:
             return 0.0
 
+    def _safe_int(self, value: object) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
     def _extract_context_field(self, line: str, field: str) -> str:
         match = re.search(r"context=(\{.*?\})(?:\s+\w+=|$)", line)
         if not match:
@@ -769,6 +775,7 @@ class ReviewService:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
         issues = self.list_issues(review_id)
+        messages = self.list_all_messages(review_id)
         issue_count = len({item.finding_id for item in findings})
         summary = (
             f"本次代码审核共收敛 {len(findings)} 条发现，"
@@ -786,6 +793,7 @@ class ReviewService:
             issues=issues,
             issue_count=issue_count,
             human_review_status=review.human_review_status,
+            llm_usage_summary=self._build_llm_usage_summary(messages),
             confidence_summary={
                 "high_confidence_count": len(
                     [item for item in findings if item.confidence >= 0.85]
@@ -801,6 +809,30 @@ class ReviewService:
                 "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
             },
         )
+
+    def _build_llm_usage_summary(self, messages: list[ConversationMessage]) -> dict[str, int]:
+        seen_call_ids: set[str] = set()
+        total_calls = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        for message in messages:
+            metadata = message.metadata or {}
+            call_id = str(metadata.get("llm_call_id") or "").strip()
+            mode = str(metadata.get("mode") or "").strip().lower()
+            if not call_id or call_id in seen_call_ids or mode in {"", "pending", "template", "rule_only_light"}:
+                continue
+            seen_call_ids.add(call_id)
+            total_calls += 1
+            prompt_tokens += self._safe_int(metadata.get("prompt_tokens"))
+            completion_tokens += self._safe_int(metadata.get("completion_tokens"))
+            total_tokens += self._safe_int(metadata.get("total_tokens"))
+        return {
+            "total_calls": total_calls,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
 
     def build_replay_bundle(self, review_id: str) -> dict[str, object]:
         review = self.get_review(review_id)
