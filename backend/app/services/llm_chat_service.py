@@ -183,13 +183,14 @@ class LLMChatService:
                 attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                 total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
                 logger.warning(
-                    "llm request timeout context=%s attempt=%s/%s provider=%s model=%s timeout_kind=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
+                    "llm request timeout context=%s attempt=%s/%s provider=%s model=%s timeout_kind=%s will_retry=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
                     timeout_kind,
+                    attempt < safe_attempts,
                     attempt_elapsed_ms,
                     total_elapsed_ms,
                     exc,
@@ -221,13 +222,14 @@ class LLMChatService:
                 attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                 total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
                 logger.warning(
-                    "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
+                    "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s will_retry=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
                     request_error_kind,
+                    attempt < safe_attempts,
                     attempt_elapsed_ms,
                     total_elapsed_ms,
                     exc,
@@ -243,7 +245,7 @@ class LLMChatService:
                     attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                     total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
                     logger.warning(
-                        "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s exc_type=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
+                        "llm request transport failure context=%s attempt=%s/%s provider=%s model=%s request_error_kind=%s exc_type=%s will_retry=%s attempt_elapsed_ms=%s total_elapsed_ms=%s error=%s",
                         context_preview,
                         attempt,
                         safe_attempts,
@@ -251,6 +253,7 @@ class LLMChatService:
                         resolution.model,
                         generic_error_kind,
                         type(exc).__name__,
+                        attempt < safe_attempts,
                         attempt_elapsed_ms,
                         total_elapsed_ms,
                         exc,

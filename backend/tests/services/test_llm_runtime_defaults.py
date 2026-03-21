@@ -680,3 +680,69 @@ def test_llm_chat_retries_windows_connection_aborted_os_error_and_succeeds(
     assert result.mode == "live"
     assert result.text == "ok after windows retry"
     assert "request_error_kind=connection_aborted" in caplog.text
+    assert "will_retry=True" in caplog.text
+
+
+def test_llm_chat_retries_windows_connection_reset_os_error_and_succeeds(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    attempts = {"count": 0}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok after reset retry"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ConnectionResetError(
+                    "[WinError 10054] An existing connection was forcibly closed by the remote host"
+                )
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            fallback_text="fallback",
+            allow_fallback=False,
+            max_attempts=2,
+            log_context={"review_id": "rev_win_reset_retry"},
+        )
+
+    assert attempts["count"] == 2
+    assert result.mode == "live"
+    assert result.text == "ok after reset retry"
+    assert "request_error_kind=connection_reset" in caplog.text
+    assert "will_retry=True" in caplog.text
