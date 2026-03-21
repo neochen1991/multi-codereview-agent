@@ -226,6 +226,10 @@ const SettingsPage: React.FC = () => {
                 allow_human_gate: Boolean(values.allow_human_gate),
                 issue_filter_enabled: Boolean(values.issue_filter_enabled),
                 issue_min_priority_level: values.issue_min_priority_level || "P2",
+                issue_confidence_threshold_p0: Number(values.issue_confidence_threshold_p0 ?? 0.95),
+                issue_confidence_threshold_p1: Number(values.issue_confidence_threshold_p1 ?? 0.85),
+                issue_confidence_threshold_p2: Number(values.issue_confidence_threshold_p2 ?? 0.8),
+                issue_confidence_threshold_p3: Number(values.issue_confidence_threshold_p3 ?? 0.7),
                 suppress_low_risk_hint_issues: Boolean(values.suppress_low_risk_hint_issues),
                 hint_issue_confidence_threshold: Number(values.hint_issue_confidence_threshold || 0.85),
                 hint_issue_evidence_cap: Number(values.hint_issue_evidence_cap || 2),
@@ -413,7 +417,7 @@ const SettingsPage: React.FC = () => {
                       showIcon
                       style={{ marginBottom: 16 }}
                       message="Issue 过滤治理说明"
-                      description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
+                      description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值和每个 P 级单独置信度阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
                     />
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
@@ -440,6 +444,42 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="default_max_debate_rounds" label="默认辩论轮次">
                           <InputNumber min={1} max={6} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item
+                          name="issue_confidence_threshold_p0"
+                          label="P0 Issue 置信度阈值"
+                          extra="blocker 级问题至少达到该置信度才升级为 issue。"
+                        >
+                          <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item
+                          name="issue_confidence_threshold_p1"
+                          label="P1 Issue 置信度阈值"
+                          extra="high / critical 级问题至少达到该置信度才升级为 issue。"
+                        >
+                          <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item
+                          name="issue_confidence_threshold_p2"
+                          label="P2 Issue 置信度阈值"
+                          extra="medium 级问题至少达到该置信度才升级为 issue。"
+                        >
+                          <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item
+                          name="issue_confidence_threshold_p3"
+                          label="P3 Issue 置信度阈值"
+                          extra="low 级问题至少达到该置信度才升级为 issue。"
+                        >
+                          <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>

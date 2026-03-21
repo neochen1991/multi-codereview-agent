@@ -326,6 +326,10 @@ export interface RuntimeSettings {
   allow_human_gate: boolean;
   issue_filter_enabled: boolean;
   issue_min_priority_level: "P0" | "P1" | "P2" | "P3";
+  issue_confidence_threshold_p0: number;
+  issue_confidence_threshold_p1: number;
+  issue_confidence_threshold_p2: number;
+  issue_confidence_threshold_p3: number;
   suppress_low_risk_hint_issues: boolean;
   hint_issue_confidence_threshold: number;
   hint_issue_evidence_cap: number;

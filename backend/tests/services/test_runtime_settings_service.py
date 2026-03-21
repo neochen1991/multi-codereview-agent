@@ -90,6 +90,10 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
         {
             "issue_filter_enabled": False,
             "issue_min_priority_level": "P1",
+            "issue_confidence_threshold_p0": 0.99,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.82,
+            "issue_confidence_threshold_p3": 0.71,
             "suppress_low_risk_hint_issues": False,
             "hint_issue_confidence_threshold": 0.91,
             "hint_issue_evidence_cap": 4,
@@ -98,6 +102,10 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
 
     assert runtime.issue_filter_enabled is False
     assert runtime.issue_min_priority_level == "P1"
+    assert runtime.issue_confidence_threshold_p0 == 0.99
+    assert runtime.issue_confidence_threshold_p1 == 0.95
+    assert runtime.issue_confidence_threshold_p2 == 0.82
+    assert runtime.issue_confidence_threshold_p3 == 0.71
     assert runtime.suppress_low_risk_hint_issues is False
     assert runtime.hint_issue_confidence_threshold == 0.91
     assert runtime.hint_issue_evidence_cap == 4
@@ -105,6 +113,10 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
     sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
     assert sqlite_payload["issue_filter_enabled"] is False
     assert sqlite_payload["issue_min_priority_level"] == "P1"
+    assert sqlite_payload["issue_confidence_threshold_p0"] == 0.99
+    assert sqlite_payload["issue_confidence_threshold_p1"] == 0.95
+    assert sqlite_payload["issue_confidence_threshold_p2"] == 0.82
+    assert sqlite_payload["issue_confidence_threshold_p3"] == 0.71
     assert sqlite_payload["suppress_low_risk_hint_issues"] is False
     assert sqlite_payload["hint_issue_confidence_threshold"] == 0.91
     assert sqlite_payload["hint_issue_evidence_cap"] == 4
@@ -113,6 +125,10 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
     config_runtime = config_repository.get_runtime_settings()
     assert config_runtime.issue_filter_enabled is True
     assert config_runtime.issue_min_priority_level == "P2"
+    assert config_runtime.issue_confidence_threshold_p0 == 0.95
+    assert config_runtime.issue_confidence_threshold_p1 == 0.85
+    assert config_runtime.issue_confidence_threshold_p2 == 0.8
+    assert config_runtime.issue_confidence_threshold_p3 == 0.7
     assert config_runtime.suppress_low_risk_hint_issues is True
 
 

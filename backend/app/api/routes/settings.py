@@ -36,6 +36,10 @@ class RuntimeSettingsRequest(BaseModel):
     allow_human_gate: bool = True
     issue_filter_enabled: bool = True
     issue_min_priority_level: Literal["P0", "P1", "P2", "P3"] = "P2"
+    issue_confidence_threshold_p0: float = 0.95
+    issue_confidence_threshold_p1: float = 0.85
+    issue_confidence_threshold_p2: float = 0.8
+    issue_confidence_threshold_p3: float = 0.7
     suppress_low_risk_hint_issues: bool = True
     hint_issue_confidence_threshold: float = 0.85
     hint_issue_evidence_cap: int = 2

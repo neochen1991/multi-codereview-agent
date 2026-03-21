@@ -56,6 +56,10 @@ def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
     return {
         "issue_filter_enabled": bool(raw.get("issue_filter_enabled", True)),
         "issue_min_priority_level": str(raw.get("issue_min_priority_level", "P2") or "P2").upper(),
+        "issue_confidence_threshold_p0": float(raw.get("issue_confidence_threshold_p0", 0.95) or 0.95),
+        "issue_confidence_threshold_p1": float(raw.get("issue_confidence_threshold_p1", 0.85) or 0.85),
+        "issue_confidence_threshold_p2": float(raw.get("issue_confidence_threshold_p2", 0.8) or 0.8),
+        "issue_confidence_threshold_p3": float(raw.get("issue_confidence_threshold_p3", 0.7) or 0.7),
         "suppress_low_risk_hint_issues": bool(raw.get("suppress_low_risk_hint_issues", True)),
         "hint_issue_confidence_threshold": float(raw.get("hint_issue_confidence_threshold", 0.85) or 0.85),
         "hint_issue_evidence_cap": max(0, int(raw.get("hint_issue_evidence_cap", 2) or 2)),
@@ -255,6 +259,16 @@ def _classify_issue_candidate(
             "severity": highest_severity,
         }
 
+    priority_label = _severity_to_priority_label(highest_severity)
+    priority_confidence_threshold = _priority_confidence_threshold(config, priority_label)
+    if average_confidence < priority_confidence_threshold:
+        return {
+            "rule_code": "below_priority_confidence_threshold",
+            "rule_label": "低于当前 P 级 issue 置信度阈值",
+            "reason": f"当前问题已达到 {priority_label}，但平均置信度仅为 {average_confidence:.2f}，低于该级别配置的 issue 置信度阈值 {priority_confidence_threshold:.2f}，因此仅保留为 finding。",
+            "severity": highest_severity,
+        }
+
     return None
 
 
@@ -266,3 +280,18 @@ def _severity_to_priority_label(severity: str) -> str:
     if severity == "medium":
         return "P2"
     return "P3"
+
+
+def _priority_confidence_threshold(config: dict[str, object], priority_label: str) -> float:
+    mapping = {
+        "P0": "issue_confidence_threshold_p0",
+        "P1": "issue_confidence_threshold_p1",
+        "P2": "issue_confidence_threshold_p2",
+        "P3": "issue_confidence_threshold_p3",
+    }
+    field = mapping.get(priority_label, "issue_confidence_threshold_p2")
+    raw = config.get(field, 0.8)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.8

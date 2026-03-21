@@ -662,6 +662,18 @@ class ReviewRunner:
                     "issue_min_priority_level": str(
                         getattr(runtime_settings, "issue_min_priority_level", "P2") or "P2"
                     ).upper(),
+                    "issue_confidence_threshold_p0": float(
+                        getattr(runtime_settings, "issue_confidence_threshold_p0", 0.95) or 0.95
+                    ),
+                    "issue_confidence_threshold_p1": float(
+                        getattr(runtime_settings, "issue_confidence_threshold_p1", 0.85) or 0.85
+                    ),
+                    "issue_confidence_threshold_p2": float(
+                        getattr(runtime_settings, "issue_confidence_threshold_p2", 0.8) or 0.8
+                    ),
+                    "issue_confidence_threshold_p3": float(
+                        getattr(runtime_settings, "issue_confidence_threshold_p3", 0.7) or 0.7
+                    ),
                     "suppress_low_risk_hint_issues": bool(
                         getattr(runtime_settings, "suppress_low_risk_hint_issues", True)
                     ),

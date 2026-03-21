@@ -24,6 +24,10 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "allow_human_gate": True,
             "issue_filter_enabled": True,
             "issue_min_priority_level": "P1",
+            "issue_confidence_threshold_p0": 0.99,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.82,
+            "issue_confidence_threshold_p3": 0.71,
             "suppress_low_risk_hint_issues": True,
             "hint_issue_confidence_threshold": 0.9,
             "hint_issue_evidence_cap": 3,
@@ -67,6 +71,10 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["default_max_debate_rounds"] == 3
     assert payload["issue_filter_enabled"] is True
     assert payload["issue_min_priority_level"] == "P1"
+    assert payload["issue_confidence_threshold_p0"] == 0.99
+    assert payload["issue_confidence_threshold_p1"] == 0.95
+    assert payload["issue_confidence_threshold_p2"] == 0.82
+    assert payload["issue_confidence_threshold_p3"] == 0.71
     assert payload["suppress_low_risk_hint_issues"] is True
     assert payload["hint_issue_confidence_threshold"] == 0.9
     assert payload["hint_issue_evidence_cap"] == 3

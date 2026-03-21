@@ -134,6 +134,88 @@ def test_detect_conflicts_respects_issue_priority_threshold():
     assert "P1" in result["issue_filter_decisions"][0]["reason"]
 
 
+def test_detect_conflicts_respects_per_priority_confidence_thresholds():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_high_1",
+                "expert_id": "security_compliance",
+                "title": "权限绕过风险",
+                "summary": "当前改动绕过了资源级鉴权校验，存在高风险访问控制漏洞。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 55,
+                "evidence": ["鉴权分支被绕开"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["访问控制规则"],
+                "violated_guidelines": ["高风险接口必须做资源级鉴权"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
+    assert "P1" in result["issue_filter_decisions"][0]["reason"]
+    assert "0.95" in result["issue_filter_decisions"][0]["reason"]
+
+
+def test_detect_conflicts_keeps_issue_when_priority_confidence_threshold_is_met():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_medium_2",
+                "expert_id": "database_analysis",
+                "title": "大事务批量更新缺少分批提交",
+                "summary": "当前 SQL 变更会在一次事务内更新过多记录，容易导致锁持有时间过长。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verification_needed": True,
+                "file_path": "sql/migration/V42__backfill_orders.sql",
+                "line_start": 12,
+                "evidence": ["单事务更新全表"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["批量更新需分批提交"],
+                "violated_guidelines": ["数据库回填需控制事务范围"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["title"] == "大事务批量更新缺少分批提交"
+
+
 def test_detect_conflicts_skips_non_code_review_scope_findings():
     state = {
         "findings": [

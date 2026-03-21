@@ -377,6 +377,10 @@ def test_review_runner_reads_issue_filter_settings_from_runtime(storage_root: Pa
           "default_analysis_mode": "light",
           "issue_filter_enabled": True,
           "issue_min_priority_level": "P1",
+          "issue_confidence_threshold_p0": 0.99,
+          "issue_confidence_threshold_p1": 0.95,
+          "issue_confidence_threshold_p2": 0.82,
+          "issue_confidence_threshold_p3": 0.71,
           "suppress_low_risk_hint_issues": False,
           "hint_issue_confidence_threshold": 0.93,
           "hint_issue_evidence_cap": 5,
@@ -460,6 +464,10 @@ def test_review_runner_reads_issue_filter_settings_from_runtime(storage_root: Pa
         assert state["analysis_mode"] == "light"
         assert state["issue_filter_config"]["issue_filter_enabled"] is True
         assert state["issue_filter_config"]["issue_min_priority_level"] == "P1"
+        assert state["issue_filter_config"]["issue_confidence_threshold_p0"] == 0.99
+        assert state["issue_filter_config"]["issue_confidence_threshold_p1"] == 0.95
+        assert state["issue_filter_config"]["issue_confidence_threshold_p2"] == 0.82
+        assert state["issue_filter_config"]["issue_confidence_threshold_p3"] == 0.71
         assert state["issue_filter_config"]["suppress_low_risk_hint_issues"] is False
         assert state["issue_filter_config"]["hint_issue_confidence_threshold"] == 0.93
         assert state["issue_filter_config"]["hint_issue_evidence_cap"] == 5
