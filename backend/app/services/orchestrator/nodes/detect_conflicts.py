@@ -83,30 +83,33 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         grouped.setdefault(key, []).append(finding)
     conflicts: list[dict[str, object]] = []
     for key, items in grouped.items():
-        skip_decision = _classify_issue_candidate(items, issue_filter_config)
-        if skip_decision is not None:
-            issue_filter_decisions.append(
-                {
-                    "topic": key,
-                    "rule_code": skip_decision["rule_code"],
-                    "rule_label": skip_decision["rule_label"],
-                    "reason": skip_decision["reason"],
-                    "severity": skip_decision["severity"],
-                    "finding_ids": [item.get("finding_id") for item in items],
-                    "finding_titles": [str(item.get("title") or "").strip() for item in items if str(item.get("title") or "").strip()],
-                    "expert_ids": [
-                        str(item.get("expert_id") or "").strip()
-                        for item in items
-                        if str(item.get("expert_id") or "").strip()
-                    ],
-                }
-            )
+        eligible_items: list[dict[str, object]] = []
+        for item in items:
+            skip_decision = _classify_issue_candidate([item], issue_filter_config)
+            if skip_decision is not None:
+                issue_filter_decisions.append(
+                    {
+                        "topic": key,
+                        "rule_code": skip_decision["rule_code"],
+                        "rule_label": skip_decision["rule_label"],
+                        "reason": skip_decision["reason"],
+                        "severity": skip_decision["severity"],
+                        "finding_ids": [item.get("finding_id")],
+                        "finding_titles": [str(item.get("title") or "").strip()] if str(item.get("title") or "").strip() else [],
+                        "expert_ids": [str(item.get("expert_id") or "").strip()] if str(item.get("expert_id") or "").strip() else [],
+                    }
+                )
+                continue
+            eligible_items.append(item)
+
+        if not eligible_items:
             continue
-        first = items[0]
+
+        first = eligible_items[0]
         highest_severity = "medium"
-        if any(str(item.get("severity")) in {"critical", "high"} for item in items):
+        if any(str(item.get("severity")) in {"critical", "high"} for item in eligible_items):
             highest_severity = "high"
-        if any(str(item.get("severity")) == "blocker" for item in items):
+        if any(str(item.get("severity")) == "blocker" for item in eligible_items):
             highest_severity = "blocker"
         conflicts.append(
             {
@@ -117,16 +120,16 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "finding_type": first.get("finding_type", "risk_hypothesis"),
                 "file_path": first.get("file_path"),
                 "line_start": first.get("line_start"),
-                "finding_ids": [item.get("finding_id") for item in items],
-                "participant_expert_ids": [item.get("expert_id") for item in items],
-                "evidence": [e for item in items for e in item.get("evidence", [])],
-                "cross_file_evidence": [e for item in items for e in item.get("cross_file_evidence", [])],
-                "assumptions": [e for item in items for e in item.get("assumptions", [])],
-                "context_files": [e for item in items for e in item.get("context_files", [])],
-                "direct_evidence": any(str(item.get("finding_type")) == "direct_defect" for item in items),
+                "finding_ids": [item.get("finding_id") for item in eligible_items],
+                "participant_expert_ids": [item.get("expert_id") for item in eligible_items],
+                "evidence": [e for item in eligible_items for e in item.get("evidence", [])],
+                "cross_file_evidence": [e for item in eligible_items for e in item.get("cross_file_evidence", [])],
+                "assumptions": [e for item in eligible_items for e in item.get("assumptions", [])],
+                "context_files": [e for item in eligible_items for e in item.get("context_files", [])],
+                "direct_evidence": any(str(item.get("finding_type")) == "direct_defect" for item in eligible_items),
                 "severity": highest_severity,
                 "confidence": round(
-                    sum(float(item.get("confidence", 0.0)) for item in items) / len(items), 2
+                    sum(float(item.get("confidence", 0.0)) for item in eligible_items) / len(eligible_items), 2
                 ),
             }
         )

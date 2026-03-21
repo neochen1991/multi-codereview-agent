@@ -776,7 +776,7 @@ class ReviewService:
         findings = self.list_findings(review_id)
         issues = self.list_issues(review_id)
         messages = self.list_all_messages(review_id)
-        issue_count = len({item.finding_id for item in findings})
+        issue_count = len(issues)
         summary = (
             f"本次代码审核共收敛 {len(findings)} 条发现，"
             f"形成 {len(issues)} 个争议/裁决议题，"

@@ -23,6 +23,7 @@ const severityColor = (severity: string): string => {
 
 const getMergeImpact = (finding: ReviewFinding, issue: DebateIssue | null): string => {
   // 合并影响会结合 severity 和人工裁决需求共同判断。
+  if (!issue) return "仅作为 finding 保留";
   if (issue?.needs_human && issue.status !== "resolved") return "阻塞合并";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "建议修复后再合并";
   return "可跟随后续修复计划";
@@ -162,10 +163,19 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             label: "裁决状态",
             children: (
               <>
-                <Tag color={issue?.status === "resolved" ? "success" : issue?.needs_human ? "error" : "processing"}>
-                  {issue?.status || "open"}
-                </Tag>
-                <Tag>{issue?.resolution || "pending"}</Tag>
+                {issue ? (
+                  <>
+                    <Tag color={issue.status === "resolved" ? "success" : issue.needs_human ? "error" : "processing"}>
+                      {issue.status}
+                    </Tag>
+                    <Tag>{issue.resolution || "pending"}</Tag>
+                  </>
+                ) : (
+                  <>
+                    <Tag color="default">仅 finding</Tag>
+                    <Tag>未升级为 issue</Tag>
+                  </>
+                )}
                 {governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
               </>
             ),
@@ -195,8 +205,16 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       <div style={{ marginTop: 16 }}>
         <Space wrap>
-          {issue?.verified ? <Tag color="success">已通过工具核验</Tag> : <Tag>待进一步核验</Tag>}
-          {issue?.needs_human ? <Tag color="error">需要人工确认</Tag> : <Tag color="processing">可由系统直接收敛</Tag>}
+          {issue ? (
+            issue.verified ? <Tag color="success">已通过工具核验</Tag> : <Tag>待进一步核验</Tag>
+          ) : (
+            <Tag color="default">当前未进入 issue 收敛流程</Tag>
+          )}
+          {issue ? (
+            issue.needs_human ? <Tag color="error">需要人工确认</Tag> : <Tag color="processing">可由系统直接收敛</Tag>
+          ) : (
+            <Tag color="default">仅保留为 finding</Tag>
+          )}
           {issue?.tool_name ? <Tag color="cyan">{issue.tool_name}</Tag> : null}
           {issue?.verifier_name ? <Tag color="blue">{issue.verifier_name}</Tag> : null}
           {issue?.participant_expert_ids?.map((expertId) => (

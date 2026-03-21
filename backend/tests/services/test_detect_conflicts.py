@@ -216,6 +216,66 @@ def test_detect_conflicts_keeps_issue_when_priority_confidence_threshold_is_met(
     assert result["conflicts"][0]["title"] == "大事务批量更新缺少分批提交"
 
 
+def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_group_low",
+                "expert_id": "security_compliance",
+                "title": "鉴权绕过风险提示一",
+                "summary": "同一代码块里存在一个高风险访问控制问题，但当前这条 finding 的证据较弱。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 55,
+                "evidence": ["存在绕过资源鉴权的分支"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["访问控制规则"],
+                "violated_guidelines": ["高风险接口必须做资源级鉴权"],
+            },
+            {
+                "finding_id": "fdg_group_high",
+                "expert_id": "security_compliance",
+                "title": "鉴权绕过风险提示二",
+                "summary": "同一代码块里的另一个 finding 证据更强，达到 issue 升级阈值。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.97,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 56,
+                "evidence": ["鉴权分支被显式绕开", "存在未授权访问路径"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["访问控制规则"],
+                "violated_guidelines": ["高风险接口必须做资源级鉴权"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_high"]
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_group_low"]
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
+
+
 def test_detect_conflicts_skips_non_code_review_scope_findings():
     state = {
         "findings": [

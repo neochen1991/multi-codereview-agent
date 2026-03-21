@@ -1088,6 +1088,21 @@ body {
   width: 100%;
 }
 
+.process-main-tabs,
+.process-sidebar-tabs {
+  width: 100%;
+}
+
+.process-main-tabs > .ant-tabs-content-holder,
+.process-sidebar-tabs > .ant-tabs-content-holder {
+  width: 100%;
+}
+
+.process-main-tabs .ant-tabs-tabpane,
+.process-sidebar-tabs .ant-tabs-tabpane {
+  width: 100%;
+}
+
 .process-sidebar-stack .ant-space-item {
   width: 100%;
 }
@@ -1259,7 +1274,7 @@ body {
 
 .github-diff-shell {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: minmax(340px, 40%) minmax(0, 1fr);
   height: 540px;
   background: #fff;
   contain: layout paint;

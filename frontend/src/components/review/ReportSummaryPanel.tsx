@@ -29,7 +29,7 @@ const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]
   const highRiskCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
   if ((report?.confidence_summary.needs_human_count || 0) > 0) return "阻塞合并，等待人工确认";
   if (highRiskCount > 0) return "建议修复高风险问题后再合并";
-  if (findings.length > 0) return "建议处理问题清单后合并";
+  if (findings.length > 0) return "建议处理审核发现后合并";
   return "可直接合并";
 };
 
@@ -155,6 +155,7 @@ const clickableStatistic = (
 
 const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className, onNavigateToGroup }) => {
   const totalCount = findings.length;
+  const formalIssueCount = issues.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
   const criticalCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
   const issueByFindingId = new Map<string, DebateIssue>();
@@ -213,10 +214,13 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          {clickableStatistic("总问题数", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
+          {clickableStatistic("审核发现", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
-          {clickableStatistic("高风险问题", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}
+          <Statistic title="正式议题" value={formalIssueCount} />
+        </Col>
+        <Col xs={12} xl={6}>
+          {clickableStatistic("高风险发现", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
           {clickableStatistic(
@@ -230,9 +234,9 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
         </Col>
       </Row>
       <Space wrap style={{ marginTop: 16 }}>
-        <Tag color={blockingCount > 0 ? "error" : "default"}>{`Blocking ${blockingCount}`}</Tag>
-        <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`Should Fix ${shouldFixCount}`}</Tag>
-        <Tag color="success">{`Non-blocking ${Math.max(findings.length - blockingCount - shouldFixCount, 0)}`}</Tag>
+        <Tag color={blockingCount > 0 ? "error" : "default"}>{`阻塞合并 ${blockingCount}`}</Tag>
+        <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`建议先修 ${shouldFixCount}`}</Tag>
+        <Tag color="success">{`非阻塞 ${Math.max(findings.length - blockingCount - shouldFixCount, 0)}`}</Tag>
         {Object.entries(typeCounts).map(([key, count]) => (
           <Tag key={key}>{`${findingTypeLabel(key)} ${count}`}</Tag>
         ))}

@@ -269,3 +269,53 @@ def test_build_report_aggregates_llm_calls_and_tokens_without_double_counting(tm
     assert report.llm_usage_summary.prompt_tokens == 400
     assert report.llm_usage_summary.completion_tokens == 60
     assert report.llm_usage_summary.total_tokens == 460
+
+
+def test_build_report_uses_real_issue_count_not_finding_count(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_issue_count",
+            "project_id": "proj_issue_count",
+            "source_ref": "feature/issue-count",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/109",
+            "title": "issue count review",
+        }
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            expert_id="architecture_design",
+            title="finding one",
+            summary="first finding",
+        ),
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            expert_id="performance_reliability",
+            title="finding two",
+            summary="second finding",
+        ),
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                title="single issue",
+                summary="only one issue should be counted",
+                finding_ids=["fdg_1"],
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert len(report.findings) == 2
+    assert len(report.issues) == 1
+    assert report.issue_count == 1

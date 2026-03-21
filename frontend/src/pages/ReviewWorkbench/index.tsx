@@ -35,9 +35,11 @@ const ExpertLaneBoard = lazy(() => import("@/components/review/ExpertLaneBoard")
 const FindingsPanel = lazy(() => import("@/components/review/FindingsPanel"));
 const HumanGatePanel = lazy(() => import("@/components/review/HumanGatePanel"));
 const IssueDetailPanel = lazy(() => import("@/components/review/IssueDetailPanel"));
+const IssueThresholdFilteredPanel = lazy(() => import("@/components/review/IssueThresholdFilteredPanel"));
 const IssueThreadList = lazy(() => import("@/components/review/IssueThreadList"));
 const KnowledgeRefPanel = lazy(() => import("@/components/review/KnowledgeRefPanel"));
 const ReplayConsolePanel = lazy(() => import("@/components/review/ReplayConsolePanel"));
+const ResultIssuePanel = lazy(() => import("@/components/review/ResultIssuePanel"));
 const ReportSummaryPanel = lazy(() => import("@/components/review/ReportSummaryPanel"));
 const ReviewDialogueStream = lazy(() => import("@/components/review/ReviewDialogueStream"));
 const ToolAuditPanel = lazy(() => import("@/components/review/ToolAuditPanel"));
@@ -969,116 +971,124 @@ const ReviewWorkbenchPage: React.FC = () => {
         )}
 
         {activeStep === "process" && (
-          <Row gutter={[16, 16]}>
-            <Col xs={24} xl={17}>
-              <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-main-stack">
-                <ExpertSelectionPanel summary={expertSelectionSummary} />
-                <ExpertRoutingPanel summary={expertRoutingSummary} />
-                <Tabs
-                  activeKey={processMainTab}
-                  onChange={(key) => setProcessMainTab(key as ProcessMainTabKey)}
-                  destroyInactiveTabPane
-                  items={[
-                    {
-                      key: "dialogue",
-                      label: "专家对话流",
-                      children: (
-                        <div ref={processDialogueRef}>
-                          <Card className="module-card process-dialogue-card" title="专家对话流">
-                            {reviewId ? (
-                              <Suspense fallback={<Empty description="专家对话流加载中..." image={Empty.PRESENTED_IMAGE_SIMPLE} />}>
-                                <ReviewDialogueStream messages={allMessages} review={review} events={events} />
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Row gutter={[16, 16]} align="stretch">
+              <Col xs={24} xl={15}>
+                <div className="process-main-stack">
+                  <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                    <ExpertSelectionPanel summary={expertSelectionSummary} />
+                    <ExpertRoutingPanel summary={expertRoutingSummary} />
+                  </Space>
+                </div>
+              </Col>
+              <Col xs={24} xl={9}>
+                <div className="process-sidebar-stack process-sidebar-top">
+                  <Tabs
+                    className="process-sidebar-tabs"
+                    activeKey={processSidebarTab}
+                    onChange={(key) => setProcessSidebarTab(key as ProcessSidebarTabKey)}
+                    destroyInactiveTabPane
+                    items={[
+                      {
+                        key: "issues",
+                        label: "议题与工具",
+                        children: (
+                          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                            <div ref={processIssuesRef}>
+                              <Suspense fallback={<WorkbenchPanelFallback description="Issue 列表加载中..." />}>
+                                <IssueThreadList
+                                  issues={issues}
+                                  selectedIssueId={selectedIssueId}
+                                  onSelect={setSelectedIssueId}
+                                />
                               </Suspense>
-                            ) : (
-                              <Empty description="请先在“概览与启动”创建一个审核任务。" />
-                            )}
-                          </Card>
-                        </div>
-                      ),
-                    },
-                    {
-                      key: "lanes",
-                      label: "专家泳道",
-                      children: (
-                        <Suspense fallback={<WorkbenchPanelFallback description="专家泳道加载中..." />}>
-                          <ExpertLaneBoard review={review} messages={allMessages} />
-                        </Suspense>
-                      ),
-                    },
-                    {
-                      key: "diff",
-                      label: "Diff 预览",
-                      children: (
-                        <Suspense fallback={<WorkbenchPanelFallback description="Diff 预览加载中..." />}>
-                          <DiffPreviewPanel
-                            diff={review?.subject?.unified_diff || ""}
-                            changedFileCount={review?.subject?.changed_files?.length}
-                          />
-                        </Suspense>
-                      ),
-                    },
-                    {
-                      key: "replay",
-                      label: "回放控制台",
-                      children: (
-                        <Suspense fallback={<WorkbenchPanelFallback description="回放控制台加载中..." />}>
-                          <ReplayConsolePanel replay={replay} />
-                        </Suspense>
-                      ),
-                    },
-                  ]}
-                />
-              </Space>
-            </Col>
-            <Col xs={24} xl={7}>
-              <Space direction="vertical" size={16} style={{ width: "100%" }} className="process-sidebar-stack">
-                <Tabs
-                  activeKey={processSidebarTab}
-                  onChange={(key) => setProcessSidebarTab(key as ProcessSidebarTabKey)}
-                  destroyInactiveTabPane
-                  items={[
-                    {
-                      key: "issues",
-                      label: "议题与工具",
-                      children: (
-                        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                          <div ref={processIssuesRef}>
-                            <Suspense fallback={<WorkbenchPanelFallback description="Issue 列表加载中..." />}>
-                              <IssueThreadList
-                                issues={issues}
-                                selectedIssueId={selectedIssueId}
-                                onSelect={setSelectedIssueId}
-                              />
+                            </div>
+                            <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
+                              <IssueDetailPanel issue={selectedIssue} />
                             </Suspense>
-                          </div>
-                          <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
-                            <IssueDetailPanel issue={selectedIssue} />
+                            <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
+                              <ToolAuditPanel issue={selectedIssue} />
+                            </Suspense>
+                          </Space>
+                        ),
+                      },
+                      {
+                        key: "knowledge",
+                        label: "知识引用",
+                        children: (
+                          <Suspense fallback={<WorkbenchPanelFallback description="知识引用加载中..." />}>
+                            <KnowledgeRefPanel documents={knowledgeDocs} loading={knowledgeLoading} />
                           </Suspense>
-                          <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
-                            <ToolAuditPanel issue={selectedIssue} />
-                          </Suspense>
-                        </Space>
-                      ),
-                    },
-                    {
-                      key: "knowledge",
-                      label: "知识引用",
-                      children: (
-                        <Suspense fallback={<WorkbenchPanelFallback description="知识引用加载中..." />}>
-                          <KnowledgeRefPanel documents={knowledgeDocs} loading={knowledgeLoading} />
-                        </Suspense>
-                      ),
-                    },
-                    {
-                      key: "events",
-                      label: "事件时间线",
-                      children: <EventTimeline events={events} />,
-                    },
-                  ]}
-                />
-              </Space>
-            </Col>
-          </Row>
+                        ),
+                      },
+                      {
+                        key: "events",
+                        label: "事件时间线",
+                        children: <EventTimeline events={events} />,
+                      },
+                    ]}
+                  />
+                </div>
+              </Col>
+            </Row>
+            <div className="process-main-stack">
+              <Tabs
+                className="process-main-tabs"
+                activeKey={processMainTab}
+                onChange={(key) => setProcessMainTab(key as ProcessMainTabKey)}
+                destroyInactiveTabPane
+                items={[
+                  {
+                    key: "dialogue",
+                    label: "专家对话流",
+                    children: (
+                      <div ref={processDialogueRef}>
+                        <Card className="module-card process-dialogue-card" title="专家对话流">
+                          {reviewId ? (
+                            <Suspense fallback={<Empty description="专家对话流加载中..." image={Empty.PRESENTED_IMAGE_SIMPLE} />}>
+                              <ReviewDialogueStream messages={allMessages} review={review} events={events} />
+                            </Suspense>
+                          ) : (
+                            <Empty description="请先在“概览与启动”创建一个审核任务。" />
+                          )}
+                        </Card>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: "lanes",
+                    label: "专家泳道",
+                    children: (
+                      <Suspense fallback={<WorkbenchPanelFallback description="专家泳道加载中..." />}>
+                        <ExpertLaneBoard review={review} messages={allMessages} />
+                      </Suspense>
+                    ),
+                  },
+                  {
+                    key: "diff",
+                    label: "Diff 预览",
+                    children: (
+                      <Suspense fallback={<WorkbenchPanelFallback description="Diff 预览加载中..." />}>
+                        <DiffPreviewPanel
+                          diff={review?.subject?.unified_diff || ""}
+                          changedFileCount={review?.subject?.changed_files?.length}
+                        />
+                      </Suspense>
+                    ),
+                  },
+                  {
+                    key: "replay",
+                    label: "回放控制台",
+                    children: (
+                      <Suspense fallback={<WorkbenchPanelFallback description="回放控制台加载中..." />}>
+                        <ReplayConsolePanel replay={replay} />
+                      </Suspense>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+          </Space>
         )}
 
         {activeStep === "result" && (
@@ -1152,6 +1162,12 @@ const ReviewWorkbenchPage: React.FC = () => {
               </Col>
             </Row>
             <ExpertRuleCoveragePanel items={expertRuleCoverage} />
+            <Suspense fallback={<WorkbenchPanelFallback description="正式 issue 清单加载中..." />}>
+              <ResultIssuePanel issues={issues} />
+            </Suspense>
+            <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
+              <IssueThresholdFilteredPanel findings={findings} issueFilterDecisions={issueFilterDecisions} />
+            </Suspense>
             <div ref={resultFindingsRef}>
               <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
                 <FindingsPanel

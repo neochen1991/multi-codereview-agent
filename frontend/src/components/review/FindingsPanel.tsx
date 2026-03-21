@@ -50,6 +50,7 @@ type StructuredFindingRow = ReviewFinding & {
   verified: boolean;
   mergeImpact: string;
   priority: string;
+  hasIssue: boolean;
   governanceDecision?: IssueFilterDecision | null;
 };
 
@@ -61,6 +62,7 @@ const getPriority = (finding: ReviewFinding): string => {
 };
 
 const getMergeImpact = (issue: DebateIssue | undefined, finding: ReviewFinding): string => {
+  if (!issue) return "Finding only";
   if (issue?.needs_human && issue.status !== "resolved") return "Blocking";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "Should fix before merge";
   return "Non-blocking";
@@ -170,13 +172,14 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     const issue = issueByFindingId.get(finding.finding_id);
     return {
       ...finding,
-      issueStatus: issue?.status || "open",
-      resolution: issue?.resolution || "pending",
+      issueStatus: issue?.status || "finding_only",
+      resolution: issue?.resolution || "not_promoted",
       recommendedAction: buildRecommendedAction(issue, finding),
       needsHuman: Boolean(issue?.needs_human),
       verified: Boolean(issue?.verified),
       mergeImpact: getMergeImpact(issue, finding),
       priority: getPriority(finding),
+      hasIssue: Boolean(issue),
       governanceDecision: governanceDecisionByFindingId.get(finding.finding_id) || null,
     };
   });
@@ -291,7 +294,17 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       key: "mergeImpact",
       width: 170,
       render: (value: string) => (
-        <Tag color={value === "Blocking" ? "error" : value.includes("Should fix") ? "warning" : "success"}>
+        <Tag
+          color={
+            value === "Blocking"
+              ? "error"
+              : value.includes("Should fix")
+                ? "warning"
+                : value === "Finding only"
+                  ? "default"
+                  : "success"
+          }
+        >
           {value}
         </Tag>
       ),
@@ -309,10 +322,19 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       width: 240,
       render: (_: unknown, item: StructuredFindingRow) => (
         <div className="review-tag-stack">
-          <Tag color={item.issueStatus === "resolved" ? "success" : item.needsHuman ? "error" : "processing"}>
-            {item.issueStatus}
-          </Tag>
-          <Tag>{item.resolution}</Tag>
+          {item.hasIssue ? (
+            <>
+              <Tag color={item.issueStatus === "resolved" ? "success" : item.needsHuman ? "error" : "processing"}>
+                {item.issueStatus}
+              </Tag>
+              <Tag>{item.resolution}</Tag>
+            </>
+          ) : (
+            <>
+              <Tag color="default">仅 finding</Tag>
+              <Tag>未升级为 issue</Tag>
+            </>
+          )}
           {item.governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
         </div>
       ),
@@ -394,7 +416,11 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   ];
 
   return (
-    <Card className="module-card review-findings-card" title="Code Review 问题清单">
+    <Card
+      className="module-card review-findings-card"
+      title="审核发现清单"
+      extra={<Tag color="default">这里展示本次审核的发现项，不等同于正式议题</Tag>}
+    >
       <Space wrap style={{ marginBottom: 6 }}>
         <Button type={activeGroup === "all" ? "primary" : "default"} onClick={() => setActiveGroup("all")}>
           全部 {rows.length}
@@ -449,7 +475,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           style: { cursor: onSelectFinding ? "pointer" : "default" },
         })}
         className="review-findings-table"
-        locale={{ emptyText: "当前还没有问题结论，运行审核后这里会生成正式的 Code Review 问题清单。" }}
+        locale={{ emptyText: "当前还没有审核发现，运行审核后这里会生成正式的发现清单。" }}
       />
     </Card>
   );
