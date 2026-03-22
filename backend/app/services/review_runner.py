@@ -2477,6 +2477,86 @@ class ReviewRunner:
                         title = str(match.get("title") or match.get("doc_id") or "knowledge")
                         snippet = str(match.get("snippet") or "").strip()
                         lines.append(f"  * {title}: {snippet[:160]}")
+            if tool_name == "pg_schema_context":
+                data_source_summary = item.get("data_source_summary")
+                if isinstance(data_source_summary, dict):
+                    database = str(data_source_summary.get("database") or "").strip()
+                    host = str(data_source_summary.get("host") or "").strip()
+                    schema_allowlist = [
+                        str(value).strip()
+                        for value in list(data_source_summary.get("schema_allowlist") or [])
+                        if str(value).strip()
+                    ]
+                    source_line = "  * 数据源: "
+                    source_line += database or "unknown_db"
+                    if host:
+                        source_line += f" @ {host}"
+                    if schema_allowlist:
+                        source_line += f" · schema={', '.join(schema_allowlist[:4])}"
+                    lines.append(source_line)
+                matched_tables = [
+                    str(value).strip()
+                    for value in list(item.get("matched_tables") or [])
+                    if str(value).strip()
+                ]
+                if matched_tables:
+                    lines.append(f"  * 命中表: {' / '.join(matched_tables[:6])}")
+                table_columns = item.get("table_columns")
+                if isinstance(table_columns, list) and table_columns:
+                    formatted_columns: list[str] = []
+                    for column in table_columns[:8]:
+                        if not isinstance(column, dict):
+                            continue
+                        table_name = str(column.get("table_name") or "").strip()
+                        column_name = str(column.get("column_name") or "").strip()
+                        data_type = str(column.get("data_type") or "").strip()
+                        nullable = str(column.get("is_nullable") or "").strip()
+                        if table_name and column_name:
+                            formatted_columns.append(
+                                f"{table_name}.{column_name}({data_type or 'unknown'} / nullable={nullable or 'unknown'})"
+                            )
+                    if formatted_columns:
+                        lines.append(f"  * 关键列: {' / '.join(formatted_columns[:6])}")
+                constraints = item.get("constraints")
+                if isinstance(constraints, list) and constraints:
+                    formatted_constraints: list[str] = []
+                    for constraint in constraints[:6]:
+                        if not isinstance(constraint, dict):
+                            continue
+                        table_name = str(constraint.get("table_name") or "").strip()
+                        constraint_type = str(constraint.get("constraint_type") or "").strip()
+                        columns = str(constraint.get("columns") or "").strip()
+                        if table_name and constraint_type:
+                            formatted_constraints.append(f"{table_name}:{constraint_type}({columns})" if columns else f"{table_name}:{constraint_type}")
+                    if formatted_constraints:
+                        lines.append(f"  * 约束: {' / '.join(formatted_constraints[:5])}")
+                indexes = item.get("indexes")
+                if isinstance(indexes, list) and indexes:
+                    formatted_indexes: list[str] = []
+                    for index in indexes[:6]:
+                        if not isinstance(index, dict):
+                            continue
+                        table_name = str(index.get("table_name") or "").strip()
+                        indexname = str(index.get("indexname") or "").strip()
+                        if table_name and indexname:
+                            formatted_indexes.append(f"{table_name}:{indexname}")
+                    if formatted_indexes:
+                        lines.append(f"  * 索引: {' / '.join(formatted_indexes[:5])}")
+                table_stats = item.get("table_stats")
+                if isinstance(table_stats, list) and table_stats:
+                    formatted_stats: list[str] = []
+                    for stat in table_stats[:5]:
+                        if not isinstance(stat, dict):
+                            continue
+                        table_name = str(stat.get("table_name") or "").strip()
+                        estimated_rows = stat.get("estimated_rows")
+                        total_size = str(stat.get("total_size") or "").strip()
+                        if table_name:
+                            row_part = f"rows≈{estimated_rows}" if estimated_rows not in (None, "") else "rows≈unknown"
+                            size_part = f" size={total_size}" if total_size else ""
+                            formatted_stats.append(f"{table_name}:{row_part}{size_part}")
+                    if formatted_stats:
+                        lines.append(f"  * 表统计: {' / '.join(formatted_stats[:4])}")
         return "\n".join(lines)
 
     def _build_repository_context_summary(

@@ -16,6 +16,22 @@ def test_runtime_settings_service_prefers_config_for_system_fields(storage_root:
                 "code_repo_clone_url": "https://codehub.example.com/group/project.git",
                 "auto_review_enabled": True,
                 "auto_review_poll_interval_seconds": 180,
+                "database_sources": [
+                    {
+                        "repo_url": "https://codehub.example.com/group/project.git",
+                        "provider": "postgres",
+                        "host": "127.0.0.1",
+                        "port": 5432,
+                        "database": "review_db",
+                        "user": "readonly",
+                        "password_env": "REVIEW_DB_PASSWORD",
+                        "schema_allowlist": ["public"],
+                        "ssl_mode": "prefer",
+                        "connect_timeout_seconds": 5,
+                        "statement_timeout_ms": 3000,
+                        "enabled": True,
+                    }
+                ],
                 "default_analysis_mode": "standard",
             }
         )
@@ -28,6 +44,7 @@ def test_runtime_settings_service_prefers_config_for_system_fields(storage_root:
             "standard_llm_timeout_seconds": 75,
             "auto_review_enabled": False,
             "code_repo_clone_url": "https://stale.example.com/should-not-win.git",
+            "database_sources": [{"repo_url": "https://stale.example.com/repo.git"}],
         }
     )
 
@@ -36,12 +53,15 @@ def test_runtime_settings_service_prefers_config_for_system_fields(storage_root:
     assert runtime.code_repo_clone_url == "https://codehub.example.com/group/project.git"
     assert runtime.auto_review_enabled is True
     assert runtime.auto_review_poll_interval_seconds == 180
+    assert len(runtime.database_sources) == 1
+    assert runtime.database_sources[0].database == "review_db"
     assert runtime.default_analysis_mode == "light"
     assert runtime.standard_llm_timeout_seconds == 75
 
     sqlite_payload = sqlite_repository.get_payload() or {}
     assert "auto_review_enabled" not in sqlite_payload
     assert "code_repo_clone_url" not in sqlite_payload
+    assert "database_sources" not in sqlite_payload
 
 
 def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_root: Path) -> None:
@@ -53,6 +73,22 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
             "code_repo_local_path": "/tmp/example-repo",
             "auto_review_enabled": True,
             "auto_review_poll_interval_seconds": 300,
+            "database_sources": [
+                {
+                    "repo_url": "https://github.com/example/repo.git",
+                    "provider": "postgres",
+                    "host": "localhost",
+                    "port": 5432,
+                    "database": "repo_db",
+                    "user": "readonly",
+                    "password_env": "REPO_DB_PASSWORD",
+                    "schema_allowlist": ["public", "audit"],
+                    "ssl_mode": "require",
+                    "connect_timeout_seconds": 8,
+                    "statement_timeout_ms": 5000,
+                    "enabled": True,
+                }
+            ],
             "default_analysis_mode": "light",
             "standard_llm_timeout_seconds": 90,
             "runtime_tool_allowlist": ["repo_context_search"],
@@ -62,6 +98,8 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert runtime.code_repo_clone_url == "https://github.com/example/repo.git"
     assert runtime.auto_review_enabled is True
     assert runtime.auto_review_poll_interval_seconds == 300
+    assert len(runtime.database_sources) == 1
+    assert runtime.database_sources[0].repo_url == "https://github.com/example/repo.git"
     assert runtime.default_analysis_mode == "light"
     assert runtime.standard_llm_timeout_seconds == 90
     assert runtime.runtime_tool_allowlist == ["repo_context_search"]
@@ -72,6 +110,8 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert config_runtime.code_repo_local_path == "/tmp/example-repo"
     assert config_runtime.auto_review_enabled is True
     assert config_runtime.auto_review_poll_interval_seconds == 300
+    assert len(config_runtime.database_sources) == 1
+    assert config_runtime.database_sources[0].database == "repo_db"
     assert config_runtime.default_analysis_mode == "standard"
     assert config_runtime.standard_llm_timeout_seconds == 60
 
@@ -81,6 +121,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert sqlite_payload["runtime_tool_allowlist"] == ["repo_context_search"]
     assert "code_repo_clone_url" not in sqlite_payload
     assert "auto_review_enabled" not in sqlite_payload
+    assert "database_sources" not in sqlite_payload
 
 
 def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sqlite(storage_root: Path) -> None:

@@ -319,6 +319,7 @@ export interface RuntimeSettings {
   auto_review_enabled: boolean;
   auto_review_repo_url: string;
   auto_review_poll_interval_seconds: number;
+  database_sources: PostgresDataSourceSettings[];
   tool_allowlist: string[];
   mcp_allowlist: string[];
   runtime_tool_allowlist: string[];
@@ -354,6 +355,21 @@ export interface RuntimeSettings {
   verify_ssl: boolean;
   use_system_trust_store: boolean;
   ca_bundle_path: string;
+}
+
+export interface PostgresDataSourceSettings {
+  repo_url: string;
+  provider: "postgres" | string;
+  enabled: boolean;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password_env: string;
+  schema_allowlist: string[];
+  ssl_mode: string;
+  connect_timeout_seconds: number;
+  statement_timeout_ms: number;
 }
 
 export interface ExtensionSkill {

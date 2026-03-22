@@ -54,6 +54,31 @@ type RuleScreeningBatchEntry = {
   matchedSignals: string[];
 };
 
+type PgSchemaColumnEntry = {
+  tableName: string;
+  columnName: string;
+  dataType: string;
+  nullable: string;
+};
+
+type PgSchemaConstraintEntry = {
+  tableName: string;
+  constraintType: string;
+  columns: string;
+};
+
+type PgSchemaIndexEntry = {
+  tableName: string;
+  indexName: string;
+};
+
+type PgSchemaStatEntry = {
+  tableName: string;
+  estimatedRows: string;
+  totalSize: string;
+  indexSize: string;
+};
+
 export type ReviewDialogueViewMessage = {
   id: string;
   timeText: string;
@@ -453,6 +478,123 @@ const buildRuleScreeningBatchGroup = (value: unknown): StructuredGroup | null =>
   };
 };
 
+const normalizePgSchemaColumns = (value: unknown): PgSchemaColumnEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      return {
+        tableName: String(payload.table_name || "").trim(),
+        columnName: String(payload.column_name || "").trim(),
+        dataType: String(payload.data_type || "").trim(),
+        nullable: String(payload.is_nullable || "").trim(),
+      };
+    })
+    .filter((item): item is PgSchemaColumnEntry => Boolean(item && item.tableName && item.columnName));
+};
+
+const normalizePgSchemaConstraints = (value: unknown): PgSchemaConstraintEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      return {
+        tableName: String(payload.table_name || "").trim(),
+        constraintType: String(payload.constraint_type || "").trim(),
+        columns: String(payload.columns || "").trim(),
+      };
+    })
+    .filter((item): item is PgSchemaConstraintEntry => Boolean(item && item.tableName && item.constraintType));
+};
+
+const normalizePgSchemaIndexes = (value: unknown): PgSchemaIndexEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      return {
+        tableName: String(payload.table_name || "").trim(),
+        indexName: String(payload.indexname || "").trim(),
+      };
+    })
+    .filter((item): item is PgSchemaIndexEntry => Boolean(item && item.tableName && item.indexName));
+};
+
+const normalizePgSchemaStats = (value: unknown): PgSchemaStatEntry[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as Record<string, unknown>;
+      return {
+        tableName: String(payload.table_name || "").trim(),
+        estimatedRows: String(payload.estimated_rows ?? "").trim(),
+        totalSize: String(payload.total_size || "").trim(),
+        indexSize: String(payload.index_size || "").trim(),
+      };
+    })
+    .filter((item): item is PgSchemaStatEntry => Boolean(item && item.tableName));
+};
+
+const buildPgSchemaContextGroup = (value: unknown): StructuredGroup | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const dataSourceSummary =
+    payload.data_source_summary && typeof payload.data_source_summary === "object"
+      ? (payload.data_source_summary as Record<string, unknown>)
+      : {};
+  const matchedTables = normalizeValueList(payload.matched_tables);
+  const schemas = normalizeValueList(dataSourceSummary.schema_allowlist);
+  const columns = normalizePgSchemaColumns(payload.table_columns);
+  const constraints = normalizePgSchemaConstraints(payload.constraints);
+  const indexes = normalizePgSchemaIndexes(payload.indexes);
+  const stats = normalizePgSchemaStats(payload.table_stats);
+  const sections = [
+    {
+      label: "数据源",
+      values: [
+        [
+          String(dataSourceSummary.database || "").trim() || "unknown_db",
+          String(dataSourceSummary.host || "").trim() ? `@ ${String(dataSourceSummary.host).trim()}` : "",
+          schemas.length ? `· schema=${schemas.join(", ")}` : "",
+        ]
+          .join(" ")
+          .trim(),
+      ].filter(Boolean),
+    },
+    { label: "命中表", values: matchedTables },
+    {
+      label: "关键列",
+      values: columns.slice(0, 10).map((item) => {
+        const nullable = item.nullable ? ` nullable=${item.nullable}` : "";
+        return `${item.tableName}.${item.columnName}:${item.dataType}${nullable}`;
+      }),
+    },
+    {
+      label: "约束",
+      values: constraints.slice(0, 8).map((item) => `${item.tableName}:${item.constraintType}${item.columns ? `(${item.columns})` : ""}`),
+    },
+    {
+      label: "索引",
+      values: indexes.slice(0, 8).map((item) => `${item.tableName}:${item.indexName}`),
+    },
+    {
+      label: "统计信息",
+      values: stats.slice(0, 8).map((item) => {
+        const extras = [item.estimatedRows ? `rows=${item.estimatedRows}` : "", item.totalSize, item.indexSize ? `index=${item.indexSize}` : ""]
+          .filter(Boolean)
+          .join(" · ");
+        return `${item.tableName}${extras ? ` · ${extras}` : ""}`;
+      }),
+    },
+  ].filter((section) => section.values.length > 0);
+  if (!sections.length) return null;
+  return { title: "PostgreSQL 元信息", sections };
+};
+
 const tryParseJsonBlock = (value: string): Record<string, unknown> | null => {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -656,6 +798,10 @@ const buildStructuredGroups = (
   const ruleScreeningGroup = buildRuleScreeningGroup(metadata.rule_screening);
   const ruleScreeningBatchGroup = buildRuleScreeningBatchGroup(metadata.rule_screening_batch);
   const issueFilterGroup = buildIssueFilterGroup(metadata.issue_filter_decisions);
+  const pgSchemaGroup =
+    row.eventType === "expert_tool_call" && String(metadata.tool_name || "") === "pg_schema_context"
+      ? buildPgSchemaContextGroup(toolResult)
+      : null;
 
   if (row.eventType === "expert_ack" && (boundDocumentGroup || knowledgeContextGroup || ruleScreeningGroup)) {
     return {
@@ -710,6 +856,13 @@ const buildStructuredGroups = (
         { title: "详细设计识别结果", sections: recognitionSections },
         { title: "设计一致性对比结果", sections: comparisonSections },
       ].filter((group) => group.sections.length > 0),
+    };
+  }
+
+  if (row.eventType === "expert_tool_call" && String(metadata.tool_name || "") === "pg_schema_context" && pgSchemaGroup) {
+    return {
+      summaryText: row.summary,
+      groups: [pgSchemaGroup],
     };
   }
 

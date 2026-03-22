@@ -38,6 +38,7 @@ runtime_tool_bindings:
   - diff_inspector
   - dependency_surface_locator
   - knowledge_search
+  - pg_schema_context
 agent_bindings:
   - main_agent
   - judge

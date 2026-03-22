@@ -7,6 +7,7 @@ import {
   type ExpertProfile,
   type ExtensionSkill,
   type ExtensionTool,
+  type PostgresDataSourceSettings,
   type RuntimeSettings,
 } from "@/services/api";
 
@@ -27,6 +28,19 @@ const parseJsonObject = (value: string) => {
     return typeof parsed === "object" && parsed !== null ? parsed : {};
   } catch {
     return {};
+  }
+};
+
+const stringifyJson = (value: unknown) => JSON.stringify(value ?? [], null, 2);
+
+const parseJsonArray = <T,>(value: string): T[] => {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
   }
 };
 
@@ -219,6 +233,7 @@ const SettingsPage: React.FC = () => {
                 auto_review_enabled: Boolean(values.auto_review_enabled),
                 auto_review_repo_url: values.code_repo_clone_url || "",
                 auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
+                database_sources: parseJsonArray<PostgresDataSourceSettings>(String(values.database_sources || "")),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
                 runtime_tool_allowlist: parseList(String(values.runtime_tool_allowlist || "")),
@@ -339,6 +354,19 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={12}>
                         <Form.Item name="auto_review_poll_interval_seconds" label="自动拉取轮询间隔（秒）">
                           <InputNumber min={15} max={3600} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24}>
+                        <Form.Item
+                          name="database_sources"
+                          label="按代码仓绑定 PostgreSQL 数据源"
+                          getValueProps={(value) => ({ value: stringifyJson(value as PostgresDataSourceSettings[]) })}
+                          extra="数据库分析专家会按代码仓 URL 匹配数据源，并只读拉取命中表的结构、约束、索引与轻量统计信息。建议使用 JSON 数组格式配置。"
+                        >
+                          <Input.TextArea
+                            rows={10}
+                            placeholder={`[\n  {\n    "repo_url": "https://github.com/org/repo.git",\n    "provider": "postgres",\n    "enabled": true,\n    "host": "127.0.0.1",\n    "port": 5432,\n    "database": "review_db",\n    "user": "review_user",\n    "password_env": "PG_REVIEW_PASSWORD",\n    "schema_allowlist": ["public"],\n    "ssl_mode": "prefer",\n    "connect_timeout_seconds": 5,\n    "statement_timeout_ms": 3000\n  }\n]`}
+                          />
                         </Form.Item>
                       </Col>
                     </Row>

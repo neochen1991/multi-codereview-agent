@@ -25,6 +25,7 @@ class RuntimeSettingsService:
             "auto_review_enabled",
             "auto_review_repo_url",
             "auto_review_poll_interval_seconds",
+            "database_sources",
             "default_llm_provider",
             "default_llm_base_url",
             "default_llm_model",
@@ -86,7 +87,9 @@ class RuntimeSettingsService:
             self._sqlite_repository.save_payload(sqlite_overrides)
         if not sqlite_overrides:
             return config_settings
-        return config_settings.model_copy(update=sqlite_overrides)
+        merged_payload = config_settings.model_dump(mode="json")
+        merged_payload.update(sqlite_overrides)
+        return RuntimeSettings.model_validate(merged_payload)
 
     def update(self, payload: dict[str, object]) -> RuntimeSettings:
         """更新运行时设置，并保留未提交的敏感字段。"""
@@ -102,7 +105,9 @@ class RuntimeSettingsService:
             payload = {key: value for key, value in payload.items() if key != "gitlab_access_token"}
         if payload.get("codehub_access_token") in (None, ""):
             payload = {key: value for key, value in payload.items() if key != "codehub_access_token"}
-        updated = current.model_copy(update=payload)
+        merged_payload = current.model_dump(mode="json")
+        merged_payload.update(payload)
+        updated = RuntimeSettings.model_validate(merged_payload)
         self._save_config_managed_fields(updated)
         self._sqlite_repository.save_payload(self._filter_sqlite_fields(updated.model_dump(mode="json")))
         return self.get()
@@ -122,6 +127,7 @@ class RuntimeSettingsService:
                 "llm": next_config.llm,
                 "git": next_config.git,
                 "code_repo": next_config.code_repo,
+                "database_sources": next_config.database_sources,
                 "network": next_config.network,
             }
         )

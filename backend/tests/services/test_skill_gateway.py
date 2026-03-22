@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
-from app.domain.models.runtime_settings import RuntimeSettings
+from app.domain.models.runtime_settings import PostgresDataSourceSettings, RuntimeSettings
 from app.services.tool_gateway import ReviewToolGateway
 
 
@@ -368,6 +368,104 @@ def test_skill_gateway_repo_context_search_collects_related_source_snippets_for_
         item["path"] == "src/main/java/com/example/OrderConsumer.java" and "processOrder" in item["snippet"]
         for item in repo_result["related_source_snippets"]
     )
+
+
+def test_skill_gateway_pg_schema_context_for_database_expert(tmp_path: Path, monkeypatch) -> None:
+    storage_root = tmp_path / "storage"
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库",
+        role="database",
+        enabled=True,
+        focus_areas=["schema 变更", "索引与统计信息"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        repo_url="https://github.com/example/repo.git",
+        source_ref="feature/db",
+        target_ref="main",
+        changed_files=["db/migration/V1__orders.sql"],
+        unified_diff='ALTER TABLE "orders" ADD COLUMN "status" varchar(32);',
+    )
+    runtime = RuntimeSettings(
+        code_repo_clone_url="https://github.com/example/repo.git",
+        runtime_tool_allowlist=["pg_schema_context"],
+        database_sources=[
+            PostgresDataSourceSettings(
+                repo_url="https://github.com/example/repo.git",
+                provider="postgres",
+                host="127.0.0.1",
+                port=5432,
+                database="review_db",
+                user="review_user",
+                password_env="PG_REVIEW_PASSWORD",
+                schema_allowlist=["public"],
+            )
+        ],
+    )
+
+    class _FakeContext:
+        matched = True
+        summary = "已从 PostgreSQL 数据源拉取 1 张表的结构与统计元信息。"
+
+        def to_payload(self):
+            return {
+                "summary": self.summary,
+                "matched": True,
+                "degraded_reason": "",
+                "data_source_summary": {
+                    "repo_url": "https://github.com/example/repo.git",
+                    "provider": "postgres",
+                    "host": "127.0.0.1",
+                    "port": 5432,
+                    "database": "review_db",
+                    "user": "review_user",
+                    "schema_allowlist": ["public"],
+                    "ssl_mode": "prefer",
+                },
+                "matched_tables": ["orders"],
+                "meta_queries": ["table_columns", "constraints", "indexes", "table_stats"],
+                "table_columns": [
+                    {
+                        "table_schema": "public",
+                        "table_name": "orders",
+                        "column_name": "status",
+                        "data_type": "character varying",
+                        "is_nullable": "YES",
+                        "column_default": "",
+                    }
+                ],
+                "constraints": [{"table_name": "orders", "constraint_type": "PRIMARY KEY", "columns": "id"}],
+                "indexes": [{"table_name": "orders", "indexname": "idx_orders_status"}],
+                "table_stats": [{"table_name": "orders", "estimated_rows": 1024}],
+            }
+
+    monkeypatch.setattr(
+        gateway._postgres_metadata,
+        "collect_context",
+        lambda *args, **kwargs: _FakeContext(),
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        runtime,
+        file_path="db/migration/V1__orders.sql",
+        line_start=1,
+    )
+
+    tool_names = {item["tool_name"] for item in results}
+    assert "pg_schema_context" in tool_names
+    pg_result = next(item for item in results if item["tool_name"] == "pg_schema_context")
+    assert pg_result["success"] is True
+    assert pg_result["matched_tables"] == ["orders"]
+    assert pg_result["data_source_summary"]["database"] == "review_db"
 
 
 def test_skill_gateway_repo_context_search_derives_java_method_from_source_context(tmp_path: Path):

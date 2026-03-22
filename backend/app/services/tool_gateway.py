@@ -15,6 +15,7 @@ from app.services.tool_plugin_loader import ToolPluginLoader
 from app.services.capability_gateway import CapabilityGateway
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
+from app.services.postgres_metadata_service import PostgresMetadataService
 from app.services.repository_context_service import RepositoryContextService
 
 
@@ -42,6 +43,7 @@ class ReviewToolGateway:
         self._gateway = CapabilityGateway()
         self._knowledge_retrieval = KnowledgeRetrievalService(root)
         self._diff_excerpt = DiffExcerptService()
+        self._postgres_metadata = PostgresMetadataService()
         self._plugin_loader = ToolPluginLoader(Path(__file__).resolve().parents[3] / "extensions" / "tools")
         self._register_defaults()
 
@@ -71,6 +73,12 @@ class ReviewToolGateway:
             and "repo_context_search" not in allowed_tools
         ):
             allowed_tools.append("repo_context_search")
+        if (
+            expert.expert_id == "database_analysis"
+            and (not runtime_allowlist or "pg_schema_context" in runtime_allowlist)
+            and "pg_schema_context" not in allowed_tools
+        ):
+            allowed_tools.append("pg_schema_context")
         for tool_name in extra_tools or []:
             if tool_name not in allowed_tools:
                 allowed_tools.append(tool_name)
@@ -115,6 +123,7 @@ class ReviewToolGateway:
         self._gateway.register("test_surface_locator", "tool", self._test_surface_locator)
         self._gateway.register("dependency_surface_locator", "tool", self._dependency_surface_locator)
         self._gateway.register("repo_context_search", "tool", self._repo_context_search)
+        self._gateway.register("pg_schema_context", "tool", self._pg_schema_context)
 
     def _invoke_plugin_tool(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         plugin = self._plugin_loader.get(tool_name)
@@ -342,6 +351,25 @@ class ReviewToolGateway:
                 "把结果拆成 definitions 和 references。当前不是 AST 级静态分析，展示仅保留命中的源码文件名，不再展开命中行与 snippet。"
             ),
         }
+
+    def _pg_schema_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
+        subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
+        file_path = str(payload.get("file_path") or "")
+        line_start = int(payload.get("line_start") or 1)
+        excerpt = self._diff_excerpt.extract_excerpt(str(subject.unified_diff or ""), file_path, line_start)
+        expert = dict(payload.get("expert") or {})
+        query_terms = [file_path, *[str(item) for item in list(expert.get("focus_areas") or [])]]
+        context = self._postgres_metadata.collect_context(
+            runtime,
+            subject,
+            file_path=file_path,
+            diff_excerpt=excerpt,
+            query_terms=query_terms,
+        )
+        output = context.to_payload()
+        output["success"] = context.matched
+        return output
 
     def _repo_context_enabled(self, runtime: RuntimeSettings) -> bool:
         return bool(runtime.code_repo_clone_url and runtime.code_repo_local_path)

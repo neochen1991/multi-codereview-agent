@@ -17,6 +17,22 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "code_repo_auto_sync": True,
             "auto_review_enabled": True,
             "auto_review_poll_interval_seconds": 300,
+            "database_sources": [
+                {
+                    "repo_url": "https://github.com/example/repo.git",
+                    "provider": "postgres",
+                    "host": "127.0.0.1",
+                    "port": 5432,
+                    "database": "app_review",
+                    "user": "readonly",
+                    "password_env": "APP_REVIEW_DB_PASSWORD",
+                    "schema_allowlist": ["public", "audit"],
+                    "ssl_mode": "require",
+                    "connect_timeout_seconds": 6,
+                    "statement_timeout_ms": 4000,
+                    "enabled": True,
+                }
+            ],
             "tool_allowlist": ["local_diff", "schema_diff"],
             "mcp_allowlist": ["github.diff", "playwright.snapshot"],
             "runtime_tool_allowlist": ["frontend-design"],
@@ -64,6 +80,9 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["auto_review_enabled"] is True
     assert payload["auto_review_repo_url"] == "codehub-g.huawei.com/PIP/FND/projectname/merge_requests"
     assert payload["auto_review_poll_interval_seconds"] == 300
+    assert len(payload["database_sources"]) == 1
+    assert payload["database_sources"][0]["database"] == "app_review"
+    assert payload["database_sources"][0]["schema_allowlist"] == ["public", "audit"]
     assert payload["code_repo_access_token_configured"] is True
     assert payload["github_access_token_configured"] is True
     assert payload["gitlab_access_token_configured"] is True

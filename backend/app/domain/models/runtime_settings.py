@@ -7,6 +7,23 @@ from pydantic import AliasChoices, BaseModel, Field
 from app.config import settings
 
 
+class PostgresDataSourceSettings(BaseModel):
+    """定义按代码仓绑定的 PostgreSQL 只读数据源运行时配置。"""
+
+    repo_url: str = ""
+    provider: Literal["postgres"] = "postgres"
+    host: str = ""
+    port: int = 5432
+    database: str = ""
+    user: str = ""
+    password_env: str = ""
+    schema_allowlist: list[str] = Field(default_factory=lambda: ["public"])
+    ssl_mode: str = "prefer"
+    connect_timeout_seconds: int = 5
+    statement_timeout_ms: int = 3000
+    enabled: bool = True
+
+
 class RuntimeSettings(BaseModel):
     """定义审核运行时、网络和默认模型的完整设置。"""
 
@@ -23,6 +40,7 @@ class RuntimeSettings(BaseModel):
     auto_review_enabled: bool = False
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
+    database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
     runtime_tool_allowlist: list[str] = Field(
@@ -32,6 +50,7 @@ class RuntimeSettings(BaseModel):
             "test_surface_locator",
             "dependency_surface_locator",
             "repo_context_search",
+            "pg_schema_context",
         ],
         validation_alias=AliasChoices("runtime_tool_allowlist", "skill_allowlist"),
     )

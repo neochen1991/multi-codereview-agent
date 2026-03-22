@@ -676,6 +676,151 @@ def test_review_runner_expert_messages_include_rule_screening_metadata(storage_r
     assert analysis.metadata["rule_screening"]["matched_rule_count"] == 1
 
 
+def test_review_runner_database_expert_messages_include_pg_schema_context(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库分析专家",
+        role="database",
+        enabled=True,
+        focus_areas=["SQL 与查询计划", "索引与性能"],
+        system_prompt="你是数据库专家",
+    )
+    review = ReviewTask(
+        review_id="rev_pg_schema_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            repo_url="https://github.com/example/repo.git",
+            source_ref="feature/db",
+            target_ref="main",
+            title="orders 表新增 status 列",
+            changed_files=["db/migration/V1__orders.sql"],
+            unified_diff=(
+                'diff --git a/db/migration/V1__orders.sql b/db/migration/V1__orders.sql\n'
+                '--- a/db/migration/V1__orders.sql\n'
+                '+++ b/db/migration/V1__orders.sql\n'
+                '@@ -1,1 +1,1 @@\n'
+                '-ALTER TABLE "orders" ADD COLUMN "legacy" text;\n'
+                '+ALTER TABLE "orders" ADD COLUMN "status" varchar(32);\n'
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请重点检查 orders 表新增 status 列的兼容性与索引风险",
+        metadata={
+            "file_path": "db/migration/V1__orders.sql",
+            "line_start": 1,
+            "related_files": [],
+            "business_changed_files": ["db/migration/V1__orders.sql"],
+            "target_hunk": {
+                "hunk_header": "@@ -1,1 +1,1 @@",
+                "excerpt": '-ALTER TABLE "orders" ADD COLUMN "legacy" text;\n+ALTER TABLE "orders" ADD COLUMN "status" varchar(32);',
+            },
+            "repository_context": {"routing_reason": "表结构变更涉及数据库兼容性"},
+            "expected_checks": ["新增列是否需要默认值、索引和回填策略"],
+            "disallowed_inference": [],
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.review_tool_gateway,
+        "invoke_for_expert",
+        lambda *_args, **_kwargs: [
+            {
+                "tool_name": "pg_schema_context",
+                "summary": "已从 PostgreSQL 数据源拉取 1 张表的结构与统计元信息。",
+                "matched": True,
+                "data_source_summary": {
+                    "repo_url": "https://github.com/example/repo.git",
+                    "provider": "postgres",
+                    "host": "127.0.0.1",
+                    "port": 5432,
+                    "database": "review_db",
+                    "user": "readonly",
+                    "schema_allowlist": ["public"],
+                    "ssl_mode": "prefer",
+                },
+                "matched_tables": ["orders"],
+                "table_columns": [
+                    {
+                        "table_name": "orders",
+                        "column_name": "status",
+                        "data_type": "character varying",
+                        "is_nullable": "YES",
+                    }
+                ],
+                "constraints": [{"table_name": "orders", "constraint_type": "PRIMARY KEY", "columns": "id"}],
+                "indexes": [{"table_name": "orders", "indexname": "idx_orders_created_at"}],
+                "table_stats": [{"table_name": "orders", "estimated_rows": 1800000, "total_size": "512 MB"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"ack":"收到","title":"orders.status 新增列缺少默认值与回填策略","finding_type":"risk_hypothesis",'
+                '"claim":"大表新增可空列且未说明回填策略，可能影响历史数据读取与查询条件稳定性。","severity":"high",'
+                '"line_start":1,"line_end":1,"matched_rules":[],"violated_guidelines":[],'
+                '"rule_based_reasoning":"结合表规模、现有主键与索引信息判断新增列需要明确回填与索引策略。",'
+                '"evidence":["orders 预计行数较大","当前只看到新增 status 列，未看到默认值与索引联动"],'
+                '"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"why_it_matters":"可能导致查询语义不稳定或上线回填成本过高","fix_strategy":"补齐默认值、回填脚本和索引评估",'
+                '"suggested_fix":"明确 status 默认值并评估是否补索引","change_steps":["补默认值说明","制定回填计划"],'
+                '"suggested_code":"ALTER TABLE orders ADD COLUMN status varchar(32) DEFAULT ''NEW'';","confidence":0.91,'
+                '"verification_needed":true,"verification_plan":"核对历史查询条件与回填窗口"}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="db/migration/V1__orders.sql",
+        line_start=1,
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=[],
+    )
+
+    messages = runner.message_repo.list(review.review_id)
+    tool_message = next(
+        item for item in messages if item.message_type == "expert_tool_call" and item.metadata.get("tool_name") == "pg_schema_context"
+    )
+    ack = next(item for item in messages if item.message_type == "expert_ack")
+    analysis = next(item for item in messages if item.message_type == "expert_analysis")
+
+    assert "PostgreSQL 数据源" in tool_message.content
+    assert tool_message.metadata["tool_result"]["matched_tables"] == ["orders"]
+    runtime_tool_results = ack.metadata.get("runtime_tool_results", [])
+    assert runtime_tool_results and runtime_tool_results[0]["tool_name"] == "pg_schema_context"
+    assert analysis.metadata["runtime_tool_results"][0]["data_source_summary"]["database"] == "review_db"
+
+
 def test_review_runner_rule_screening_fulltext_contains_full_rule_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -826,6 +971,70 @@ def test_review_runner_prompt_includes_related_source_snippets(storage_root: Pat
     assert "关联源码片段" in prompt
     assert "src/main/java/com/example/OrderConsumer.java" in prompt
     assert "orderService.processOrder(id);" in prompt
+
+
+def test_review_runner_prompt_includes_pg_schema_context(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/db",
+        target_ref="main",
+        changed_files=["db/migration/V1__orders.sql"],
+        unified_diff='ALTER TABLE "orders" ADD COLUMN "status" varchar(32);',
+    )
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库",
+        role="database",
+        enabled=True,
+        focus_areas=["schema 变更", "索引与统计信息"],
+        system_prompt="prompt",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "db/migration/V1__orders.sql",
+        1,
+        tool_evidence=[],
+        runtime_tool_results=[
+            {
+                "tool_name": "pg_schema_context",
+                "summary": "已从 PostgreSQL 数据源拉取 1 张表的结构与统计元信息。",
+                "data_source_summary": {
+                    "database": "review_db",
+                    "host": "127.0.0.1",
+                    "schema_allowlist": ["public"],
+                },
+                "matched_tables": ["orders"],
+                "table_columns": [
+                    {
+                        "table_name": "orders",
+                        "column_name": "status",
+                        "data_type": "character varying",
+                        "is_nullable": "YES",
+                    }
+                ],
+                "constraints": [{"table_name": "orders", "constraint_type": "PRIMARY KEY", "columns": "id"}],
+                "indexes": [{"table_name": "orders", "indexname": "idx_orders_status"}],
+                "table_stats": [{"table_name": "orders", "estimated_rows": 1024, "total_size": "128 kB"}],
+            }
+        ],
+        repository_context={},
+        target_hunk={"hunk_header": "@@ -1,1 +1,1 @@", "excerpt": '+ALTER TABLE "orders" ADD COLUMN "status" varchar(32);'},
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=["检查新增列是否需要索引、默认值与约束联动"],
+        active_skills=[],
+    )
+
+    assert "review_db @ 127.0.0.1" in prompt
+    assert "命中表: orders" in prompt
+    assert "orders.status(character varying / nullable=YES)" in prompt
+    assert "orders:PRIMARY KEY(id)" in prompt
 
 
 def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Path):

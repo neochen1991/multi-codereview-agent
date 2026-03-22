@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import settings
-from app.domain.models.runtime_settings import RuntimeSettings
+from app.domain.models.runtime_settings import PostgresDataSourceSettings, RuntimeSettings
 
 
 class ServerConfig(BaseModel):
@@ -47,6 +47,23 @@ class CodeRepoConfig(BaseModel):
     auto_review_poll_interval_seconds: int = 120
 
 
+class PostgresDataSourceConfig(BaseModel):
+    """定义按代码仓绑定的 PostgreSQL 只读数据源。"""
+
+    repo_url: str = ""
+    provider: Literal["postgres"] = "postgres"
+    host: str = ""
+    port: int = 5432
+    database: str = ""
+    user: str = ""
+    password_env: str = ""
+    schema_allowlist: list[str] = Field(default_factory=lambda: ["public"])
+    ssl_mode: str = "prefer"
+    connect_timeout_seconds: int = 5
+    statement_timeout_ms: int = 3000
+    enabled: bool = True
+
+
 class RuntimeConfig(BaseModel):
     """定义审核运行时模式和并发/超时参数。"""
 
@@ -83,6 +100,7 @@ class AllowlistConfig(BaseModel):
             "test_surface_locator",
             "dependency_surface_locator",
             "repo_context_search",
+            "pg_schema_context",
         ],
         validation_alias=AliasChoices("runtime_tools", "skills"),
     )
@@ -97,6 +115,7 @@ class AppConfig(BaseModel):
     llm: LlmConfig = Field(default_factory=LlmConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     code_repo: CodeRepoConfig = Field(default_factory=CodeRepoConfig)
+    database_sources: list[PostgresDataSourceConfig] = Field(default_factory=list)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     allowlist: AllowlistConfig = Field(default_factory=AllowlistConfig)
@@ -104,6 +123,13 @@ class AppConfig(BaseModel):
     @classmethod
     def from_runtime_settings(cls, runtime: RuntimeSettings) -> "AppConfig":
         """把旧版运行时设置对象映射成统一的应用配置对象。"""
+
+        def _to_pg_config(value: object) -> PostgresDataSourceConfig:
+            if isinstance(value, PostgresDataSourceConfig):
+                return value
+            if isinstance(value, PostgresDataSourceSettings):
+                return PostgresDataSourceConfig.model_validate(value.model_dump(mode="json"))
+            return PostgresDataSourceConfig.model_validate(value)
 
         return cls(
             llm=LlmConfig(
@@ -128,6 +154,7 @@ class AppConfig(BaseModel):
                 auto_review_repo_url=runtime.code_repo_clone_url or runtime.auto_review_repo_url,
                 auto_review_poll_interval_seconds=runtime.auto_review_poll_interval_seconds,
             ),
+            database_sources=[_to_pg_config(item) for item in list(runtime.database_sources)],
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
                 default_analysis_mode=runtime.default_analysis_mode,
@@ -158,6 +185,13 @@ class AppConfig(BaseModel):
     def to_runtime_settings(self) -> RuntimeSettings:
         """把应用配置转换回运行时服务使用的配置对象。"""
 
+        def _to_pg_runtime(value: object) -> PostgresDataSourceSettings:
+            if isinstance(value, PostgresDataSourceSettings):
+                return value
+            if isinstance(value, PostgresDataSourceConfig):
+                return PostgresDataSourceSettings.model_validate(value.model_dump(mode="json"))
+            return PostgresDataSourceSettings.model_validate(value)
+
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
             default_analysis_mode=self.runtime.default_analysis_mode,
@@ -172,6 +206,7 @@ class AppConfig(BaseModel):
             auto_review_enabled=self.code_repo.auto_review_enabled,
             auto_review_repo_url=self.code_repo.clone_url or self.code_repo.auto_review_repo_url,
             auto_review_poll_interval_seconds=self.code_repo.auto_review_poll_interval_seconds,
+            database_sources=[_to_pg_runtime(item) for item in list(self.database_sources)],
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),
             runtime_tool_allowlist=list(self.allowlist.runtime_tools),

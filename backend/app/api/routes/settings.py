@@ -5,6 +5,7 @@ from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
 from app.config import settings
+from app.domain.models.runtime_settings import PostgresDataSourceSettings
 import app.services.review_service as review_service_module
 
 router = APIRouter()
@@ -26,6 +27,7 @@ class RuntimeSettingsRequest(BaseModel):
     auto_review_enabled: bool = False
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
+    database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)
     runtime_tool_allowlist: list[str] = Field(
