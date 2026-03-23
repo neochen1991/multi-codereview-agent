@@ -345,8 +345,8 @@ class LLMChatService:
         """针对内网和流式响应构造更稳妥的 httpx 超时参数。"""
 
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
-        connect_timeout = min(45.0, max(15.0, round(safe_timeout * 0.3, 2)))
-        read_timeout = round(safe_timeout + max(20.0, connect_timeout - 6.0), 2)
+        connect_timeout = min(60.0, max(20.0, round(safe_timeout / 3, 2)))
+        read_timeout = round(max(safe_timeout * 1.5, safe_timeout + connect_timeout + 15.0), 2)
         write_timeout = connect_timeout
         pool_timeout = connect_timeout
         return httpx.Timeout(

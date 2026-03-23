@@ -67,12 +67,12 @@ class RuntimeSettings(BaseModel):
     hint_issue_evidence_cap: int = 2
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
-    rule_screening_llm_timeout_seconds: int = 90
+    rule_screening_llm_timeout_seconds: int = 150
     default_max_debate_rounds: int = 2
-    standard_llm_timeout_seconds: int = 60
+    standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3
     standard_max_parallel_experts: int = 4
-    light_llm_timeout_seconds: int = 120
+    light_llm_timeout_seconds: int = 210
     light_llm_retry_count: int = 2
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1

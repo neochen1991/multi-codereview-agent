@@ -342,15 +342,16 @@ const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> 
 };
 
 const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }> = ({ summary }) => {
-  if (!summary) return null;
   return (
     <Card className="module-card expert-routing-card expert-routing-card-info" title="专家参与判定">
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Paragraph className="expert-routing-summary">
-          主Agent 已基于当前 MR 信息、完整 diff 和专家画像，先由大模型判定本次真正需要参与审核的专家集合。
+          {summary
+            ? "主Agent 已基于当前 MR 信息、完整 diff 和专家画像，先由大模型判定本次真正需要参与审核的专家集合。"
+            : "主Agent 正在结合当前 MR、完整 diff 和专家画像判定本轮需要参与审核的专家，请稍候。"}
         </Paragraph>
-        <RoutingExpertTags title="大模型选中" items={summary.selected_experts} color="green" />
-        {summary.requested_expert_ids.length > 0 ? (
+        {summary ? <RoutingExpertTags title="大模型选中" items={summary.selected_experts} color="green" /> : null}
+        {summary?.requested_expert_ids.length ? (
           <div className="routing-group">
             <Text className="routing-group-title">原始候选</Text>
             <Space size={[8, 8]} wrap>
@@ -362,7 +363,7 @@ const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }>
             </Space>
           </div>
         ) : null}
-        {summary.skipped_experts.length > 0 ? (
+        {summary?.skipped_experts.length ? (
           <div className="routing-group">
             <Text className="routing-group-title">未参与本轮</Text>
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
@@ -374,6 +375,8 @@ const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }>
               ))}
             </Space>
           </div>
+        ) : !summary ? (
+          <Tag color="processing">正在判定参与专家</Tag>
         ) : null}
       </Space>
     </Card>

@@ -113,7 +113,9 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert len(config_runtime.database_sources) == 1
     assert config_runtime.database_sources[0].database == "repo_db"
     assert config_runtime.default_analysis_mode == "standard"
-    assert config_runtime.standard_llm_timeout_seconds == 60
+    assert config_runtime.standard_llm_timeout_seconds == 120
+    assert config_runtime.light_llm_timeout_seconds == 210
+    assert config_runtime.rule_screening_llm_timeout_seconds == 150
 
     sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
     assert sqlite_payload["default_analysis_mode"] == "light"
