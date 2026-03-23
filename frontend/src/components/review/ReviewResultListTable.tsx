@@ -21,6 +21,7 @@ export type ReviewResultListRow = {
   line_start?: number;
   title: string;
   summary: string;
+  metaSummary?: string;
   finding_type: string;
   severity: string;
   confidence: number;
@@ -385,6 +386,11 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                 <div className="review-summary-text" title={value}>
                   {value}
                 </div>
+                {item.metaSummary ? (
+                  <div className="review-summary-text" style={{ marginTop: 6, color: "var(--text-muted)" }} title={item.metaSummary}>
+                    {item.metaSummary}
+                  </div>
+                ) : null}
               </div>
             ),
           },

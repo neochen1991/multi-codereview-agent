@@ -221,6 +221,11 @@ const normalizeRuleScreeningMetadata = (value: unknown): RuleScreeningMetadata |
   };
 };
 
+const THRESHOLD_RULE_CODES = new Set([
+  "below_issue_priority_threshold",
+  "below_priority_confidence_threshold",
+]);
+
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
 ): ReviewOverviewExpertSelectionSummary | null => {
@@ -612,6 +617,16 @@ const ReviewWorkbenchPage: React.FC = () => {
     }
     return map;
   }, [issueFilterDecisions]);
+  const visibleFindings = useMemo(
+    () =>
+      findings.filter((finding) => {
+        if (issueByFindingId.has(finding.finding_id)) return false;
+        const decision = issueFilterDecisionByFindingId.get(finding.finding_id);
+        if (decision && THRESHOLD_RULE_CODES.has(decision.rule_code)) return false;
+        return true;
+      }),
+    [findings, issueByFindingId, issueFilterDecisionByFindingId],
+  );
   const selectedFindingGovernanceDecision = useMemo(
     () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueFilterDecisionByFindingId, selectedFinding],
@@ -1186,7 +1201,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             <div ref={resultFindingsRef}>
               <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
                 <FindingsPanel
-                  findings={findings}
+                  findings={visibleFindings}
                   issues={issues}
                   issueFilterDecisions={issueFilterDecisions}
                   selectedFindingId={selectedFindingId}

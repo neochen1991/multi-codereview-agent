@@ -100,12 +100,38 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           .map((findingId) => findingById.get(findingId))
           .filter(Boolean) as ReviewFinding[];
         const primaryFinding = relatedFindings[0];
+        const distinctFiles = Array.from(
+          new Set(
+            relatedFindings
+              .map((finding) => String(finding.file_path || "").trim())
+              .filter(Boolean),
+          ),
+        );
+        const filePath =
+          issue.file_path ||
+          (distinctFiles.length === 1
+            ? distinctFiles[0]
+            : distinctFiles.length > 1
+              ? `跨 ${distinctFiles.length} 个文件`
+              : "");
+        const lineStart =
+          issue.line_start ||
+          (distinctFiles.length <= 1 ? primaryFinding?.line_start : undefined);
+        const metaSummaryParts = [
+          "议题聚合",
+          `关联发现 ${issue.finding_ids.length}`,
+          `参与专家 ${issue.participant_expert_ids.length}`,
+        ];
+        if (distinctFiles.length > 1) {
+          metaSummaryParts.push(`涉及文件 ${distinctFiles.length}`);
+        }
         return {
           id: issue.issue_id,
-          file_path: issue.file_path || primaryFinding?.file_path || "",
-          line_start: issue.line_start || primaryFinding?.line_start,
+          file_path: filePath,
+          line_start: lineStart,
           title: issue.title,
           summary: issue.summary,
+          metaSummary: metaSummaryParts.join(" · "),
           finding_type: issue.finding_type || primaryFinding?.finding_type || "risk_hypothesis",
           severity: issue.severity,
           confidence: issue.confidence,

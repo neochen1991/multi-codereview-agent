@@ -103,6 +103,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           line_start: finding.line_start,
           title: finding.title,
           summary: finding.summary,
+          metaSummary: undefined,
           finding_type: finding.finding_type,
           severity: finding.severity,
           confidence: finding.confidence,
@@ -127,13 +128,13 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     <ReviewResultListTable
       cardClassName="review-findings-card"
       title="审核发现清单"
-      extra={<Tag color="default">这里展示本次审核的发现项，不等同于正式议题</Tag>}
+      extra={<Tag color="default">这里只展示未升级为正式问题、且未被阈值过滤的审核发现</Tag>}
       rows={rows}
       activeGroup={activeGroup}
       onGroupChange={setActiveGroup}
       selectedRowId={selectedFindingId}
       onSelectRow={onSelectFinding}
-      emptyText="当前还没有审核发现，运行审核后这里会生成正式的发现清单。"
+      emptyText="当前没有留在审核发现清单中的项；达到阈值的问题会进入正式问题清单，低于阈值的会出现在阈值过滤清单。"
     />
   );
 };
