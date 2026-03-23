@@ -221,6 +221,16 @@ const normalizeRuleScreeningMetadata = (value: unknown): RuleScreeningMetadata |
   };
 };
 
+const formatElapsedDuration = (seconds: number): string => {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分 ${remainingSeconds} 秒`;
+  if (minutes > 0) return `${minutes} 分 ${remainingSeconds} 秒`;
+  return `${remainingSeconds} 秒`;
+};
+
 const THRESHOLD_RULE_CODES = new Set([
   "below_issue_priority_threshold",
   "below_priority_confidence_threshold",
@@ -405,6 +415,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [findingsActiveGroup, setFindingsActiveGroup] = useState<ReviewResultGroup>("all");
   const [issuesActiveGroup, setIssuesActiveGroup] = useState<ReviewResultGroup>("all");
   const [decisionComment, setDecisionComment] = useState("");
+  const [elapsedNow, setElapsedNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [submittingDecision, setSubmittingDecision] = useState(false);
@@ -570,6 +581,15 @@ const ReviewWorkbenchPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [review, reviewId]);
 
+  useEffect(() => {
+    if (activeStep !== "process" || review?.status !== "running" || !review?.started_at) return;
+    setElapsedNow(Date.now());
+    const timer = window.setInterval(() => {
+      setElapsedNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeStep, review?.started_at, review?.status]);
+
   const issues = replay?.issues || [];
   const events = replay?.events || [];
   const report = replay?.report || null;
@@ -705,6 +725,19 @@ const ReviewWorkbenchPage: React.FC = () => {
     if (!review) return "多专家代码审核工作台";
     return review.subject.title || `${review.subject.source_ref} -> ${review.subject.target_ref}`;
   }, [review]);
+  const processElapsedLabel = useMemo(() => {
+    if (!review) return "";
+    if (review.status === "running" && review.started_at) {
+      const startedAtMs = Date.parse(review.started_at);
+      if (Number.isFinite(startedAtMs)) {
+        return `当前任务已运行 ${formatElapsedDuration((elapsedNow - startedAtMs) / 1000)}`;
+      }
+    }
+    if (["completed", "failed", "waiting_human"].includes(review.status) && typeof review.duration_seconds === "number") {
+      return `本次任务运行耗时 ${formatElapsedDuration(review.duration_seconds)}`;
+    }
+    return "";
+  }, [elapsedNow, review]);
 
   const workspaceTabs = useMemo(
     () => [
@@ -989,6 +1022,16 @@ const ReviewWorkbenchPage: React.FC = () => {
 
         {activeStep === "process" && (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {processElapsedLabel ? (
+              <Card className="module-card">
+                <Space wrap>
+                  <Tag color={review?.status === "running" ? "processing" : "default"}>
+                    {review?.status === "running" ? "运行中" : "已结束"}
+                  </Tag>
+                  <Text>{processElapsedLabel}</Text>
+                </Space>
+              </Card>
+            ) : null}
             <Row gutter={[16, 16]} align="stretch">
               <Col xs={24} xl={15}>
                 <div className="process-main-stack">
