@@ -1956,3 +1956,13 @@ body {
     max-height: 220px;
   }
 }
+.review-code-block {
+  margin: 8px 0 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}

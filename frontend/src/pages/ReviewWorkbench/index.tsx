@@ -9,6 +9,7 @@ import ReviewOverviewPanel, {
   type ReviewFormState,
   type ReviewOverviewExpertSelectionSummary,
 } from "@/components/review/ReviewOverviewPanel";
+import type { ReviewResultGroup } from "@/components/review/ReviewResultListTable";
 import ReviewSubjectPanel from "@/components/review/ReviewSubjectPanel";
 import {
   buildReviewEventStreamUrl,
@@ -22,6 +23,7 @@ import {
   type KnowledgeDocument,
   type ReviewArtifacts,
   type ReviewDesignDocumentInput,
+  type ReviewFinding,
   type ReviewReplayBundle,
   type ReviewSummary,
   type RuleScreeningMetadata,
@@ -392,18 +394,8 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [selectedIssueId, setSelectedIssueId] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
-  const [findingsActiveGroup, setFindingsActiveGroup] = useState<
-    | "all"
-    | "blocking"
-    | "should_fix"
-    | "non_blocking"
-    | "verified"
-    | "design_misaligned"
-    | "direct_defect"
-    | "risk_hypothesis"
-    | "test_gap"
-    | "design_concern"
-  >("all");
+  const [findingsActiveGroup, setFindingsActiveGroup] = useState<ReviewResultGroup>("all");
+  const [issuesActiveGroup, setIssuesActiveGroup] = useState<ReviewResultGroup>("all");
   const [decisionComment, setDecisionComment] = useState("");
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -596,6 +588,13 @@ const ReviewWorkbenchPage: React.FC = () => {
     }
     return map;
   }, [issues]);
+  const findingById = useMemo(() => {
+    const map = new Map<string, ReviewFinding>();
+    for (const finding of findings) {
+      map.set(finding.finding_id, finding);
+    }
+    return map;
+  }, [findings]);
   const selectedFinding = useMemo(
     () => findings.find((item) => item.finding_id === selectedFindingId) || findings[0] || null,
     [findings, selectedFindingId],
@@ -1163,7 +1162,23 @@ const ReviewWorkbenchPage: React.FC = () => {
             </Row>
             <ExpertRuleCoveragePanel items={expertRuleCoverage} />
             <Suspense fallback={<WorkbenchPanelFallback description="正式 issue 清单加载中..." />}>
-              <ResultIssuePanel issues={issues} />
+              <ResultIssuePanel
+                reviewId={reviewId}
+                issues={issues}
+                findings={findings}
+                selectedIssueId={selectedIssueId}
+                activeGroup={issuesActiveGroup}
+                onGroupChange={setIssuesActiveGroup}
+                onSelectIssue={(issueId) => {
+                  setSelectedIssueId(issueId);
+                  const issue = issues.find((item) => item.issue_id === issueId);
+                  const findingId = issue?.finding_ids.find((id) => findingById.has(id));
+                  if (findingId) {
+                    setSelectedFindingId(findingId);
+                    setFindingModalOpen(true);
+                  }
+                }}
+              />
             </Suspense>
             <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
               <IssueThresholdFilteredPanel findings={findings} issueFilterDecisions={issueFilterDecisions} />

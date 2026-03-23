@@ -473,6 +473,24 @@ export interface ReviewArtifacts {
   };
 }
 
+export interface CodehubExportItem {
+  issue_id: string;
+  title: string;
+  severity: string;
+  problem_description: string;
+  remediation_suggestion: string;
+  patched_code: string;
+  mock_ticket_url: string;
+  finding_ids: string[];
+}
+
+export interface CodehubExportResponse {
+  review_id: string;
+  status: string;
+  submitted_count: number;
+  items: CodehubExportItem[];
+}
+
 export const reviewApi = {
   async create(payload: {
     subject_type: "mr" | "branch";
@@ -560,6 +578,13 @@ export const reviewApi = {
     payload: { issue_id: string; decision: "approved" | "rejected"; comment: string },
   ): Promise<{ review_id: string; status: string; phase: string; human_review_status: string }> {
     const { data } = await api.post(`/reviews/${reviewId}/human-decisions`, payload);
+    return data;
+  },
+  async exportIssuesToCodehub(
+    reviewId: string,
+    payload: { issue_ids: string[] },
+  ): Promise<CodehubExportResponse> {
+    const { data } = await api.post(`/reviews/${reviewId}/issues/export/codehub`, payload);
     return data;
   },
 };
