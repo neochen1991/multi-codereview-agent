@@ -631,6 +631,28 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => (selectedFinding ? issueByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueByFindingId, selectedFinding],
   );
+  const selectedIssueFinding = useMemo(() => {
+    if (!selectedIssue) return null;
+    for (const findingId of selectedIssue.finding_ids || []) {
+      const finding = findingById.get(findingId);
+      if (finding) return finding;
+    }
+    return null;
+  }, [findingById, selectedIssue]);
+  const issueFindingMap = useMemo(() => {
+    const map: Record<string, typeof findings[number] | null> = {};
+    for (const issue of issues) {
+      map[issue.issue_id] = null;
+      for (const findingId of issue.finding_ids || []) {
+        const finding = findingById.get(findingId);
+        if (finding) {
+          map[issue.issue_id] = finding;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [findingById, issues]);
   const issueFilterDecisionByFindingId = useMemo(() => {
     const map = new Map<string, IssueFilterDecision>();
     for (const decision of issueFilterDecisions) {
@@ -1058,13 +1080,14 @@ const ReviewWorkbenchPage: React.FC = () => {
                               <Suspense fallback={<WorkbenchPanelFallback description="Issue 列表加载中..." />}>
                                 <IssueThreadList
                                   issues={issues}
+                                  issueFindingMap={issueFindingMap}
                                   selectedIssueId={selectedIssueId}
                                   onSelect={setSelectedIssueId}
                                 />
                               </Suspense>
                             </div>
                             <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
-                              <IssueDetailPanel issue={selectedIssue} />
+                              <IssueDetailPanel issue={selectedIssue} finding={selectedIssueFinding} />
                             </Suspense>
                             <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
                               <ToolAuditPanel issue={selectedIssue} />

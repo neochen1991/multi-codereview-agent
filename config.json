@@ -7,7 +7,7 @@
     "default_provider": "dashscope-openai-compatible",
     "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
     "default_model": "kimi-k2.5",
-    "default_api_key_env": "DASHSCOPE_API_KEY",
+    "default_api_key_env": null,
     "default_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366"
   },
   "git": {
@@ -40,8 +40,8 @@
     "light_max_debate_rounds": 1
   },
   "network": {
-    "verify_ssl": true,
-    "use_system_trust_store": true,
+    "verify_ssl": false,
+    "use_system_trust_store": false,
     "ca_bundle_path": ""
   },
   "allowlist": {

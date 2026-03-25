@@ -31,6 +31,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.orchestrator.graph import build_review_graph
+from app.services.repository_context_service import RepositoryContextService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
 from app.services.runtime_settings_service import RuntimeSettingsService
@@ -1407,6 +1408,13 @@ class ReviewRunner:
                 parsed_line_start,
                 expert.expert_id,
             ),
+            code_context=self._build_finding_code_context(
+                review.subject,
+                file_path,
+                parsed_line_start,
+                target_hunk,
+                repository_context,
+            ),
             suggested_code=str(
                 parsed.get("suggested_code")
                 or self._build_suggested_code(review.subject, file_path, parsed_line_start, expert.expert_id)
@@ -1927,10 +1935,27 @@ class ReviewRunner:
         line_start: int,
         expert_id: str,
     ) -> str:
+        repository_excerpt = self._load_repository_source_excerpt(file_path, line_start)
+        if repository_excerpt:
+            return repository_excerpt
         excerpt = self.diff_excerpt_service.extract_excerpt(subject.unified_diff, file_path, line_start)
         if excerpt:
             return excerpt
         return self._build_fallback_code_excerpt(file_path, line_start, expert_id)
+
+    def _load_repository_source_excerpt(self, file_path: str, line_start: int, radius: int = 8) -> str:
+        runtime = self.runtime_settings_service.get()
+        service = RepositoryContextService(
+            clone_url=runtime.code_repo_clone_url,
+            local_path=runtime.code_repo_local_path,
+            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
+            access_token=runtime.code_repo_access_token,
+            auto_sync=runtime.code_repo_auto_sync,
+        )
+        if not service.is_ready():
+            return ""
+        context = service.load_file_context(file_path, max(1, line_start), radius=radius)
+        return str(context.get("snippet") or "").strip()
 
     def _build_target_file_full_diff(self, subject: ReviewSubject, file_path: str) -> str:
         full_diff = self.diff_excerpt_service.extract_file_diff(subject.unified_diff, file_path)
@@ -1963,6 +1988,47 @@ class ReviewRunner:
         if remaining > 0:
             sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 和代码仓上下文判断影响范围。")
         return "\n\n".join(sections)
+
+    def _build_finding_code_context(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object],
+        repository_context: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "target_file_full_diff": self._build_target_file_full_diff(subject, file_path),
+            "related_diff_summary": self._build_related_diff_summary(subject, file_path),
+            "source_file_context": self._load_repository_source_excerpt(file_path, line_start),
+            "target_hunk": {
+                "file_path": str(target_hunk.get("file_path") or file_path),
+                "hunk_header": str(target_hunk.get("hunk_header") or ""),
+                "start_line": self._normalize_optional_line_value(target_hunk.get("start_line")) or line_start,
+                "end_line": self._normalize_optional_line_value(target_hunk.get("end_line")) or line_start,
+                "changed_lines": self._normalize_changed_line_values(target_hunk.get("changed_lines")),
+                "excerpt": str(target_hunk.get("excerpt") or ""),
+            },
+            "primary_context": dict(repository_context.get("primary_context") or {})
+            if isinstance(repository_context.get("primary_context"), dict)
+            else {},
+            "related_contexts": [
+                dict(item)
+                for item in list(repository_context.get("related_contexts") or [])[:6]
+                if isinstance(item, dict)
+            ],
+            "symbol_contexts": [
+                dict(item)
+                for item in list(repository_context.get("symbol_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
+            "context_files": [
+                str(item).strip()
+                for item in list(repository_context.get("context_files") or [])[:10]
+                if str(item).strip()
+            ],
+            "routing_reason": str(repository_context.get("routing_reason") or "").strip(),
+        }
 
     def _build_fallback_code_excerpt(
         self,
@@ -2455,8 +2521,9 @@ class ReviewRunner:
                 result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
                 result["verification_needed"] = True
 
-        result["line_start"] = self._normalize_line_start(result.get("line_start"), line_start)
-        result["line_end"] = self._normalize_line_start(result.get("line_end"), int(result["line_start"]))
+        effective_line_start = self._stabilize_line_start(result.get("line_start"), line_start, target_hunk)
+        result["line_start"] = effective_line_start
+        result["line_end"] = self._stabilize_line_end(result.get("line_end"), effective_line_start, target_hunk)
         result["matched_rules"] = [str(item).strip() for item in list(result.get("matched_rules") or []) if str(item).strip()]
         result["violated_guidelines"] = [
             str(item).strip() for item in list(result.get("violated_guidelines") or []) if str(item).strip()
@@ -2477,6 +2544,48 @@ class ReviewRunner:
         result["design_conflicts"] = self._normalize_text_list(result.get("design_conflicts"), [])
         result["design_alignment_status"] = str(result.get("design_alignment_status") or "").strip()
         return result
+
+    def _stabilize_line_start(self, value: object, fallback: int, target_hunk: dict[str, object]) -> int:
+        normalized = self._normalize_line_start(value, fallback)
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if changed_lines:
+            min_changed = min(changed_lines)
+            max_changed = max(changed_lines)
+            if normalized < min_changed or normalized > max_changed:
+                return min_changed
+            return normalized
+        start_line = self._normalize_optional_line_value(target_hunk.get("start_line"))
+        end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
+        if start_line is None:
+            return normalized
+        if normalized < start_line or (end_line is not None and normalized > end_line):
+            return start_line
+        return normalized
+
+    def _stabilize_line_end(self, value: object, fallback: int, target_hunk: dict[str, object]) -> int:
+        normalized = self._normalize_line_start(value, fallback)
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if changed_lines:
+            return max(fallback, min(normalized, max(changed_lines)))
+        end_line = self._normalize_optional_line_value(target_hunk.get("end_line"))
+        if end_line is None:
+            return max(fallback, normalized)
+        return max(fallback, min(normalized, end_line))
+
+    def _normalize_changed_line_values(self, values: object) -> list[int]:
+        normalized: list[int] = []
+        for item in list(values or []):
+            parsed = self._normalize_optional_line_value(item)
+            if parsed is not None:
+                normalized.append(parsed)
+        return normalized
+
+    def _normalize_optional_line_value(self, value: object) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(1, parsed)
 
     def _build_expert_fallback(
         self,
@@ -2610,15 +2719,23 @@ class ReviewRunner:
             primary_context = repository_context.get("primary_context")
             if isinstance(primary_context, dict) and primary_context.get("snippet"):
                 lines.append(f"- 目标文件: {primary_context.get('path')}")
+                lines.extend(
+                    f"    {line}"
+                    for line in str(primary_context.get("snippet") or "").splitlines()[:12]
+                    if str(line).strip()
+                )
             related_contexts = repository_context.get("related_contexts")
             if isinstance(related_contexts, list) and related_contexts:
-                related_paths = [
-                    str(item.get("path") or "").strip()
-                    for item in related_contexts
-                    if isinstance(item, dict) and str(item.get("path") or "").strip()
-                ]
-                if related_paths:
-                    lines.append(f"- 关联文件: {' / '.join(related_paths[:4])}")
+                lines.append("- 关联文件源码片段:")
+                for item in related_contexts[:4]:
+                    if not isinstance(item, dict):
+                        continue
+                    related_path = str(item.get("path") or "").strip()
+                    related_snippet = str(item.get("snippet") or "").strip()
+                    if not related_path or not related_snippet:
+                        continue
+                    lines.append(f"  * {related_path}")
+                    lines.extend(f"    {line}" for line in related_snippet.splitlines()[:12])
             symbol_contexts = repository_context.get("symbol_contexts")
             if isinstance(symbol_contexts, list) and symbol_contexts:
                 for item in symbol_contexts[:2]:
@@ -2629,6 +2746,28 @@ class ReviewRunner:
                     reference_count = len(list(item.get("references") or []))
                     if symbol:
                         lines.append(f"- 符号上下文: {symbol} · 定义 {definition_count} · 引用 {reference_count}")
+                    definitions = item.get("definitions")
+                    if isinstance(definitions, list) and definitions:
+                        for definition in definitions[:2]:
+                            if not isinstance(definition, dict):
+                                continue
+                            path = str(definition.get("path") or "").strip()
+                            snippet = str(definition.get("snippet") or "").strip()
+                            if not path or not snippet:
+                                continue
+                            lines.append(f"  * 定义: {path}")
+                            lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
+                    references = item.get("references")
+                    if isinstance(references, list) and references:
+                        for reference in references[:2]:
+                            if not isinstance(reference, dict):
+                                continue
+                            path = str(reference.get("path") or "").strip()
+                            snippet = str(reference.get("snippet") or "").strip()
+                            if not path or not snippet:
+                                continue
+                            lines.append(f"  * 引用: {path}")
+                            lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
         for item in runtime_tool_results:
             if str(item.get("tool_name") or "") != "repo_context_search":
                 continue

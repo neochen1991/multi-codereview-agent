@@ -1,7 +1,13 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
 
-import type { DebateIssue, IssueFilterDecision, ReviewFinding, RuleScreeningMetadata } from "@/services/api";
+import type {
+  DebateIssue,
+  FindingCodeContextSnippet,
+  IssueFilterDecision,
+  ReviewFinding,
+  RuleScreeningMetadata,
+} from "@/services/api";
 
 const { Paragraph } = Typography;
 
@@ -110,6 +116,28 @@ const renderSuggestedCode = (code: string) => (
   </div>
 );
 
+const renderContextSnippet = (title: string, snippet: FindingCodeContextSnippet | null | undefined) => {
+  if (!snippet?.snippet) return null;
+  return (
+    <div style={{ marginTop: 16 }}>
+      <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>{title}</Paragraph>
+      <div className="review-code-panel">
+        <div className="review-code-panel-header">
+          <span>{snippet.path || "关联代码"}</span>
+          {snippet.line_start ? <Tag>{`L${snippet.line_start}`}</Tag> : null}
+        </div>
+        <div className="review-code-frame">
+          {snippet.snippet.split("\n").filter(Boolean).map((line, index) => (
+            <div key={`${title}-${index}`} className="review-code-line">
+              <code>{line}</code>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // 结果弹窗负责把单条 finding 渲染成正式 Code Review 详情视图。
 const CodeReviewConclusionPanel: React.FC<Props> = ({
   finding,
@@ -136,6 +164,15 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       </Card>
     );
   }
+
+  const codeContext = finding.code_context;
+  const currentCode = codeContext?.source_file_context || codeContext?.primary_context?.snippet || finding.code_excerpt;
+  const targetDiff = codeContext?.target_file_full_diff || codeContext?.target_hunk?.excerpt || "";
+  const relatedContexts = (codeContext?.related_contexts || []).filter((item) => item?.snippet);
+  const symbolContexts = (codeContext?.symbol_contexts || []).flatMap((item) => [
+    ...((item.definitions || []).map((entry) => ({ title: `符号定义 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
+    ...((item.references || []).map((entry) => ({ title: `符号引用 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
+  ]);
 
   return (
     <Card className="module-card" title="问题详情">
@@ -399,7 +436,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                 <Tag>{finding.file_path}:{finding.line_start}</Tag>
               </div>
               {renderCodeLines(
-                finding.code_excerpt || `${finding.file_path}:${finding.line_start}`,
+                currentCode || `${finding.file_path}:${finding.line_start}`,
                 finding.line_start,
                 lineRefs,
               )}
@@ -418,6 +455,33 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           </Col>
         </Row>
       </div>
+
+      {targetDiff ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>目标文件完整变更</Paragraph>
+          <div className="review-code-panel">
+            <div className="review-code-panel-header">
+              <span>{finding.file_path}</span>
+              <Tag color="purple">diff</Tag>
+            </div>
+            <div className="review-code-frame">
+              {targetDiff.split("\n").filter(Boolean).map((line, index) => (
+                <div key={`target-diff-${index}`} className="review-code-line">
+                  <code>{line}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {relatedContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`关联上下文代码 ${index + 1}`, item),
+      )}
+
+      {symbolContexts.slice(0, 4).map((item, index) =>
+        renderContextSnippet(item.title || `符号上下文 ${index + 1}`, item.snippet),
+      )}
 
       <div style={{ marginTop: 16 }}>
         <Button onClick={onJumpToProcess} disabled={!onJumpToProcess}>

@@ -82,9 +82,43 @@ export interface ReviewFinding {
   remediation_suggestion: string;
   remediation_steps?: string[];
   code_excerpt: string;
+  code_context?: FindingCodeContext;
   suggested_code?: string;
   suggested_code_language?: string;
   created_at: string;
+}
+
+export interface FindingCodeContextSnippet {
+  path?: string;
+  line_start?: number;
+  snippet?: string;
+}
+
+export interface FindingCodeContextHunk {
+  file_path?: string;
+  hunk_header?: string;
+  start_line?: number;
+  end_line?: number;
+  changed_lines?: number[];
+  excerpt?: string;
+}
+
+export interface FindingCodeContextSymbol {
+  symbol?: string;
+  definitions?: FindingCodeContextSnippet[];
+  references?: FindingCodeContextSnippet[];
+}
+
+export interface FindingCodeContext {
+  target_file_full_diff?: string;
+  related_diff_summary?: string;
+  source_file_context?: string;
+  target_hunk?: FindingCodeContextHunk;
+  primary_context?: FindingCodeContextSnippet;
+  related_contexts?: FindingCodeContextSnippet[];
+  symbol_contexts?: FindingCodeContextSymbol[];
+  context_files?: string[];
+  routing_reason?: string;
 }
 
 export interface DebateIssue {

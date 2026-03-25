@@ -1168,6 +1168,42 @@ def test_review_runner_downgrades_weak_performance_signal(storage_root: Path):
     assert float(stabilized["confidence"]) <= 0.35
 
 
+def test_review_runner_stabilize_expert_analysis_reanchors_line_start_to_target_hunk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "创建订单前缺少币种校验",
+            "claim": "当前 createOrder 在写入前没有完成必要的业务校验。",
+            "finding_type": "direct_defect",
+            "severity": "high",
+            "confidence": 0.86,
+            "line_start": 1,
+            "line_end": 1,
+            "evidence": ["validateCurrency 调用缺失"],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": False,
+        },
+        "correctness_business",
+        "apps/api/order/order.service.ts",
+        22,
+        {
+            "hunk_header": "@@ -20,2 +22,4 @@",
+            "start_line": 22,
+            "end_line": 24,
+            "changed_lines": [22, 23],
+            "excerpt": (
+                "  22 | +  const payload = { amount, currency };\n"
+                "  23 | +  return client.post('/api/orders', payload);\n"
+            ),
+        },
+    )
+
+    assert stabilized["line_start"] == 22
+    assert stabilized["line_end"] >= 22
+
+
 def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(
@@ -1418,6 +1454,220 @@ def test_review_runner_build_expert_prompt_includes_target_file_full_diff(storag
     assert "auditCancel(id);" in prompt
     assert "其他变更文件摘要" in prompt
     assert "authGuard" in prompt
+
+
+def test_review_runner_build_expert_prompt_includes_complete_repository_context_snippets(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/context",
+        target_ref="main",
+        changed_files=["apps/api/order/order.service.ts", "apps/api/order/order.controller.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/order/order.service.ts b/apps/api/order/order.service.ts\n"
+            "--- a/apps/api/order/order.service.ts\n"
+            "+++ b/apps/api/order/order.service.ts\n"
+            "@@ -4,2 +4,4 @@\n"
+            "   async createOrder(payload) {\n"
+            "+    validateOrder(payload);\n"
+            "+    auditCreate(payload.id);\n"
+            "   }\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性"],
+        system_prompt="prompt",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "apps/api/order/order.service.ts",
+        5,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={
+            "summary": "service 与 controller、dto 存在联动",
+            "routing_reason": "需要检查 service 到 controller 的契约是否一致",
+            "primary_context": {
+                "path": "apps/api/order/order.service.ts",
+                "line_start": 5,
+                "snippet": (
+                    "   3 | export class OrderService {\n"
+                    "   4 |   async createOrder(payload) {\n"
+                    "   5 |     validateOrder(payload);\n"
+                    "   6 |     auditCreate(payload.id);\n"
+                    "   7 |   }\n"
+                ),
+            },
+            "related_contexts": [
+                {
+                    "path": "apps/api/order/order.controller.ts",
+                    "line_start": 12,
+                    "snippet": (
+                        "  10 | export class OrderController {\n"
+                        "  11 |   async create(req) {\n"
+                        "  12 |     return this.orderService.createOrder(req.body);\n"
+                        "  13 |   }\n"
+                    ),
+                }
+            ],
+            "symbol_contexts": [
+                {
+                    "symbol": "createOrder",
+                    "definitions": [
+                        {
+                            "path": "apps/api/order/order.service.ts",
+                            "line_number": 4,
+                            "snippet": "4: async createOrder(payload) {",
+                        }
+                    ],
+                    "references": [
+                        {
+                            "path": "apps/api/order/order.controller.ts",
+                            "line_number": 12,
+                            "snippet": "12: return this.orderService.createOrder(req.body);",
+                        }
+                    ],
+                }
+            ],
+        },
+        target_hunk={"hunk_header": "@@ -4,2 +4,4 @@", "excerpt": "+    validateOrder(payload);"},
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=["检查跨文件调用链上的输入校验与业务约束"],
+        active_skills=[],
+    )
+
+    assert "validateOrder(payload);" in prompt
+    assert "auditCreate(payload.id);" in prompt
+    assert "return this.orderService.createOrder(req.body);" in prompt
+    assert "createOrder" in prompt
+
+
+def test_review_runner_build_code_excerpt_prefers_repository_source_context(storage_root: Path):
+    repo_root = storage_root / "repo"
+    target_file = repo_root / "apps" / "api" / "order" / "order.service.ts"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(
+        "\n".join(
+            [
+                "export class OrderService {",
+                "  constructor(private readonly client: HttpClient) {}",
+                "",
+                "  async createOrder(payload: CreateOrderInput) {",
+                "    validateOrder(payload);",
+                "    auditCreate(payload.id);",
+                "    return this.client.post('/orders', payload);",
+                "  }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner = ReviewRunner(storage_root=storage_root)
+    runner.runtime_settings_service.update(
+        {
+            "code_repo_clone_url": "https://example.com/repo.git",
+            "code_repo_local_path": str(repo_root),
+            "code_repo_default_branch": "main",
+        }
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/source-snippet",
+        target_ref="main",
+        changed_files=["apps/api/order/order.service.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/order/order.service.ts b/apps/api/order/order.service.ts\n"
+            "--- a/apps/api/order/order.service.ts\n"
+            "+++ b/apps/api/order/order.service.ts\n"
+            "@@ -4,2 +4,4 @@\n"
+            "   async createOrder(payload: CreateOrderInput) {\n"
+            "+    validateOrder(payload);\n"
+            "+    auditCreate(payload.id);\n"
+            "     return this.client.post('/orders', payload);\n"
+            "   }\n"
+        ),
+    )
+
+    excerpt = runner._build_code_excerpt(subject, "apps/api/order/order.service.ts", 6, "correctness_business")
+
+    assert "constructor(private readonly client: HttpClient)" in excerpt
+    assert "auditCreate(payload.id);" in excerpt
+    assert "return this.client.post('/orders', payload);" in excerpt
+
+
+def test_review_runner_build_finding_code_context_contains_diff_and_related_context(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/context-payload",
+        target_ref="main",
+        changed_files=["apps/api/order/order.service.ts", "apps/api/order/order.controller.ts"],
+        unified_diff=(
+            "diff --git a/apps/api/order/order.service.ts b/apps/api/order/order.service.ts\n"
+            "--- a/apps/api/order/order.service.ts\n"
+            "+++ b/apps/api/order/order.service.ts\n"
+            "@@ -4,2 +4,4 @@\n"
+            "   async createOrder(payload) {\n"
+            "+    validateOrder(payload);\n"
+            "+    auditCreate(payload.id);\n"
+            "   }\n"
+            "diff --git a/apps/api/order/order.controller.ts b/apps/api/order/order.controller.ts\n"
+            "--- a/apps/api/order/order.controller.ts\n"
+            "+++ b/apps/api/order/order.controller.ts\n"
+            "@@ -10,1 +10,1 @@\n"
+            "-return this.orderService.createOrder(req.body)\n"
+            "+return this.orderService.createOrder(req.body)\n"
+        ),
+    )
+
+    context = runner._build_finding_code_context(
+        subject,
+        "apps/api/order/order.service.ts",
+        5,
+        {
+            "file_path": "apps/api/order/order.service.ts",
+            "hunk_header": "@@ -4,2 +4,4 @@",
+            "start_line": 4,
+            "end_line": 6,
+            "changed_lines": [5, 6],
+            "excerpt": "+    validateOrder(payload);",
+        },
+        {
+            "routing_reason": "需要检查 service 到 controller 的契约是否一致",
+            "primary_context": {
+                "path": "apps/api/order/order.service.ts",
+                "snippet": "   4 | async createOrder(payload) {\n   5 |   validateOrder(payload);\n   6 | }",
+            },
+            "related_contexts": [
+                {
+                    "path": "apps/api/order/order.controller.ts",
+                    "snippet": "  10 | return this.orderService.createOrder(req.body);",
+                }
+            ],
+            "symbol_contexts": [{"symbol": "createOrder", "definitions": [], "references": []}],
+            "context_files": ["apps/api/order/order.service.ts", "apps/api/order/order.controller.ts"],
+        },
+    )
+
+    assert "validateOrder(payload);" in str(context["target_file_full_diff"])
+    assert "order.controller.ts" in str(context["related_diff_summary"])
+    assert context["target_hunk"]["changed_lines"] == [5, 6]
+    assert len(context["related_contexts"]) == 1
+    assert context["symbol_contexts"][0]["symbol"] == "createOrder"
 
 
 def test_review_runner_extract_design_alignment_returns_tool_payload(storage_root: Path):
