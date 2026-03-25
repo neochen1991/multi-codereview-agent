@@ -701,6 +701,7 @@ class ReviewRunner:
                 status=str(item.get("status") or "open"),
                 severity=str(item.get("severity") or "medium"),
                 confidence=float(item.get("confidence") or 0.72),
+                confidence_breakdown=dict(item.get("confidence_breakdown") or {}),
                 finding_ids=[str(value) for value in item.get("finding_ids", [])],
                 participant_expert_ids=[str(value) for value in item.get("participant_expert_ids", [])],
                 evidence=[str(value) for value in item.get("evidence", [])],

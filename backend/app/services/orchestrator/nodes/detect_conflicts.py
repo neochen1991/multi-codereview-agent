@@ -46,6 +46,13 @@ PRIORITY_ORDER = {
     "low": 3,
 }
 
+FINDING_TYPE_WEIGHTS = {
+    "direct_defect": 1.0,
+    "test_gap": 0.8,
+    "risk_hypothesis": 0.65,
+    "design_concern": 0.55,
+}
+
 
 def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
     """从状态图里读取 issue 过滤治理配置，并补齐默认值。"""
@@ -111,6 +118,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             highest_severity = "high"
         if any(str(item.get("severity")) == "blocker" for item in eligible_items):
             highest_severity = "blocker"
+        confidence, confidence_breakdown = _score_issue_confidence(eligible_items)
         conflicts.append(
             {
                 "issue_id": first.get("finding_id"),
@@ -128,9 +136,8 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "context_files": [e for item in eligible_items for e in item.get("context_files", [])],
                 "direct_evidence": any(str(item.get("finding_type")) == "direct_defect" for item in eligible_items),
                 "severity": highest_severity,
-                "confidence": round(
-                    sum(float(item.get("confidence", 0.0)) for item in eligible_items) / len(eligible_items), 2
-                ),
+                "confidence": confidence,
+                "confidence_breakdown": confidence_breakdown,
             }
         )
     next_state["conflicts"] = conflicts
@@ -298,3 +305,92 @@ def _priority_confidence_threshold(config: dict[str, object], priority_label: st
         return float(raw)
     except (TypeError, ValueError):
         return 0.8
+
+
+def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict[str, object]]:
+    if not items:
+        return 0.01, {
+            "base_weighted_confidence": 0.01,
+            "consensus_bonus": 0.0,
+            "evidence_bonus": 0.0,
+            "verification_bonus": 0.0,
+            "hypothesis_penalty": 0.0,
+            "final_confidence": 0.01,
+            "participant_count": 0,
+            "evidence_signal_count": 0,
+        }
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for item in items:
+        finding_type = str(item.get("finding_type") or "risk_hypothesis").strip()
+        weight = float(FINDING_TYPE_WEIGHTS.get(finding_type, 0.65))
+        confidence = _coerce_confidence(item.get("confidence"))
+        weighted_sum += confidence * weight
+        total_weight += weight
+    base_weighted_confidence = round(weighted_sum / max(total_weight, 1e-6), 2)
+
+    participant_ids = {
+        str(item.get("expert_id") or "").strip()
+        for item in items
+        if str(item.get("expert_id") or "").strip()
+    }
+    participant_count = len(participant_ids)
+    consensus_bonus = 0.0
+    if participant_count > 1:
+        consensus_bonus = min(0.08, round(0.03 + 0.02 * (participant_count - 2), 2))
+
+    evidence_signal_count = len(_collect_issue_evidence_signals(items))
+    direct_evidence = any(str(item.get("finding_type") or "").strip() == "direct_defect" for item in items)
+    evidence_bonus = min(0.06, round(min(evidence_signal_count, 4) * 0.01 + (0.02 if direct_evidence else 0.0), 2))
+
+    all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
+    all_hypothesis = all(str(item.get("finding_type") or "risk_hypothesis").strip() == "risk_hypothesis" for item in items)
+    hypothesis_penalty = 0.0
+    if all_hypothesis and all_need_verification and not direct_evidence:
+        hypothesis_penalty = 0.05
+        if participant_count <= 1:
+            hypothesis_penalty += 0.03
+        if evidence_signal_count <= 3:
+            hypothesis_penalty += 0.02
+        hypothesis_penalty = min(0.12, round(hypothesis_penalty, 2))
+
+    verification_bonus = 0.0
+    final_confidence = round(
+        min(
+            0.99,
+            max(0.01, base_weighted_confidence + consensus_bonus + evidence_bonus + verification_bonus - hypothesis_penalty),
+        ),
+        2,
+    )
+    return final_confidence, {
+        "base_weighted_confidence": base_weighted_confidence,
+        "consensus_bonus": consensus_bonus,
+        "evidence_bonus": evidence_bonus,
+        "verification_bonus": verification_bonus,
+        "hypothesis_penalty": hypothesis_penalty,
+        "final_confidence": final_confidence,
+        "participant_count": participant_count,
+        "evidence_signal_count": evidence_signal_count,
+        "direct_evidence": direct_evidence,
+        "finding_count": len(items),
+    }
+
+
+def _collect_issue_evidence_signals(items: list[dict[str, object]]) -> set[str]:
+    signals: set[str] = set()
+    for item in items:
+        for key in ["evidence", "cross_file_evidence", "context_files", "matched_rules", "violated_guidelines"]:
+            for raw in list(item.get(key) or []):
+                value = str(raw).strip()
+                if value:
+                    signals.add(value)
+    return signals
+
+
+def _coerce_confidence(value: object) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(0.99, max(0.01, parsed))

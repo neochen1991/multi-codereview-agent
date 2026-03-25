@@ -259,6 +259,109 @@ AND 必要上下文存在
 - `extra_implementation_points`
 - `conflicting_implementation_points`
 
+## Issue 置信度计算模型
+
+当前系统里，`finding` 和 `issue` 的置信度不是同一个概念：
+
+- `finding.confidence`
+  - 表示单个专家对单条结论的把握程度
+  - 由专家基线分和专家 LLM 输出共同决定
+- `issue.confidence`
+  - 表示多个 findings 收敛为正式议题后的整体置信度
+  - 由 orchestrator 在 issue 聚合阶段统一计算
+
+### 计算入口
+
+核心逻辑在：
+
+- [detect_conflicts.py](/Users/neochen/multi-codereview-agent/backend/app/services/orchestrator/nodes/detect_conflicts.py)
+
+系统会先按 `file_path + 行号窗口` 聚合 findings，再对每个 issue 候选计算一组新的 issue 级置信度。
+
+### issue 置信度的组成
+
+当前使用的是“加权基础分 + 修正项”模型，而不是简单平均。
+
+公式可以理解为：
+
+```text
+issue_confidence
+= base_weighted_confidence
++ consensus_bonus
++ evidence_bonus
++ verification_bonus
+- hypothesis_penalty
+```
+
+其中：
+
+- `base_weighted_confidence`
+  - 对当前 issue 下的 findings 按类型加权平均
+  - 权重如下：
+    - `direct_defect`: `1.00`
+    - `test_gap`: `0.80`
+    - `risk_hypothesis`: `0.65`
+    - `design_concern`: `0.55`
+- `consensus_bonus`
+  - 多个不同专家命中同一个 issue 时增加
+  - 目前最多加到 `0.08`
+- `evidence_bonus`
+  - 根据证据条数、跨文件证据、上下文文件、命中规则、违反规范等信号增加
+  - 目前最多加到 `0.06`
+- `verification_bonus`
+  - 预留给后续 verifier / 工具核验结果的正向修正
+  - 当前 issue 聚合阶段先记为 `0.0`
+- `hypothesis_penalty`
+  - 如果一个 issue 全部由 `risk_hypothesis` 组成、仍需要验证、缺少直接证据，会做降权
+  - 目前最多扣到 `0.12`
+
+最终结果会被裁剪到 `0.01 ~ 0.99`，并四舍五入到两位小数。
+
+### 为什么这样设计
+
+这套模型主要是为了避免“issue 和 finding 内容几乎一样，但 issue 只是简单平均”的问题。
+
+它会显式体现这些事实：
+
+- `direct_defect` 比纯推测类 finding 更可信
+- 多专家达成一致时，issue 应该比单专家更有把握
+- 证据越充分、命中规范越多，issue 应该越稳定
+- 单专家、纯提示、纯 hypothesis 的 issue 不应该被轻易抬得太高
+
+### 输出给前端的解释字段
+
+每个 issue 现在除了 `confidence`，还会附带：
+
+- `confidence_breakdown`
+
+用于解释：
+
+- 基础加权分
+- 一致性加分
+- 证据加分
+- 验证加分
+- hypothesis 扣分
+
+这能帮助前端详情页或后续排查直接回答：
+
+- 为什么这个 issue 是 `0.95`
+- 它是因为多专家一致，还是因为 direct defect + 证据更强
+
+### 与 issue 升级阈值的关系
+
+issue 是否能进入“正式问题清单”，仍然受设置页中的 P 级阈值控制：
+
+- `issue_confidence_threshold_p0`
+- `issue_confidence_threshold_p1`
+- `issue_confidence_threshold_p2`
+- `issue_confidence_threshold_p3`
+
+也就是说：
+
+- 先算出 issue 级置信度
+- 再按 `P0 / P1 / P2 / P3` 阈值判断是否升级为正式问题
+- 没达到阈值的，保留在 finding 或“被阈值过滤的发现清单”
+
 ### 审核启动页中的详细设计文档
 
 详细设计文档现在直接在审核启动页上传，不需要先进入知识库。

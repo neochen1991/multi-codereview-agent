@@ -31,6 +31,7 @@ class DebateIssue(BaseModel):
     status: str = "open"
     severity: str = "medium"
     confidence: float = 0.72
+    confidence_breakdown: dict[str, object] = Field(default_factory=dict)
     finding_ids: list[str] = Field(default_factory=list)
     participant_expert_ids: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)

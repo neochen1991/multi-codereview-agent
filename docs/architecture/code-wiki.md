@@ -318,6 +318,221 @@ sequenceDiagram
   RR->>JG: graph.invoke(findings)
   JG-->>RR: issues / judge result
   RR-->>UI: 通过 SSE / 轮询持续可见
+
+---
+
+## 6. Issue 置信度模型
+
+`issue.confidence` 的计算不在前端，也不是简单复用某一条 finding 的分数。
+
+当前实现里，这个值是在 orchestrator 的 issue 聚合阶段统一生成的，核心节点是：
+
+- [detect_conflicts.py](/Users/neochen/multi-codereview-agent/backend/app/services/orchestrator/nodes/detect_conflicts.py)
+
+### 6.1 数据从哪里来
+
+一次 expert 审查结束后，`ReviewRunner` 会产出 `ReviewFinding`。
+
+其中：
+
+- `finding.confidence`
+  - 来自专家基线分 + LLM 输出后的归一化结果
+- `finding.finding_type`
+  - 例如 `direct_defect`、`risk_hypothesis`、`test_gap`、`design_concern`
+- `evidence / cross_file_evidence / context_files / matched_rules / violated_guidelines`
+  - 这些字段会一起进入后续 issue 聚合
+
+相关代码：
+
+- [review_runner.py](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+
+### 6.2 issue 是如何聚合出来的
+
+`detect_conflicts` 会先按下面的方式分组：
+
+```text
+key = file_path + line_bucket
+line_bucket = ((line_start - 1) // 25) + 1
+```
+
+也就是说，同一文件、相近行号窗口内的 findings 会先尝试被聚成一个 issue 候选。
+
+在每个候选分组里，系统会先执行 issue 升级治理规则：
+
+- 是否低于最低 P 级阈值
+- 是否属于纯提示性问题
+- 是否属于非代码检视范围
+- 是否低于对应 P 级的 issue 置信度阈值
+
+只有通过这些规则的 findings，才会进入最终 issue 聚合。
+
+### 6.3 当前 issue 置信度公式
+
+现在采用的是“加权基础分 + 修正项”的模型：
+
+```text
+issue_confidence
+= base_weighted_confidence
++ consensus_bonus
++ evidence_bonus
++ verification_bonus
+- hypothesis_penalty
+```
+
+最后结果会被裁剪到 `0.01 ~ 0.99`，并保留两位小数。
+
+### 6.4 base_weighted_confidence
+
+基础分不是简单平均，而是先按 finding 类型加权：
+
+```text
+direct_defect    -> 1.00
+test_gap         -> 0.80
+risk_hypothesis  -> 0.65
+design_concern   -> 0.55
+```
+
+对应实现里，单个 issue 的基础分计算方式等价于：
+
+```text
+sum(finding.confidence * finding_type_weight) / sum(finding_type_weight)
+```
+
+这一步解决的是：
+
+- `direct_defect` 不该和纯 hypothesis 完全同权
+- `test_gap` 要比 design concern 更靠近“可执行问题”
+
+### 6.5 consensus_bonus
+
+如果一个 issue 由多个不同专家共同命中，会增加一致性加分。
+
+当前策略：
+
+- 2 个专家开始给加分
+- 每增加一个专家继续小幅加分
+- 上限 `0.08`
+
+这一步的目标是表达：
+
+- “多专家独立指向同一个问题”比“单专家孤立结论”更稳定
+
+### 6.6 evidence_bonus
+
+系统会收集 issue 内所有 findings 的证据信号，包括：
+
+- `evidence`
+- `cross_file_evidence`
+- `context_files`
+- `matched_rules`
+- `violated_guidelines`
+
+这些信号去重后形成 `evidence_signal_count`，再转成证据加分。
+
+另外，只要 issue 内存在 `direct_defect`，还会额外得到一档直接证据加分。
+
+当前上限是：
+
+- `0.06`
+
+### 6.7 hypothesis_penalty
+
+如果一个 issue 满足以下条件：
+
+- 全部 findings 都是 `risk_hypothesis`
+- 全部都还需要验证
+- 没有 `direct_defect`
+
+系统会给它一个负向修正，避免纯推测类 issue 被抬得过高。
+
+如果同时还是：
+
+- 单专家结论
+- 证据信号很少
+
+扣分会继续增加。
+
+当前上限是：
+
+- `0.12`
+
+### 6.8 verification_bonus
+
+在当前聚合节点中，`verification_bonus` 先固定为 `0.0`，但字段已经保留。
+
+后续 evidence verification 节点会继续处理 issue：
+
+- [evidence_verification.py](/Users/neochen/multi-codereview-agent/backend/app/services/orchestrator/nodes/evidence_verification.py)
+
+如果 verifier 验证通过，系统会把：
+
+- `issue.confidence`
+- `verification_result.score`
+
+取较大值，并把最终分数上限封到 `0.98`。
+
+所以实际运行时的 issue 置信度链路是：
+
+```text
+finding.confidence
+-> detect_conflicts 计算 issue.confidence
+-> evidence_verification 按工具核验结果上调
+```
+
+### 6.9 为什么 issue 和 finding 的置信度会不同
+
+这是现在前端最容易看到、也最容易误解的一点。
+
+原因是：
+
+- finding 展示的是“单条专家结论”的置信度
+- issue 展示的是“多个 findings 聚合后的议题级置信度”
+
+所以即使：
+
+- 正式问题清单和审核发现清单的文本内容很相近
+
+也可能出现：
+
+- finding 是 `0.78`
+- issue 是 `0.95`
+
+因为 issue 这里已经吃进去了：
+
+- finding 类型权重
+- 多专家一致性
+- 证据强度
+- 后续 verifier 上调
+
+### 6.10 confidence_breakdown 字段
+
+为了让这套模型可解释，当前 issue 上会附带：
+
+- `confidence_breakdown`
+
+它至少包含：
+
+- `base_weighted_confidence`
+- `consensus_bonus`
+- `evidence_bonus`
+- `verification_bonus`
+- `hypothesis_penalty`
+- `final_confidence`
+- `participant_count`
+- `evidence_signal_count`
+- `direct_evidence`
+- `finding_count`
+
+相关模型与接线位置：
+
+- [issue.py](/Users/neochen/multi-codereview-agent/backend/app/domain/models/issue.py)
+- [review_runner.py](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+- [api.ts](/Users/neochen/multi-codereview-agent/frontend/src/services/api.ts)
+
+这个字段的价值主要有两个：
+
+1. 给前端详情页解释“为什么这个 issue 是这个分数”
+2. 给后续调参和排查提供可观测性
 ```
 
 ---

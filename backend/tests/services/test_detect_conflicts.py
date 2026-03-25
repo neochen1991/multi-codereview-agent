@@ -303,3 +303,94 @@ def test_detect_conflicts_skips_non_code_review_scope_findings():
 
     assert result["conflicts"] == []
     assert result["issue_filter_decisions"][0]["rule_code"] == "non_code_review_scope"
+
+
+def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_bonus():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_weighted_1",
+                "expert_id": "security_compliance",
+                "title": "鉴权绕过风险",
+                "summary": "存在可直接利用的未授权访问路径。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.92,
+                "verification_needed": False,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 21,
+                "evidence": ["资源级鉴权被绕开", "未授权路径可直达"],
+                "cross_file_evidence": ["controller -> service 鉴权链路断裂"],
+                "context_files": ["src/app/controller/OrderController.java", "src/app/service/OrderService.java"],
+                "matched_rules": ["访问控制规则"],
+                "violated_guidelines": ["高风险接口必须做资源级鉴权"],
+            },
+            {
+                "finding_id": "fdg_weighted_2",
+                "expert_id": "architecture_design",
+                "title": "鉴权绕过风险",
+                "summary": "鉴权职责被下沉后没有在入口层补齐。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 22,
+                "evidence": ["入口层缺少统一鉴权守卫"],
+                "cross_file_evidence": ["controller -> interceptor 没有接入"],
+                "context_files": ["src/app/interceptor/AuthInterceptor.java"],
+                "matched_rules": ["边界层职责闭合"],
+                "violated_guidelines": ["安全校验不能依赖调用方自觉"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["confidence"] == 0.95
+    assert conflict["confidence_breakdown"]["base_weighted_confidence"] == 0.86
+    assert conflict["confidence_breakdown"]["consensus_bonus"] == 0.03
+    assert conflict["confidence_breakdown"]["evidence_bonus"] == 0.06
+    assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.0
+    assert conflict["confidence_breakdown"]["participant_count"] == 2
+
+
+def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_penalty_1",
+                "expert_id": "maintainability_code_health",
+                "title": "这里可能需要补充更多日志",
+                "summary": "当前日志信息略少，后续排查可能不够方便。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.84,
+                "verification_needed": True,
+                "file_path": "src/app/service/OrderService.java",
+                "line_start": 33,
+                "evidence": ["日志字段较少"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["confidence"] == 0.75
+    assert conflict["confidence_breakdown"]["base_weighted_confidence"] == 0.84
+    assert conflict["confidence_breakdown"]["evidence_bonus"] == 0.01
+    assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.1

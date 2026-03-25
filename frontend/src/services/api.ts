@@ -98,6 +98,7 @@ export interface DebateIssue {
   status: string;
   severity: string;
   confidence: number;
+  confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
   participant_expert_ids: string[];
   evidence: string[];
