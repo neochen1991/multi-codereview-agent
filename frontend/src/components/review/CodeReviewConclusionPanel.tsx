@@ -166,9 +166,17 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   }
 
   const codeContext = finding.code_context;
-  const currentCode = codeContext?.source_file_context || codeContext?.primary_context?.snippet || finding.code_excerpt;
+  const currentCode =
+    codeContext?.problem_source_context?.snippet ||
+    codeContext?.source_file_context ||
+    codeContext?.primary_context?.snippet ||
+    finding.code_excerpt;
   const targetDiff = codeContext?.target_file_full_diff || codeContext?.target_hunk?.excerpt || "";
-  const relatedContexts = (codeContext?.related_contexts || []).filter((item) => item?.snippet);
+  const relatedSourceSnippets = codeContext?.related_source_snippets || [];
+  const fallbackRelatedContexts = codeContext?.related_contexts || [];
+  const relatedContexts = (relatedSourceSnippets.length > 0 ? relatedSourceSnippets : fallbackRelatedContexts).filter(
+    (item) => item?.snippet,
+  );
   const symbolContexts = (codeContext?.symbol_contexts || []).flatMap((item) => [
     ...((item.definitions || []).map((entry) => ({ title: `符号定义 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
     ...((item.references || []).map((entry) => ({ title: `符号引用 · ${item.symbol || "unknown"}`, snippet: entry })) || []),

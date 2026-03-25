@@ -540,16 +540,33 @@ class ReviewToolGateway:
             symbol = str(context.get("symbol") or "").strip()
             if not symbol:
                 continue
-            definition_files = self._collect_symbol_hit_files(context, "definitions")
-            reference_files = self._collect_symbol_hit_files(context, "references")
             compact_contexts.append(
                 {
                     "symbol": symbol,
-                    "definitions": [{"path": path} for path in definition_files],
-                    "references": [{"path": path} for path in reference_files],
+                    "definitions": self._compact_symbol_entries(context, "definitions"),
+                    "references": self._compact_symbol_entries(context, "references"),
                 }
             )
         return compact_contexts
+
+    def _compact_symbol_entries(self, context: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for item in list(context.get(key) or []):
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path or not self._is_source_like_path(path) or path in seen_paths:
+                continue
+            entries.append(
+                {
+                    "path": path,
+                    "line_start": int(item.get("line_number") or 1),
+                    "snippet": str(item.get("snippet") or "").strip(),
+                }
+            )
+            seen_paths.add(path)
+        return entries
 
     def _collect_symbol_hit_files(self, context: dict[str, Any], key: str) -> list[str]:
         files: list[str] = []

@@ -488,11 +488,7 @@ class LLMChatService:
         return self._safe_json(log_context)
 
     def _truncate(self, value: object, limit: int | None = None) -> str:
-        text = str(value or "")
-        max_length = limit or self._PREVIEW_LIMIT
-        if len(text) <= max_length:
-            return text
-        return f"{text[:max_length]}...<truncated>"
+        return str(value or "")
 
     def _decode_payload(self, *, response_text: str, content_type: str) -> dict[str, object]:
         cleaned = response_text.lstrip("\ufeff").strip()

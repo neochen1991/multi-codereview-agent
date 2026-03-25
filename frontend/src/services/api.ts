@@ -91,6 +91,7 @@ export interface ReviewFinding {
 export interface FindingCodeContextSnippet {
   path?: string;
   line_start?: number;
+  line_end?: number;
   snippet?: string;
 }
 
@@ -113,9 +114,11 @@ export interface FindingCodeContext {
   target_file_full_diff?: string;
   related_diff_summary?: string;
   source_file_context?: string;
+  problem_source_context?: FindingCodeContextSnippet;
   target_hunk?: FindingCodeContextHunk;
   primary_context?: FindingCodeContextSnippet;
   related_contexts?: FindingCodeContextSnippet[];
+  related_source_snippets?: FindingCodeContextSnippet[];
   symbol_contexts?: FindingCodeContextSymbol[];
   context_files?: string[];
   routing_reason?: string;

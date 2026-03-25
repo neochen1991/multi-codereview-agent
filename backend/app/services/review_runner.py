@@ -2001,6 +2001,7 @@ class ReviewRunner:
             "target_file_full_diff": self._build_target_file_full_diff(subject, file_path),
             "related_diff_summary": self._build_related_diff_summary(subject, file_path),
             "source_file_context": self._load_repository_source_excerpt(file_path, line_start),
+            "problem_source_context": self._load_repository_problem_context(file_path, line_start, target_hunk),
             "target_hunk": {
                 "file_path": str(target_hunk.get("file_path") or file_path),
                 "hunk_header": str(target_hunk.get("hunk_header") or ""),
@@ -2017,6 +2018,11 @@ class ReviewRunner:
                 for item in list(repository_context.get("related_contexts") or [])[:6]
                 if isinstance(item, dict)
             ],
+            "related_source_snippets": [
+                dict(item)
+                for item in list(repository_context.get("related_source_snippets") or [])[:6]
+                if isinstance(item, dict)
+            ],
             "symbol_contexts": [
                 dict(item)
                 for item in list(repository_context.get("symbol_contexts") or [])[:4]
@@ -2029,6 +2035,32 @@ class ReviewRunner:
             ],
             "routing_reason": str(repository_context.get("routing_reason") or "").strip(),
         }
+
+    def _load_repository_problem_context(
+        self,
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object],
+    ) -> dict[str, object]:
+        runtime = self.runtime_settings_service.get()
+        service = RepositoryContextService(
+            clone_url=runtime.code_repo_clone_url,
+            local_path=runtime.code_repo_local_path,
+            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
+            access_token=runtime.code_repo_access_token,
+            auto_sync=runtime.code_repo_auto_sync,
+        )
+        if not service.is_ready():
+            return {}
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if changed_lines:
+            start_line = min(changed_lines)
+            end_line = max(changed_lines)
+        else:
+            start_line = self._normalize_optional_line_value(target_hunk.get("start_line")) or line_start
+            end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
+        context = service.load_file_range(file_path, start_line, end_line, padding=4)
+        return dict(context) if isinstance(context, dict) else {}
 
     def _build_fallback_code_excerpt(
         self,

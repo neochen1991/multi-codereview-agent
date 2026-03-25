@@ -214,6 +214,43 @@ class RepositoryContextService:
         snippet = "\n".join(f"{index + 1:>4} | {lines[index]}" for index in range(start, end))
         return {"path": relative_path, "snippet": snippet, "line_start": line_start}
 
+    def load_file_range(
+        self,
+        relative_path: str,
+        start_line: int,
+        end_line: int,
+        *,
+        padding: int = 4,
+    ) -> dict[str, Any]:
+        """读取目标文件给定范围附近的完整片段。"""
+        normalized_start = max(1, int(start_line or 1))
+        normalized_end = max(normalized_start, int(end_line or normalized_start))
+        if not self.is_ready():
+            return {
+                "path": relative_path,
+                "snippet": "",
+                "line_start": normalized_start,
+                "line_end": normalized_end,
+            }
+        target = (self.local_path / relative_path).resolve()
+        if not target.exists() or not target.is_file():
+            return {
+                "path": relative_path,
+                "snippet": "",
+                "line_start": normalized_start,
+                "line_end": normalized_end,
+            }
+        lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        start = max(0, normalized_start - padding - 1)
+        end = min(len(lines), normalized_end + padding)
+        snippet = "\n".join(f"{index + 1:>4} | {lines[index]}" for index in range(start, end))
+        return {
+            "path": relative_path,
+            "snippet": snippet,
+            "line_start": normalized_start,
+            "line_end": normalized_end,
+        }
+
     def _search_with_ripgrep(self, query: str, globs: list[str], limit: int) -> list[dict[str, Any]]:
         rg_bin = shutil.which("rg")
         if not rg_bin:
