@@ -623,6 +623,25 @@ flowchart TD
 - 为每个专家指定目标文件、目标 hunk、必查项、禁止推断项
 - 审核结束后输出主总结
 
+主 Agent 当前真正拿到的 diff 上下文不是“整份 MR 原样截断”。
+
+当前实现是：
+
+- 主要业务文件完整 diff
+- 其他变更文件摘要
+- 候选 hunk 列表
+
+这样做是为了同时满足两个目标：
+
+- 派工时保留足够的全局变更信号
+- 避免大 MR 时直接把整份 `unified_diff` 裸塞进 prompt 导致上下文浪费
+
+关键实现：
+
+- [MainAgentService._build_routing_user_prompt](/Users/neochen/multi-codereview-agent/backend/app/services/main_agent_service.py)
+- [MainAgentService._build_expert_selection_user_prompt](/Users/neochen/multi-codereview-agent/backend/app/services/main_agent_service.py)
+- [DiffExcerptService.extract_file_diff](/Users/neochen/multi-codereview-agent/backend/app/services/diff_excerpt_service.py)
+
 不负责：
 
 - 直接给出最终 finding
@@ -638,14 +657,38 @@ flowchart TD
 
 - 严格按自己的职责边界分析代码
 - 读取：
-  - MR/PR diff 片段
+  - 目标文件完整 diff
+  - 其他变更文件摘要
   - target hunk
+  - 当前代码片段 excerpt
   - 代码仓上下文
   - 绑定规范文档
   - 绑定参考文档
   - 已激活的 skills
   - 运行时工具结果
 - 输出结构化 finding
+
+这里有一个关键约束：
+
+- 专家 prompt 不能只给 `target_hunk` 或 `code_excerpt`
+- 否则当前 hunk 之外、但仍属于同一目标文件的重要变更会丢失
+- 前端 diff 预览看到“完整 diff”并不代表专家真的拿到了完整文件级上下文
+
+当前实现已经修成：
+
+- 目标文件完整 diff
+- 其他变更文件摘要
+- target hunk
+- excerpt
+- repo context
+- tool results
+
+关键实现：
+
+- [ReviewRunner._build_expert_prompt](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+- [ReviewRunner._build_target_file_full_diff](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+- [ReviewRunner._build_related_diff_summary](/Users/neochen/multi-codereview-agent/backend/app/services/review_runner.py)
+- [DiffExcerptService.extract_file_diff](/Users/neochen/multi-codereview-agent/backend/app/services/diff_excerpt_service.py)
 
 #### 专家如何消费 skill
 
@@ -786,13 +829,15 @@ flowchart TD
 
 它的真实输入包括：
 
-1. 当前 PR/MR/commit 的 diff 片段
-2. 主 Agent 选出来的 target hunk
-3. 主 Agent 推导出的 related files
-4. `repo_context_search` 提供的目标分支源码上下文
-5. `knowledge_search` 命中的专家绑定文档
-6. 专家的核心规范文档
-7. 其他运行时工具结果
+1. 目标文件完整 diff
+2. 其他变更文件摘要
+3. 主 Agent 选出来的 target hunk
+4. 当前代码片段 excerpt
+5. 主 Agent 推导出的 related files
+6. `repo_context_search` 提供的目标分支源码上下文
+7. `knowledge_search` 命中的专家绑定文档
+8. 专家的核心规范文档
+9. 其他运行时工具结果
 
 对应关键代码：
 

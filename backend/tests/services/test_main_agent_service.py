@@ -1261,3 +1261,116 @@ def test_main_agent_command_accepts_route_hint_with_full_business_files():
         "apps/api/orders/order.service.ts",
     ]
     assert command["routing_reason"] == "字段契约变更"
+
+
+def test_main_agent_routing_prompt_includes_target_file_full_diff_and_related_summary():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/full-diff",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/order.service.ts",
+            "apps/api/orders/order.controller.ts",
+        ],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -1,3 +1,5 @@\n"
+            " export async function createOrder(payload) {\n"
+            "+  validateOrder(payload);\n"
+            "+  auditCreate(payload.id);\n"
+            "   return client.post('/orders', payload);\n"
+            " }\n"
+            "diff --git a/apps/api/orders/order.controller.ts b/apps/api/orders/order.controller.ts\n"
+            "--- a/apps/api/orders/order.controller.ts\n"
+            "+++ b/apps/api/orders/order.controller.ts\n"
+            "@@ -3,1 +3,2 @@\n"
+            "-router.post('/orders', createOrderHandler);\n"
+            "+router.post('/orders', authGuard, createOrderHandler);\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        )
+    ]
+    candidate_hunks = [
+        {
+            "candidate_id": "apps/api/orders/order.service.ts:2:1",
+            "file_path": "apps/api/orders/order.service.ts",
+            "line_start": 2,
+            "hunk_header": "@@ -1,3 +1,5 @@",
+            "excerpt": "+  validateOrder(payload);",
+            "repo_hits": {},
+        }
+    ]
+
+    prompt = agent._build_routing_user_prompt(subject=subject, experts=experts, candidate_hunks=candidate_hunks)
+
+    assert "目标文件完整 diff" in prompt
+    assert "validateOrder(payload);" in prompt
+    assert "其他变更文件摘要" in prompt
+    assert "authGuard" in prompt
+
+
+def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/full-diff",
+        target_ref="main",
+        changed_files=[
+            "apps/api/orders/order.service.ts",
+            "apps/api/orders/order.controller.ts",
+        ],
+        unified_diff=(
+            "diff --git a/apps/api/orders/order.service.ts b/apps/api/orders/order.service.ts\n"
+            "--- a/apps/api/orders/order.service.ts\n"
+            "+++ b/apps/api/orders/order.service.ts\n"
+            "@@ -1,3 +1,5 @@\n"
+            " export async function createOrder(payload) {\n"
+            "+  validateOrder(payload);\n"
+            "+  auditCreate(payload.id);\n"
+            "   return client.post('/orders', payload);\n"
+            " }\n"
+            "diff --git a/apps/api/orders/order.controller.ts b/apps/api/orders/order.controller.ts\n"
+            "--- a/apps/api/orders/order.controller.ts\n"
+            "+++ b/apps/api/orders/order.controller.ts\n"
+            "@@ -3,1 +3,2 @@\n"
+            "-router.post('/orders', createOrderHandler);\n"
+            "+router.post('/orders', authGuard, createOrderHandler);\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        )
+    ]
+
+    prompt = agent._build_expert_selection_user_prompt(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business"],
+    )
+
+    assert "业务变更文件完整 diff" in prompt
+    assert "validateOrder(payload);" in prompt
+    assert "authGuard" in prompt

@@ -1932,6 +1932,38 @@ class ReviewRunner:
             return excerpt
         return self._build_fallback_code_excerpt(file_path, line_start, expert_id)
 
+    def _build_target_file_full_diff(self, subject: ReviewSubject, file_path: str) -> str:
+        full_diff = self.diff_excerpt_service.extract_file_diff(subject.unified_diff, file_path)
+        if not full_diff:
+            return f"未从完整 diff 中提取到 {file_path} 的文件级变更，请结合目标 hunk 和代码仓上下文谨慎判断。"
+        lines = full_diff.splitlines()
+        if len(lines) <= 160:
+            return full_diff
+        return "\n".join(lines[:160]) + "\n... [目标文件完整 diff 过长，已截断展示前 160 行]"
+
+    def _build_related_diff_summary(self, subject: ReviewSubject, target_file_path: str) -> str:
+        related_paths = [
+            str(path).strip()
+            for path in list(subject.changed_files or [])
+            if str(path).strip() and str(path).strip() != target_file_path
+        ]
+        if not related_paths:
+            return "除目标文件外无其他变更文件。"
+        sections: list[str] = []
+        for path in related_paths[:4]:
+            full_diff = self.diff_excerpt_service.extract_file_diff(subject.unified_diff, path)
+            if not full_diff:
+                sections.append(f"# {path}\n未提取到该文件 diff。")
+                continue
+            preview_lines = full_diff.splitlines()
+            display_lines = preview_lines[:24]
+            suffix = "\n... [摘要已截断]" if len(preview_lines) > 24 else ""
+            sections.append(f"# {path}\n" + "\n".join(display_lines) + suffix)
+        remaining = len(related_paths) - min(len(related_paths), 4)
+        if remaining > 0:
+            sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 和代码仓上下文判断影响范围。")
+        return "\n\n".join(sections)
+
     def _build_fallback_code_excerpt(
         self,
         file_path: str,
@@ -2136,6 +2168,8 @@ class ReviewRunner:
         """
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
+        target_file_full_diff = self._build_target_file_full_diff(subject, file_path)
+        related_diff_summary = self._build_related_diff_summary(subject, file_path)
         runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
         repository_context_summary = self._build_repository_context_summary(repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
@@ -2176,13 +2210,15 @@ class ReviewRunner:
             f"规则遍历结果:\n{rule_screening_summary}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
+            f"目标文件完整 diff:\n{target_file_full_diff}\n"
+            f"其他变更文件摘要:\n{related_diff_summary}\n"
             f"运行时工具调用结果:\n{runtime_tool_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
-            f"请基于真实 diff 做审查，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
+            f"请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
             f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"

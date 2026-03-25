@@ -1350,6 +1350,76 @@ def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_co
     assert "主Agent派工理由" in prompt
 
 
+def test_review_runner_build_expert_prompt_includes_target_file_full_diff(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/full-diff",
+        target_ref="main",
+        title="Full diff should reach expert",
+        changed_files=[
+            "apps/api/order/order.service.ts",
+            "apps/api/order/order.controller.ts",
+        ],
+        unified_diff=(
+            "diff --git a/apps/api/order/order.service.ts b/apps/api/order/order.service.ts\n"
+            "--- a/apps/api/order/order.service.ts\n"
+            "+++ b/apps/api/order/order.service.ts\n"
+            "@@ -8,6 +8,8 @@\n"
+            " export async function createOrder(amount, currency) {\n"
+            "+  validateCurrency(currency);\n"
+            "+  const payload = { amount, currency };\n"
+            "   return client.post('/api/orders', payload);\n"
+            " }\n"
+            "@@ -20,4 +22,6 @@\n"
+            " export async function cancelOrder(id) {\n"
+            "-  return client.delete(`/api/orders/${id}`);\n"
+            "+  auditCancel(id);\n"
+            "+  return client.delete(`/api/orders/${id.trim()}`);\n"
+            " }\n"
+            "diff --git a/apps/api/order/order.controller.ts b/apps/api/order/order.controller.ts\n"
+            "--- a/apps/api/order/order.controller.ts\n"
+            "+++ b/apps/api/order/order.controller.ts\n"
+            "@@ -3,1 +3,2 @@\n"
+            "-router.post('/orders', createOrderHandler);\n"
+            "+router.post('/orders', authGuard, createOrderHandler);\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性"],
+        system_prompt="prompt",
+        review_spec="规则一\n规则二",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "apps/api/order/order.service.ts",
+        9,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={"summary": "目标分支中存在 controller 和 service 配合改动。", "routing_reason": "service 存在字段和调用链变化"},
+        target_hunk={"hunk_header": "@@ -8,6 +8,8 @@", "excerpt": "+  const payload = { amount, currency };"},
+        bound_documents=[],
+        disallowed_inference=["证据不足时不要假定 controller 已完成全部校验"],
+        expected_checks=["检查同文件内其他变更是否影响业务一致性"],
+        active_skills=[],
+    )
+
+    assert "目标文件完整 diff" in prompt
+    assert "validateCurrency(currency);" in prompt
+    assert "auditCancel(id);" in prompt
+    assert "其他变更文件摘要" in prompt
+    assert "authGuard" in prompt
+
+
 def test_review_runner_extract_design_alignment_returns_tool_payload(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 

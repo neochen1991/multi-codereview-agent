@@ -229,6 +229,40 @@ AND 必要上下文存在
 
 这样新增 tool 时，不需要改主审核流程源码。
 
+## Diff 上下文策略
+
+系统内部现在区分了三种 diff 视角，不能混用：
+
+- 前端 `Diff Preview`
+  - 直接展示完整的 `ReviewSubject.unified_diff`
+  - 用于人工浏览和核对原始变更
+- 主 Agent prompt
+  - 不再直接塞一整段裸 `unified_diff[:12000]`
+  - 改为：
+    - 主要业务文件完整 diff
+    - 其他变更文件摘要
+    - 候选 hunk
+- 专家 Agent prompt
+  - 不再只看 `target_hunk` 和 `code_excerpt`
+  - 改为：
+    - 目标文件完整 diff
+    - 其他变更文件摘要
+    - 目标 hunk
+    - 代码仓上下文
+    - 运行时工具结果
+
+这样做的原因很直接：
+
+- 前端预览需要完整原始 diff
+- 主 Agent 需要足够多的全局信号做派工，但不能被超长 diff 直接冲垮 token
+- 专家 Agent 至少必须看到“目标文件完整 diff”，否则会把局部 excerpt 误判成“diff 不完整”
+
+当前约束是：
+
+- 专家审查时，目标文件完整 diff 是必带上下文
+- 其他文件只做摘要补充，不默认把整个 MR 全量灌给每个专家
+- 如果后续要调整 prompt，优先改“文件级完整 diff + 其他文件摘要”的结构，不要退回到“只给 excerpt”或“直接截断整份 unified_diff”
+
 ### 详细设计一致性检查示例
 
 当前首个完整落地的 skill 是：

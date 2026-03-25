@@ -4,6 +4,27 @@ from __future__ import annotations
 class DiffExcerptService:
     """负责从 unified diff 中提取 hunk、行号和代码片段。"""
 
+    def extract_file_diff(self, unified_diff: str, file_path: str) -> str:
+        """提取某个文件在 unified diff 中的完整 diff block。"""
+
+        lines = unified_diff.splitlines()
+        active_file = ""
+        collected: list[str] = []
+
+        for raw_line in lines:
+            if raw_line.startswith("diff --git "):
+                next_file = self._parse_file_path(raw_line)
+                if active_file == file_path and collected:
+                    break
+                active_file = next_file
+                if active_file == file_path:
+                    collected = [raw_line]
+                continue
+            if active_file == file_path and collected is not None:
+                collected.append(raw_line)
+
+        return "\n".join(collected).strip()
+
     def list_hunks(self, unified_diff: str, file_path: str) -> list[dict[str, object]]:
         """列出某个文件在 diff 中的全部 hunk。"""
 

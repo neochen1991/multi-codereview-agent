@@ -1124,13 +1124,17 @@ class MainAgentService:
                 )
             )
         business_changed_files = self._candidate_changed_files(subject, "")
+        primary_file_path = str(candidate_hunks[0]["file_path"]) if candidate_hunks else str(business_changed_files[0]) if business_changed_files else ""
+        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
+        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"源分支: {subject.source_ref}\n"
             f"目标分支: {subject.target_ref}\n"
             f"全部变更文件: {json.dumps(list(subject.changed_files), ensure_ascii=False)}\n"
             f"业务变更文件: {json.dumps(business_changed_files, ensure_ascii=False)}\n"
-            f"完整 diff:\n{subject.unified_diff[:12000]}\n\n"
+            f"目标文件完整 diff:\n{target_file_full_diff}\n\n"
+            f"其他变更文件摘要:\n{related_diff_summary}\n\n"
             f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
             f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
             "请输出 JSON，格式为：\n"
@@ -1173,6 +1177,9 @@ class MainAgentService:
                     ]
                 )
             )
+        primary_file_path = str(business_changed_files[0]) if business_changed_files else str(subject.changed_files[0]) if subject.changed_files else ""
+        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
+        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"MR 链接: {subject.mr_url}\n"
@@ -1181,7 +1188,8 @@ class MainAgentService:
             f"全部变更文件: {json.dumps(list(subject.changed_files), ensure_ascii=False)}\n"
             f"业务变更文件: {json.dumps(business_changed_files, ensure_ascii=False)}\n"
             f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
-            f"完整 diff:\n{subject.unified_diff[:12000]}\n\n"
+            f"业务变更文件完整 diff:\n{target_file_full_diff}\n\n"
+            f"其他变更文件摘要:\n{related_diff_summary}\n\n"
             f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
             "请输出 JSON，格式为：\n"
             "{\n"
@@ -1193,6 +1201,40 @@ class MainAgentService:
             "  ]\n"
             "}"
         )
+
+    def _build_file_diff_context(self, subject: ReviewSubject, file_path: str) -> str:
+        if not file_path:
+            return "未定位到主要变更文件。"
+        full_diff = self._diff_excerpt_service.extract_file_diff(subject.unified_diff, file_path)
+        if not full_diff:
+            return f"未从 unified diff 中提取到 {file_path} 的文件级变更。"
+        lines = full_diff.splitlines()
+        if len(lines) <= 160:
+            return full_diff
+        return "\n".join(lines[:160]) + "\n... [目标文件完整 diff 过长，已截断展示前 160 行]"
+
+    def _build_related_diff_summary(self, subject: ReviewSubject, primary_file_path: str) -> str:
+        related_paths = [
+            str(path).strip()
+            for path in list(subject.changed_files or [])
+            if str(path).strip() and str(path).strip() != primary_file_path
+        ]
+        if not related_paths:
+            return "除主要变更文件外无其他变更文件。"
+        sections: list[str] = []
+        for path in related_paths[:4]:
+            full_diff = self._diff_excerpt_service.extract_file_diff(subject.unified_diff, path)
+            if not full_diff:
+                sections.append(f"# {path}\n未提取到该文件 diff。")
+                continue
+            preview_lines = full_diff.splitlines()
+            display_lines = preview_lines[:24]
+            suffix = "\n... [摘要已截断]" if len(preview_lines) > 24 else ""
+            sections.append(f"# {path}\n" + "\n".join(display_lines) + suffix)
+        remaining = len(related_paths) - min(len(related_paths), 4)
+        if remaining > 0:
+            sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 判断全局影响。")
+        return "\n\n".join(sections)
 
     def _parse_json_payload(self, text: str) -> dict[str, object]:
         content = str(text or "").strip()
