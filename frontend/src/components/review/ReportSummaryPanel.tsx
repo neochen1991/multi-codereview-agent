@@ -217,7 +217,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
           {clickableStatistic("审核发现", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
-          <Statistic title="正式议题" value={formalIssueCount} />
+          {clickableStatistic("正式议题", formalIssueCount)}
         </Col>
         <Col xs={12} xl={6}>
           {clickableStatistic("高风险发现", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}

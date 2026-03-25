@@ -1265,7 +1265,16 @@ const ReviewWorkbenchPage: React.FC = () => {
               />
             </Suspense>
             <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
-              <IssueThresholdFilteredPanel findings={findings} issueFilterDecisions={issueFilterDecisions} />
+              <IssueThresholdFilteredPanel
+                findings={findings}
+                issueFilterDecisions={issueFilterDecisions}
+                onSelectFinding={(findingId) => {
+                  setSelectedFindingId(findingId);
+                  const issue = issueByFindingId.get(findingId);
+                  if (issue) setSelectedIssueId(issue.issue_id);
+                  setFindingModalOpen(true);
+                }}
+              />
             </Suspense>
             <div ref={resultFindingsRef}>
               <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>

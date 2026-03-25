@@ -21,6 +21,7 @@ type ThresholdFilteredRow = {
 type IssueThresholdFilteredPanelProps = {
   findings: ReviewFinding[];
   issueFilterDecisions: IssueFilterDecision[];
+  onSelectFinding?: (findingId: string) => void;
 };
 
 const THRESHOLD_RULE_CODES = new Set([
@@ -28,7 +29,11 @@ const THRESHOLD_RULE_CODES = new Set([
   "below_priority_confidence_threshold",
 ]);
 
-const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = ({ findings, issueFilterDecisions }) => {
+const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = ({
+  findings,
+  issueFilterDecisions,
+  onSelectFinding,
+}) => {
   const findingById = useMemo(() => {
     const map = new Map<string, ReviewFinding>();
     for (const finding of findings) {
@@ -74,6 +79,10 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
         size="middle"
         pagination={{ pageSize: 6, hideOnSinglePage: true }}
         scroll={{ x: 1540 }}
+        onRow={(record) => ({
+          onClick: () => onSelectFinding?.(record.finding_id),
+          style: { cursor: onSelectFinding ? "pointer" : "default" },
+        })}
         locale={{ emptyText: <Empty description="当前没有被阈值过滤的问题。" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
         columns={[
           {
