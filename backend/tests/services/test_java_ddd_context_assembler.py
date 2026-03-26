@@ -1,0 +1,92 @@
+from pathlib import Path
+
+from app.services.java_ddd_context_assembler import JavaDddContextAssembler
+from app.services.repository_context_service import RepositoryContextService
+
+
+def test_java_ddd_context_assembler_extracts_callees_and_transaction_chain(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    controller = repo_root / "src" / "main" / "java" / "com" / "acme" / "order" / "interfaces" / "OrderController.java"
+    app_service = repo_root / "src" / "main" / "java" / "com" / "acme" / "order" / "app" / "OrderApplicationService.java"
+    repository = repo_root / "src" / "main" / "java" / "com" / "acme" / "order" / "domain" / "OrderRepository.java"
+    domain_service = repo_root / "src" / "main" / "java" / "com" / "acme" / "inventory" / "domain" / "InventoryDomainService.java"
+    aggregate = repo_root / "src" / "main" / "java" / "com" / "acme" / "order" / "domain" / "OrderAggregate.java"
+    for path in [controller, app_service, repository, domain_service, aggregate]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    controller.write_text(
+        (
+            "package com.acme.order.interfaces;\n"
+            "import org.springframework.web.bind.annotation.RestController;\n"
+            "import com.acme.order.app.OrderApplicationService;\n"
+            "@RestController\n"
+            "public class OrderController {\n"
+            "  private final OrderApplicationService orderApplicationService;\n"
+            "  public void close(Long id) { orderApplicationService.close(id); }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    app_service.write_text(
+        (
+            "package com.acme.order.app;\n"
+            "import org.springframework.transaction.annotation.Transactional;\n"
+            "import com.acme.order.domain.OrderRepository;\n"
+            "import com.acme.inventory.domain.InventoryDomainService;\n"
+            "public class OrderApplicationService {\n"
+            "  private final OrderRepository orderRepository;\n"
+            "  private final InventoryDomainService inventoryDomainService;\n"
+            "  @Transactional\n"
+            "  public void close(Long id) {\n"
+            "    orderRepository.save(id);\n"
+            "    inventoryDomainService.reserve(id);\n"
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    repository.write_text(
+        "package com.acme.order.domain;\npublic interface OrderRepository { void save(Long id); }\n",
+        encoding="utf-8",
+    )
+    domain_service.write_text(
+        "package com.acme.inventory.domain;\npublic class InventoryDomainService { public void reserve(Long id) {} }\n",
+        encoding="utf-8",
+    )
+    aggregate.write_text(
+        "package com.acme.order.domain;\npublic class OrderAggregate { public void close() {} }\n",
+        encoding="utf-8",
+    )
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/acme.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+    assembler = JavaDddContextAssembler()
+
+    context = assembler.build_context_pack(
+        service,
+        file_path="src/main/java/com/acme/order/app/OrderApplicationService.java",
+        line_start=9,
+        primary_context={"snippet": "orderRepository.save(id);\ninventoryDomainService.reserve(id);\n"},
+        related_files=[
+            "src/main/java/com/acme/order/domain/OrderRepository.java",
+            "src/main/java/com/acme/inventory/domain/InventoryDomainService.java",
+        ],
+        symbol_contexts=[{"symbol": "close"}],
+        excerpt="orderRepository.save(id);\ninventoryDomainService.reserve(id);\n",
+    )
+
+    callee_symbols = {str(item.get("symbol") or "") for item in context["callee_contexts"]}
+    assert "OrderRepository" in callee_symbols
+    assert "InventoryDomainService" in callee_symbols
+
+    caller_paths = {str(item.get("path") or "") for item in context["caller_contexts"]}
+    assert "src/main/java/com/acme/order/interfaces/OrderController.java" in caller_paths
+
+    transaction_context = context["transaction_context"]
+    assert transaction_context["transactional_method"] == "close"
+    assert any("controller:" in item for item in transaction_context["call_chain"])
+    assert any("repository:" in item for item in transaction_context["call_chain"])
+

@@ -5,10 +5,10 @@
   },
   "llm": {
     "default_provider": "dashscope-openai-compatible",
-    "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+    "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
     "default_model": "kimi-k2.5",
     "default_api_key_env": null,
-    "default_api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366"
+    "default_api_key": "7b446c97-7172-4c90-a4ef-3f3ff5a8f894"
   },
   "git": {
     "repo_access_token": "ghp_example",

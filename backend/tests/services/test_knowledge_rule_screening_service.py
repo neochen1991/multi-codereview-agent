@@ -8,6 +8,7 @@ from app.services.llm_chat_service import LLMTextResult
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_rule_index_service import KnowledgeRuleIndexService
 from app.services.knowledge_rule_screening_service import KnowledgeRuleScreeningService
+from app.services.knowledge_service import KnowledgeService
 
 REAL_PERF_RULES_PATH = (
     Path(__file__).resolve().parents[3]
@@ -16,6 +17,53 @@ REAL_PERF_RULES_PATH = (
     / "performance_reliability"
     / "performance-reliability-real-rules.md"
 )
+
+
+def test_knowledge_service_bootstraps_builtin_java_ddd_rules(storage_root: Path) -> None:
+    service = KnowledgeService(storage_root)
+    imported = service.bootstrap_builtin_documents()
+
+    assert imported > 0
+
+    security = service.screen_rules_for_expert(
+        "security_compliance",
+        {
+            "changed_files": ["src/main/java/com/acme/order/interfaces/OrderController.java"],
+            "query_terms": ["RestController", "PreAuthorize", "CloseOrderCommand", "tenant"],
+            "focus_file": "src/main/java/com/acme/order/interfaces/OrderController.java",
+        },
+    )
+    assert any(item["rule_id"] == "SEC-JDDD-001" for item in security["matched_rules_for_llm"])
+
+    performance = service.screen_rules_for_expert(
+        "performance_reliability",
+        {
+            "changed_files": ["src/main/java/com/acme/order/app/OrderApplicationService.java"],
+            "query_terms": ["Transactional", "FeignClient", "Kafka", "publish"],
+            "focus_file": "src/main/java/com/acme/order/app/OrderApplicationService.java",
+        },
+    )
+    assert any(item["rule_id"] == "PERF-JDDD-001" for item in performance["matched_rules_for_llm"])
+
+    architecture = service.screen_rules_for_expert(
+        "architecture_design",
+        {
+            "changed_files": ["src/main/java/com/acme/order/interfaces/OrderController.java"],
+            "query_terms": ["Controller", "Repository", "Mapper"],
+            "focus_file": "src/main/java/com/acme/order/interfaces/OrderController.java",
+        },
+    )
+    assert any(item["rule_id"] == "ARCH-JDDD-001" for item in architecture["matched_rules_for_llm"])
+
+    ddd = service.screen_rules_for_expert(
+        "ddd_specification",
+        {
+            "changed_files": ["src/main/java/com/acme/order/domain/Order.java"],
+            "query_terms": ["Aggregate", "setStatus", "DomainEvent", "outbox"],
+            "focus_file": "src/main/java/com/acme/order/domain/Order.java",
+        },
+    )
+    assert any(item["rule_id"] == "DDD-JDDD-001" for item in ddd["matched_rules_for_llm"])
 
 
 def test_knowledge_rule_screening_service_traverses_all_rules(storage_root: Path) -> None:

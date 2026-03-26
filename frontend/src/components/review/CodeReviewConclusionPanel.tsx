@@ -177,6 +177,13 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const relatedContexts = (relatedSourceSnippets.length > 0 ? relatedSourceSnippets : fallbackRelatedContexts).filter(
     (item) => item?.snippet,
   );
+  const currentClassContext = codeContext?.current_class_context;
+  const parentContractContexts = (codeContext?.parent_contract_contexts || []).filter((item) => item?.snippet);
+  const callerContexts = (codeContext?.caller_contexts || []).filter((item) => item?.snippet);
+  const calleeContexts = (codeContext?.callee_contexts || []).filter((item) => item?.snippet);
+  const domainModelContexts = (codeContext?.domain_model_contexts || []).filter((item) => item?.snippet);
+  const persistenceContexts = (codeContext?.persistence_contexts || []).filter((item) => item?.snippet);
+  const transactionContext = codeContext?.transaction_context;
   const symbolContexts = (codeContext?.symbol_contexts || []).flatMap((item) => [
     ...((item.definitions || []).map((entry) => ({ title: `符号定义 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
     ...((item.references || []).map((entry) => ({ title: `符号引用 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
@@ -482,6 +489,55 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           </div>
         </div>
       ) : null}
+
+      {renderContextSnippet("当前类完整问题片段", currentClassContext)}
+
+      {parentContractContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`父接口 / 抽象类 ${index + 1}`, item),
+      )}
+
+      {callerContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`调用方 Controller / ApplicationService ${index + 1}`, item),
+      )}
+
+      {calleeContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`被调方 Repository / DomainService ${index + 1}`, item),
+      )}
+
+      {domainModelContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`相关 Aggregate / ValueObject / DomainEvent ${index + 1}`, item),
+      )}
+
+      {transactionContext?.transaction_boundary_snippet ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>事务边界所在方法和调用链</Paragraph>
+          <div className="review-code-panel">
+            <div className="review-code-panel-header">
+              <span>{transactionContext.transactional_path || "事务边界"}</span>
+              {transactionContext.transactional_method ? <Tag>{transactionContext.transactional_method}</Tag> : null}
+              {transactionContext.contains_remote_call ? <Tag color="volcano">远程调用</Tag> : null}
+              {transactionContext.contains_message_publish ? <Tag color="gold">消息发布</Tag> : null}
+              {transactionContext.contains_multi_repository_write ? <Tag color="purple">多仓储写入</Tag> : null}
+            </div>
+            <div className="review-code-frame">
+              {transactionContext.transaction_boundary_snippet.split("\n").filter(Boolean).map((line, index) => (
+                <div key={`transaction-${index}`} className="review-code-line">
+                  <code>{line}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+          {(transactionContext.call_chain || []).length ? (
+            <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
+              调用链：{(transactionContext.call_chain || []).join(" -> ")}
+            </Paragraph>
+          ) : null}
+        </div>
+      ) : null}
+
+      {persistenceContexts.slice(0, 3).map((item, index) =>
+        renderContextSnippet(`ORM 映射实体 / SQL / Mapper ${index + 1}`, item),
+      )}
 
       {relatedContexts.slice(0, 3).map((item, index) =>
         renderContextSnippet(`关联上下文代码 ${index + 1}`, item),

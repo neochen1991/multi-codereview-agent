@@ -1,0 +1,9 @@
+{
+  "name": "multi-codereview-agent-root",
+  "private": true,
+  "scripts": {
+    "start:all": "bash scripts/start-all.sh",
+    "stop:all": "bash scripts/stop-all.sh",
+    "stop:all:force": "bash scripts/stop-all.sh"
+  }
+}

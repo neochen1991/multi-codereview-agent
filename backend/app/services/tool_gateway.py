@@ -14,6 +14,7 @@ from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.tool_plugin_loader import ToolPluginLoader
 from app.services.capability_gateway import CapabilityGateway
 from app.services.diff_excerpt_service import DiffExcerptService
+from app.services.java_ddd_context_assembler import JavaDddContextAssembler
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
 from app.services.postgres_metadata_service import PostgresMetadataService
 from app.services.repository_context_service import RepositoryContextService
@@ -43,6 +44,7 @@ class ReviewToolGateway:
         self._gateway = CapabilityGateway()
         self._knowledge_retrieval = KnowledgeRetrievalService(root)
         self._diff_excerpt = DiffExcerptService()
+        self._java_ddd_context_assembler = JavaDddContextAssembler()
         self._postgres_metadata = PostgresMetadataService()
         self._plugin_loader = ToolPluginLoader(Path(__file__).resolve().parents[3] / "extensions" / "tools")
         self._register_defaults()
@@ -315,6 +317,17 @@ class ReviewToolGateway:
             service.load_file_context(related_path, 1, radius=8)
             for related_path in related_files[:3]
         ]
+        java_ddd_context: dict[str, object] = {}
+        if Path(file_path).suffix.lower() == ".java":
+            java_ddd_context = self._java_ddd_context_assembler.build_context_pack(
+                service,
+                file_path=file_path,
+                line_start=line_start,
+                primary_context=primary_context,
+                related_files=related_files,
+                symbol_contexts=symbol_contexts,
+                excerpt=excerpt,
+            )
         context_files = [
             item
             for item in [file_path, *related_files[:3]]
@@ -348,8 +361,9 @@ class ReviewToolGateway:
             "symbol_match_strategy": "文本检索命中 + 轻量定义特征判断",
             "symbol_match_explanation": (
                 "先在目标分支源码仓里搜索 symbol 文本命中，再根据 function/class/const/export 等定义特征，"
-                "把结果拆成 definitions 和 references。当前不是 AST 级静态分析，展示仅保留命中的源码文件名，不再展开命中行与 snippet。"
+                "把结果拆成 definitions 和 references。当前不是 AST 级静态分析，但会保留命中行和代码片段。"
             ),
+            **java_ddd_context,
         }
 
     def _pg_schema_context(self, payload: dict[str, Any]) -> dict[str, Any]:

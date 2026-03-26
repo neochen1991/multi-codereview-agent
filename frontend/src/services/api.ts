@@ -90,9 +90,22 @@ export interface ReviewFinding {
 
 export interface FindingCodeContextSnippet {
   path?: string;
+  kind?: string;
+  symbol?: string;
   line_start?: number;
   line_end?: number;
   snippet?: string;
+}
+
+export interface FindingCodeContextTransaction {
+  kind?: string;
+  transactional_method?: string;
+  transactional_path?: string;
+  transaction_boundary_snippet?: string;
+  call_chain?: string[];
+  contains_remote_call?: boolean;
+  contains_message_publish?: boolean;
+  contains_multi_repository_write?: boolean;
 }
 
 export interface FindingCodeContextHunk {
@@ -119,6 +132,13 @@ export interface FindingCodeContext {
   primary_context?: FindingCodeContextSnippet;
   related_contexts?: FindingCodeContextSnippet[];
   related_source_snippets?: FindingCodeContextSnippet[];
+  current_class_context?: FindingCodeContextSnippet & { class_name?: string; method_name?: string; changed_methods?: string[]; changed_fields?: string[] };
+  parent_contract_contexts?: FindingCodeContextSnippet[];
+  caller_contexts?: FindingCodeContextSnippet[];
+  callee_contexts?: FindingCodeContextSnippet[];
+  domain_model_contexts?: FindingCodeContextSnippet[];
+  transaction_context?: FindingCodeContextTransaction;
+  persistence_contexts?: FindingCodeContextSnippet[];
   symbol_contexts?: FindingCodeContextSymbol[];
   context_files?: string[];
   routing_reason?: string;

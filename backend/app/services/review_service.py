@@ -63,6 +63,7 @@ class ReviewService:
         self.expert_registry = ExpertRegistry(self.storage_root / "experts")
         self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
         self.knowledge_service = KnowledgeService(self.storage_root)
+        self.knowledge_service.bootstrap_builtin_documents()
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])

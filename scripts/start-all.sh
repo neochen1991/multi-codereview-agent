@@ -11,7 +11,7 @@ BACKEND_LOG="${LOG_DIR}/backend.log"
 FRONTEND_LOG="${LOG_DIR}/frontend.log"
 BACKEND_PID_FILE="${RUN_DIR}/backend.pid"
 FRONTEND_PID_FILE="${RUN_DIR}/frontend.pid"
-BACKEND_URL="http://127.0.0.1:8011/api/experts"
+BACKEND_URL="http://127.0.0.1:8011/health"
 FRONTEND_URL="http://127.0.0.1:5174"
 
 cleanup_stale_pid() {
@@ -42,6 +42,32 @@ wait_for_http() {
   return 1
 }
 
+process_alive() {
+  local pid_file="$1"
+  if [[ ! -f "${pid_file}" ]]; then
+    return 1
+  fi
+  local pid
+  pid="$(cat "${pid_file}")"
+  [[ -n "${pid}" ]] || return 1
+  kill -0 "${pid}" 2>/dev/null
+}
+
+print_start_failure() {
+  local service_name="$1"
+  local pid_file="$2"
+  local log_file="$3"
+  echo "${service_name} failed to start, check ${log_file}"
+  if [[ -f "${pid_file}" ]]; then
+    echo "recorded pid: $(cat "${pid_file}")"
+  else
+    echo "pid file not created: ${pid_file}"
+  fi
+  if [[ -f "${log_file}" ]]; then
+    tail -n 60 "${log_file}" || true
+  fi
+}
+
 start_backend() {
   cleanup_stale_pid "${BACKEND_PID_FILE}"
   if [[ -f "${BACKEND_PID_FILE}" ]] && kill -0 "$(cat "${BACKEND_PID_FILE}")" 2>/dev/null; then
@@ -57,12 +83,20 @@ start_backend() {
     nohup "${ROOT_DIR}/.venv/bin/uvicorn" app.main:app --app-dir "${ROOT_DIR}/backend" --port 8011 >"${BACKEND_LOG}" 2>&1 &
     echo $! >"${BACKEND_PID_FILE}"
   )
-  if wait_for_http "${BACKEND_URL}" 20 1; then
-    echo "started backend on http://127.0.0.1:8011"
-    return
-  fi
-  echo "backend failed to start, check ${BACKEND_LOG}"
-  tail -n 40 "${BACKEND_LOG}" || true
+  local index=0
+  while (( index < 20 )); do
+    if wait_for_http "${BACKEND_URL}" 1 0; then
+      echo "started backend on http://127.0.0.1:8011"
+      return
+    fi
+    if ! process_alive "${BACKEND_PID_FILE}"; then
+      print_start_failure "backend" "${BACKEND_PID_FILE}" "${BACKEND_LOG}"
+      exit 1
+    fi
+    sleep 1
+    index=$((index + 1))
+  done
+  print_start_failure "backend" "${BACKEND_PID_FILE}" "${BACKEND_LOG}"
   exit 1
 }
 
@@ -81,12 +115,20 @@ start_frontend() {
     nohup npm run dev -- --host 127.0.0.1 --port 5174 --strictPort >"${FRONTEND_LOG}" 2>&1 &
     echo $! >"${FRONTEND_PID_FILE}"
   )
-  if wait_for_http "${FRONTEND_URL}" 30 1; then
-    echo "started frontend on http://127.0.0.1:5174"
-    return
-  fi
-  echo "frontend failed to start, check ${FRONTEND_LOG}"
-  tail -n 40 "${FRONTEND_LOG}" || true
+  local index=0
+  while (( index < 30 )); do
+    if wait_for_http "${FRONTEND_URL}" 1 0; then
+      echo "started frontend on http://127.0.0.1:5174"
+      return
+    fi
+    if ! process_alive "${FRONTEND_PID_FILE}"; then
+      print_start_failure "frontend" "${FRONTEND_PID_FILE}" "${FRONTEND_LOG}"
+      exit 1
+    fi
+    sleep 1
+    index=$((index + 1))
+  done
+  print_start_failure "frontend" "${FRONTEND_PID_FILE}" "${FRONTEND_LOG}"
   exit 1
 }
 

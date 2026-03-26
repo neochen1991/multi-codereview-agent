@@ -76,6 +76,7 @@ class ReviewRunner:
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
         self.knowledge_service = KnowledgeService(self.storage_root)
+        self.knowledge_service.bootstrap_builtin_documents()
         self.graph = build_review_graph()
 
     def _resolve_db_path(self, root: Path) -> Path:
@@ -2023,6 +2024,37 @@ class ReviewRunner:
                 for item in list(repository_context.get("related_source_snippets") or [])[:6]
                 if isinstance(item, dict)
             ],
+            "current_class_context": dict(repository_context.get("current_class_context") or {})
+            if isinstance(repository_context.get("current_class_context"), dict)
+            else {},
+            "parent_contract_contexts": [
+                dict(item)
+                for item in list(repository_context.get("parent_contract_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
+            "caller_contexts": [
+                dict(item)
+                for item in list(repository_context.get("caller_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
+            "callee_contexts": [
+                dict(item)
+                for item in list(repository_context.get("callee_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
+            "domain_model_contexts": [
+                dict(item)
+                for item in list(repository_context.get("domain_model_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
+            "transaction_context": dict(repository_context.get("transaction_context") or {})
+            if isinstance(repository_context.get("transaction_context"), dict)
+            else {},
+            "persistence_contexts": [
+                dict(item)
+                for item in list(repository_context.get("persistence_contexts") or [])[:4]
+                if isinstance(item, dict)
+            ],
             "symbol_contexts": [
                 dict(item)
                 for item in list(repository_context.get("symbol_contexts") or [])[:4]
@@ -2276,6 +2308,8 @@ class ReviewRunner:
         rule_screening_summary = self._build_rule_screening_summary(rule_screening or {})
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
+        language = self._infer_code_language(file_path)
+        java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, repository_context)
         has_design_docs = bool(self._review_design_docs(subject))
         business_changed_files = self._business_changed_files(subject)
         routing_reason = str(repository_context.get("routing_reason") or "").strip()
@@ -2314,6 +2348,7 @@ class ReviewRunner:
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
+            f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
             f"请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
@@ -2324,6 +2359,70 @@ class ReviewRunner:
             f"JSON 字段要求:\n"
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
+
+    def _build_java_ddd_review_focus(
+        self,
+        language: str,
+        expert_id: str,
+        repository_context: dict[str, object],
+    ) -> str:
+        if language != "java":
+            return ""
+        available_sections: list[str] = []
+        for key, label in [
+            ("current_class_context", "当前类问题片段"),
+            ("parent_contract_contexts", "父接口/抽象类"),
+            ("caller_contexts", "调用方 Controller/ApplicationService"),
+            ("callee_contexts", "被调方 Repository/DomainService"),
+            ("domain_model_contexts", "Aggregate/Entity/ValueObject/DomainEvent"),
+            ("transaction_context", "事务边界与调用链"),
+            ("persistence_contexts", "ORM/SQL/Mapper"),
+        ]:
+            value = repository_context.get(key)
+            if isinstance(value, dict) and value:
+                available_sections.append(label)
+            if isinstance(value, list) and value:
+                available_sections.append(label)
+        base = [
+            "Java DDD 专项审查要求：",
+            f"- 可用上下文: {' / '.join(available_sections) or '仅有基础 diff 与代码片段'}",
+            "- 不要只基于单个 diff hunk 下结论，必须结合调用方、被调方、事务边界和持久化层判断。",
+        ]
+        if expert_id == "security_compliance":
+            base.extend(
+                [
+                    "- 重点检查 Controller/ApplicationService 入口是否完成参数校验、权限校验、租户隔离和敏感字段脱敏。",
+                    "- 重点检查 Repository/SQL/Mapper 是否存在拼接查询、越权查询、批量更新越边界、日志泄漏敏感信息。",
+                    "- 若结论依赖未展示的鉴权实现，只能输出 risk_hypothesis，并明确 verification_plan。",
+                ]
+            )
+        elif expert_id == "performance_reliability":
+            base.extend(
+                [
+                    "- 重点检查事务边界内是否包含远程调用、消息发送、循环写库、多仓储写入和大对象装载。",
+                    "- 重点检查 ORM/Mapper 是否引入 N+1、全表扫描、隐式 EAGER 加载、批量场景逐条写入。",
+                    "- 必须判断当前聚合/仓储调用链是否会放大锁竞争、超时重试或资源占用。",
+                ]
+            )
+        elif expert_id == "architecture_design":
+            base.extend(
+                [
+                    "- 重点检查 Controller/ApplicationService/DomainService/Repository 是否越层依赖、边界绕过、基础设施泄漏。",
+                    "- 重点检查应用服务是否堆业务规则，领域对象是否退化为贫血模型。",
+                    "- 必须判断事务边界和聚合边界是否一致，是否存在跨聚合直接修改。",
+                ]
+            )
+        elif expert_id == "ddd_specification":
+            base.extend(
+                [
+                    "- 重点检查聚合根是否真正维护不变量，ValueObject 是否保持不可变语义。",
+                    "- 重点检查 DomainEvent 是否在正确边界发布，Repository 是否只服务聚合根而不是应用层拼装。",
+                    "- 必须说明当前改动是落在领域层、应用层还是基础设施层，以及是否破坏 DDD 分层职责。",
+                ]
+            )
+        else:
+            base.append("- 若上下文中存在 Java DDD 结构信息，请优先引用这些结构化上下文，而不是只看单行改动。")
+        return "\n".join(base) + "\n"
 
     def _build_expert_system_prompt(
         self,
@@ -2800,6 +2899,7 @@ class ReviewRunner:
                                 continue
                             lines.append(f"  * 引用: {path}")
                             lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
+            self._append_java_ddd_context_summary(lines, repository_context)
         for item in runtime_tool_results:
             if str(item.get("tool_name") or "") != "repo_context_search":
                 continue
@@ -2867,7 +2967,60 @@ class ReviewRunner:
                         header += f"（{kind or 'context'} / {symbol or 'n/a'}）"
                     lines.append(f"  * {header}")
                     lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
+            self._append_java_ddd_context_summary(lines, item)
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
+
+    def _append_java_ddd_context_summary(self, lines: list[str], context_payload: dict[str, object]) -> None:
+        current_class_context = context_payload.get("current_class_context")
+        if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
+            lines.append("- Java 当前类问题片段:")
+            lines.append(
+                f"  * {str(current_class_context.get('path') or '').strip()} "
+                f"{str(current_class_context.get('class_name') or '').strip()}::"
+                f"{str(current_class_context.get('method_name') or '').strip()}"
+            )
+            lines.extend(
+                f"    {line}"
+                for line in str(current_class_context.get("snippet") or "").splitlines()[:14]
+                if str(line).strip()
+            )
+        for key, label in [
+            ("parent_contract_contexts", "父接口/抽象类"),
+            ("caller_contexts", "调用方"),
+            ("callee_contexts", "被调方"),
+            ("domain_model_contexts", "领域模型"),
+            ("persistence_contexts", "持久化上下文"),
+        ]:
+            contexts = context_payload.get(key)
+            if not isinstance(contexts, list) or not contexts:
+                continue
+            lines.append(f"- Java {label}:")
+            for item in contexts[:3]:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                symbol = str(item.get("symbol") or "").strip()
+                if not path or not snippet:
+                    continue
+                header = path
+                if symbol:
+                    header += f" · {symbol}"
+                lines.append(f"  * {header}")
+                lines.extend(f"    {line}" for line in snippet.splitlines()[:10])
+        transaction_context = context_payload.get("transaction_context")
+        if isinstance(transaction_context, dict) and transaction_context:
+            lines.append("- Java 事务边界:")
+            method_name = str(transaction_context.get("transactional_method") or "").strip()
+            transaction_path = str(transaction_context.get("transactional_path") or "").strip()
+            if transaction_path or method_name:
+                lines.append(f"  * {transaction_path} · {method_name}")
+            boundary_snippet = str(transaction_context.get("transaction_boundary_snippet") or "").strip()
+            if boundary_snippet:
+                lines.extend(f"    {line}" for line in boundary_snippet.splitlines()[:10])
+            call_chain = [str(item).strip() for item in list(transaction_context.get("call_chain") or []) if str(item).strip()]
+            if call_chain:
+                lines.append(f"  * 调用链: {' -> '.join(call_chain[:6])}")
 
     def _build_knowledge_review_context(
         self,

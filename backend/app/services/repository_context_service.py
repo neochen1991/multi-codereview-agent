@@ -345,6 +345,10 @@ class RepositoryContextService:
         definition_markers = [
             f"def {normalized_symbol}",
             f"class {normalized_symbol}",
+            f"interface {normalized_symbol}",
+            f"enum {normalized_symbol}",
+            f"record {normalized_symbol}",
+            f"@interface {normalized_symbol}",
             f"function {normalized_symbol}",
             f"const {normalized_symbol}",
             f"let {normalized_symbol}",
@@ -352,6 +356,10 @@ class RepositoryContextService:
             f"export const {normalized_symbol}",
             f"export function {normalized_symbol}",
             f"export class {normalized_symbol}",
+            f"public interface {normalized_symbol}",
+            f"public class {normalized_symbol}",
+            f"public enum {normalized_symbol}",
+            f"public record {normalized_symbol}",
             f"{normalized_symbol} =",
             f"{normalized_symbol}:",
         ]

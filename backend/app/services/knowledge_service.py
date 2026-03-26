@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.runtime_settings import RuntimeSettings
@@ -40,6 +41,34 @@ class KnowledgeService:
 
         document = KnowledgeDocument.model_validate(payload)
         return self._ingestion.ingest(document)
+
+    def bootstrap_builtin_documents(self) -> int:
+        """把仓库内置知识文档导入当前 SQLite，供实际审核链路使用。"""
+
+        docs_root = Path(__file__).resolve().parents[1] / "storage" / "knowledge" / "docs"
+        if not docs_root.exists():
+            return 0
+        imported = 0
+        for expert_dir in sorted(path for path in docs_root.iterdir() if path.is_dir()):
+            expert_id = str(expert_dir.name).strip()
+            if not expert_id:
+                continue
+            for doc_path in sorted(expert_dir.glob("*.md")):
+                content = doc_path.read_text(encoding="utf-8")
+                self._ingestion.ingest(
+                    KnowledgeDocument(
+                        doc_id=doc_path.stem,
+                        title=self._resolve_builtin_title(doc_path, content),
+                        expert_id=expert_id,
+                        doc_type="review_rule" if "RULE:" in content else "reference",
+                        content=content,
+                        tags=["builtin", expert_id],
+                        source_filename=doc_path.name,
+                        storage_path=str(doc_path),
+                    )
+                )
+                imported += 1
+        return imported
 
     def delete_document(self, doc_id: str) -> bool:
         """删除一篇知识文档。"""
@@ -90,3 +119,12 @@ class KnowledgeService:
         for document in documents:
             document.indexed_outline = list(outline_by_doc.get(document.doc_id, []))
         return documents
+
+    def _resolve_builtin_title(self, path: Path, content: str) -> str:
+        """优先取 Markdown 首个标题，回退到文件名。"""
+
+        for line in content.splitlines():
+            match = re.match(r"^\s{0,3}#\s+(.+?)\s*$", line)
+            if match:
+                return str(match.group(1)).strip()
+        return path.stem
