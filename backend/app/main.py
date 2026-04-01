@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import experts, governance, issues, knowledge, reviews, settings as settings_routes, streams, triggers
 from app.config import settings
 import app.services.review_service as review_service_module
 from app.services.auto_review_scheduler import AutoReviewScheduler
+from app.services.memory_probe import MemoryProbe
 
 
 def configure_logging() -> None:
@@ -40,6 +42,7 @@ def create_application() -> FastAPI:
     """创建并装配 FastAPI 应用及所有业务路由。"""
 
     configure_logging()
+    MemoryProbe.log("app.create.begin")
     app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
     app.add_middleware(
         CORSMiddleware,
@@ -59,13 +62,25 @@ def create_application() -> FastAPI:
     scheduler = AutoReviewScheduler(review_service_module.review_service)
     app.state.auto_review_scheduler = scheduler
 
+    @app.middleware("http")
+    async def memory_probe_http_middleware(request: Request, call_next):
+        path = str(request.url.path or "")
+        MemoryProbe.log("http.request.start", method=request.method, path=path)
+        response = await call_next(request)
+        MemoryProbe.log("http.request.finish", method=request.method, path=path, status_code=response.status_code)
+        return response
+
     @app.on_event("startup")
     def startup_scheduler() -> None:
+        MemoryProbe.log("app.startup.begin")
         scheduler.start()
+        MemoryProbe.log("app.startup.after_scheduler")
 
     @app.on_event("shutdown")
     def shutdown_scheduler() -> None:
+        MemoryProbe.log("app.shutdown.begin")
         scheduler.stop()
+        MemoryProbe.log("app.shutdown.after_scheduler")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -73,6 +88,7 @@ def create_application() -> FastAPI:
 
         return {"status": "ok"}
 
+    MemoryProbe.log("app.create.finish")
     return app
 
 

@@ -4,6 +4,7 @@ import fnmatch
 import re
 import shutil
 import subprocess
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ class RepositoryContextService:
         ".pyc",
         ".pyo",
     }
+    MAX_CACHE_ENTRIES = 128
 
     def __init__(
         self,
@@ -78,7 +80,10 @@ class RepositoryContextService:
         self.default_branch = str(default_branch or "").strip() or "main"
         self.access_token = (access_token or "").strip() or None
         self.auto_sync = auto_sync
-        self._cache: dict[tuple[str, tuple[str, ...], int], list[dict[str, Any]]] = {}
+        self._cache: OrderedDict[
+            tuple[str, tuple[str, ...], int],
+            list[dict[str, Any]],
+        ] = OrderedDict()
 
     @classmethod
     def from_review_context(
@@ -180,8 +185,10 @@ class RepositoryContextService:
         normalized_globs = tuple(sorted(str(item).strip() for item in (globs or []) if str(item).strip()))
         cache_key = (normalized_query, normalized_globs, limit)
         if cache_key in self._cache:
+            cached = self._cache.pop(cache_key)
+            self._cache[cache_key] = cached
             return {
-                "matches": self._cache[cache_key],
+                "matches": cached,
                 "cache_hit": True,
                 "local_path": str(self.local_path),
                 "default_branch": self.default_branch,
@@ -198,13 +205,28 @@ class RepositoryContextService:
         matches = self._search_with_ripgrep(normalized_query, list(normalized_globs), limit)
         if not matches:
             matches = self._search_with_fallback(normalized_query, list(normalized_globs), limit)
-        self._cache[cache_key] = matches
+        self._store_cache(cache_key, matches)
         return {
             "matches": matches,
             "cache_hit": False,
             "local_path": str(self.local_path),
             "default_branch": self.default_branch,
         }
+
+    def clear_cache(self) -> None:
+        """清空搜索缓存，供 review 结束后主动释放历史上下文。"""
+
+        self._cache.clear()
+
+    def _store_cache(
+        self,
+        cache_key: tuple[str, tuple[str, ...], int],
+        matches: list[dict[str, Any]],
+    ) -> None:
+        self._cache[cache_key] = [dict(item) for item in matches]
+        self._cache.move_to_end(cache_key)
+        while len(self._cache) > self.MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
 
     def is_searchable_path(self, relative_path: str) -> bool:
         return self._is_searchable_relative_path(relative_path)
@@ -309,6 +331,7 @@ class RepositoryContextService:
         end_line: int,
         *,
         padding: int = 4,
+        expand_to_block: bool = False,
     ) -> dict[str, Any]:
         """读取目标文件给定范围附近的完整片段。"""
         normalized_start = max(1, int(start_line or 1))
@@ -331,6 +354,8 @@ class RepositoryContextService:
         lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
         start = max(0, normalized_start - padding - 1)
         end = min(len(lines), normalized_end + padding)
+        if expand_to_block:
+            start, end = self._expand_range_to_code_block(lines, start, end, normalized_start, normalized_end)
         snippet = "\n".join(f"{index + 1:>4} | {lines[index]}" for index in range(start, end))
         return {
             "path": relative_path,
@@ -338,6 +363,88 @@ class RepositoryContextService:
             "line_start": normalized_start,
             "line_end": normalized_end,
         }
+
+    def _expand_range_to_code_block(
+        self,
+        lines: list[str],
+        start_index: int,
+        end_index: int,
+        normalized_start: int,
+        normalized_end: int,
+    ) -> tuple[int, int]:
+        """尽量把片段扩展到完整方法/代码块，而不是只停在问题点附近几行。"""
+
+        if not lines:
+            return start_index, end_index
+
+        total = len(lines)
+        anchor_start = max(0, min(total - 1, normalized_start - 1))
+        anchor_end = max(anchor_start, min(total - 1, normalized_end - 1))
+
+        block_start = self._find_code_block_start(lines, anchor_start, lower_bound=start_index)
+        block_end = self._find_code_block_end(lines, block_start, upper_bound=end_index)
+
+        expanded_start = block_start
+        expanded_end = block_end
+
+        max_lines = 80
+        if expanded_end - expanded_start > max_lines:
+            centered_start = max(0, anchor_start - 24)
+            centered_end = min(total, centered_start + max_lines)
+            if centered_end - centered_start < max_lines:
+                centered_start = max(0, centered_end - max_lines)
+            expanded_start = min(expanded_start, centered_start)
+            expanded_end = max(expanded_start + 1, min(expanded_end, centered_end))
+
+        return expanded_start, expanded_end
+
+    def _find_code_block_start(self, lines: list[str], anchor_index: int, *, lower_bound: int) -> int:
+        signature_patterns = (
+            "public ",
+            "private ",
+            "protected ",
+            "internal ",
+            "function ",
+            "def ",
+            "async ",
+            "@",
+        )
+        control_flow_prefixes = ("if ", "for ", "while ", "switch ", "catch ", "else ", "try")
+        index = anchor_index
+        min_index = max(0, lower_bound - 24)
+        while index >= min_index:
+            stripped = lines[index].strip()
+            if stripped:
+                if any(stripped.startswith(prefix) for prefix in signature_patterns):
+                    return index
+                if (
+                    stripped.endswith("{")
+                    and not any(stripped.startswith(prefix) for prefix in control_flow_prefixes)
+                    and ("(" in stripped or " class " in stripped or stripped.startswith("class "))
+                ):
+                    return index
+            if not stripped and index < anchor_index - 1:
+                break
+            index -= 1
+        return max(0, lower_bound)
+
+    def _find_code_block_end(self, lines: list[str], block_start_index: int, *, upper_bound: int) -> int:
+        total = len(lines)
+        start = max(0, min(total - 1, block_start_index))
+        max_index = min(total - 1, upper_bound + 36)
+        balance = 0
+        seen_open = False
+        index = start
+        while index <= max_index:
+            line = lines[index]
+            balance += line.count("{")
+            if line.count("{") > 0:
+                seen_open = True
+            balance -= line.count("}")
+            if seen_open and balance <= 0 and index >= block_start_index:
+                return index + 1
+            index += 1
+        return min(total, upper_bound)
 
     def _search_with_ripgrep(self, query: str, globs: list[str], limit: int) -> list[dict[str, Any]]:
         rg_bin = shutil.which("rg")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
@@ -11,6 +12,8 @@ from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeReposito
 class KnowledgeRetrievalService:
     """基于专家、变更文件和关键词检索知识文档。"""
 
+    MAX_CACHE_ENTRIES = 64
+
     def __init__(self, root: Path) -> None:
         """初始化知识仓储和检索缓存。"""
 
@@ -18,7 +21,10 @@ class KnowledgeRetrievalService:
         db_path = Path(root) / "app.db"
         self._repository = SqliteKnowledgeRepository(db_path)
         self._node_repository = SqliteKnowledgeNodeRepository(db_path)
-        self._cache: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[KnowledgeDocument]] = {}
+        self._cache: OrderedDict[
+            tuple[str, tuple[str, ...], tuple[str, ...]],
+            list[KnowledgeDocument],
+        ] = OrderedDict()
 
     def retrieve(
         self, expert_id: str, review_context: dict[str, object]
@@ -27,7 +33,9 @@ class KnowledgeRetrievalService:
 
         cache_key = self._build_cache_key(expert_id, review_context)
         if cache_key in self._cache:
-            return [item.model_copy() for item in self._cache[cache_key]]
+            cached = self._cache.pop(cache_key)
+            self._cache[cache_key] = cached
+            return [item.model_copy() for item in cached]
         candidates = [doc for doc in self._repository.list() if doc.expert_id == expert_id]
         if not candidates:
             return []
@@ -45,11 +53,26 @@ class KnowledgeRetrievalService:
         nodes = self._node_repository.list_for_document_ids([doc.doc_id for doc in filtered])
         if not query_terms or not nodes:
             result = [self._attach_outline(doc, nodes) for doc in filtered]
-            self._cache[cache_key] = [item.model_copy() for item in result]
+            self._store_cache(cache_key, result)
             return result
         result = self._retrieve_by_index(filtered, nodes, query_entries)
-        self._cache[cache_key] = [item.model_copy() for item in result]
+        self._store_cache(cache_key, result)
         return result
+
+    def clear_cache(self) -> None:
+        """清空检索缓存，供长时间运行后主动释放内存。"""
+
+        self._cache.clear()
+
+    def _store_cache(
+        self,
+        cache_key: tuple[str, tuple[str, ...], tuple[str, ...]],
+        result: list[KnowledgeDocument],
+    ) -> None:
+        self._cache[cache_key] = [item.model_copy() for item in result]
+        self._cache.move_to_end(cache_key)
+        while len(self._cache) > self.MAX_CACHE_ENTRIES:
+            self._cache.popitem(last=False)
 
     def _matches_bound_sources(self, document: KnowledgeDocument, bound_sources: set[str]) -> bool:
         """判断文档是否命中专家显式绑定的知识源范围。"""

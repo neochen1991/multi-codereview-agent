@@ -40,6 +40,44 @@ def test_repository_context_service_uses_cache_for_same_query(tmp_path: Path):
     assert second["cache_hit"] is True
 
 
+def test_repository_context_service_cache_is_bounded(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    target = repo_root / "src" / "service.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text("\n".join(f"export const item{i} = {i}" for i in range(150)), encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    for index in range(service.MAX_CACHE_ENTRIES + 12):
+        service.search(query=f"item{index}")
+
+    assert len(service._cache) == service.MAX_CACHE_ENTRIES
+
+
+def test_repository_context_service_clear_cache_removes_cached_entries(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    target = repo_root / "src" / "service.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const foo = () => repo.search()\n", encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    service.search(query="repo.search", globs=["src/**/*.ts"])
+    assert service._cache
+
+    service.clear_cache()
+
+    assert not service._cache
+
+
 def test_repository_context_service_loads_file_context(tmp_path: Path):
     repo_root = tmp_path / "repo"
     target = repo_root / "src" / "service.ts"
@@ -54,6 +92,52 @@ def test_repository_context_service_loads_file_context(tmp_path: Path):
 
     context = service.load_file_context("src/service.ts", line_start=3, radius=1)
     assert "3 | line3" in context["snippet"]
+
+
+def test_repository_context_service_load_file_range_can_expand_to_java_method_block(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    target = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "\n".join(
+            [
+                "public class OrderService {",
+                "    private final OrderRepository repository;",
+                "",
+                "    public void close(Order order) {",
+                "        if (order == null) {",
+                "            return;",
+                "        }",
+                "        order.setStatus(Status.CLOSED);",
+                "        repository.save(order);",
+                "    }",
+                "",
+                "    public void reopen(Order order) {",
+                "        order.setStatus(Status.OPEN);",
+                "    }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    context = service.load_file_range(
+        "src/main/java/com/example/OrderService.java",
+        start_line=8,
+        end_line=8,
+        padding=4,
+        expand_to_block=True,
+    )
+
+    assert "4 |     public void close(Order order) {" in context["snippet"]
+    assert "9 |         repository.save(order);" in context["snippet"]
+    assert "12 |     public void reopen(Order order) {" not in context["snippet"]
 
 
 def test_repository_context_service_search_many_dedupes_matches(tmp_path: Path):

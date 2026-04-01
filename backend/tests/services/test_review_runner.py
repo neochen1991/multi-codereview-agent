@@ -28,6 +28,26 @@ def test_review_runner_emits_finding_created_event(storage_root: Path):
     assert any(event.event_type == "finding_created" for event in events)
 
 
+def test_review_runner_releases_large_expert_job_payload_after_execution(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    job = {
+        "bound_documents": [{"title": "Doc"}],
+        "knowledge_context": {"summary": "context"},
+        "rule_screening": {"matched_rules_for_llm": [{"rule_id": "RULE-1"}]},
+        "repository_context": {"summary": "repo"},
+        "target_hunk": {"excerpt": "diff"},
+        "related_files": ["src/main/java/com/example/OrderService.java"],
+        "business_changed_files": ["src/main/java/com/example/OrderService.java"],
+        "expected_checks": ["check"],
+        "disallowed_inference": ["guess"],
+        "keep_me": "value",
+    }
+
+    runner._release_expert_job_payload(job)
+
+    assert job == {"keep_me": "value"}
+
+
 def test_review_runner_emits_main_agent_intake_message(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

@@ -82,6 +82,11 @@ class KnowledgeService:
 
         return self._retrieval.retrieve(expert_id, review_context)
 
+    def clear_runtime_caches(self) -> None:
+        """清理长生命周期检索缓存，避免后台常驻进程占用持续抬高。"""
+
+        self._retrieval.clear_cache()
+
     def screen_rules_for_expert(
         self,
         expert_id: str,

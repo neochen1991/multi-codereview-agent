@@ -142,8 +142,13 @@ class MainAgentService:
                     "api_key_env": "",
                     "mode": "rule_only_light",
                     "error": "",
-                }
-            return baseline_routes
+        }
+        return baseline_routes
+
+    def clear_runtime_caches(self) -> None:
+        """清理主 Agent 本地缓存，避免常驻进程保留历史上下文。"""
+
+        self._repo_context_cache.clear()
         candidate_hunks = self._build_candidate_hunks(subject, repository_service)
         if not candidate_hunks or not experts:
             return baseline_routes
@@ -1258,13 +1263,18 @@ class MainAgentService:
             )
         business_changed_files = self._candidate_changed_files(subject, "")
         primary_file_path = str(candidate_hunks[0]["file_path"]) if candidate_hunks else str(business_changed_files[0]) if business_changed_files else ""
-        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
-        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
+        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path, max_lines=100)
+        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path, max_files=3, max_lines_per_file=16)
         source_context_summary = self._build_main_agent_source_context_summary(
             subject,
             runtime_settings,
             primary_file_path=primary_file_path,
             related_file_paths=business_changed_files,
+            primary_radius=10,
+            primary_max_lines=16,
+            related_radius=6,
+            related_max_files=2,
+            related_max_lines=8,
         )
         language_general_guidance = self._build_language_general_guidance_summary(
             [str(item.get("file_path") or "") for item in candidate_hunks] + business_changed_files
@@ -1323,13 +1333,18 @@ class MainAgentService:
                 )
             )
         primary_file_path = str(business_changed_files[0]) if business_changed_files else str(subject.changed_files[0]) if subject.changed_files else ""
-        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
-        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
+        target_file_full_diff = self._build_file_diff_context(subject, primary_file_path, max_lines=80)
+        related_diff_summary = self._build_related_diff_summary(subject, primary_file_path, max_files=2, max_lines_per_file=12)
         source_context_summary = self._build_main_agent_source_context_summary(
             subject,
             runtime_settings,
             primary_file_path=primary_file_path,
             related_file_paths=business_changed_files,
+            primary_radius=8,
+            primary_max_lines=12,
+            related_radius=5,
+            related_max_files=2,
+            related_max_lines=6,
         )
         language_general_guidance = self._build_language_general_guidance_summary(
             business_changed_files or [str(item) for item in list(subject.changed_files or [])]
@@ -1358,18 +1373,25 @@ class MainAgentService:
             "}"
         )
 
-    def _build_file_diff_context(self, subject: ReviewSubject, file_path: str) -> str:
+    def _build_file_diff_context(self, subject: ReviewSubject, file_path: str, *, max_lines: int = 160) -> str:
         if not file_path:
             return "未定位到主要变更文件。"
         full_diff = self._diff_excerpt_service.extract_file_diff(subject.unified_diff, file_path)
         if not full_diff:
             return f"未从 unified diff 中提取到 {file_path} 的文件级变更。"
         lines = full_diff.splitlines()
-        if len(lines) <= 160:
+        if len(lines) <= max_lines:
             return full_diff
-        return "\n".join(lines[:160]) + "\n... [目标文件完整 diff 过长，已截断展示前 160 行]"
+        return "\n".join(lines[:max_lines]) + f"\n... [目标文件完整 diff 过长，已截断展示前 {max_lines} 行]"
 
-    def _build_related_diff_summary(self, subject: ReviewSubject, primary_file_path: str) -> str:
+    def _build_related_diff_summary(
+        self,
+        subject: ReviewSubject,
+        primary_file_path: str,
+        *,
+        max_files: int = 4,
+        max_lines_per_file: int = 24,
+    ) -> str:
         related_paths = [
             str(path).strip()
             for path in list(subject.changed_files or [])
@@ -1378,16 +1400,16 @@ class MainAgentService:
         if not related_paths:
             return "除主要变更文件外无其他变更文件。"
         sections: list[str] = []
-        for path in related_paths[:4]:
+        for path in related_paths[:max_files]:
             full_diff = self._diff_excerpt_service.extract_file_diff(subject.unified_diff, path)
             if not full_diff:
                 sections.append(f"# {path}\n未提取到该文件 diff。")
                 continue
             preview_lines = full_diff.splitlines()
-            display_lines = preview_lines[:24]
-            suffix = "\n... [摘要已截断]" if len(preview_lines) > 24 else ""
+            display_lines = preview_lines[:max_lines_per_file]
+            suffix = "\n... [摘要已截断]" if len(preview_lines) > max_lines_per_file else ""
             sections.append(f"# {path}\n" + "\n".join(display_lines) + suffix)
-        remaining = len(related_paths) - min(len(related_paths), 4)
+        remaining = len(related_paths) - min(len(related_paths), max_files)
         if remaining > 0:
             sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 判断全局影响。")
         return "\n\n".join(sections)
@@ -1399,6 +1421,11 @@ class MainAgentService:
         *,
         primary_file_path: str,
         related_file_paths: list[str],
+        primary_radius: int = 16,
+        primary_max_lines: int = 24,
+        related_radius: int = 10,
+        related_max_files: int = 3,
+        related_max_lines: int = 16,
     ) -> str:
         service = self._build_repository_service(runtime_settings, subject)
         if not service.is_ready():
@@ -1406,25 +1433,25 @@ class MainAgentService:
         sections: list[str] = []
         if primary_file_path:
             primary_line = self._pick_line_start(subject, "", primary_file_path)
-            primary_context = service.load_file_context(primary_file_path, max(1, primary_line), radius=16)
+            primary_context = service.load_file_context(primary_file_path, max(1, primary_line), radius=primary_radius)
             primary_snippet = str((primary_context or {}).get("snippet") or "").strip()
             if primary_snippet:
                 sections.append(f"# 目标文件源码\n{primary_file_path}")
-                sections.extend(primary_snippet.splitlines()[:24])
+                sections.extend(primary_snippet.splitlines()[:primary_max_lines])
         for path in [
             item
             for item in related_file_paths
             if str(item).strip() and str(item).strip() != primary_file_path
-        ][:3]:
+        ][:related_max_files]:
             line_start = self._pick_line_start(subject, "", path)
-            context = service.load_file_context(path, max(1, line_start), radius=10)
+            context = service.load_file_context(path, max(1, line_start), radius=related_radius)
             snippet = str((context or {}).get("snippet") or "").strip()
             if not snippet:
                 continue
             if sections:
                 sections.append("")
             sections.append(f"# 关联源码\n{path}")
-            sections.extend(snippet.splitlines()[:16])
+            sections.extend(snippet.splitlines()[:related_max_lines])
         return "\n".join(sections) if sections else "未从目标分支源码仓加载到可用源码片段。"
 
     def _parse_json_payload(self, text: str) -> dict[str, object]:

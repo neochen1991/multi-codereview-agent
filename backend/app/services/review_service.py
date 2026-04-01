@@ -212,6 +212,7 @@ class ReviewService:
                 logger.exception("review background execution failed review_id=%s error=%s", review_id, exc)
                 self._mark_failed(review_id, str(exc))
             finally:
+                self.runner.clear_runtime_caches()
                 with self._active_reviews_lock:
                     self._active_reviews.discard(review_id)
                 logger.info("review background execution finished review_id=%s", review_id)
@@ -520,6 +521,7 @@ class ReviewService:
         self.issue_repo.delete_for_review(review_id)
         self.feedback_repo.delete_for_review(review_id)
         self.artifact_service.clear(review_id)
+        self.runner.clear_runtime_caches()
 
     def recover_interrupted_reviews(self) -> list[ReviewTask]:
         """把异常退出后遗留的 running 任务恢复为 pending，避免阻塞自动队列。"""

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import logging
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -447,7 +449,9 @@ class ReviewRunner:
                         "related_files": command.get("related_files", []),
                         "business_changed_files": self._business_changed_files(review.subject),
                         "target_hunk": command.get("target_hunk", {}),
-                        "repository_context": command.get("repository_context", {}),
+                        "repository_context": self._build_repository_context_metadata(
+                            dict(command.get("repository_context") or {})
+                        ),
                         "expected_checks": command.get("expected_checks", []),
                         "disallowed_inference": command.get("disallowed_inference", []),
                         "routing_reason": command.get("routing_reason", ""),
@@ -486,8 +490,8 @@ class ReviewRunner:
                 expert,
                 file_path,
                 line_start,
-                dict(command_message.metadata.get("repository_context") or {}),
-                dict(command_message.metadata.get("target_hunk") or {}),
+                dict(command.get("repository_context") or {}),
+                dict(command.get("target_hunk") or {}),
             )
             bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
             rule_screening = self.knowledge_service.screen_rules_for_expert(
@@ -519,6 +523,14 @@ class ReviewRunner:
                     "command_message": command_message,
                     "file_path": file_path,
                     "line_start": line_start,
+                    "repository_context": dict(command.get("repository_context") or {}),
+                    "target_hunk": dict(command.get("target_hunk") or {}),
+                    "related_files": list(command.get("related_files") or []),
+                    "business_changed_files": self._business_changed_files(review.subject),
+                    "expected_checks": list(command.get("expected_checks") or []),
+                    "disallowed_inference": list(command.get("disallowed_inference") or []),
+                    "routing_reason": str(command.get("routing_reason") or ""),
+                    "routing_confidence": float(command.get("routing_confidence") or 0.0),
                     "runtime_settings": effective_runtime_settings,
                     "analysis_mode": analysis_mode,
                     "llm_request_options": llm_request_options,
@@ -920,6 +932,12 @@ class ReviewRunner:
         )
         return review
 
+    def clear_runtime_caches(self) -> None:
+        """清理 ReviewRunner 持有的长生命周期缓存。"""
+
+        self.main_agent_service.clear_runtime_caches()
+        self.knowledge_service.clear_runtime_caches()
+
     def _record_expert_job_failure(
         self,
         job: dict[str, object],
@@ -1036,8 +1054,8 @@ class ReviewRunner:
             return None
         file_path = str(job.get("file_path") or "")
         line_start = int(job.get("line_start") or 1)
-        repository_context = dict(command_message.metadata.get("repository_context") or {})
-        target_hunk = dict(command_message.metadata.get("target_hunk") or {})
+        repository_context = dict(job.get("repository_context") or {})
+        target_hunk = dict(job.get("target_hunk") or {})
         must_review_count = int(rule_screening.get("must_review_count") or 0)
         possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
         top_rule = next((item for item in list(rule_screening.get("matched_rules_for_llm") or []) if isinstance(item, dict)), {})
@@ -1356,6 +1374,8 @@ class ReviewRunner:
                 except Exception as exc:
                     failures.append(self._record_expert_job_failure(job, exc))
                     self._update_expert_review_progress(job, state="failed", total_jobs=len(expert_jobs))
+                finally:
+                    self._release_expert_job_payload(job)
             return failures
         max_workers = min(self._max_parallel_experts(runtime_settings, analysis_mode), len(expert_jobs))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1372,7 +1392,27 @@ class ReviewRunner:
                 except Exception as exc:
                     failures.append(self._record_expert_job_failure(job, exc))
                     self._update_expert_review_progress(job, state="failed", total_jobs=len(expert_jobs))
+                finally:
+                    self._release_expert_job_payload(job)
         return failures
+
+    def _release_expert_job_payload(self, job: dict[str, object]) -> None:
+        """专家任务完成后尽快丢弃大对象，降低批次执行期间的峰值内存。"""
+
+        for key in (
+            "bound_documents",
+            "knowledge_context",
+            "rule_screening",
+            "repository_context",
+            "target_hunk",
+            "related_files",
+            "business_changed_files",
+            "expected_checks",
+            "disallowed_inference",
+        ):
+            job.pop(key, None)
+        if sys.platform == "win32":
+            gc.collect()
 
     def _update_expert_review_progress(
         self,
@@ -1491,7 +1531,7 @@ class ReviewRunner:
             runtime_settings,
             file_path=file_path,
             line_start=line_start,
-            related_files=list(command_message.metadata.get("related_files", []) or []),
+            related_files=list(job.get("related_files") or []),
             design_docs=design_docs,
             extra_tools=self._collect_skill_tools(active_skills),
             active_skills=[str(skill.skill_id) for skill in active_skills if str(getattr(skill, "skill_id", "")).strip()],
@@ -1503,12 +1543,12 @@ class ReviewRunner:
             runtime_tool_result_count=len(runtime_tool_results),
         )
         repository_context = self._merge_runtime_repository_context(
-            dict(command_message.metadata.get("repository_context") or {}),
+            dict(job.get("repository_context") or {}),
             runtime_tool_results,
         )
-        repository_context["routing_reason"] = command_message.metadata.get("routing_reason", "")
-        repository_context["routing_confidence"] = command_message.metadata.get("routing_confidence", 0.0)
-        target_hunk = dict(command_message.metadata.get("target_hunk") or {})
+        repository_context["routing_reason"] = job.get("routing_reason", "")
+        repository_context["routing_confidence"] = job.get("routing_confidence", 0.0)
+        target_hunk = dict(job.get("target_hunk") or {})
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
             self.message_repo.append(
@@ -1523,7 +1563,7 @@ class ReviewRunner:
                         "tool_name": tool_name,
                         "file_path": file_path,
                         "line_start": line_start,
-                        "tool_result": tool_result,
+                        "tool_result": self._build_tool_result_metadata(tool_result),
                         **self._expert_llm_metadata(expert, runtime_settings),
                     },
                 )
@@ -1584,13 +1624,13 @@ class ReviewRunner:
                     "bound_documents": self._build_bound_document_metadata(bound_documents),
                     "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                     "rule_screening": self._build_rule_screening_metadata(rule_screening),
-                    "related_files": command_message.metadata.get("related_files", []),
-                    "business_changed_files": command_message.metadata.get("business_changed_files", []),
+                    "related_files": list(job.get("related_files") or []),
+                    "business_changed_files": list(job.get("business_changed_files") or []),
                     "target_hunk": target_hunk,
-                    "repository_context": repository_context,
-                    "expected_checks": command_message.metadata.get("expected_checks", []),
-                    "disallowed_inference": command_message.metadata.get("disallowed_inference", []),
-                    "runtime_tool_results": runtime_tool_results,
+                    "repository_context": self._build_repository_context_metadata(repository_context),
+                    "expected_checks": list(job.get("expected_checks") or []),
+                    "disallowed_inference": list(job.get("disallowed_inference") or []),
+                    "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
                     "design_doc_titles": self._normalize_text_list(
                         [item.get("title") for item in design_docs],
                         [],
@@ -1622,7 +1662,7 @@ class ReviewRunner:
                         "tool_name": tool_name,
                         "file_path": file_path,
                         "line_start": line_start,
-                        "tool_result": tool_result,
+                        "tool_result": self._build_tool_result_metadata(tool_result),
                         "tool_category": "runtime",
                         "target_hunk": target_hunk,
                         **self._expert_llm_metadata(expert, runtime_settings),
@@ -1673,8 +1713,8 @@ class ReviewRunner:
                 repository_context,
                 target_hunk,
                 bound_documents,
-                list(command_message.metadata.get("disallowed_inference", []) or []),
-                list(command_message.metadata.get("expected_checks", []) or []),
+                list(job.get("disallowed_inference") or []),
+                list(job.get("expected_checks") or []),
                 active_skills,
                 rule_screening,
             ),
@@ -1844,10 +1884,10 @@ class ReviewRunner:
                     "allowed_runtime_tools": expert.runtime_tool_bindings,
                     "knowledge_sources": expert.knowledge_sources,
                     "active_skills": [skill.skill_id for skill in active_skills],
-                    "tool_evidence": tool_evidence,
-                    "runtime_tool_results": runtime_tool_results,
+                    "tool_evidence": [self._build_tool_result_metadata(item) for item in tool_evidence[:6]],
+                    "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
                     "target_hunk": target_hunk,
-                    "repository_context": repository_context,
+                    "repository_context": self._build_repository_context_metadata(repository_context),
                     "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                     "bound_documents": self._build_bound_document_metadata(bound_documents),
                     "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
@@ -2576,8 +2616,44 @@ class ReviewRunner:
         else:
             start_line = self._normalize_optional_line_value(target_hunk.get("start_line")) or line_start
             end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
-        context = service.load_file_range(file_path, start_line, end_line, padding=4)
+        padding = self._compute_problem_context_padding(start_line, end_line, changed_lines)
+        context = service.load_file_range(
+            file_path,
+            start_line,
+            end_line,
+            padding=padding,
+            expand_to_block=True,
+        )
         return dict(context) if isinstance(context, dict) else {}
+
+    def _compute_problem_context_padding(
+        self,
+        start_line: int,
+        end_line: int,
+        changed_lines: list[int],
+    ) -> int:
+        """为问题代码区域计算更完整的源码窗口。
+
+        结果页里的“当前代码”不应该只覆盖问题点附近几行。这里按问题跨度自适应放大窗口：
+        - 单点/短 hunk：优先给出更大的上下文，尽量覆盖完整方法或代码块
+        - 中等 hunk：保持足够多的上下文辅助判断上下游逻辑
+        - 超长 hunk：仍限制在可读范围内，避免结果页过长
+        """
+
+        normalized_start = max(1, int(start_line or 1))
+        normalized_end = max(normalized_start, int(end_line or normalized_start))
+        changed_count = len(changed_lines)
+        span = max(1, normalized_end - normalized_start + 1, changed_count)
+
+        if span <= 3:
+            return 18
+        if span <= 8:
+            return 16
+        if span <= 16:
+            return 14
+        if span <= 28:
+            return 12
+        return 10
 
     def _build_fallback_code_excerpt(
         self,
@@ -4278,6 +4354,117 @@ class ReviewRunner:
                 if str(item.get("rule_id") or item.get("title") or "").strip()
             ],
         }
+
+    def _build_repository_context_metadata(self, repository_context: dict[str, object]) -> dict[str, object]:
+        """为过程页保留紧凑的代码仓上下文摘要，避免消息里重复落整份源码片段。"""
+
+        if not repository_context:
+            return {}
+        payload: dict[str, object] = {
+            "summary": str(repository_context.get("summary") or "").strip(),
+            "routing_reason": str(repository_context.get("routing_reason") or "").strip(),
+            "java_review_mode": str(repository_context.get("java_review_mode") or "").strip(),
+            "java_context_signals": [
+                str(item).strip()
+                for item in list(repository_context.get("java_context_signals") or [])[:8]
+                if str(item).strip()
+            ],
+            "java_quality_signals": [
+                str(item).strip()
+                for item in list(repository_context.get("java_quality_signals") or [])[:8]
+                if str(item).strip()
+            ],
+            "java_quality_signal_summary": str(repository_context.get("java_quality_signal_summary") or "").strip(),
+            "context_files": [
+                str(item).strip()
+                for item in list(repository_context.get("context_files") or [])[:8]
+                if str(item).strip()
+            ],
+        }
+
+        def _compact_entries(key: str, *, symbol_key: str = "symbol") -> list[dict[str, object]]:
+            return [
+                {
+                    "path": str(item.get("path") or "").strip(),
+                    "symbol": str(item.get(symbol_key) or item.get("class_name") or "").strip(),
+                    "line_start": int(item.get("line_start") or 0) if item.get("line_start") else 0,
+                }
+                for item in list(repository_context.get(key) or [])[:4]
+                if isinstance(item, dict) and str(item.get("path") or item.get(symbol_key) or item.get("class_name") or "").strip()
+            ]
+
+        primary_context = repository_context.get("primary_context")
+        if isinstance(primary_context, dict):
+            payload["primary_context"] = {
+                "path": str(primary_context.get("path") or "").strip(),
+                "line_start": int(primary_context.get("line_start") or 0) if primary_context.get("line_start") else 0,
+            }
+
+        current_class_context = repository_context.get("current_class_context")
+        if isinstance(current_class_context, dict):
+            payload["current_class_context"] = {
+                "path": str(current_class_context.get("path") or "").strip(),
+                "symbol": str(current_class_context.get("symbol") or current_class_context.get("class_name") or "").strip(),
+                "line_start": int(current_class_context.get("line_start") or 0)
+                if current_class_context.get("line_start")
+                else 0,
+            }
+
+        for key in (
+            "related_contexts",
+            "related_source_snippets",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "persistence_contexts",
+        ):
+            entries = _compact_entries(key)
+            if entries:
+                payload[key] = entries
+
+        transaction_context = repository_context.get("transaction_context")
+        if isinstance(transaction_context, dict):
+            payload["transaction_context"] = {
+                "transactional_method": str(transaction_context.get("transactional_method") or "").strip(),
+                "transactional_path": str(transaction_context.get("transactional_path") or "").strip(),
+                "call_chain": [
+                    str(item).strip()
+                    for item in list(transaction_context.get("call_chain") or [])[:8]
+                    if str(item).strip()
+                ],
+            }
+
+        return {key: value for key, value in payload.items() if value not in (None, "", [], {}, 0)}
+
+    def _build_tool_result_metadata(self, tool_result: dict[str, object]) -> dict[str, object]:
+        payload = {
+            "tool_name": str(tool_result.get("tool_name") or "").strip(),
+            "summary": str(tool_result.get("summary") or "").strip(),
+            "skipped": bool(tool_result.get("skipped")),
+            "skip_reason": str(tool_result.get("skip_reason") or "").strip(),
+            "signal_summary": str(tool_result.get("signal_summary") or tool_result.get("java_quality_signal_summary") or "").strip(),
+            "signals": [
+                str(item).strip()
+                for item in list(tool_result.get("signals") or tool_result.get("java_quality_signals") or [])[:8]
+                if str(item).strip()
+            ],
+            "context_files": [
+                str(item).strip()
+                for item in list(tool_result.get("context_files") or [])[:6]
+                if str(item).strip()
+            ],
+        }
+        return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+    def _build_runtime_tool_results_metadata(self, runtime_tool_results: list[dict[str, object]]) -> list[dict[str, object]]:
+        results: list[dict[str, object]] = []
+        for item in runtime_tool_results[:8]:
+            if not isinstance(item, dict):
+                continue
+            compact = self._build_tool_result_metadata(item)
+            if compact:
+                results.append(compact)
+        return results
 
     def _build_rule_screening_batch_messages(
         self,
