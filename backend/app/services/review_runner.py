@@ -31,6 +31,7 @@ from app.services.java_quality_signal_extractor import JavaQualitySignalExtracto
 from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
+from app.services.memory_probe import MemoryProbe
 from app.services.orchestrator.graph import build_review_graph
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
@@ -126,6 +127,7 @@ class ReviewRunner:
         review = self.review_repo.get(review_id)
         if review is None:
             raise KeyError(review_id)
+        MemoryProbe.log("review_runner.start", review_id=review_id)
         self._abort_if_closed(review_id)
 
         review.status = "running"
@@ -156,6 +158,11 @@ class ReviewRunner:
             enabled_experts,
             effective_runtime_settings,
             requested_expert_ids=requested_selected_ids,
+        )
+        MemoryProbe.log(
+            "review_runner.after_expert_selection",
+            review_id=review.review_id,
+            selected_expert_count=len(list(selection_plan.get("selected_expert_ids", []) or [])),
         )
         selection_elapsed_ms = round((time.perf_counter() - selection_started_at) * 1000, 1)
         selected_ids = [
@@ -327,6 +334,11 @@ class ReviewRunner:
             experts,
             effective_runtime_settings,
             analysis_mode=analysis_mode,
+        )
+        MemoryProbe.log(
+            "review_runner.after_routing_plan",
+            review_id=review.review_id,
+            routed_expert_count=len(routing_plan),
         )
         routing_elapsed_ms = round((time.perf_counter() - routing_started_at) * 1000, 1)
         self.message_repo.append(
@@ -574,6 +586,12 @@ class ReviewRunner:
 
         expert_execution_started_at = time.perf_counter()
         expert_failures = self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
+        MemoryProbe.log(
+            "review_runner.after_expert_jobs",
+            review_id=review.review_id,
+            expert_job_count=len(expert_jobs),
+            expert_failure_count=len(expert_failures),
+        )
         expert_execution_elapsed_ms = round((time.perf_counter() - expert_execution_started_at) * 1000, 1)
         review = self._merge_review_metadata(
             review,
@@ -893,6 +911,13 @@ class ReviewRunner:
             len(pending_human_issue_ids),
         )
         self.artifact_service.publish(review, issues)
+        MemoryProbe.log(
+            "review_runner.finish",
+            review_id=review.review_id,
+            status=review.status,
+            finding_count=len(finding_payloads),
+            issue_count=len(issues),
+        )
         return review
 
     def _record_expert_job_failure(
@@ -1445,6 +1470,13 @@ class ReviewRunner:
         6. 落库 finding、analysis message 和 event
         """
         self._abort_if_closed(review.review_id)
+        MemoryProbe.log(
+            "expert.start",
+            review_id=review.review_id,
+            expert_id=expert.expert_id,
+            file_path=file_path,
+            line_start=line_start,
+        )
         tool_evidence = self.capability_service.collect_tool_evidence(expert, review.subject)
         active_skills = self.review_skill_activation_service.activate(
             expert,
@@ -1463,6 +1495,12 @@ class ReviewRunner:
             design_docs=design_docs,
             extra_tools=self._collect_skill_tools(active_skills),
             active_skills=[str(skill.skill_id) for skill in active_skills if str(getattr(skill, "skill_id", "")).strip()],
+        )
+        MemoryProbe.log(
+            "expert.after_runtime_tools",
+            review_id=review.review_id,
+            expert_id=expert.expert_id,
+            runtime_tool_result_count=len(runtime_tool_results),
         )
         repository_context = self._merge_runtime_repository_context(
             dict(command_message.metadata.get("repository_context") or {}),
@@ -1656,6 +1694,13 @@ class ReviewRunner:
                 "line_start": line_start,
             },
         )
+        MemoryProbe.log(
+            "expert.after_llm",
+            review_id=review.review_id,
+            expert_id=expert.expert_id,
+            llm_mode=llm_result.mode,
+            llm_error=llm_result.error,
+        )
         self._abort_if_closed(review.review_id)
         parsed = self._parse_expert_analysis(
             llm_result.text,
@@ -1773,6 +1818,12 @@ class ReviewRunner:
             return
         self._abort_if_closed(review.review_id)
         self.finding_repo.save(review.review_id, finding)
+        MemoryProbe.log(
+            "expert.after_finding_save",
+            review_id=review.review_id,
+            expert_id=expert.expert_id,
+            finding_id=finding.finding_id,
+        )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review.review_id,

@@ -16,6 +16,7 @@ from app.services.capability_gateway import CapabilityGateway
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.java_ddd_context_assembler import JavaDddContextAssembler
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
+from app.services.memory_probe import MemoryProbe
 from app.services.postgres_metadata_service import PostgresMetadataService
 from app.services.repository_context_service import RepositoryContextService
 
@@ -88,6 +89,12 @@ class ReviewToolGateway:
             if tool_name not in allowed_tools:
                 allowed_tools.append(tool_name)
         results: list[dict[str, Any]] = []
+        MemoryProbe.log(
+            "tool_gateway.invoke_start",
+            expert_id=expert.expert_id,
+            file_path=file_path,
+            tool_count=len(allowed_tools),
+        )
         for tool_name in allowed_tools:
             if tool_name == "design_spec_alignment" and not list(design_docs or []):
                 results.append(
@@ -119,6 +126,12 @@ class ReviewToolGateway:
             merged_output = {"tool_name": tool_name, **output}
             merged_output.setdefault("success", True)
             results.append(merged_output)
+            MemoryProbe.log(
+                "tool_gateway.after_tool",
+                expert_id=expert.expert_id,
+                tool_name=tool_name,
+                result_count=len(results),
+            )
         return results
 
     def _register_defaults(self) -> None:
@@ -286,6 +299,11 @@ class ReviewToolGateway:
 
     def _repo_context_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         """从目标分支源码仓补充文件、符号和引用上下文。"""
+        MemoryProbe.log(
+            "tool_gateway.repo_context_search.start",
+            file_path=str(payload.get("file_path") or ""),
+            line_start=int(payload.get("line_start") or 1),
+        )
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
         subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
         service = RepositoryContextService.from_review_context(
@@ -380,7 +398,7 @@ class ReviewToolGateway:
                 f"命中 {len(definition_hits)} 个定义文件、{len(reference_hits)} 个引用文件，"
                 "并已自动排除 test/spec 与编译产物等噪音文件。"
             )
-        return {
+        result = {
             "summary": summary,
             "primary_context": primary_context,
             "related_contexts": related_contexts,
@@ -400,6 +418,14 @@ class ReviewToolGateway:
             ),
             **java_ddd_context,
         }
+        MemoryProbe.log(
+            "tool_gateway.repo_context_search.finish",
+            file_path=file_path,
+            symbol_query_count=len(symbol_queries[:3]),
+            related_context_count=len(related_contexts),
+            related_snippet_count=len(related_source_snippets[:4]),
+        )
+        return result
 
     def _pg_schema_context(self, payload: dict[str, Any]) -> dict[str, Any]:
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))

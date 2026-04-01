@@ -13,6 +13,7 @@ from app.config import settings
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.http_client_factory import HttpClientFactory
+from app.services.memory_probe import MemoryProbe
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,14 @@ class LLMChatService:
             preview_limit=preview_limit,
         )
         context_preview = self._stringify_context(log_context)
+        MemoryProbe.log(
+            "llm.complete_text.start",
+            provider=resolution.provider,
+            model=resolution.model,
+            timeout_seconds=safe_timeout,
+            system_prompt_len=len(system_prompt),
+            user_prompt_len=len(user_prompt),
+        )
         total_started_at = time.perf_counter()
         for attempt in range(1, safe_attempts + 1):
             attempt_started_at = time.perf_counter()
@@ -161,12 +170,27 @@ class LLMChatService:
                         attempt_elapsed_ms,
                         response_preview,
                     )
+                    MemoryProbe.log(
+                        "llm.complete_text.after_response",
+                        provider=resolution.provider,
+                        model=resolution.model,
+                        status=getattr(response, "status_code", "unknown"),
+                        response_len=len(response_text),
+                    )
                     try:
                         payload = self._decode_payload(
                             response_text=response_text,
                             content_type=content_type,
                         )
                         prompt_tokens, completion_tokens, total_tokens = self._extract_usage(payload)
+                        MemoryProbe.log(
+                            "llm.complete_text.after_decode",
+                            provider=resolution.provider,
+                            model=resolution.model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=total_tokens,
+                        )
                     except ValueError as exc:
                         last_error = (
                             "invalid_json_response:"
