@@ -12,6 +12,7 @@ from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
+from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.repository_context_service import RepositoryContextService
 
@@ -32,6 +33,7 @@ class MainAgentService:
         self._llm = LLMChatService()
         self._diff_excerpt_service = DiffExcerptService()
         self._capability_service = ExpertCapabilityService()
+        self._java_quality_signal_extractor = JavaQualitySignalExtractor()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
     def build_command(
@@ -43,7 +45,7 @@ class MainAgentService:
     ) -> dict[str, object]:
         """为单个专家生成一次带上下文的派工指令。"""
         change_chain = self.build_change_chain(subject)
-        repository_service = self._build_repository_service(runtime_settings)
+        repository_service = self._build_repository_service(runtime_settings, subject)
         target_focus = route_hint or self._build_rule_route(subject, expert, repository_service)
         file_path = str(target_focus.get("file_path") or self._pick_file_path(subject, expert))
         line_start = (
@@ -69,7 +71,11 @@ class MainAgentService:
             related_files,
             dict(target_focus.get("repo_hits") or {}),
         )
-        routeable, skip_reason = self._should_route_expert(subject, expert, target_focus, file_path)
+        if route_hint is not None:
+            routeable = bool(target_focus.get("routeable", True))
+            skip_reason = "" if routeable else str(target_focus.get("skip_reason") or "")
+        else:
+            routeable, skip_reason = self._should_route_expert(subject, expert, target_focus, file_path)
         summary = self._build_command_fallback(
             subject,
             expert,
@@ -121,11 +127,12 @@ class MainAgentService:
         2. 再把全部业务变更、候选 hunk 和专家职责交给 LLM 做语义分工
         """
         self._repo_context_cache.clear()
-        repository_service = self._build_repository_service(runtime_settings)
+        repository_service = self._build_repository_service(runtime_settings, subject)
         baseline_routes = {
             expert.expert_id: self._build_rule_route(subject, expert, repository_service)
             for expert in experts
         }
+        baseline_routes = self._preserve_selected_expert_routes(experts, baseline_routes)
         if analysis_mode == "light":
             for route in baseline_routes.values():
                 route["routing_llm"] = {
@@ -154,6 +161,7 @@ class MainAgentService:
                 subject=subject,
                 experts=experts,
                 candidate_hunks=candidate_hunks,
+                runtime_settings=runtime_settings,
             ),
             resolution=resolution,
             runtime_settings=runtime_settings,
@@ -177,6 +185,7 @@ class MainAgentService:
             candidate_hunks=candidate_hunks,
             llm_plan=parsed,
         )
+        merged = self._preserve_selected_expert_routes(experts, merged)
         for route in merged.values():
             route["routing_llm"] = self._llm_metadata(result)
         return merged
@@ -232,6 +241,7 @@ class MainAgentService:
                 subject=subject,
                 experts=experts,
                 requested_expert_ids=list(requested_expert_ids or []),
+                runtime_settings=runtime_settings,
             ),
             resolution=resolution,
             runtime_settings=runtime_settings,
@@ -249,6 +259,7 @@ class MainAgentService:
         )
         parsed = self._parse_json_payload(result.text)
         merged = self._merge_expert_selection(
+            subject=subject,
             experts=experts,
             requested_expert_ids=list(requested_expert_ids or []),
             llm_payload=parsed,
@@ -320,23 +331,32 @@ class MainAgentService:
         issues: list[DebateIssue],
         runtime_settings: RuntimeSettings,
         *,
+        partial_failure_count: int = 0,
         timeout_seconds: float = 60.0,
         max_attempts: int = 3,
     ) -> tuple[str, dict[str, object]]:
         """让主 Agent 在 issue 收敛后输出控制台播报式总结。"""
         blocker_count = len([issue for issue in issues if issue.severity in {"blocker", "critical"}])
         pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
+        if partial_failure_count > 0:
+            fallback_text = (
+                f"主Agent收敛完成：本轮共有 {len(issues)} 个议题，blocker/critical {blocker_count} 个，"
+                f"待人工裁决 {pending_count} 个。另有 {partial_failure_count} 个专家任务执行失败，"
+                "当前结果应视为部分完成，请优先重试失败专家后再做最终放行判断。"
+            )
+        else:
+            fallback_text = (
+                f"主Agent收敛完成：本次共形成 {len(issues)} 个议题，其中 blocker/critical {blocker_count} 个，"
+                f"待人工裁决 {pending_count} 个，审核状态 {review.status}，下一步请优先处理高风险结论。"
+            )
         resolution = self._llm.resolve_main_agent(runtime_settings)
-        fallback_text = (
-            f"主Agent收敛完成：本次共形成 {len(issues)} 个议题，其中 blocker/critical {blocker_count} 个，"
-            f"待人工裁决 {pending_count} 个，审核状态 {review.status}，下一步请优先处理高风险结论。"
-        )
         user_prompt = (
             f"审核状态: {review.status}\n"
             f"审核阶段: {review.phase}\n"
             f"议题总数: {len(issues)}\n"
             f"高风险议题数: {blocker_count}\n"
             f"待人工裁决数: {pending_count}\n"
+            f"专家执行失败数: {partial_failure_count}\n"
             f"请输出一段中文总结，风格像主Agent对控制台的收敛播报。"
         )
         result = self._llm.complete_text(
@@ -559,6 +579,39 @@ class MainAgentService:
             "routing_source": "rule",
         }
 
+    def _preserve_selected_expert_routes(
+        self,
+        experts: list[ExpertProfile],
+        routes: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        preserved: dict[str, dict[str, object]] = {}
+        for expert in experts:
+            route = dict(routes.get(expert.expert_id) or {})
+            if not route:
+                preserved[expert.expert_id] = route
+                continue
+            file_path = str(route.get("file_path") or "").strip()
+            if not file_path:
+                preserved[expert.expert_id] = route
+                continue
+            if bool(route.get("routeable", True)):
+                preserved[expert.expert_id] = route
+                continue
+
+            previous_reason = str(route.get("skip_reason") or "").strip()
+            routing_reason = str(route.get("routing_reason") or "").strip()
+            override_reason = "主Agent已选中该专家，本轮按保守执行策略继续审查，避免执行层二次静默跳过。"
+            route["routeable"] = True
+            route["skip_reason"] = ""
+            route["confidence"] = max(float(route.get("confidence") or 0.0), 0.31)
+            route["routing_source"] = "selected_override"
+            combined_reason = " ".join(part for part in [routing_reason, override_reason] if part).strip()
+            route["routing_reason"] = combined_reason or override_reason
+            if previous_reason:
+                route["routing_override_reason"] = previous_reason
+            preserved[expert.expert_id] = route
+        return preserved
+
     def _pick_correctness_chain_focus(
         self,
         subject: ReviewSubject,
@@ -670,6 +723,32 @@ class MainAgentService:
             prioritized.remove(file_path)
         return [file_path, *prioritized]
 
+    def _has_security_signal(self, subject: ReviewSubject, file_path: str, target_hunk: dict[str, object]) -> bool:
+        lowered = "\n".join(
+            [
+                str(file_path or "").lower(),
+                str(target_hunk.get("excerpt") or "").lower(),
+                self._strip_non_diff_signal_lines(str(subject.unified_diff or "")).lower(),
+            ]
+        )
+        tokens = [
+            "auth",
+            "security",
+            "permission",
+            "token",
+            "secret",
+            "@valid",
+            "validation",
+            "bindingresult",
+            "requestbody",
+            "requestparam",
+            "input",
+            "sanitize",
+            "csrf",
+            "bean validation",
+        ]
+        return any(token in lowered for token in tokens)
+
     def _should_route_expert(
         self,
         subject: ReviewSubject,
@@ -711,6 +790,14 @@ class MainAgentService:
                 "dos",
                 "denial",
                 "serialize",
+                "@valid",
+                "validation",
+                "bindingresult",
+                "requestbody",
+                "requestparam",
+                "bean validation",
+                "sanitize",
+                "csrf",
             ]
         ):
             return False, "当前变更未命中安全相关线索"
@@ -887,13 +974,14 @@ class MainAgentService:
             return True
         return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
 
-    def _build_repository_service(self, runtime_settings: RuntimeSettings) -> RepositoryContextService:
-        return RepositoryContextService(
+    def _build_repository_service(self, runtime_settings: RuntimeSettings, subject: ReviewSubject) -> RepositoryContextService:
+        return RepositoryContextService.from_review_context(
             clone_url=runtime_settings.code_repo_clone_url,
             local_path=runtime_settings.code_repo_local_path,
             default_branch=runtime_settings.code_repo_default_branch or runtime_settings.default_target_branch,
             access_token=runtime_settings.code_repo_access_token,
             auto_sync=runtime_settings.code_repo_auto_sync,
+            subject=subject,
         )
 
     def _search_related_repo_context(
@@ -1088,12 +1176,57 @@ class MainAgentService:
             "6. selected_experts 至少返回 1 个。"
         )
 
+    def _infer_code_language(self, file_path: str) -> str:
+        lowered = str(file_path or "").lower()
+        if lowered.endswith(".tsx"):
+            return "tsx"
+        if lowered.endswith(".ts"):
+            return "typescript"
+        if lowered.endswith(".jsx"):
+            return "jsx"
+        if lowered.endswith(".js"):
+            return "javascript"
+        if lowered.endswith(".java"):
+            return "java"
+        return "text"
+
+    def _build_language_general_guidance(self, language: str) -> str:
+        normalized = str(language or "").strip().lower()
+        if normalized == "java":
+            return (
+                "- 参考 Java / Spring 通用代码规范：命名清晰，职责单一，校验、事务、持久化、远程调用不要无边界混合。\n"
+                "- 关注输入校验、空值与异常处理、日志脱敏、权限/租户隔离，以及 @Transactional 内的副作用。\n"
+                "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写等常见质量风险。"
+            )
+        if normalized in {"javascript", "jsx", "typescript", "tsx"}:
+            return (
+                "- 参考 JavaScript / TypeScript 通用代码规范：命名清晰，副作用显式，异步错误必须处理，避免隐式 any 和不透明的数据流。\n"
+                "- 关注输入校验、鉴权边界、敏感信息暴露、Promise/await 错误传播、竞态和资源泄露。\n"
+                "- 检查数据库/HTTP/缓存调用是否存在未分页查询、无边界重试、串行批处理或阻塞主路径的问题。"
+            )
+        return ""
+
+    def _build_language_general_guidance_summary(self, file_paths: list[str]) -> str:
+        sections: list[str] = []
+        seen_languages: set[str] = set()
+        for path in file_paths:
+            language = self._infer_code_language(path)
+            if language in seen_languages:
+                continue
+            seen_languages.add(language)
+            guidance = self._build_language_general_guidance(language)
+            if not guidance:
+                continue
+            sections.append(f"# {language}\n{guidance}")
+        return "\n\n".join(sections) if sections else "当前变更文件未命中已配置的语言通用规范提示。"
+
     def _build_routing_user_prompt(
         self,
         *,
         subject: ReviewSubject,
         experts: list[ExpertProfile],
         candidate_hunks: list[dict[str, object]],
+        runtime_settings: RuntimeSettings,
     ) -> str:
         expert_sections = []
         for expert in experts:
@@ -1127,6 +1260,15 @@ class MainAgentService:
         primary_file_path = str(candidate_hunks[0]["file_path"]) if candidate_hunks else str(business_changed_files[0]) if business_changed_files else ""
         target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
         related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
+        source_context_summary = self._build_main_agent_source_context_summary(
+            subject,
+            runtime_settings,
+            primary_file_path=primary_file_path,
+            related_file_paths=business_changed_files,
+        )
+        language_general_guidance = self._build_language_general_guidance_summary(
+            [str(item.get("file_path") or "") for item in candidate_hunks] + business_changed_files
+        )
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"源分支: {subject.source_ref}\n"
@@ -1135,6 +1277,8 @@ class MainAgentService:
             f"业务变更文件: {json.dumps(business_changed_files, ensure_ascii=False)}\n"
             f"目标文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
+            f"变更源码与关联上下文:\n{source_context_summary}\n\n"
+            f"语言通用规范提示:\n{language_general_guidance}\n\n"
             f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
             f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
             "请输出 JSON，格式为：\n"
@@ -1160,6 +1304,7 @@ class MainAgentService:
         subject: ReviewSubject,
         experts: list[ExpertProfile],
         requested_expert_ids: list[str],
+        runtime_settings: RuntimeSettings,
     ) -> str:
         business_changed_files = self._candidate_changed_files(subject, "")
         expert_sections = []
@@ -1180,6 +1325,15 @@ class MainAgentService:
         primary_file_path = str(business_changed_files[0]) if business_changed_files else str(subject.changed_files[0]) if subject.changed_files else ""
         target_file_full_diff = self._build_file_diff_context(subject, primary_file_path)
         related_diff_summary = self._build_related_diff_summary(subject, primary_file_path)
+        source_context_summary = self._build_main_agent_source_context_summary(
+            subject,
+            runtime_settings,
+            primary_file_path=primary_file_path,
+            related_file_paths=business_changed_files,
+        )
+        language_general_guidance = self._build_language_general_guidance_summary(
+            business_changed_files or [str(item) for item in list(subject.changed_files or [])]
+        )
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"MR 链接: {subject.mr_url}\n"
@@ -1190,6 +1344,8 @@ class MainAgentService:
             f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
             f"业务变更文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
+            f"变更源码与关联上下文:\n{source_context_summary}\n\n"
+            f"语言通用规范提示:\n{language_general_guidance}\n\n"
             f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
             "请输出 JSON，格式为：\n"
             "{\n"
@@ -1236,6 +1392,41 @@ class MainAgentService:
             sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 判断全局影响。")
         return "\n\n".join(sections)
 
+    def _build_main_agent_source_context_summary(
+        self,
+        subject: ReviewSubject,
+        runtime_settings: RuntimeSettings,
+        *,
+        primary_file_path: str,
+        related_file_paths: list[str],
+    ) -> str:
+        service = self._build_repository_service(runtime_settings, subject)
+        if not service.is_ready():
+            return "代码仓上下文未配置或本地仓不可用；当前只提供真实 diff，未补充目标分支源码。"
+        sections: list[str] = []
+        if primary_file_path:
+            primary_line = self._pick_line_start(subject, "", primary_file_path)
+            primary_context = service.load_file_context(primary_file_path, max(1, primary_line), radius=16)
+            primary_snippet = str((primary_context or {}).get("snippet") or "").strip()
+            if primary_snippet:
+                sections.append(f"# 目标文件源码\n{primary_file_path}")
+                sections.extend(primary_snippet.splitlines()[:24])
+        for path in [
+            item
+            for item in related_file_paths
+            if str(item).strip() and str(item).strip() != primary_file_path
+        ][:3]:
+            line_start = self._pick_line_start(subject, "", path)
+            context = service.load_file_context(path, max(1, line_start), radius=10)
+            snippet = str((context or {}).get("snippet") or "").strip()
+            if not snippet:
+                continue
+            if sections:
+                sections.append("")
+            sections.append(f"# 关联源码\n{path}")
+            sections.extend(snippet.splitlines()[:16])
+        return "\n".join(sections) if sections else "未从目标分支源码仓加载到可用源码片段。"
+
     def _parse_json_payload(self, text: str) -> dict[str, object]:
         content = str(text or "").strip()
         if "```json" in content:
@@ -1254,6 +1445,7 @@ class MainAgentService:
     def _merge_expert_selection(
         self,
         *,
+        subject: ReviewSubject,
         experts: list[ExpertProfile],
         requested_expert_ids: list[str],
         llm_payload: dict[str, object],
@@ -1317,6 +1509,32 @@ class MainAgentService:
                     "reason": "大模型未将该专家纳入本次 MR 的参与集合",
                 }
             )
+        if "security_compliance" in requested_expert_ids and "security_compliance" not in selected_ids:
+            security_expert = experts_by_id.get("security_compliance")
+            if security_expert is not None:
+                file_path = self._pick_file_path(subject, security_expert)
+                target_focus = self._build_rule_route(subject, security_expert, self._build_repository_service(RuntimeSettings(), subject))
+                if self._has_security_signal(subject, file_path, dict(target_focus.get("target_hunk") or {})):
+                    selected_ids.append("security_compliance")
+                    selected_entries.append(
+                        {
+                            "expert_id": "security_compliance",
+                            "expert_name": security_expert.name_zh,
+                            "reason": "命中 Java 入口校验/输入验证安全线索，系统补入安全与合规专家复核。",
+                            "confidence": 0.78,
+                            "source": "heuristic_selected",
+                        }
+                    )
+                    skipped_entries = [item for item in skipped_entries if str(item.get("expert_id") or "") != "security_compliance"]
+        java_quality = self._collect_java_quality_signals(subject)
+        selected_ids, selected_entries, skipped_entries = self._apply_java_signal_expert_retention(
+            requested_expert_ids=requested_expert_ids,
+            experts_by_id=experts_by_id,
+            selected_ids=selected_ids,
+            selected_entries=selected_entries,
+            skipped_entries=skipped_entries,
+            java_quality_signals=java_quality["signals"],
+        )
         return {
             "requested_expert_ids": requested_expert_ids,
             "candidate_expert_ids": [expert.expert_id for expert in experts],
@@ -1324,6 +1542,88 @@ class MainAgentService:
             "selected_experts": selected_entries,
             "skipped_experts": skipped_entries,
         }
+
+    def _collect_java_quality_signals(self, subject: ReviewSubject) -> dict[str, list[str]]:
+        signals: list[str] = []
+        matched_terms: list[str] = []
+        for file_path in list(subject.changed_files or []):
+            if Path(str(file_path or "")).suffix.lower() != ".java":
+                continue
+            file_diff = self._diff_excerpt_service.extract_file_diff(str(subject.unified_diff or ""), str(file_path))
+            if not file_diff.strip():
+                continue
+            extracted = self._java_quality_signal_extractor.extract(
+                file_path=str(file_path),
+                target_hunk={"excerpt": file_diff},
+                full_diff=file_diff,
+            )
+            for signal in list(extracted.get("signals") or []):
+                normalized = str(signal).strip()
+                if normalized and normalized not in signals:
+                    signals.append(normalized)
+            for term in list(extracted.get("matched_terms") or []):
+                normalized = str(term).strip()
+                if normalized and normalized not in matched_terms:
+                    matched_terms.append(normalized)
+        return {"signals": signals, "matched_terms": matched_terms}
+
+    def _apply_java_signal_expert_retention(
+        self,
+        *,
+        requested_expert_ids: list[str],
+        experts_by_id: dict[str, ExpertProfile],
+        selected_ids: list[str],
+        selected_entries: list[dict[str, object]],
+        skipped_entries: list[dict[str, object]],
+        java_quality_signals: list[str],
+    ) -> tuple[list[str], list[dict[str, object]], list[dict[str, object]]]:
+        signal_set = {str(item).strip() for item in java_quality_signals if str(item).strip()}
+        if not signal_set:
+            return selected_ids, selected_entries, skipped_entries
+
+        def _add_if_requested(expert_id: str, reason: str, confidence: float) -> None:
+            if expert_id not in requested_expert_ids or expert_id in selected_ids:
+                return
+            expert = experts_by_id.get(expert_id)
+            if expert is None:
+                return
+            selected_ids.append(expert_id)
+            selected_entries.append(
+                {
+                    "expert_id": expert_id,
+                    "expert_name": expert.name_zh,
+                    "reason": reason,
+                    "confidence": confidence,
+                    "source": "heuristic_selected",
+                }
+            )
+
+        if {"factory_bypass", "event_ordering_risk"} & signal_set:
+            _add_if_requested(
+                "architecture_design",
+                "检测到聚合工厂绕过或事件发布顺序风险，系统补入架构与设计专家复核结构边界与事务顺序。",
+                0.81,
+            )
+
+        if {"query_semantics_weakened", "exception_swallowed"} & signal_set:
+            _add_if_requested(
+                "security_compliance",
+                "检测到查询语义放宽或异常处理退化，系统补入安全与合规专家复核数据访问面与错误处理边界。",
+                0.76,
+            )
+
+        if {"naming_convention_violation", "exception_swallowed"} & signal_set:
+            _add_if_requested(
+                "maintainability_code_health",
+                "检测到命名规范或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
+                0.72,
+            )
+
+        selected_set = set(selected_ids)
+        filtered_skipped = [
+            item for item in skipped_entries if str(item.get("expert_id") or "").strip() not in selected_set
+        ]
+        return selected_ids, selected_entries, filtered_skipped
 
     def _merge_routing_plan(
         self,

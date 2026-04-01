@@ -123,6 +123,35 @@ export interface FindingCodeContextSymbol {
   references?: FindingCodeContextSnippet[];
 }
 
+export interface FindingCodeContextInputCompleteness {
+  review_spec_present?: boolean;
+  language_guidance_present?: boolean;
+  enabled_rule_count?: number;
+  matched_rule_count?: number;
+  bound_document_count?: number;
+  target_file_diff_present?: boolean;
+  source_context_present?: boolean;
+  related_context_count?: number;
+  missing_sections?: string[];
+}
+
+export interface FindingCodeContextMatchedRule {
+  rule_id?: string;
+  title?: string;
+  priority?: string;
+}
+
+export interface FindingCodeContextReviewInputs {
+  expert_id?: string;
+  review_spec_present?: boolean;
+  language_guidance_language?: string;
+  language_guidance_present?: boolean;
+  language_guidance_topics?: string[];
+  bound_document_titles?: string[];
+  matched_rules?: FindingCodeContextMatchedRule[];
+  context_files?: string[];
+}
+
 export interface FindingCodeContext {
   target_file_full_diff?: string;
   related_diff_summary?: string;
@@ -132,6 +161,8 @@ export interface FindingCodeContext {
   primary_context?: FindingCodeContextSnippet;
   related_contexts?: FindingCodeContextSnippet[];
   related_source_snippets?: FindingCodeContextSnippet[];
+  java_review_mode?: "general" | "ddd_enhanced" | string;
+  java_context_signals?: string[];
   current_class_context?: FindingCodeContextSnippet & { class_name?: string; method_name?: string; changed_methods?: string[]; changed_fields?: string[] };
   parent_contract_contexts?: FindingCodeContextSnippet[];
   caller_contexts?: FindingCodeContextSnippet[];
@@ -142,6 +173,8 @@ export interface FindingCodeContext {
   symbol_contexts?: FindingCodeContextSymbol[];
   context_files?: string[];
   routing_reason?: string;
+  input_completeness?: FindingCodeContextInputCompleteness;
+  review_inputs?: FindingCodeContextReviewInputs;
 }
 
 export interface DebateIssue {

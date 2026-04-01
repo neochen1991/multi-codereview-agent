@@ -315,6 +315,68 @@ const buildIssueFilterGroup = (value: unknown): StructuredGroup | null => {
   };
 };
 
+const buildInputQualityGroup = (inputCompletenessValue: unknown, reviewInputsValue: unknown): StructuredGroup | null => {
+  const inputCompleteness =
+    inputCompletenessValue && typeof inputCompletenessValue === "object"
+      ? (inputCompletenessValue as Record<string, unknown>)
+      : null;
+  const reviewInputs =
+    reviewInputsValue && typeof reviewInputsValue === "object"
+      ? (reviewInputsValue as Record<string, unknown>)
+      : null;
+  if (!inputCompleteness && !reviewInputs) return null;
+
+  const language = typeof reviewInputs?.language_guidance_language === "string" ? reviewInputs.language_guidance_language.trim() : "";
+  const matchedRules = Array.isArray(reviewInputs?.matched_rules) ? reviewInputs?.matched_rules : [];
+  const matchedRuleValues = matchedRules
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      return String(payload.rule_id || payload.title || "").trim();
+    })
+    .filter(Boolean);
+
+  const sections = [
+    {
+      label: "规范输入",
+      values: [
+        inputCompleteness?.review_spec_present ? "专家规范已注入" : "专家规范缺失",
+        inputCompleteness?.language_guidance_present ? "语言通用规范提示已注入" : "语言通用规范提示缺失",
+        language ? `语言: ${language}` : "",
+      ].filter(Boolean),
+    },
+    {
+      label: "代码输入",
+      values: [
+        inputCompleteness?.target_file_diff_present ? "变更代码已注入" : "变更代码缺失",
+        inputCompleteness?.source_context_present ? "当前源码已注入" : "当前源码缺失",
+        typeof inputCompleteness?.related_context_count === "number"
+          ? `关联源码 ${inputCompleteness.related_context_count} 段`
+          : "",
+      ].filter(Boolean),
+    },
+    {
+      label: "规则输入",
+      values: [
+        typeof inputCompleteness?.matched_rule_count === "number" ? `命中规则 ${inputCompleteness.matched_rule_count}` : "",
+        typeof inputCompleteness?.enabled_rule_count === "number" ? `启用规则 ${inputCompleteness.enabled_rule_count}` : "",
+        typeof inputCompleteness?.bound_document_count === "number" ? `绑定文档 ${inputCompleteness.bound_document_count}` : "",
+        ...matchedRuleValues.slice(0, 4),
+      ].filter(Boolean),
+    },
+    {
+      label: "语言规范主题",
+      values: limitValueList(normalizeValueList(reviewInputs?.language_guidance_topics), 6),
+    },
+    {
+      label: "缺失输入",
+      values: normalizeValueList(inputCompleteness?.missing_sections),
+    },
+  ].filter((section) => section.values.length > 0);
+  if (!sections.length) return null;
+  return { title: "审查输入质量", sections };
+};
+
 const normalizeRuleScreeningEntries = (value: unknown): RuleScreeningEntry[] => {
   if (!value || typeof value !== "object") return [];
   const payload = value as Record<string, unknown>;
@@ -798,6 +860,7 @@ const buildStructuredGroups = (
   const ruleScreeningGroup = buildRuleScreeningGroup(metadata.rule_screening);
   const ruleScreeningBatchGroup = buildRuleScreeningBatchGroup(metadata.rule_screening_batch);
   const issueFilterGroup = buildIssueFilterGroup(metadata.issue_filter_decisions);
+  const inputQualityGroup = buildInputQualityGroup(metadata.input_completeness, metadata.review_inputs);
   const pgSchemaGroup =
     row.eventType === "expert_tool_call" && String(metadata.tool_name || "") === "pg_schema_context"
       ? buildPgSchemaContextGroup(toolResult)
@@ -807,6 +870,7 @@ const buildStructuredGroups = (
     return {
       summaryText: row.summary,
       groups: [
+        ...(inputQualityGroup ? [inputQualityGroup] : []),
         ...(ruleScreeningGroup ? [ruleScreeningGroup] : []),
         ...(boundDocumentGroup ? [boundDocumentGroup] : []),
         ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),
@@ -1056,6 +1120,10 @@ const buildStructuredGroups = (
       };
     }
     if (toolName === "repo_context_search") {
+      const relatedCodeContexts =
+        normalizeContextValueList(toolResult.related_source_snippets).length > 0
+          ? normalizeContextValueList(toolResult.related_source_snippets)
+          : normalizeContextValueList(toolResult.related_contexts);
       return {
         summaryText: typeof toolResult.summary === "string" ? toolResult.summary : undefined,
         groups: [
@@ -1066,7 +1134,7 @@ const buildStructuredGroups = (
               { label: "关键词来源", values: normalizeKeywordSourceEntries(toolResult.search_keyword_sources) },
               { label: "搜索命令", values: normalizeValueList(toolResult.search_commands) },
               { label: "上下文文件", values: limitValueList(normalizeValueList(toolResult.context_files), 8) },
-              { label: "关联上下文", values: limitValueList(normalizeContextValueList(toolResult.related_contexts), 4) },
+              { label: "关联上下文", values: limitValueList(relatedCodeContexts, 4) },
               { label: "定义命中文件", values: limitValueList(normalizeValueList(toolResult.definition_hits), 8) },
               { label: "引用命中文件", values: limitValueList(normalizeValueList(toolResult.reference_hits), 8) },
               { label: "判定逻辑", values: normalizeSingleValue(toolResult.symbol_match_strategy) },
@@ -1121,6 +1189,7 @@ const buildStructuredGroups = (
             { label: "验证计划", values: normalizeSingleValue(parsedAnalysis.verification_plan) },
           ].filter((section) => section.values.length > 0),
         },
+        ...(inputQualityGroup ? [inputQualityGroup] : []),
         ...(ruleScreeningGroup ? [ruleScreeningGroup] : []),
         ...(boundDocumentGroup ? [boundDocumentGroup] : []),
         ...(knowledgeContextGroup ? [knowledgeContextGroup] : []),

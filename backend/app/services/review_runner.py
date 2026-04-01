@@ -27,6 +27,7 @@ from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
+from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
 from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
@@ -72,6 +73,7 @@ class ReviewRunner:
         self.capability_service = ExpertCapabilityService()
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
+        self.java_quality_signal_extractor = JavaQualitySignalExtractor()
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
@@ -558,12 +560,7 @@ class ReviewRunner:
             effective_experts=effective_experts,
             system_added_experts=system_added_experts,
         )
-        review.subject.metadata = {
-            **review.subject.metadata,
-            "expert_routing": routing_summary,
-        }
-        review.updated_at = datetime.now(UTC)
-        self.review_repo.save(review)
+        review = self._merge_review_metadata(review, {"expert_routing": routing_summary})
         self._abort_if_closed(review_id)
         self.event_repo.append(
             ReviewEvent(
@@ -576,8 +573,20 @@ class ReviewRunner:
         )
 
         expert_execution_started_at = time.perf_counter()
-        self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
+        expert_failures = self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
         expert_execution_elapsed_ms = round((time.perf_counter() - expert_execution_started_at) * 1000, 1)
+        review = self._merge_review_metadata(
+            review,
+            {
+                "expert_execution": {
+                    "failed_experts": expert_failures,
+                    "partial_failure_count": len(expert_failures),
+                    "successful_expert_job_count": max(0, len(expert_jobs) - len(expert_failures)),
+                    "expert_job_count": len(expert_jobs),
+                    "analysis_mode": analysis_mode,
+                }
+            },
+        )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review_id,
@@ -594,6 +603,30 @@ class ReviewRunner:
                 },
             )
         )
+        if expert_failures:
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review_id,
+                    issue_id="review_orchestration",
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type="main_agent_expert_execution_partial_failure",
+                    content=f"本轮有 {len(expert_failures)} 个专家任务执行失败，系统已保留其余专家的发现并继续收敛结果。",
+                    metadata={
+                        "phase": "coordination",
+                        "analysis_mode": analysis_mode,
+                        "expert_failures": expert_failures,
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review_id,
+                    event_type="expert_execution_partial_failure",
+                    phase="coordination",
+                    message="部分专家任务执行失败，系统将保留其余专家结果继续收敛。",
+                    payload={"expert_failures": expert_failures},
+                )
+            )
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,
@@ -806,12 +839,14 @@ class ReviewRunner:
             finding_count=len(finding_payloads),
             issue_count=len(issues),
             pending_human_count=len(pending_human_issue_ids),
+            partial_failure_count=len(expert_failures),
         )
         self._abort_if_closed(review_id)
         final_summary, final_llm = self.main_agent_service.build_final_summary(
             review,
             issues,
             effective_runtime_settings,
+            partial_failure_count=len(expert_failures),
             timeout_seconds=float(llm_request_options["timeout_seconds"]),
             max_attempts=int(llm_request_options["max_attempts"]),
         )
@@ -827,6 +862,7 @@ class ReviewRunner:
                     "status": review.status,
                     "issue_count": len(issues),
                     "pending_human_count": len(pending_human_issue_ids),
+                    "partial_failure_count": len(expert_failures),
                     **final_llm,
                 },
             )
@@ -841,6 +877,7 @@ class ReviewRunner:
                     "issue_count": len(issues),
                     "pending_human_count": len(pending_human_issue_ids),
                     "status": review.status,
+                    "partial_failure_count": len(expert_failures),
                 },
             )
         )
@@ -857,6 +894,189 @@ class ReviewRunner:
         )
         self.artifact_service.publish(review, issues)
         return review
+
+    def _record_expert_job_failure(
+        self,
+        job: dict[str, object],
+        exc: Exception,
+    ) -> dict[str, object]:
+        review = job["review"]
+        expert = job["expert"]
+        file_path = str(job.get("file_path") or "")
+        line_start = int(job.get("line_start") or 1)
+        command_message = job["command_message"]
+        assert isinstance(review, ReviewTask)
+        assert isinstance(expert, ExpertProfile)
+        assert isinstance(command_message, ConversationMessage)
+        error_text = str(exc).strip() or exc.__class__.__name__
+        payload = {
+            "expert_id": expert.expert_id,
+            "expert_name": expert.name_zh,
+            "file_path": file_path,
+            "line_start": line_start,
+            "error_type": exc.__class__.__name__,
+            "error": error_text,
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_failed",
+                content=f"{expert.name_zh} 执行失败：{error_text}",
+                metadata={
+                    "phase": "expert_review",
+                    "reply_to_message_id": command_message.message_id,
+                    **payload,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="expert_failed",
+                phase="expert_review",
+                message=f"{expert.name_zh} 执行失败，系统将继续保留其他专家结果。",
+                payload=payload,
+            )
+        )
+        logger.exception(
+            "expert execution failed review_id=%s expert_id=%s file_path=%s line_start=%s error=%s",
+            review.review_id,
+            expert.expert_id,
+            file_path,
+            line_start,
+            error_text,
+        )
+        fallback_finding = self._build_failed_expert_fallback_finding(job, error_text)
+        if fallback_finding is not None:
+            self.finding_repo.save(review.review_id, fallback_finding)
+            finding_payloads = job.get("finding_payloads")
+            if isinstance(finding_payloads, list):
+                finding_payloads.append(fallback_finding.model_dump(mode="json"))
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id=fallback_finding.finding_id,
+                    expert_id=expert.expert_id,
+                    message_type="expert_analysis",
+                    content="专家执行失败，系统已基于已命中规则、代码上下文和工具证据保守生成待验证风险。",
+                    metadata={
+                        "phase": "expert_review",
+                        "severity": fallback_finding.severity,
+                        "confidence": fallback_finding.confidence,
+                        "file_path": fallback_finding.file_path,
+                        "line_start": fallback_finding.line_start,
+                        "finding_type": fallback_finding.finding_type,
+                        "assumptions": fallback_finding.assumptions,
+                        "matched_rules": fallback_finding.matched_rules,
+                        "violated_guidelines": fallback_finding.violated_guidelines,
+                        "rule_based_reasoning": fallback_finding.rule_based_reasoning,
+                        "context_files": fallback_finding.context_files,
+                        "input_completeness": fallback_finding.code_context.get("input_completeness", {}),
+                        "review_inputs": fallback_finding.code_context.get("review_inputs", {}),
+                        "fallback_generated": True,
+                        "failure_reason": error_text,
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="finding_created",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 执行失败后保守生成待验证发现",
+                    payload={"finding_id": fallback_finding.finding_id, "expert_id": expert.expert_id, "fallback_generated": True},
+                )
+            )
+        return payload
+
+    def _build_failed_expert_fallback_finding(
+        self,
+        job: dict[str, object],
+        error_text: str,
+    ) -> ReviewFinding | None:
+        review = job.get("review")
+        expert = job.get("expert")
+        command_message = job.get("command_message")
+        if not isinstance(review, ReviewTask) or not isinstance(expert, ExpertProfile) or not isinstance(command_message, ConversationMessage):
+            return None
+        rule_screening = dict(job.get("rule_screening") or {})
+        matched_rules = [
+            str(item.get("rule_id") or item.get("title") or "").strip()
+            for item in list(rule_screening.get("matched_rules_for_llm") or [])[:4]
+            if isinstance(item, dict) and str(item.get("rule_id") or item.get("title") or "").strip()
+        ]
+        if not matched_rules:
+            return None
+        file_path = str(job.get("file_path") or "")
+        line_start = int(job.get("line_start") or 1)
+        repository_context = dict(command_message.metadata.get("repository_context") or {})
+        target_hunk = dict(command_message.metadata.get("target_hunk") or {})
+        must_review_count = int(rule_screening.get("must_review_count") or 0)
+        possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
+        top_rule = next((item for item in list(rule_screening.get("matched_rules_for_llm") or []) if isinstance(item, dict)), {})
+        rule_title = str(top_rule.get("title") or top_rule.get("rule_id") or matched_rules[0]).strip()
+        rule_reason = str(top_rule.get("reason") or "").strip()
+        confidence = 0.28 if must_review_count > 0 else 0.22 if possible_hit_count > 0 else 0.18
+        summary = (
+            f"专家执行失败，但基于已命中的规则“{rule_title}”和当前代码上下文，"
+            f"此处仍存在待验证风险。{rule_reason or '建议优先按规则意图补充验证。'}"
+        )
+        fallback_payload = self._enrich_java_quality_signal_language(
+            {
+                "title": f"{expert.name_zh} 执行失败后保守保留的待验证风险",
+                "summary": summary,
+                "claim": summary,
+                "evidence": [
+                    f"专家执行失败: {error_text}",
+                    f"规则命中: {rule_title}",
+                    *( [rule_reason] if rule_reason else [] ),
+                ],
+            },
+            expert.expert_id,
+            file_path,
+            target_hunk,
+            repository_context,
+        )
+        finding = ReviewFinding(
+            review_id=review.review_id,
+            expert_id=expert.expert_id,
+            title=str(fallback_payload.get("title") or f"{expert.name_zh} 执行失败后保守保留的待验证风险"),
+            summary=str(fallback_payload.get("summary") or summary),
+            finding_type="risk_hypothesis",
+            severity="medium",
+            confidence=confidence,
+            file_path=file_path,
+            line_start=line_start,
+            evidence=[str(item).strip() for item in list(fallback_payload.get("evidence") or []) if str(item).strip()],
+            assumptions=[
+                "当前结论来自规则筛选、路由上下文与运行前证据，尚未得到完整专家 LLM 输出确认。"
+            ],
+            context_files=self._merge_context_files([], repository_context, []),
+            matched_rules=matched_rules,
+            violated_guidelines=matched_rules,
+            rule_based_reasoning=rule_reason or f"命中规则 {rule_title}，需要补跑专家以确认具体违例证据。",
+            verification_needed=True,
+            verification_plan="建议先重试失败专家；若仍失败，人工复核目标 hunk、关联源码和命中规则后再决定是否升级为 issue。",
+            remediation_strategy=self._build_remediation_strategy(review.subject, expert.expert_id, file_path),
+            remediation_suggestion=self._build_remediation_suggestion(review.subject, expert.expert_id, file_path),
+            remediation_steps=self._build_remediation_steps(review.subject, expert.expert_id, file_path),
+            code_excerpt=self._build_code_excerpt(review.subject, file_path, line_start, expert.expert_id),
+            code_context=self._build_finding_code_context(
+                review.subject,
+                file_path,
+                line_start,
+                target_hunk,
+                repository_context,
+                expert=expert,
+                bound_documents=list(job.get("bound_documents") or []),
+                rule_screening=rule_screening,
+            ),
+            suggested_code=self._build_suggested_code(review.subject, file_path, line_start, expert.expert_id),
+            suggested_code_language=self._infer_code_language(file_path),
+        )
+        return finding
 
     def _abort_if_closed(self, review_id: str) -> None:
         """在关键阶段检查任务是否已被用户主动关闭。"""
@@ -1092,22 +1312,111 @@ class ReviewRunner:
         expert_jobs: list[dict[str, object]],
         runtime_settings,
         analysis_mode: Literal["standard", "light"],
-    ) -> None:
+    ) -> list[dict[str, object]]:
         """按分析模式执行专家任务。
 
         标准模式允许更高并发；轻量模式会压低并发，减少内网/Windows 下的大模型并发压力。
         """
+        failures: list[dict[str, object]] = []
         if not expert_jobs:
-            return
+            return failures
         if os.getenv("PYTEST_CURRENT_TEST") or len(expert_jobs) <= 1:
             for job in expert_jobs:
-                self._run_expert_from_command(**job)
-            return
+                self._update_expert_review_progress(job, state="started", total_jobs=len(expert_jobs))
+                try:
+                    self._run_expert_from_command(**job)
+                    self._update_expert_review_progress(job, state="completed", total_jobs=len(expert_jobs))
+                except ReviewClosedError:
+                    raise
+                except Exception as exc:
+                    failures.append(self._record_expert_job_failure(job, exc))
+                    self._update_expert_review_progress(job, state="failed", total_jobs=len(expert_jobs))
+            return failures
         max_workers = min(self._max_parallel_experts(runtime_settings, analysis_mode), len(expert_jobs))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._run_expert_from_command, **job) for job in expert_jobs]
-            for future in futures:
-                future.result()
+            futures = []
+            for job in expert_jobs:
+                self._update_expert_review_progress(job, state="started", total_jobs=len(expert_jobs))
+                futures.append((job, executor.submit(self._run_expert_from_command, **job)))
+            for job, future in futures:
+                try:
+                    future.result()
+                    self._update_expert_review_progress(job, state="completed", total_jobs=len(expert_jobs))
+                except ReviewClosedError:
+                    raise
+                except Exception as exc:
+                    failures.append(self._record_expert_job_failure(job, exc))
+                    self._update_expert_review_progress(job, state="failed", total_jobs=len(expert_jobs))
+        return failures
+
+    def _update_expert_review_progress(
+        self,
+        job: dict[str, object],
+        *,
+        state: Literal["started", "completed", "failed"],
+        total_jobs: int,
+    ) -> None:
+        review = job.get("review")
+        expert = job.get("expert")
+        if not isinstance(review, ReviewTask) or not isinstance(expert, ExpertProfile):
+            return
+        latest = self.review_repo.get(review.review_id)
+        if latest is None:
+            return
+        metadata = dict(latest.subject.metadata or {})
+        progress = dict(metadata.get("expert_review_progress") or {})
+        started_ids = [str(item) for item in list(progress.get("started_expert_ids") or []) if str(item).strip()]
+        completed_ids = [str(item) for item in list(progress.get("completed_expert_ids") or []) if str(item).strip()]
+        failed_ids = [str(item) for item in list(progress.get("failed_expert_ids") or []) if str(item).strip()]
+
+        expert_id = expert.expert_id
+        if state == "started" and expert_id not in started_ids:
+            started_ids.append(expert_id)
+        if state == "completed" and expert_id not in completed_ids:
+            completed_ids.append(expert_id)
+        if state == "failed" and expert_id not in failed_ids:
+            failed_ids.append(expert_id)
+
+        now = datetime.now(UTC)
+        file_path = str(job.get("file_path") or "")
+        line_start = int(job.get("line_start") or 1)
+        active_expert_id = expert_id if state == "started" else ""
+        active_expert_name = expert.name_zh if state == "started" else ""
+        progress.update(
+            {
+                "total_expert_jobs": max(int(progress.get("total_expert_jobs") or 0), int(total_jobs or 0)),
+                "started_expert_ids": started_ids,
+                "completed_expert_ids": completed_ids,
+                "failed_expert_ids": failed_ids,
+                "started_count": len(started_ids),
+                "completed_count": len(completed_ids),
+                "failed_count": len(failed_ids),
+                "active_expert_id": active_expert_id,
+                "active_expert_name": active_expert_name,
+                "last_event": state,
+                "last_event_at": now.isoformat(),
+                "last_expert_id": expert_id,
+                "last_expert_name": expert.name_zh,
+                "last_file_path": file_path,
+                "last_line_start": line_start,
+            }
+        )
+        latest.subject.metadata = {
+            **metadata,
+            "expert_review_progress": progress,
+        }
+        latest.updated_at = now
+        self.review_repo.save(latest)
+
+    def _merge_review_metadata(self, review: ReviewTask, metadata_patch: dict[str, object]) -> ReviewTask:
+        latest = self.review_repo.get(review.review_id) or review
+        latest.subject.metadata = {
+            **dict(latest.subject.metadata or {}),
+            **metadata_patch,
+        }
+        latest.updated_at = datetime.now(UTC)
+        self.review_repo.save(latest)
+        return latest
 
     def _run_expert_from_command(
         self,
@@ -1155,7 +1464,10 @@ class ReviewRunner:
             extra_tools=self._collect_skill_tools(active_skills),
             active_skills=[str(skill.skill_id) for skill in active_skills if str(getattr(skill, "skill_id", "")).strip()],
         )
-        repository_context = dict(command_message.metadata.get("repository_context") or {})
+        repository_context = self._merge_runtime_repository_context(
+            dict(command_message.metadata.get("repository_context") or {}),
+            runtime_tool_results,
+        )
         repository_context["routing_reason"] = command_message.metadata.get("routing_reason", "")
         repository_context["routing_confidence"] = command_message.metadata.get("routing_confidence", 0.0)
         target_hunk = dict(command_message.metadata.get("target_hunk") or {})
@@ -1301,6 +1613,16 @@ class ReviewRunner:
         self._abort_if_closed(review.review_id)
 
         severity, confidence = self._score_finding(review.subject, expert.expert_id)
+        input_completeness = self._build_review_input_completeness(
+            review.subject,
+            file_path,
+            line_start,
+            repository_context,
+            expert=expert,
+            bound_documents=bound_documents or [],
+            rule_screening=rule_screening or {},
+            language=self._infer_code_language(file_path),
+        )
         llm_result = self.llm_chat_service.complete_text(
             system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
             user_prompt=self._build_expert_prompt(
@@ -1342,7 +1664,15 @@ class ReviewRunner:
             file_path,
             line_start,
         )
-        parsed = self._stabilize_expert_analysis(parsed, expert.expert_id, file_path, line_start, target_hunk)
+        parsed = self._stabilize_expert_analysis(
+            parsed,
+            expert.expert_id,
+            file_path,
+            line_start,
+            target_hunk,
+            repository_context=repository_context,
+            input_completeness=input_completeness,
+        )
         design_alignment = self._extract_design_alignment(runtime_tool_results)
         severity = self._normalize_severity(parsed.get("severity"), severity)
         confidence = self._normalize_confidence(parsed.get("confidence"), confidence)
@@ -1415,6 +1745,9 @@ class ReviewRunner:
                 parsed_line_start,
                 target_hunk,
                 repository_context,
+                expert=expert,
+                bound_documents=bound_documents,
+                rule_screening=rule_screening,
             ),
             suggested_code=str(
                 parsed.get("suggested_code")
@@ -1481,6 +1814,8 @@ class ReviewRunner:
                     "extra_implementation_points": finding.extra_implementation_points,
                     "design_conflicts": finding.design_conflicts,
                     "analysis_mode": analysis_mode,
+                    "input_completeness": finding.code_context.get("input_completeness", {}),
+                    "review_inputs": finding.code_context.get("review_inputs", {}),
                     **self._llm_message_metadata(llm_result),
                 },
             )
@@ -1936,7 +2271,7 @@ class ReviewRunner:
         line_start: int,
         expert_id: str,
     ) -> str:
-        repository_excerpt = self._load_repository_source_excerpt(file_path, line_start)
+        repository_excerpt = self._load_repository_source_excerpt(subject, file_path, line_start)
         if repository_excerpt:
             return repository_excerpt
         excerpt = self.diff_excerpt_service.extract_excerpt(subject.unified_diff, file_path, line_start)
@@ -1944,14 +2279,21 @@ class ReviewRunner:
             return excerpt
         return self._build_fallback_code_excerpt(file_path, line_start, expert_id)
 
-    def _load_repository_source_excerpt(self, file_path: str, line_start: int, radius: int = 8) -> str:
+    def _load_repository_source_excerpt(
+        self,
+        subject: ReviewSubject | dict[str, object],
+        file_path: str,
+        line_start: int,
+        radius: int = 8,
+    ) -> str:
         runtime = self.runtime_settings_service.get()
-        service = RepositoryContextService(
+        service = RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
             local_path=runtime.code_repo_local_path,
             default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
             access_token=runtime.code_repo_access_token,
             auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
         )
         if not service.is_ready():
             return ""
@@ -1990,6 +2332,55 @@ class ReviewRunner:
             sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 和代码仓上下文判断影响范围。")
         return "\n\n".join(sections)
 
+    def _merge_runtime_repository_context(
+        self,
+        repository_context: dict[str, object],
+        runtime_tool_results: list[dict[str, object]],
+    ) -> dict[str, object]:
+        merged = dict(repository_context or {})
+        runtime_repo_context = next(
+            (
+                item
+                for item in runtime_tool_results
+                if str(item.get("tool_name") or "") == "repo_context_search"
+            ),
+            None,
+        )
+        if not isinstance(runtime_repo_context, dict):
+            return merged
+        passthrough_keys = {
+            "primary_context",
+            "related_contexts",
+            "related_source_snippets",
+            "context_files",
+            "matches",
+            "symbol_contexts",
+            "search_keywords",
+            "search_keyword_sources",
+            "search_commands",
+            "definition_hits",
+            "reference_hits",
+            "symbol_match_strategy",
+            "symbol_match_explanation",
+            "java_review_mode",
+            "java_context_signals",
+            "java_quality_signals",
+            "java_quality_signal_summary",
+            "current_class_context",
+            "parent_contract_contexts",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "transaction_context",
+            "persistence_contexts",
+        }
+        for key in passthrough_keys:
+            value = runtime_repo_context.get(key)
+            if value in (None, "", [], {}):
+                continue
+            merged[key] = value
+        return merged
+
     def _build_finding_code_context(
         self,
         subject: ReviewSubject,
@@ -1997,12 +2388,33 @@ class ReviewRunner:
         line_start: int,
         target_hunk: dict[str, object],
         repository_context: dict[str, object],
+        *,
+        expert: ExpertProfile | None = None,
+        bound_documents: list[object] | None = None,
+        rule_screening: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        language = self._infer_code_language(file_path)
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=self._build_target_file_full_diff(subject, file_path),
+        )
+        input_completeness = self._build_review_input_completeness(
+            subject,
+            file_path,
+            line_start,
+            repository_context,
+            expert=expert,
+            bound_documents=bound_documents or [],
+            rule_screening=rule_screening or {},
+            language=language,
+        )
         return {
             "target_file_full_diff": self._build_target_file_full_diff(subject, file_path),
             "related_diff_summary": self._build_related_diff_summary(subject, file_path),
-            "source_file_context": self._load_repository_source_excerpt(file_path, line_start),
-            "problem_source_context": self._load_repository_problem_context(file_path, line_start, target_hunk),
+            "source_file_context": self._load_repository_source_excerpt(subject, file_path, line_start),
+            "problem_source_context": self._load_repository_problem_context(subject, file_path, line_start, target_hunk),
             "target_hunk": {
                 "file_path": str(target_hunk.get("file_path") or file_path),
                 "hunk_header": str(target_hunk.get("hunk_header") or ""),
@@ -2024,6 +2436,18 @@ class ReviewRunner:
                 for item in list(repository_context.get("related_source_snippets") or [])[:6]
                 if isinstance(item, dict)
             ],
+            "java_review_mode": str(repository_context.get("java_review_mode") or "").strip(),
+            "java_context_signals": [
+                str(item).strip()
+                for item in list(repository_context.get("java_context_signals") or [])[:10]
+                if str(item).strip()
+            ],
+            "java_quality_signals": [
+                str(item).strip()
+                for item in list(java_quality.get("signals") or [])[:10]
+                if str(item).strip()
+            ],
+            "java_quality_signal_summary": str(java_quality.get("summary") or "").strip(),
             "current_class_context": dict(repository_context.get("current_class_context") or {})
             if isinstance(repository_context.get("current_class_context"), dict)
             else {},
@@ -2066,21 +2490,31 @@ class ReviewRunner:
                 if str(item).strip()
             ],
             "routing_reason": str(repository_context.get("routing_reason") or "").strip(),
+            "input_completeness": input_completeness,
+            "review_inputs": self._build_review_input_trace(
+                expert=expert,
+                bound_documents=bound_documents or [],
+                rule_screening=rule_screening or {},
+                repository_context=repository_context,
+                language=language,
+            ),
         }
 
     def _load_repository_problem_context(
         self,
+        subject: ReviewSubject | dict[str, object],
         file_path: str,
         line_start: int,
         target_hunk: dict[str, object],
     ) -> dict[str, object]:
         runtime = self.runtime_settings_service.get()
-        service = RepositoryContextService(
+        service = RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
             local_path=runtime.code_repo_local_path,
             default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
             access_token=runtime.code_repo_access_token,
             auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
         )
         if not service.is_ready():
             return {}
@@ -2275,6 +2709,24 @@ class ReviewRunner:
             return "go"
         return "text"
 
+    def _build_language_general_guidance(self, language: str) -> str:
+        normalized = str(language or "").strip().lower()
+        if normalized == "java":
+            return (
+                "- 遵循 Java / Spring 通用代码规范：命名清晰，单个方法职责收敛，避免把校验、事务、持久化、远程调用混成一个长方法。\n"
+                "- 关注输入校验、空值处理、异常边界、日志脱敏、权限/租户隔离，以及 @Transactional 范围内的副作用。\n"
+                "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写、EAGER/级联加载风险。\n"
+                "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据，证据不足时只能输出 risk_hypothesis。"
+            )
+        if normalized in {"javascript", "jsx", "typescript", "tsx"}:
+            return (
+                "- 遵循 JavaScript / TypeScript 通用代码规范：命名清晰，避免隐藏副作用，保持函数职责单一，异步流程要显式处理错误和资源释放。\n"
+                "- 关注输入校验、鉴权边界、日志与敏感信息暴露、空值/undefined 处理、Promise/await 错误传播和并发竞态。\n"
+                "- 检查数据库/HTTP/缓存调用是否存在无边界重试、批量串行、未分页查询、未取消请求或阻塞主路径的问题。\n"
+                "- 若结论依赖运行时分支、类型收窄或框架约定，必须引用已提供代码证据；证据不足时只能输出 risk_hypothesis。"
+            )
+        return ""
+
     def _build_expert_prompt(
         self,
         subject: ReviewSubject,
@@ -2300,8 +2752,20 @@ class ReviewRunner:
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
         target_file_full_diff = self._build_target_file_full_diff(subject, file_path)
         related_diff_summary = self._build_related_diff_summary(subject, file_path)
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=target_file_full_diff,
+        )
+        prompt_repository_context = dict(repository_context)
+        if list(java_quality.get("signals") or []):
+            prompt_repository_context["java_quality_signals"] = list(java_quality.get("signals") or [])
+        if str(java_quality.get("summary") or "").strip():
+            prompt_repository_context["java_quality_signal_summary"] = str(java_quality.get("summary") or "").strip()
         runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
-        repository_context_summary = self._build_repository_context_summary(repository_context, runtime_tool_results)
+        repository_context_summary = self._build_repository_context_summary(prompt_repository_context, runtime_tool_results)
+        repository_source_blocks = self._build_repository_source_blocks(prompt_repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
         review_spec_summary = self._build_review_spec_summary(expert.review_spec)
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
@@ -2309,7 +2773,18 @@ class ReviewRunner:
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
         language = self._infer_code_language(file_path)
-        java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, repository_context)
+        language_general_guidance = self._build_language_general_guidance(language)
+        java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, prompt_repository_context)
+        input_completeness_summary = self._build_review_input_completeness_summary(
+            subject,
+            file_path,
+            line_start,
+            prompt_repository_context,
+            expert=expert,
+            bound_documents=bound_documents,
+            rule_screening=rule_screening or {},
+            language=language,
+        )
         has_design_docs = bool(self._review_design_docs(subject))
         business_changed_files = self._business_changed_files(subject)
         routing_reason = str(repository_context.get("routing_reason") or "").strip()
@@ -2340,12 +2815,15 @@ class ReviewRunner:
             f"已激活技能:\n{active_skill_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
             f"规则遍历结果:\n{rule_screening_summary}\n"
+            f"输入完整性校验:\n{input_completeness_summary}\n"
+            f"语言通用规范提示:\n{language_general_guidance or '当前目标文件未命中已配置的语言通用规范提示，请仅依据专家规范、规则和代码证据审查。'}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
             f"目标文件完整 diff:\n{target_file_full_diff}\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n"
             f"运行时工具调用结果:\n{runtime_tool_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
+            f"关键源码上下文:\n{repository_source_blocks}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
@@ -2360,6 +2838,154 @@ class ReviewRunner:
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
+    def _build_review_input_completeness_summary(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        *,
+        expert: ExpertProfile,
+        bound_documents: list[object],
+        rule_screening: dict[str, object],
+        language: str,
+    ) -> str:
+        payload = self._build_review_input_completeness(
+            subject,
+            file_path,
+            line_start,
+            repository_context,
+            expert=expert,
+            bound_documents=bound_documents,
+            rule_screening=rule_screening,
+            language=language,
+        )
+        lines = [
+            f"- 专家规范: {'已提供' if payload['review_spec_present'] else '缺失'}",
+            f"- 语言通用规范提示: {'已提供' if payload['language_guidance_present'] else '缺失'}",
+            f"- 绑定规则: {payload['matched_rule_count']} 条命中 / {payload['enabled_rule_count']} 条启用",
+            f"- 绑定参考文档: {payload['bound_document_count']} 份",
+            f"- 变更代码原文: {'已提供' if payload['target_file_diff_present'] else '缺失'}",
+            f"- 当前源码上下文: {'已提供' if payload['source_context_present'] else '缺失'}",
+            f"- 关联源码上下文: {payload['related_context_count']} 段",
+        ]
+        missing_sections = list(payload.get("missing_sections") or [])
+        if missing_sections:
+            lines.append(f"- 缺失项: {' / '.join(missing_sections[:6])}")
+            lines.append("- 若结论依赖缺失项，只能输出 risk_hypothesis，并写清 verification_plan。")
+        else:
+            lines.append("- 当前未缺失关键输入，可基于规范、规则、变更代码和关联上下文直接审查。")
+        return "\n".join(lines)
+
+    def _build_review_input_completeness(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        *,
+        expert: ExpertProfile | None,
+        bound_documents: list[object],
+        rule_screening: dict[str, object],
+        language: str,
+    ) -> dict[str, object]:
+        target_file_diff_present = bool(self._build_target_file_full_diff(subject, file_path).strip())
+        language_guidance_present = bool(self._build_language_general_guidance(language).strip())
+        source_context_present = bool(
+            self._load_repository_problem_context(subject, file_path, line_start, {}).get("snippet")
+            or self._load_repository_source_excerpt(subject, file_path, line_start).strip()
+            or str((repository_context.get("primary_context") or {}).get("snippet") or "").strip()
+        )
+        related_context_count = sum(
+            1
+            for collection in [
+                list(repository_context.get("related_source_snippets") or []),
+                list(repository_context.get("related_contexts") or []),
+                list(repository_context.get("caller_contexts") or []),
+                list(repository_context.get("callee_contexts") or []),
+                list(repository_context.get("domain_model_contexts") or []),
+                list(repository_context.get("persistence_contexts") or []),
+            ]
+            for item in collection[:6]
+            if isinstance(item, dict) and str(item.get("snippet") or "").strip()
+        )
+        enabled_rule_count = int(rule_screening.get("enabled_rules") or 0)
+        matched_rule_count = len(list(rule_screening.get("matched_rules_for_llm") or []))
+        review_spec_present = bool(str(getattr(expert, "review_spec", "") or "").strip())
+        bound_document_count = len([item for item in bound_documents if item is not None])
+        missing_sections: list[str] = []
+        if not review_spec_present:
+            missing_sections.append("专家规范")
+        if not language_guidance_present:
+            missing_sections.append("语言通用规范提示")
+        if enabled_rule_count <= 0:
+            missing_sections.append("绑定规则")
+        if not target_file_diff_present:
+            missing_sections.append("变更代码原文")
+        if not source_context_present:
+            missing_sections.append("当前源码上下文")
+        if related_context_count <= 0:
+            missing_sections.append("关联源码上下文")
+        return {
+            "review_spec_present": review_spec_present,
+            "language_guidance_present": language_guidance_present,
+            "enabled_rule_count": enabled_rule_count,
+            "matched_rule_count": matched_rule_count,
+            "bound_document_count": bound_document_count,
+            "target_file_diff_present": target_file_diff_present,
+            "source_context_present": source_context_present,
+            "related_context_count": related_context_count,
+            "missing_sections": missing_sections,
+        }
+
+    def _build_review_input_trace(
+        self,
+        *,
+        expert: ExpertProfile | None,
+        bound_documents: list[object],
+        rule_screening: dict[str, object],
+        repository_context: dict[str, object],
+        language: str,
+    ) -> dict[str, object]:
+        matched_rules = []
+        for item in list(rule_screening.get("matched_rules_for_llm") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            matched_rules.append(
+                {
+                    "rule_id": str(item.get("rule_id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "priority": str(item.get("priority") or "").strip(),
+                }
+            )
+        bound_doc_titles = []
+        for item in bound_documents[:6]:
+            title = str(getattr(item, "title", "") or "").strip()
+            if title:
+                bound_doc_titles.append(title)
+        return {
+            "expert_id": str(getattr(expert, "expert_id", "") or "").strip(),
+            "review_spec_present": bool(str(getattr(expert, "review_spec", "") or "").strip()),
+            "language_guidance_language": str(language or "").strip(),
+            "language_guidance_present": bool(self._build_language_general_guidance(language).strip()),
+            "language_guidance_topics": self._build_language_guidance_topics(language),
+            "bound_document_titles": bound_doc_titles,
+            "matched_rules": matched_rules,
+            "context_files": [
+                str(item).strip()
+                for item in list(repository_context.get("context_files") or [])[:10]
+                if str(item).strip()
+            ],
+        }
+
+    def _build_language_guidance_topics(self, language: str) -> list[str]:
+        normalized = str(language or "").strip().lower()
+        if normalized == "java":
+            return ["命名与职责", "输入校验与安全边界", "事务与副作用", "Repository/ORM 查询风险"]
+        if normalized in {"javascript", "jsx", "typescript", "tsx"}:
+            return ["命名与职责", "输入校验与鉴权边界", "异步错误处理", "数据访问与性能边界"]
+        return []
+
     def _build_java_ddd_review_focus(
         self,
         language: str,
@@ -2368,6 +2994,17 @@ class ReviewRunner:
     ) -> str:
         if language != "java":
             return ""
+        java_review_mode = str(repository_context.get("java_review_mode") or "").strip() or "general"
+        java_context_signals = [
+            str(item).strip()
+            for item in list(repository_context.get("java_context_signals") or [])
+            if str(item).strip()
+        ]
+        java_quality_signals = [
+            str(item).strip()
+            for item in list(repository_context.get("java_quality_signals") or [])
+            if str(item).strip()
+        ]
         available_sections: list[str] = []
         for key, label in [
             ("current_class_context", "当前类问题片段"),
@@ -2384,9 +3021,12 @@ class ReviewRunner:
             if isinstance(value, list) and value:
                 available_sections.append(label)
         base = [
-            "Java DDD 专项审查要求：",
+            "Java 通用审查要求：",
+            f"- 当前模式: {'Java DDD 增强模式' if java_review_mode == 'ddd_enhanced' else 'Java 通用模式'}",
             f"- 可用上下文: {' / '.join(available_sections) or '仅有基础 diff 与代码片段'}",
-            "- 不要只基于单个 diff hunk 下结论，必须结合调用方、被调方、事务边界和持久化层判断。",
+            f"- 已识别信号: {' / '.join(java_context_signals[:8]) or '未识别到额外 Java 结构信号'}",
+            f"- 已识别通用质量信号: {' / '.join(java_quality_signals[:8]) or '未识别到额外 Java 通用质量信号'}",
+            "- 不要只基于单个 diff hunk 下结论，必须结合当前类、调用方、被调方、事务边界和持久化层判断。",
         ]
         if expert_id == "security_compliance":
             base.extend(
@@ -2408,8 +3048,8 @@ class ReviewRunner:
             base.extend(
                 [
                     "- 重点检查 Controller/ApplicationService/DomainService/Repository 是否越层依赖、边界绕过、基础设施泄漏。",
-                    "- 重点检查应用服务是否堆业务规则，领域对象是否退化为贫血模型。",
-                    "- 必须判断事务边界和聚合边界是否一致，是否存在跨聚合直接修改。",
+                    "- 重点检查 Service 是否承担过多编排与规则逻辑，是否把持久化和流程控制揉在一起。",
+                    "- 必须判断事务边界和模块边界是否一致；若处于 DDD 增强模式，再额外判断聚合边界是否被破坏。",
                 ]
             )
         elif expert_id == "ddd_specification":
@@ -2421,7 +3061,14 @@ class ReviewRunner:
                 ]
             )
         else:
-            base.append("- 若上下文中存在 Java DDD 结构信息，请优先引用这些结构化上下文，而不是只看单行改动。")
+            base.append("- 若上下文中存在 Java 结构化上下文，请优先引用这些结构化上下文，而不是只看单行改动。")
+        if java_review_mode == "ddd_enhanced":
+            base.extend(
+                [
+                    "- Java DDD 增强要求: 当前变更命中了领域建模信号，请额外检查聚合边界、领域事件和值对象语义。",
+                    "- 若结论涉及领域层责任划分，必须明确说明改动落在领域层、应用层还是基础设施层。",
+                ]
+            )
         return "\n".join(base) + "\n"
 
     def _build_expert_system_prompt(
@@ -2565,6 +3212,8 @@ class ReviewRunner:
         file_path: str,
         line_start: int,
         target_hunk: dict[str, object],
+        repository_context: dict[str, object] | None = None,
+        input_completeness: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """对专家输出做二次收敛，压制明显误报。"""
         result = dict(parsed)
@@ -2659,6 +3308,7 @@ class ReviewRunner:
         result["violated_guidelines"] = [
             str(item).strip() for item in list(result.get("violated_guidelines") or []) if str(item).strip()
         ]
+        result = self._enrich_java_domain_finding_language(result, expert_id)
         if not str(result.get("rule_based_reasoning") or "").strip():
             matched_rules = list(result.get("matched_rules") or [])
             violated = list(result.get("violated_guidelines") or [])
@@ -2674,6 +3324,185 @@ class ReviewRunner:
         result["extra_implementation_points"] = self._normalize_text_list(result.get("extra_implementation_points"), [])
         result["design_conflicts"] = self._normalize_text_list(result.get("design_conflicts"), [])
         result["design_alignment_status"] = str(result.get("design_alignment_status") or "").strip()
+        result = self._enrich_java_quality_signal_language(
+            result,
+            expert_id,
+            file_path,
+            target_hunk,
+            repository_context or {},
+        )
+        result = self._apply_input_quality_gate(result, input_completeness or {})
+        return result
+
+    def _apply_input_quality_gate(
+        self,
+        parsed: dict[str, object],
+        input_completeness: dict[str, object],
+    ) -> dict[str, object]:
+        result = dict(parsed)
+        missing_sections = [
+            str(item).strip()
+            for item in list(input_completeness.get("missing_sections") or [])
+            if str(item).strip()
+        ]
+        required_sections = {"专家规范", "语言通用规范提示", "变更代码原文", "当前源码上下文", "关联源码上下文"}
+        missing_required = [item for item in missing_sections if item in required_sections]
+        if not missing_required:
+            return result
+
+        result["finding_type"] = "risk_hypothesis"
+        result["verification_needed"] = True
+        result["direct_evidence"] = False
+        result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35 if len(missing_required) >= 2 else 0.4)
+        if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
+            result["severity"] = "medium"
+
+        assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+        assumption = f"当前审查输入缺失: {' / '.join(missing_required[:5])}，结论已自动降级为待验证风险。"
+        if assumption not in assumptions:
+            assumptions.append(assumption)
+        result["assumptions"] = assumptions
+
+        existing_plan = str(result.get("verification_plan") or "").strip()
+        gate_plan = f"先补齐 {' / '.join(missing_required[:5])}，再重新审查并确认当前风险是否成立。"
+        result["verification_plan"] = existing_plan or gate_plan
+        return result
+
+    def _enrich_java_domain_finding_language(
+        self,
+        parsed: dict[str, object],
+        expert_id: str,
+    ) -> dict[str, object]:
+        if expert_id not in {"ddd_specification", "architecture_design"}:
+            return parsed
+
+        matched_rules = [str(item).strip().upper() for item in list(parsed.get("matched_rules") or []) if str(item).strip()]
+        if not any(rule.startswith("DDD-JDDD-001") or rule.startswith("ARCH-JDDD-002") for rule in matched_rules):
+            return parsed
+
+        result = dict(parsed)
+        title = str(result.get("title") or "").strip()
+        claim = str(result.get("claim") or "").strip()
+        text_blob = f"{title}\n{claim}".lower()
+
+        needs_course_create = "course.create" not in text_blob
+        needs_aggregate = "aggregate" not in text_blob
+        needs_factory = "factory" not in text_blob
+        needs_domain_event = "domain event" not in text_blob
+
+        if needs_aggregate or needs_factory:
+            suffix = "Aggregate factory bypass"
+            if suffix.lower() not in title.lower():
+                title = f"{title} ({suffix})" if title else suffix
+        result["title"] = title
+
+        additions: list[str] = []
+        if needs_course_create:
+            additions.append("当前变更绕过了 Course.create")
+        if needs_aggregate or needs_factory:
+            additions.append("这属于 aggregate factory bypass")
+        if needs_domain_event:
+            additions.append("并可能让 domain event 录制/发布语义退化")
+        if additions:
+            claim = claim.rstrip("。")
+            suffix = "；".join(additions)
+            result["claim"] = f"{claim}；{suffix}。".strip("；")
+        else:
+            result["claim"] = claim
+        return result
+
+    def _enrich_java_quality_signal_language(
+        self,
+        parsed: dict[str, object],
+        expert_id: str,
+        file_path: str,
+        target_hunk: dict[str, object],
+        repository_context: dict[str, object],
+    ) -> dict[str, object]:
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=str(target_hunk.get("excerpt") or ""),
+        )
+        signal_set = {
+            str(item).strip()
+            for item in list(java_quality.get("signals") or [])
+            if str(item).strip()
+        }
+        if not signal_set:
+            return parsed
+
+        matched_terms = [
+            str(item).strip()
+            for item in list(java_quality.get("matched_terms") or [])
+            if str(item).strip()
+        ]
+        signal_terms = {
+            str(key).strip(): [str(item).strip() for item in list(value or []) if str(item).strip()]
+            for key, value in dict(java_quality.get("signal_terms") or {}).items()
+            if str(key).strip()
+        }
+        result = self._enrich_java_domain_finding_language(dict(parsed), expert_id)
+        title = str(result.get("title") or "").strip()
+        summary = str(result.get("summary") or "").strip()
+        claim = str(result.get("claim") or "").strip()
+        claim_blob = f"{title}\n{claim}".lower()
+        evidence = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        summary_parts = [summary] if summary else []
+
+        if "query_semantics_weakened" in signal_set and expert_id in {
+            "database_analysis",
+            "correctness_business",
+            "performance_reliability",
+            "security_compliance",
+        }:
+            phrase = "当前变更把 equal 精确匹配放宽成 like/contains 模糊匹配"
+            summary_phrase = "查询语义从精确匹配退化为模糊匹配，可能扩大结果范围并削弱索引命中。"
+            evidence_phrase = "检测到查询语义从 equal 精确匹配退化为 like 模糊匹配。"
+            if "查询语义" not in title:
+                title = f"{title}（查询语义退化）" if title else "查询语义退化"
+            if "like" not in claim_blob:
+                claim = f"{claim.rstrip('。')}；{phrase}。".strip("；")
+            if summary_phrase not in summary_parts:
+                summary_parts.append(summary_phrase)
+            if evidence_phrase not in evidence:
+                evidence.append(evidence_phrase)
+
+        if "naming_convention_violation" in signal_set:
+            rename_terms = [term for term in list(signal_terms.get("naming_convention_violation") or []) if term]
+            if len(rename_terms) >= 2:
+                rename_phrase = f"并存在命名规范退化（{rename_terms[0]} -> {rename_terms[1]}）"
+                rename_summary = f"变量/常量命名从 {rename_terms[0]} 退化为 {rename_terms[1]}，违背 Java 通用命名规范。"
+            elif rename_terms:
+                rename_phrase = f"并存在命名规范退化（{rename_terms[0]}）"
+                rename_summary = f"标识符 {rename_terms[0]} 存在命名规范退化。"
+            else:
+                rename_phrase = "并存在命名规范退化"
+                rename_summary = "当前改动引入了命名规范退化。"
+            if "命名规范" not in title:
+                title = f"{title}（命名规范退化）" if title else "命名规范退化"
+            if rename_phrase.replace("并", "") not in claim:
+                claim = f"{claim.rstrip('。')}；{rename_phrase}。".strip("；")
+            if rename_summary not in summary_parts:
+                summary_parts.append(rename_summary)
+            if rename_phrase not in evidence:
+                evidence.append(rename_phrase)
+
+        if "exception_swallowed" in signal_set and "静默吞掉" not in claim_blob and "空 catch" not in claim_blob:
+            swallow_phrase = "当前变更还让 catch 块静默吞掉异常"
+            swallow_summary = "异常处理被弱化为静默吞掉异常，后续排障、补偿和审计都会变难。"
+            claim = f"{claim.rstrip('。')}；{swallow_phrase}。".strip("；")
+            if swallow_summary not in summary_parts:
+                summary_parts.append(swallow_summary)
+            if swallow_phrase not in evidence:
+                evidence.append(swallow_phrase)
+
+        result["title"] = title
+        if summary_parts:
+            result["summary"] = "；".join(part for part in summary_parts if part)
+        result["claim"] = claim
+        result["evidence"] = evidence
         return result
 
     def _stabilize_line_start(self, value: object, fallback: int, target_hunk: dict[str, object]) -> int:
@@ -2970,7 +3799,117 @@ class ReviewRunner:
             self._append_java_ddd_context_summary(lines, item)
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
 
+    def _build_repository_source_blocks(
+        self,
+        repository_context: dict[str, object],
+        runtime_tool_results: list[dict[str, object]],
+    ) -> str:
+        lines: list[str] = []
+        primary_context = repository_context.get("primary_context")
+        if isinstance(primary_context, dict):
+            path = str(primary_context.get("path") or "").strip()
+            snippet = str(primary_context.get("snippet") or "").strip()
+            if path and snippet:
+                lines.append(f"# 目标文件源码\n{path}")
+                lines.extend(snippet.splitlines()[:20])
+
+        current_class_context = repository_context.get("current_class_context")
+        if isinstance(current_class_context, dict):
+            path = str(current_class_context.get("path") or "").strip()
+            snippet = str(current_class_context.get("snippet") or "").strip()
+            if path and snippet:
+                if lines:
+                    lines.append("")
+                lines.append(f"# 当前类问题片段\n{path}")
+                lines.extend(snippet.splitlines()[:20])
+
+        for key, label in [
+            ("parent_contract_contexts", "父接口/抽象类"),
+            ("caller_contexts", "调用方"),
+            ("callee_contexts", "被调方"),
+            ("domain_model_contexts", "领域模型"),
+            ("persistence_contexts", "持久化上下文"),
+        ]:
+            contexts = repository_context.get(key)
+            if not isinstance(contexts, list):
+                continue
+            appended = 0
+            for item in contexts[:2]:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                symbol = str(item.get("symbol") or "").strip()
+                if not path or not snippet:
+                    continue
+                if lines:
+                    lines.append("")
+                header = f"# {label}\n{path}"
+                if symbol:
+                    header += f" · {symbol}"
+                lines.append(header)
+                lines.extend(snippet.splitlines()[:16])
+                appended += 1
+            if appended:
+                continue
+
+        transaction_context = repository_context.get("transaction_context")
+        if isinstance(transaction_context, dict) and transaction_context:
+            snippet = str(transaction_context.get("transaction_boundary_snippet") or "").strip()
+            path = str(transaction_context.get("transactional_path") or "").strip()
+            method_name = str(transaction_context.get("transactional_method") or "").strip()
+            if snippet:
+                if lines:
+                    lines.append("")
+                header = f"# 事务边界\n{path}"
+                if method_name:
+                    header += f" · {method_name}"
+                lines.append(header)
+                lines.extend(snippet.splitlines()[:16])
+            call_chain = [
+                str(item).strip()
+                for item in list(transaction_context.get("call_chain") or [])
+                if str(item).strip()
+            ]
+            if call_chain:
+                lines.append(f"调用链: {' -> '.join(call_chain[:6])}")
+
+        if not lines:
+            for item in runtime_tool_results:
+                if str(item.get("tool_name") or "") != "repo_context_search":
+                    continue
+                primary = item.get("primary_context")
+                if isinstance(primary, dict):
+                    path = str(primary.get("path") or "").strip()
+                    snippet = str(primary.get("snippet") or "").strip()
+                    if path and snippet:
+                        lines.append(f"# 目标文件源码\n{path}")
+                        lines.extend(snippet.splitlines()[:20])
+                        break
+        return "\n".join(lines) if lines else "未补充可直接供大模型阅读的源码上下文。"
+
     def _append_java_ddd_context_summary(self, lines: list[str], context_payload: dict[str, object]) -> None:
+        java_review_mode = str(context_payload.get("java_review_mode") or "").strip()
+        java_context_signals = [
+            str(item).strip()
+            for item in list(context_payload.get("java_context_signals") or [])
+            if str(item).strip()
+        ]
+        if java_review_mode:
+            mode_label = "Java DDD 增强模式" if java_review_mode == "ddd_enhanced" else "Java 通用模式"
+            lines.append(f"- Java 审查模式: {mode_label}")
+        if java_context_signals:
+            lines.append(f"- Java 结构信号: {' / '.join(java_context_signals[:8])}")
+        java_quality_signals = [
+            str(item).strip()
+            for item in list(context_payload.get("java_quality_signals") or [])
+            if str(item).strip()
+        ]
+        if java_quality_signals:
+            lines.append(f"- Java 通用质量信号: {' / '.join(java_quality_signals[:8])}")
+        java_quality_signal_summary = str(context_payload.get("java_quality_signal_summary") or "").strip()
+        if java_quality_signal_summary:
+            lines.append(f"- Java 通用质量摘要: {java_quality_signal_summary}")
         current_class_context = context_payload.get("current_class_context")
         if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
             lines.append("- Java 当前类问题片段:")
@@ -3043,6 +3982,27 @@ class ReviewRunner:
         ]:
             if isinstance(value, str) and value.strip():
                 query_terms.append(value.strip())
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=self._build_target_file_full_diff(subject, file_path),
+        )
+        java_review_mode = str(repository_context.get("java_review_mode") or "").strip()
+        if java_review_mode:
+            query_terms.append(f"java_mode:{java_review_mode}")
+        for signal in list(repository_context.get("java_context_signals") or [])[:8]:
+            normalized = str(signal).strip()
+            if normalized:
+                query_terms.append(f"java_signal:{normalized}")
+        for signal in list(java_quality.get("signals") or [])[:8]:
+            normalized = str(signal).strip()
+            if normalized:
+                query_terms.append(f"java_quality:{normalized}")
+        for term in list(java_quality.get("matched_terms") or [])[:8]:
+            normalized = str(term).strip()
+            if normalized:
+                query_terms.append(f"java_term:{normalized}")
         return {
             "changed_files": list(subject.changed_files),
             "query_terms": query_terms,

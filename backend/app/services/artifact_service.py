@@ -13,13 +13,17 @@ def build_report_summary(
     finding_count: int,
     issue_count: int,
     pending_human_count: int,
+    partial_failure_count: int = 0,
 ) -> str:
     """生成产物快照和结果页都会复用的报告摘要文案。"""
 
-    return (
+    summary = (
         f"审核报告已生成，共收敛 {finding_count} 条 findings，"
         f"形成 {issue_count} 个议题，其中 {pending_human_count} 个待人工裁决。"
     )
+    if partial_failure_count > 0:
+        summary += f" 本轮另有 {partial_failure_count} 个专家任务执行失败，已保留其余审查结果。"
+    return summary
 
 
 class ArtifactService:

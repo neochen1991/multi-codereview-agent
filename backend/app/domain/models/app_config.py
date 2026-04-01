@@ -101,6 +101,11 @@ class AllowlistConfig(BaseModel):
             "dependency_surface_locator",
             "repo_context_search",
             "pg_schema_context",
+            "transaction_boundary_inspector",
+            "aggregate_invariant_inspector",
+            "application_service_boundary_inspector",
+            "controller_entry_guard_inspector",
+            "repository_query_risk_inspector",
         ],
         validation_alias=AliasChoices("runtime_tools", "skills"),
     )

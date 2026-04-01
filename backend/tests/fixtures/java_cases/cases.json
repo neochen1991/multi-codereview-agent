@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "repo_key": "spring-petclinic",
+      "clone_url": "https://github.com/spring-projects/spring-petclinic.git",
+      "default_branch": "main",
+      "review_mode": "general",
+      "preferred_local_path": "/tmp/github-java-real-case"
+    },
+    {
+      "repo_key": "java-ddd-example",
+      "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
+      "default_branch": "main",
+      "review_mode": "ddd_enhanced",
+      "preferred_local_path": "/tmp/java-ddd-example-review-repo"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "petclinic-owner-create-validation-regression",
+      "repo_key": "spring-petclinic",
+      "category": "security",
+      "scenario": "Owner onboarding drops bean validation at the controller entry",
+      "business_context": "会员注册入口为了快速修复表单兼容问题，临时移除了创建 Owner 时的控制器入参校验。",
+      "tags": ["spring-mvc", "validation", "controller"],
+      "patch_operations": [
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+          "description": "Remove @Valid from owner creation flow.",
+          "search": "public String processCreationForm(@Valid Owner owner, BindingResult result, RedirectAttributes redirectAttributes) {",
+          "replace": "public String processCreationForm(Owner owner, BindingResult result, RedirectAttributes redirectAttributes) {"
+        }
+      ],
+      "expected": {
+        "required_experts": ["security_compliance", "correctness_business"],
+        "rule_ids_any_of": ["SEC-JDDD-001"],
+        "finding_keywords": ["@Valid", "validation", "owner"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "petclinic-owner-search-unbounded-query",
+      "repo_key": "spring-petclinic",
+      "category": "performance",
+      "scenario": "Customer search endpoint bypasses pagination and switches to contains query",
+      "business_context": "客服希望模糊搜索所有 Owner，直接把分页查询改成了 contains + 全量列表返回。",
+      "tags": ["spring-data", "pagination", "repository"],
+      "patch_operations": [
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+          "description": "Replace paginated owner search with unbounded list query.",
+          "search": "\t\t// find owners by last name\n\t\tPage<Owner> ownersResults = findPaginatedForOwnersLastName(page, lastName);\n\t\tif (ownersResults.isEmpty()) {\n\t\t\t// no owners found\n\t\t\tresult.rejectValue(\"lastName\", \"notFound\", \"not found\");\n\t\t\treturn \"owners/findOwners\";\n\t\t}\n\n\t\tif (ownersResults.getTotalElements() == 1) {\n\t\t\t// 1 owner found\n\t\t\towner = ownersResults.iterator().next();\n\t\t\treturn \"redirect:/owners/\" + owner.getId();\n\t\t}\n\n\t\t// multiple owners found\n\t\treturn addPaginationModel(page, model, ownersResults);",
+          "replace": "\t\t// find owners by last name\n\t\tList<Owner> ownersResults = this.owners.findByLastNameContaining(lastName);\n\t\tif (ownersResults.isEmpty()) {\n\t\t\t// no owners found\n\t\t\tresult.rejectValue(\"lastName\", \"notFound\", \"not found\");\n\t\t\treturn \"owners/findOwners\";\n\t\t}\n\n\t\tif (ownersResults.size() == 1) {\n\t\t\t// 1 owner found\n\t\t\towner = ownersResults.iterator().next();\n\t\t\treturn \"redirect:/owners/\" + owner.getId();\n\t\t}\n\n\t\t// multiple owners found\n\t\tmodel.addAttribute(\"listOwners\", ownersResults);\n\t\tmodel.addAttribute(\"currentPage\", page);\n\t\tmodel.addAttribute(\"totalPages\", 1);\n\t\tmodel.addAttribute(\"totalItems\", ownersResults.size());\n\t\treturn \"owners/ownersList\";"
+        },
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+          "description": "Add contains query returning a full list.",
+          "search": "package org.springframework.samples.petclinic.owner;\n\nimport java.util.Optional;",
+          "replace": "package org.springframework.samples.petclinic.owner;\n\nimport java.util.List;\nimport java.util.Optional;"
+        },
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/owner/OwnerRepository.java",
+          "description": "Expose unbounded contains query.",
+          "search": "\tPage<Owner> findByLastNameStartingWith(String lastName, Pageable pageable);\n",
+          "replace": "\tPage<Owner> findByLastNameStartingWith(String lastName, Pageable pageable);\n\n\tList<Owner> findByLastNameContaining(String lastName);\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["performance_reliability", "database_analysis"],
+        "rule_ids_any_of": ["PERF-SQL-001", "PERF-SQL-002"],
+        "finding_keywords": ["分页", "contains", "全量", "模糊查询"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "petclinic-owner-update-id-guard-removed",
+      "repo_key": "spring-petclinic",
+      "category": "correctness",
+      "scenario": "Owner update flow removes URL and payload identity consistency check",
+      "business_context": "为了兼容前端改造，更新 Owner 时去掉了 URL ownerId 与表单 id 的一致性校验。",
+      "tags": ["controller", "integrity", "update"],
+      "patch_operations": [
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/owner/OwnerController.java",
+          "description": "Remove owner id mismatch guard before save.",
+          "search": "\n\t\tif (!Objects.equals(owner.getId(), ownerId)) {\n\t\t\tresult.rejectValue(\"id\", \"mismatch\", \"The owner ID in the form does not match the URL.\");\n\t\t\tredirectAttributes.addFlashAttribute(\"error\", \"Owner ID mismatch. Please try again.\");\n\t\t\treturn \"redirect:/owners/{ownerId}/edit\";\n\t\t}\n",
+          "replace": "\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["correctness_business", "security_compliance"],
+        "rule_ids_any_of": ["SEC-JDDD-001"],
+        "finding_keywords": ["ownerId", "表单", "URL", "mismatch"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "petclinic-vet-html-unpaged-list",
+      "repo_key": "spring-petclinic",
+      "category": "performance",
+      "scenario": "Vet HTML list endpoint abandons pagination and loads all records",
+      "business_context": "诊所后台希望导出全部医生列表，直接把 HTML 页接口改成一次性查全表。",
+      "tags": ["spring-mvc", "pagination", "repository"],
+      "patch_operations": [
+        {
+          "path": "src/main/java/org/springframework/samples/petclinic/vet/VetController.java",
+          "description": "Return all vets for the HTML endpoint.",
+          "search": "\t@GetMapping(\"/vets.html\")\n\tpublic String showVetList(@RequestParam(defaultValue = \"1\") int page, Model model) {\n\t\t// Here we are returning an object of type 'Vets' rather than a collection of Vet\n\t\t// objects so it is simpler for Object-Xml mapping\n\t\tVets vets = new Vets();\n\t\tPage<Vet> paginated = findPaginated(page);\n\t\tvets.getVetList().addAll(paginated.toList());\n\t\treturn addPaginationModel(page, paginated, model);\n\t}\n",
+          "replace": "\t@GetMapping(\"/vets.html\")\n\tpublic String showVetList(@RequestParam(defaultValue = \"1\") int page, Model model) {\n\t\tList<Vet> listVets = this.vetRepository.findAll();\n\t\tmodel.addAttribute(\"currentPage\", page);\n\t\tmodel.addAttribute(\"totalPages\", 1);\n\t\tmodel.addAttribute(\"totalItems\", listVets.size());\n\t\tmodel.addAttribute(\"listVets\", listVets);\n\t\treturn \"vets/vetList\";\n\t}\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["performance_reliability", "database_analysis"],
+        "rule_ids_any_of": ["PERF-SQL-001"],
+        "finding_keywords": ["findAll", "分页", "全量", "vets"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-course-creator-bypasses-domain-events",
+      "repo_key": "java-ddd-example",
+      "category": "architecture",
+      "scenario": "Course creation bypasses aggregate factory and drops domain event recording",
+      "business_context": "课程创建流程为了绕过一个构造器问题，直接 new Course，跳过了 aggregate factory 与领域事件录制。",
+      "tags": ["ddd", "aggregate", "domain-event"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Instantiate the aggregate directly instead of using the factory.",
+          "search": "        Course course = Course.create(id, name, duration);",
+          "replace": "        Course course = new Course(id, name, duration);"
+        }
+      ],
+      "expected": {
+        "required_experts": ["ddd_specification", "architecture_design"],
+        "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002"],
+        "finding_keywords": ["Course.create", "aggregate", "domain event", "factory"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-domain-events-consumer-unbounded-batch",
+      "repo_key": "java-ddd-example",
+      "category": "performance",
+      "scenario": "Domain events consumer removes SQL LIMIT and scans the full outbox each loop",
+      "business_context": "事件消费端为了一次性追平 backlog，去掉了每批 200 条限制，导致循环内查询不再受控。",
+      "tags": ["ddd", "outbox", "sql", "transaction"],
+      "patch_operations": [
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+          "description": "Remove SQL limit and chunk parameter.",
+          "search": "\t\t\tNativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(\n\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk\"\n\t\t\t);\n\n\t\t\tquery.setParameter(\"chunk\", CHUNKS);\n",
+          "replace": "\t\t\tNativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(\n\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC\"\n\t\t\t);\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["performance_reliability", "database_analysis", "ddd_specification"],
+        "rule_ids_any_of": ["PERF-SQL-001", "PERF-JDDD-002"],
+        "finding_keywords": ["LIMIT", "domain_events", "批量", "全表"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-criteria-equals-becomes-contains",
+      "repo_key": "java-ddd-example",
+      "category": "security",
+      "scenario": "Criteria exact match is widened into contains search for shared filters",
+      "business_context": "共享查询层为了复用 contains 逻辑，把精确匹配也改成了 like %%value%%，扩大了查询结果面。",
+      "tags": ["ddd", "criteria", "query", "security"],
+      "patch_operations": [
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+          "description": "Broaden exact match into contains semantics.",
+          "search": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.equal(root.get(filter.field().value()), filter.value().value());\n    }\n",
+          "replace": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n    }\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["security_compliance", "database_analysis", "correctness_business"],
+        "rule_ids_any_of": ["SEC-JDDD-002", "PERF-SQL-001"],
+        "finding_keywords": ["equal", "like", "contains", "criteria"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-composite-quality-regression",
+      "repo_key": "java-ddd-example",
+      "category": "composite",
+      "scenario": "Composite Java MR mixes DDD, SQL, exception handling, naming, and query-semantics regressions",
+      "business_context": "一条真实风格的综合 Java MR 同时引入了聚合工厂绕过、领域事件时序倒置、查询语义放宽、批量消费无 LIMIT、异常吞没和常量命名退化。",
+      "tags": ["ddd", "sql", "query", "exception", "naming", "composite"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Instantiate the aggregate directly instead of using the factory.",
+          "search": "        Course course = Course.create(id, name, duration);",
+          "replace": "        Course course = new Course(id, name, duration);"
+        },
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Publish domain events before persistence.",
+          "search": "        repository.save(course);\n        eventBus.publish(course.pullDomainEvents());",
+          "replace": "        eventBus.publish(course.pullDomainEvents());\n        repository.save(course);"
+        },
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+          "description": "Broaden exact match into contains semantics.",
+          "search": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.equal(root.get(filter.field().value()), filter.value().value());\n    }\n",
+          "replace": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n    }\n"
+        },
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+          "description": "Rename the batch size constant to a non-constant style name.",
+          "search": "\tprivate final Integer CHUNKS = 200;\n",
+          "replace": "\tprivate final Integer chunksTmp = 200;\n"
+        },
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+          "description": "Remove SQL limit and chunk parameter.",
+          "search": "\t\t\tNativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(\n\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk\"\n\t\t\t);\n\n\t\t\tquery.setParameter(\"chunk\", CHUNKS);\n",
+          "replace": "\t\t\tNativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(\n\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC\"\n\t\t\t);\n"
+        },
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+          "description": "Swallow the reflection errors silently.",
+          "search": "\t\t\t} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |\n\t\t\t\t\t InstantiationException e) {\n\t\t\t\te.printStackTrace();\n\t\t\t}\n",
+          "replace": "\t\t\t} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |\n\t\t\t\t\t InstantiationException e) {\n\t\t\t}\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["ddd_specification", "architecture_design", "performance_reliability", "database_analysis", "correctness_business", "security_compliance"],
+        "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002", "PERF-SQL-001", "SEC-JDDD-002"],
+        "finding_keywords": ["aggregate", "factory", "domain event", "LIMIT", "like", "catch", "chunksTmp"],
+        "min_findings": 4,
+        "min_issues": 1
+      }
+    }
+  ]
+}

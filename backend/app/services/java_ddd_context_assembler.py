@@ -8,12 +8,14 @@ from app.services.repository_context_service import RepositoryContextService
 
 
 class JavaDddContextAssembler:
-    """为 Java DDD 项目补充固定结构的审查上下文。"""
+    """为 Java 项目补充固定结构的审查上下文，并在命中时增强 DDD 语义。"""
 
     CALLER_PATH_HINTS = ("controller", "application", "appservice", "listener", "job", "scheduler")
     CALLEE_PATH_HINTS = ("repository", "mapper", "domainservice", "service", "gateway")
     DOMAIN_PATH_HINTS = ("domain", "aggregate", "entity", "valueobject", "event")
     PERSISTENCE_SUFFIXES = (".xml", ".sql")
+    DDD_PATH_HINTS = ("domain", "aggregate", "valueobject", "event", "application")
+    DDD_TEXT_HINTS = ("Aggregate", "ValueObject", "DomainEvent", "ApplicationService", "DomainService")
 
     def build_context_pack(
         self,
@@ -69,7 +71,29 @@ class JavaDddContextAssembler:
             callee_contexts=callee_contexts,
             domain_model_contexts=domain_model_contexts,
         )
+        java_context_signals = self._collect_java_context_signals(
+            file_path=file_path,
+            primary_context=primary_context,
+            excerpt=excerpt,
+            related_files=related_files,
+            current_class_context=current_class_context,
+            caller_contexts=caller_contexts,
+            callee_contexts=callee_contexts,
+            domain_model_contexts=domain_model_contexts,
+            transaction_context=transaction_context,
+            persistence_contexts=persistence_contexts,
+        )
+        java_review_mode = self._detect_java_review_mode(
+            file_path=file_path,
+            related_files=related_files,
+            current_class_context=current_class_context,
+            callee_contexts=callee_contexts,
+            domain_model_contexts=domain_model_contexts,
+            java_context_signals=java_context_signals,
+        )
         return {
+            "java_review_mode": java_review_mode,
+            "java_context_signals": java_context_signals,
             "current_class_context": current_class_context,
             "parent_contract_contexts": parent_contract_contexts,
             "caller_contexts": caller_contexts,
@@ -502,6 +526,97 @@ class JavaDddContextAssembler:
             seen.add(key)
             deduped.append(item)
         return deduped[:8]
+
+    def _collect_java_context_signals(
+        self,
+        *,
+        file_path: str,
+        primary_context: dict[str, Any],
+        excerpt: str,
+        related_files: list[str],
+        current_class_context: dict[str, Any],
+        caller_contexts: list[dict[str, Any]],
+        callee_contexts: list[dict[str, Any]],
+        domain_model_contexts: list[dict[str, Any]],
+        transaction_context: dict[str, Any],
+        persistence_contexts: list[dict[str, Any]],
+    ) -> list[str]:
+        signals: list[str] = []
+        blob_parts = [
+            file_path,
+            *(str(path).strip() for path in related_files if str(path).strip()),
+            str(primary_context.get("snippet") or "").strip(),
+            str(excerpt or "").strip(),
+            str(current_class_context.get("snippet") or "").strip(),
+        ]
+        text_blob = "\n".join(part for part in blob_parts if part)
+        lowered_blob = text_blob.lower()
+        if "controller" in lowered_blob or any("controller" in str(item.get("caller_type") or "") for item in caller_contexts):
+            signals.append("controller_entry")
+        if "@transactional" in lowered_blob or str(transaction_context.get("transactional_method") or "").strip():
+            signals.append("transaction_boundary")
+        if any("repository" in str(item.get("callee_type") or "") for item in callee_contexts):
+            signals.append("repository_dependency")
+        if any("mapper" in str(item.get("callee_type") or "") for item in callee_contexts):
+            signals.append("mapper_dependency")
+        if persistence_contexts:
+            signals.append("persistence_context")
+        if any(".xml" in str(item.get("path") or "").lower() for item in persistence_contexts):
+            signals.append("sql_or_mapper_context")
+        if "applicationservice" in lowered_blob or "/application/" in lowered_blob:
+            signals.append("application_service_layer")
+        if any("domain_service" in str(item.get("callee_type") or "") for item in callee_contexts):
+            signals.append("domain_service_dependency")
+        if self._has_path_hint(file_path, self.DDD_PATH_HINTS) or any(self._has_path_hint(path, self.DDD_PATH_HINTS) for path in related_files):
+            signals.append("ddd_package_layout")
+        if domain_model_contexts:
+            signals.append("domain_model_context")
+        for item in domain_model_contexts:
+            domain_type = str(item.get("domain_type") or "").strip()
+            if domain_type:
+                signal = f"domain_{domain_type}"
+                if signal not in signals:
+                    signals.append(signal)
+        if any(token.lower() in lowered_blob for token in [hint.lower() for hint in self.DDD_TEXT_HINTS]):
+            signals.append("ddd_symbol_hint")
+        return signals
+
+    def _detect_java_review_mode(
+        self,
+        *,
+        file_path: str,
+        related_files: list[str],
+        current_class_context: dict[str, Any],
+        callee_contexts: list[dict[str, Any]],
+        domain_model_contexts: list[dict[str, Any]],
+        java_context_signals: list[str],
+    ) -> str:
+        ddd_score = 0
+        signal_set = {str(item).strip() for item in java_context_signals if str(item).strip()}
+        if "ddd_package_layout" in signal_set:
+            ddd_score += 2
+        if "domain_model_context" in signal_set:
+            ddd_score += 2
+        if "ddd_symbol_hint" in signal_set:
+            ddd_score += 1
+        if "application_service_layer" in signal_set:
+            ddd_score += 1
+        if "domain_service_dependency" in signal_set:
+            ddd_score += 1
+        if any(signal.startswith("domain_") for signal in signal_set):
+            ddd_score += 2
+        snippet = str(current_class_context.get("snippet") or "").strip()
+        if re.search(r"\b(order|aggregate|entity|event|valueobject)\b", snippet, re.IGNORECASE):
+            ddd_score += 1
+        if any("domain" in str(item.get("path") or "").lower() for item in domain_model_contexts):
+            ddd_score += 1
+        if any("domainservice" in str(item.get("path") or "").replace("\\", "/").lower() for item in callee_contexts):
+            ddd_score += 1
+        if self._has_path_hint(file_path, self.DDD_PATH_HINTS):
+            ddd_score += 1
+        if any(self._has_path_hint(path, self.DDD_PATH_HINTS) for path in related_files):
+            ddd_score += 1
+        return "ddd_enhanced" if ddd_score >= 3 else "general"
 
     def _format_call_chain_entry(self, item: dict[str, Any]) -> str:
         path = str(item.get("path") or "").strip()

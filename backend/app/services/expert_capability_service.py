@@ -148,7 +148,22 @@ class ExpertCapabilityService:
         """返回不同专家用于识别相关 hunk 的信号词。"""
 
         mapping = {
-            "security_compliance": ["auth", "permission", "token", "security", "encrypt", "secret"],
+            "security_compliance": [
+                "auth",
+                "permission",
+                "token",
+                "security",
+                "encrypt",
+                "secret",
+                "@valid",
+                "validation",
+                "bindingresult",
+                "requestbody",
+                "requestparam",
+                "input",
+                "sanitize",
+                "csrf",
+            ],
             "database_analysis": ["select", "insert", "update", "delete", "sql", "schema", "migration", "index", "transaction"],
             "performance_reliability": ["timeout", "retry", "batch", "query", "cache", "migration", "rollback", "lock"],
             "redis_analysis": ["redis", "cache", "ttl", "expire", "setnx", "pipeline"],

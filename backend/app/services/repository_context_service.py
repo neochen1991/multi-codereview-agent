@@ -80,11 +80,99 @@ class RepositoryContextService:
         self.auto_sync = auto_sync
         self._cache: dict[tuple[str, tuple[str, ...], int], list[dict[str, Any]]] = {}
 
+    @classmethod
+    def from_review_context(
+        cls,
+        *,
+        clone_url: str,
+        local_path: str | Path,
+        default_branch: str,
+        access_token: str | None = None,
+        auto_sync: bool = False,
+        subject: Any | None = None,
+    ) -> "RepositoryContextService":
+        resolved_local_path = cls._resolve_effective_local_path(local_path, subject=subject)
+        return cls(
+            clone_url=clone_url,
+            local_path=resolved_local_path,
+            default_branch=default_branch,
+            access_token=access_token,
+            auto_sync=auto_sync,
+        )
+
     def is_configured(self) -> bool:
-        return bool(self.clone_url and str(self.local_path))
+        return bool(str(self.local_path))
 
     def is_ready(self) -> bool:
         return self.is_configured() and self.local_path.exists() and self.local_path.is_dir()
+
+    @classmethod
+    def _resolve_effective_local_path(
+        cls,
+        local_path: str | Path,
+        *,
+        subject: Any | None = None,
+    ) -> Path:
+        metadata = cls._extract_subject_metadata(subject)
+        workspace_repo_path = str(
+            metadata.get("workspace_repo_path")
+            or metadata.get("repo_context_workspace_path")
+            or metadata.get("workspace_repo")
+            or ""
+        ).strip()
+        if workspace_repo_path:
+            workspace_repo = Path(workspace_repo_path).expanduser()
+            if workspace_repo.exists() and workspace_repo.is_dir():
+                return workspace_repo
+        normalized_local_path = Path(local_path).expanduser() if str(local_path or "").strip() else Path()
+        if str(normalized_local_path):
+            return normalized_local_path
+        if not cls._should_use_workspace_fallback(subject):
+            return normalized_local_path
+        workspace = Path.cwd()
+        if not workspace.exists() or not workspace.is_dir():
+            return normalized_local_path
+        if not (workspace / ".git").exists():
+            return normalized_local_path
+        changed_files = cls._extract_changed_files(subject)
+        if not changed_files:
+            return normalized_local_path
+        if not any((workspace / item).exists() for item in changed_files):
+            return normalized_local_path
+        return workspace
+
+    @staticmethod
+    def _extract_subject_metadata(subject: Any | None) -> dict[str, Any]:
+        if subject is None:
+            return {}
+        metadata = getattr(subject, "metadata", None)
+        if isinstance(metadata, dict):
+            return metadata
+        if isinstance(subject, dict):
+            raw_metadata = subject.get("metadata")
+            if isinstance(raw_metadata, dict):
+                return raw_metadata
+        return {}
+
+    @staticmethod
+    def _extract_changed_files(subject: Any | None) -> list[str]:
+        if subject is None:
+            return []
+        if hasattr(subject, "changed_files"):
+            values = getattr(subject, "changed_files", []) or []
+        elif isinstance(subject, dict):
+            values = subject.get("changed_files", []) or []
+        else:
+            values = []
+        return [str(item).strip() for item in values if str(item).strip()]
+
+    @classmethod
+    def _should_use_workspace_fallback(cls, subject: Any | None) -> bool:
+        metadata = cls._extract_subject_metadata(subject)
+        if bool(metadata.get("repo_context_local_fallback") or metadata.get("local_workspace_fallback")):
+            return True
+        trigger_source = str(metadata.get("trigger_source") or "").strip().lower()
+        return trigger_source in {"manual", "manual_real_case_test", "local"}
 
     def search(self, query: str, globs: list[str] | None = None, limit: int = 20) -> dict[str, Any]:
         """搜索源码仓中的文本命中，并带简单缓存。"""

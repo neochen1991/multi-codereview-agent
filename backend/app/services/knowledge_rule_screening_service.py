@@ -8,6 +8,7 @@ from pathlib import Path
 from app.domain.models.knowledge import KnowledgeReviewRule
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.sqlite_knowledge_rule_repository import SqliteKnowledgeRuleRepository
+from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ class KnowledgeRuleScreeningService:
     def __init__(self, root: Path) -> None:
         self._repository = SqliteKnowledgeRuleRepository(Path(root) / "app.db")
         self._llm = LLMChatService()
+        self._java_quality_signal_extractor = JavaQualitySignalExtractor()
 
     def screen(
         self,
@@ -255,6 +257,7 @@ class KnowledgeRuleScreeningService:
     ) -> dict[str, object]:
         enabled_rules = [rule for rule in rules if rule.enabled]
         by_rule_id = {rule.rule_id: rule for rule in enabled_rules}
+        signal_payload = self._build_signal_payload(review_context)
         must_review_rules: list[dict[str, object]] = []
         possible_hit_rules: list[dict[str, object]] = []
         no_hit_rules: list[dict[str, object]] = []
@@ -297,6 +300,12 @@ class KnowledgeRuleScreeningService:
                 "line_start": rule.line_start,
                 "line_end": rule.line_end,
             }
+            item = self._apply_java_signal_overrides(
+                rule=rule,
+                item=item,
+                signal_payload=signal_payload,
+            )
+            decision = str(item.get("decision") or "no_hit").strip().lower()
             if decision == "must_review":
                 must_review_rules.append(item)
             elif decision == "possible_hit":
@@ -515,6 +524,14 @@ class KnowledgeRuleScreeningService:
         return [item for item in rules if isinstance(item, dict)]
 
     def _screen_rule(self, rule: KnowledgeReviewRule, signal_payload: dict[str, object]) -> dict[str, object]:
+        if not self._is_rule_supported_by_java_mode(rule, signal_payload):
+            return {
+                "decision": "no_hit",
+                "score": 0.0,
+                "matched_terms": [],
+                "matched_signals": [],
+                "reason": "当前 Java 审查模式下不启用该类 DDD 强约束规则",
+            }
         normalized_languages = {item.lower() for item in rule.applicable_languages if item.strip()}
         signal_languages = set(signal_payload["languages"])
         if normalized_languages and signal_languages and not normalized_languages.intersection(signal_languages):
@@ -587,6 +604,7 @@ class KnowledgeRuleScreeningService:
     def _build_signal_payload(self, review_context: dict[str, object]) -> dict[str, object]:
         raw_values: list[str] = []
         languages: set[str] = set()
+        java_mode = ""
         for item in list(review_context.get("changed_files", []) or []):
             value = str(item).strip()
             if not value:
@@ -599,6 +617,8 @@ class KnowledgeRuleScreeningService:
             value = str(item).strip()
             if value:
                 raw_values.append(value)
+                if value.lower().startswith("java_mode:"):
+                    java_mode = value.split(":", 1)[1].strip().lower()
         focus_file = str(review_context.get("focus_file") or "").strip()
         if focus_file:
             raw_values.append(focus_file)
@@ -612,11 +632,166 @@ class KnowledgeRuleScreeningService:
                 normalized = token.strip()
                 if len(normalized) >= 3:
                     terms.add(normalized)
+        quality_signals = self._extract_java_quality_signals(raw_values)
         return {
             "combined_text": combined,
             "terms": terms,
             "languages": languages,
+            "java_mode": java_mode,
+            "java_signals": self._extract_java_signal_terms(raw_values, combined),
+            "java_quality_signals": quality_signals,
         }
+
+    def _extract_java_quality_signals(self, raw_values: list[str]) -> set[str]:
+        explicit = {
+            value.split(":", 1)[1].strip().lower()
+            for value in raw_values
+            if value.strip().lower().startswith("java_quality:")
+        }
+        file_path = next((value for value in raw_values if value.lower().endswith(".java")), "")
+        diff_excerpt_parts = [
+            value
+            for value in raw_values
+            if value.startswith("@@ ") or value.startswith("# ") or "\n" in value
+        ]
+        payload = self._java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk={"excerpt": "\n".join(diff_excerpt_parts)},
+            repository_context={},
+            full_diff="\n".join(diff_excerpt_parts),
+        )
+        extracted = {
+            str(value).strip().lower()
+            for value in list(payload.get("signals") or [])
+            if str(value).strip()
+        }
+        return explicit.union(extracted)
+
+    def _extract_java_signal_terms(self, raw_values: list[str], combined: str) -> set[str]:
+        signals: set[str] = set()
+        for value in raw_values:
+            normalized = value.strip().lower()
+            if normalized.startswith("java_signal:"):
+                signal = normalized.split(":", 1)[1].strip()
+                if signal:
+                    signals.add(signal)
+        if ".create(" in combined and re.search(r"\bnew\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(", combined):
+            signals.add("factory_bypass")
+            signals.add("aggregate_factory_call_removed")
+        if "pulldomainevents" in combined or "eventbus.publish" in combined:
+            signals.add("domain_event_pull_present")
+        if "application_service_layer" in signals and ("factory_bypass" in signals or "aggregate_factory_call_removed" in signals):
+            signals.add("application_service_direct_instantiation")
+        return signals
+
+    def _apply_java_signal_overrides(
+        self,
+        *,
+        rule: KnowledgeReviewRule,
+        item: dict[str, object],
+        signal_payload: dict[str, object],
+    ) -> dict[str, object]:
+        java_mode = str(signal_payload.get("java_mode") or "").strip().lower()
+        java_signals = {str(value).strip().lower() for value in set(signal_payload.get("java_signals") or set()) if str(value).strip()}
+        java_quality_signals = {
+            str(value).strip().lower()
+            for value in set(signal_payload.get("java_quality_signals") or set())
+            if str(value).strip()
+        }
+
+        rule_id = str(rule.rule_id or "").strip().upper()
+        current_decision = str(item.get("decision") or "no_hit").strip().lower()
+        matched_terms = [
+            str(value).strip()
+            for value in list(item.get("matched_terms", []) or [])
+            if str(value).strip()
+        ]
+        matched_signals = [
+            str(value).strip()
+            for value in list(item.get("matched_signals", []) or [])
+            if str(value).strip()
+        ]
+
+        if java_mode == "ddd_enhanced":
+            ddd_factory_signals = {
+                "factory_bypass",
+                "aggregate_factory_call_removed",
+                "application_service_direct_instantiation",
+            }
+            if rule_id == "DDD-JDDD-001" and ddd_factory_signals.intersection(java_signals):
+                if current_decision != "must_review":
+                    return {
+                        **item,
+                        "decision": "must_review",
+                        "score": max(float(item.get("score") or 0.0), 8.0),
+                        "matched_terms": (matched_terms + ["factory_bypass", "aggregate_factory_call_removed"])[:10],
+                        "matched_signals": (matched_signals + ["java_signal:factory_bypass", "java_signal:application_service_direct_instantiation"])[:10],
+                        "reason": "命中聚合工厂绕过与应用层直接实例化强信号，DDD 风险需强制深审",
+                    }
+                return item
+
+            if rule_id == "ARCH-JDDD-002" and ddd_factory_signals.intersection(java_signals):
+                if current_decision == "no_hit":
+                    return {
+                        **item,
+                        "decision": "possible_hit",
+                        "score": max(float(item.get("score") or 0.0), 3.0),
+                        "matched_terms": (matched_terms + ["factory_bypass"])[:10],
+                        "matched_signals": (matched_signals + ["java_signal:factory_bypass"])[:10],
+                        "reason": "命中应用层绕过聚合工厂信号，需复核是否造成架构边界退化",
+                    }
+                return item
+
+            if rule_id == "DDD-JDDD-002" and {"domain_event_pull_present", "application_service_direct_instantiation"}.issubset(java_signals):
+                if current_decision == "no_hit":
+                    return {
+                        **item,
+                        "decision": "possible_hit",
+                        "score": max(float(item.get("score") or 0.0), 3.0),
+                        "matched_terms": (matched_terms + ["pullDomainEvents", "eventBus.publish"])[:10],
+                        "matched_signals": (matched_signals + ["java_signal:domain_event_pull_present"])[:10],
+                        "reason": "命中领域事件拉取与应用层直接实例化信号，需复核跨聚合副作用建模是否退化",
+                    }
+        if rule_id == "DDD-JDDD-002" and "event_ordering_risk" in java_quality_signals and current_decision == "no_hit":
+            return {
+                **item,
+                "decision": "possible_hit",
+                "score": max(float(item.get("score") or 0.0), 3.0),
+                "matched_terms": (matched_terms + ["event_ordering_risk", "publish_before_save"])[:10],
+                "matched_signals": (matched_signals + ["java_quality:event_ordering_risk"])[:10],
+                "reason": "命中事件发布先于持久化的通用质量信号，需复核领域事件时序与边界建模",
+            }
+        if rule_id in {"PERF-SQL-001", "PERF-BATCH-001"} and "unbounded_query_risk" in java_quality_signals:
+            decision = "must_review" if rule_id == "PERF-SQL-001" else "possible_hit"
+            if current_decision == "no_hit":
+                return {
+                    **item,
+                    "decision": decision,
+                    "score": max(float(item.get("score") or 0.0), 5.0 if decision == "must_review" else 3.0),
+                    "matched_terms": (matched_terms + ["limit_removed", "pagination_missing"])[:10],
+                    "matched_signals": (matched_signals + ["java_quality:unbounded_query_risk"])[:10],
+                    "reason": "命中分页或 limit 保护移除的通用质量信号，需复核查询与批处理风险",
+                }
+            return item
+        if rule_id == "PERF-SQL-001" and "query_semantics_weakened" in java_quality_signals and current_decision == "no_hit":
+            return {
+                **item,
+                "decision": "possible_hit",
+                "score": max(float(item.get("score") or 0.0), 3.0),
+                "matched_terms": (matched_terms + ["equal", "like", "contains"])[:10],
+                "matched_signals": (matched_signals + ["java_quality:query_semantics_weakened"])[:10],
+                "reason": "命中查询语义放宽的通用质量信号，需复核索引命中与结果集放大风险",
+            }
+        return item
+
+    def _is_rule_supported_by_java_mode(self, rule: KnowledgeReviewRule, signal_payload: dict[str, object]) -> bool:
+        java_mode = str(signal_payload.get("java_mode") or "").strip().lower()
+        if java_mode != "general":
+            return True
+        rule_id = str(rule.rule_id or "").strip().upper()
+        if rule_id.startswith("ARCH-JDDD-") or rule_id.startswith("DDD-JDDD-"):
+            return False
+        return True
 
     def _extract_descriptive_tokens(self, rule: KnowledgeReviewRule) -> set[str]:
         text = " ".join(

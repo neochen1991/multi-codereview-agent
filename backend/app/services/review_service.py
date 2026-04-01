@@ -602,14 +602,15 @@ class ReviewService:
     def read_extension_tool_script(self, tool_id: str, entry: str = "run.py") -> str:
         return self.extension_editor_service.read_tool_script(tool_id, entry)
 
-    def build_repository_context_service(self) -> RepositoryContextService:
+    def build_repository_context_service(self, subject: dict[str, object] | None = None) -> RepositoryContextService:
         runtime = self.get_runtime_settings()
-        return RepositoryContextService(
+        return RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
             local_path=runtime.code_repo_local_path,
             default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
             access_token=runtime.code_repo_access_token,
             auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
         )
 
     def get_artifacts(self, review_id: str) -> dict[str, object]:

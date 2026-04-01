@@ -70,7 +70,7 @@ class ReviewToolGateway:
             if not runtime_allowlist or tool_name in runtime_allowlist
         ][: expert.max_tool_calls]
         if (
-            self._repo_context_enabled(runtime)
+            self._repo_context_enabled(runtime, subject)
             and (not runtime_allowlist or "repo_context_search" in runtime_allowlist)
             and "repo_context_search" not in allowed_tools
         ):
@@ -81,6 +81,9 @@ class ReviewToolGateway:
             and "pg_schema_context" not in allowed_tools
         ):
             allowed_tools.append("pg_schema_context")
+        for tool_name in self._java_ddd_runtime_tools_for_expert(expert.expert_id, file_path):
+            if (not runtime_allowlist or tool_name in runtime_allowlist) and tool_name not in allowed_tools:
+                allowed_tools.append(tool_name)
         for tool_name in extra_tools or []:
             if tool_name not in allowed_tools:
                 allowed_tools.append(tool_name)
@@ -126,6 +129,23 @@ class ReviewToolGateway:
         self._gateway.register("dependency_surface_locator", "tool", self._dependency_surface_locator)
         self._gateway.register("repo_context_search", "tool", self._repo_context_search)
         self._gateway.register("pg_schema_context", "tool", self._pg_schema_context)
+        self._gateway.register("transaction_boundary_inspector", "tool", self._transaction_boundary_inspector)
+        self._gateway.register("aggregate_invariant_inspector", "tool", self._aggregate_invariant_inspector)
+        self._gateway.register(
+            "application_service_boundary_inspector",
+            "tool",
+            self._application_service_boundary_inspector,
+        )
+        self._gateway.register(
+            "controller_entry_guard_inspector",
+            "tool",
+            self._controller_entry_guard_inspector,
+        )
+        self._gateway.register(
+            "repository_query_risk_inspector",
+            "tool",
+            self._repository_query_risk_inspector,
+        )
 
     def _invoke_plugin_tool(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         plugin = self._plugin_loader.get(tool_name)
@@ -268,12 +288,13 @@ class ReviewToolGateway:
         """从目标分支源码仓补充文件、符号和引用上下文。"""
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
         subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
-        service = RepositoryContextService(
+        service = RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
             local_path=runtime.code_repo_local_path,
             default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
             access_token=runtime.code_repo_access_token,
             auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
         )
         file_path = str(payload.get("file_path") or "")
         line_start = int(payload.get("line_start") or 1)
@@ -307,15 +328,29 @@ class ReviewToolGateway:
             )
             for symbol in symbol_queries[:3]
         ]
+        symbol_priorities = self._build_symbol_priority_map(keyword_sources)
+        ranked_anchors = self._collect_ranked_symbol_anchors(symbol_contexts, symbol_priorities=symbol_priorities)
+        derived_related_files = self._derive_related_files_from_anchors(
+            ranked_anchors,
+            primary_file_path=file_path,
+        )
+        effective_related_files = related_files or derived_related_files
         related_source_snippets = self._build_related_source_snippets(
             service,
             symbol_contexts,
             primary_file_path=file_path,
+            related_files=effective_related_files,
+            search_keyword_sources=keyword_sources,
         )
         compact_symbol_contexts = self._compact_symbol_contexts(symbol_contexts)
         related_contexts = [
-            service.load_file_context(related_path, 1, radius=8)
-            for related_path in related_files[:3]
+            self._load_related_context(
+                service,
+                related_path,
+                symbol_contexts=symbol_contexts,
+                symbol_priorities=symbol_priorities,
+            )
+            for related_path in effective_related_files[:3]
         ]
         java_ddd_context: dict[str, object] = {}
         if Path(file_path).suffix.lower() == ".java":
@@ -330,7 +365,7 @@ class ReviewToolGateway:
             )
         context_files = [
             item
-            for item in [file_path, *related_files[:3]]
+            for item in [file_path, *effective_related_files[:3]]
             if item and self._is_source_like_path(item)
         ]
         definition_hits = self._flatten_symbol_hits(compact_symbol_contexts, "definitions")
@@ -385,8 +420,340 @@ class ReviewToolGateway:
         output["success"] = context.matched
         return output
 
-    def _repo_context_enabled(self, runtime: RuntimeSettings) -> bool:
-        return bool(runtime.code_repo_clone_url and runtime.code_repo_local_path)
+    def _transaction_boundary_inspector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        if not service.is_ready() or not file_path:
+            return {
+                "summary": "事务边界核验跳过：代码仓上下文不可用。",
+                "success": False,
+                "signals": [],
+                "call_chain": [],
+            }
+        current = service.load_file_context(file_path, line_start, radius=18)
+        snippet = str(current.get("snippet") or "").strip()
+        normalized = snippet.lower()
+        signals: list[str] = []
+        if "@transactional" in normalized:
+            signals.append("transaction_annotation_present")
+        if any(token in normalized for token in [".save(", ".update(", ".insert(", ".delete("]):
+            signals.append("repository_write_detected")
+        if any(token in normalized for token in [".publish", "domaineventpublisher", "kafkatemplate", "rabbittemplate"]):
+            signals.append("message_publish_detected")
+        if any(token in normalized for token in [".call(", "feign", "resttemplate", "webclient", "httpclient"]):
+            signals.append("remote_call_detected")
+        java_context = self._extract_java_ddd_context(payload)
+        call_chain = self._build_transaction_call_chain(java_context)
+        summary_parts: list[str] = []
+        if "transaction_annotation_present" in signals:
+            summary_parts.append("检测到事务边界")
+        if "repository_write_detected" in signals:
+            summary_parts.append("事务内存在仓储写入")
+        if "message_publish_detected" in signals:
+            summary_parts.append("事务内存在事件/消息发布")
+        if "remote_call_detected" in signals:
+            summary_parts.append("事务内存在远程调用信号")
+        if call_chain:
+            summary_parts.append(f"调用链: {' -> '.join(call_chain[:6])}")
+        return {
+            "summary": "；".join(summary_parts) or "未发现明显事务边界风险信号。",
+            "success": True,
+            "signals": signals,
+            "call_chain": call_chain,
+            "snippet": snippet,
+        }
+
+    def _aggregate_invariant_inspector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        if not service.is_ready() or not file_path:
+            return {
+                "summary": "聚合不变量核验跳过：代码仓上下文不可用。",
+                "success": False,
+                "signals": [],
+                "aggregate_symbols": [],
+            }
+        current = service.load_file_context(file_path, line_start, radius=18)
+        snippet = str(current.get("snippet") or "").strip()
+        normalized = snippet.lower()
+        target_hunk = dict(payload.get("target_hunk") or {})
+        diff_excerpt = str(target_hunk.get("excerpt") or "").strip()
+        diff_lower = diff_excerpt.lower()
+        java_context = self._extract_java_ddd_context(payload)
+        domain_contexts = list(java_context.get("domain_model_contexts") or [])
+        aggregate_symbols = [
+            str(item.get("symbol") or "").strip()
+            for item in domain_contexts
+            if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+        ]
+        if not aggregate_symbols:
+            for symbol in re.findall(r"\bnew\s+([A-Z][A-Za-z0-9_]*)\s*\(", f"{snippet}\n{diff_excerpt}"):
+                if symbol not in aggregate_symbols:
+                    aggregate_symbols.append(symbol)
+        signals: list[str] = []
+        if "setstatus(" in normalized:
+            signals.append("direct_state_mutation_detected")
+        if any(token in normalized for token in [".set", ".change", ".assign"]) and aggregate_symbols:
+            signals.append("aggregate_mutator_invoked")
+        if not any(token in normalized for token in ["validate", "check", "ensure", "invariant"]) and aggregate_symbols:
+            signals.append("invariant_guard_not_visible")
+        if re.search(r"\bnew\s+[A-Z][A-Za-z0-9_]*\s*\(", f"{snippet}\n{diff_excerpt}"):
+            signals.append("direct_constructor_invocation_detected")
+        if ".pulldomainevents(" in normalized or ".pulldomainevents(" in diff_lower:
+            signals.append("domain_event_pull_detected")
+        if "course.create(" in diff_lower and "new course(" in diff_lower:
+            signals.append("aggregate_factory_bypass_detected")
+        if "direct_constructor_invocation_detected" in signals and "domain_event_pull_detected" in signals:
+            signals.append("domain_event_publish_after_direct_construction")
+        summary_parts: list[str] = []
+        if aggregate_symbols:
+            summary_parts.append(f"关联领域对象: {' / '.join(aggregate_symbols[:4])}")
+        if "direct_state_mutation_detected" in signals:
+            summary_parts.append("检测到直接状态修改")
+        if "invariant_guard_not_visible" in signals:
+            summary_parts.append("当前片段未看到显式不变量保护")
+        if "aggregate_factory_bypass_detected" in signals:
+            summary_parts.append("检测到聚合工厂/工厂方法被直接构造绕过")
+        if "domain_event_publish_after_direct_construction" in signals:
+            summary_parts.append("直接构造后仍发布 pullDomainEvents，需核验领域事件是否已正确记录")
+        return {
+            "summary": "；".join(summary_parts) or "未发现明显聚合不变量风险信号。",
+            "success": True,
+            "signals": signals,
+            "aggregate_symbols": aggregate_symbols[:6],
+            "snippet": snippet,
+        }
+
+    def _application_service_boundary_inspector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        if not service.is_ready() or not file_path:
+            return {
+                "summary": "应用服务边界核验跳过：代码仓上下文不可用。",
+                "success": False,
+                "signals": [],
+                "callee_symbols": [],
+            }
+        current = service.load_file_context(file_path, line_start, radius=18)
+        snippet = str(current.get("snippet") or "").strip()
+        normalized = snippet.lower()
+        java_context = self._extract_java_ddd_context(payload)
+        callee_contexts = list(java_context.get("callee_contexts") or [])
+        callee_symbols = [
+            str(item.get("symbol") or "").strip()
+            for item in callee_contexts
+            if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+        ]
+        signals: list[str] = []
+        lower_path = file_path.lower()
+        if "application" in lower_path or "appservice" in lower_path:
+            if any(token in normalized for token in [".save(", ".update(", ".insert(", ".delete("]):
+                signals.append("application_service_direct_persistence")
+            if any(token in normalized for token in [".publish", "domaineventpublisher"]):
+                signals.append("application_service_event_orchestration")
+            if any(token in normalized for token in [".set", ".change", ".assign"]):
+                signals.append("application_service_mutates_domain_state")
+        summary_parts: list[str] = []
+        if callee_symbols:
+            summary_parts.append(f"被调方: {' / '.join(callee_symbols[:5])}")
+        if "application_service_direct_persistence" in signals:
+            summary_parts.append("应用服务直接进行持久化写入")
+        if "application_service_mutates_domain_state" in signals:
+            summary_parts.append("应用服务直接修改领域状态")
+        if "application_service_event_orchestration" in signals:
+            summary_parts.append("应用服务内存在事件发布编排")
+        return {
+            "summary": "；".join(summary_parts) or "未发现明显应用服务边界风险信号。",
+            "success": True,
+            "signals": signals,
+            "callee_symbols": callee_symbols[:8],
+            "snippet": snippet,
+        }
+
+    def _controller_entry_guard_inspector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        if not service.is_ready() or not file_path:
+            return {
+                "summary": "接口入口保护核验跳过：代码仓上下文不可用。",
+                "success": False,
+                "signals": [],
+                "snippet": "",
+            }
+        current = service.load_file_context(file_path, line_start, radius=18)
+        snippet = str(current.get("snippet") or "").strip()
+        java_context = self._extract_java_ddd_context(payload)
+        caller_contexts = list(java_context.get("caller_contexts") or [])
+        controller_contexts = [
+            item for item in caller_contexts if isinstance(item, dict) and str(item.get("caller_type") or "").strip() == "controller"
+        ]
+        controller_snippets = [str(item.get("snippet") or "").strip() for item in controller_contexts if str(item.get("snippet") or "").strip()]
+        controller_blob = "\n".join(controller_snippets[:2]) or snippet
+        normalized = controller_blob.lower()
+        signals: list[str] = []
+        if "@restcontroller" in normalized or "@controller" in normalized or controller_contexts:
+            signals.append("controller_entry_detected")
+        if any(token in normalized for token in ["@validated", "@valid", "bindingresult", "validator", ".validate("]):
+            signals.append("input_validation_present")
+        else:
+            signals.append("input_validation_not_visible")
+        if any(token in normalized for token in ["@preauthorize", "@secured", "@rolesallowed", "permission", "tenant", "auth"]):
+            signals.append("auth_or_tenant_guard_present")
+        summary_parts: list[str] = []
+        if controller_contexts:
+            summary_parts.append(f"关联 Controller 数量: {len(controller_contexts[:3])}")
+        if "input_validation_present" in signals:
+            summary_parts.append("接口入口可见参数校验信号")
+        if "input_validation_not_visible" in signals:
+            summary_parts.append("接口入口未见明显参数校验信号")
+        if "auth_or_tenant_guard_present" in signals:
+            summary_parts.append("接口入口可见权限/租户保护信号")
+        return {
+            "summary": "；".join(summary_parts) or "未发现明显接口入口保护信号。",
+            "success": True,
+            "signals": signals,
+            "snippet": controller_blob,
+        }
+
+    def _repository_query_risk_inspector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        if not service.is_ready() or not file_path:
+            return {
+                "summary": "Repository/查询风险核验跳过：代码仓上下文不可用。",
+                "success": False,
+                "signals": [],
+                "snippet": "",
+            }
+        current = service.load_file_context(file_path, line_start, radius=18)
+        snippet = str(current.get("snippet") or "").strip()
+        java_context = self._extract_java_ddd_context(payload)
+        persistence_contexts = [item for item in list(java_context.get("persistence_contexts") or []) if isinstance(item, dict)]
+        callee_contexts = [item for item in list(java_context.get("callee_contexts") or []) if isinstance(item, dict)]
+        persistence_blob = "\n".join(
+            [
+                snippet,
+                *[str(item.get("snippet") or "").strip() for item in persistence_contexts[:3] if str(item.get("snippet") or "").strip()],
+                *[str(item.get("snippet") or "").strip() for item in callee_contexts[:2] if str(item.get("snippet") or "").strip()],
+            ]
+        )
+        normalized = persistence_blob.lower()
+        signals: list[str] = []
+        if any(token in normalized for token in ["findbystatus", "select", "from", "where"]):
+            signals.append("query_surface_detected")
+        if "findbystatus" in normalized or ("status" in normalized and "list<" in normalized):
+            signals.append("status_query_detected")
+        if "like" in normalized:
+            signals.append("like_query_detected")
+        if "limit" not in normalized and "page" not in normalized and "pagesize" not in normalized and "pagination" not in normalized:
+            signals.append("pagination_not_visible")
+        summary_parts: list[str] = []
+        if persistence_contexts:
+            summary_parts.append(f"持久化上下文: {len(persistence_contexts[:3])} 个片段")
+        if "status_query_detected" in signals:
+            summary_parts.append("检测到按状态或条件批量查询信号")
+        if "like_query_detected" in signals:
+            summary_parts.append("检测到模糊查询信号")
+        if "pagination_not_visible" in signals and "query_surface_detected" in signals:
+            summary_parts.append("当前查询片段未见明显分页/limit 保护")
+        return {
+            "summary": "；".join(summary_parts) or "未发现明显 Repository/查询风险信号。",
+            "success": True,
+            "signals": signals,
+            "snippet": persistence_blob,
+        }
+
+    def _repo_context_enabled(self, runtime: RuntimeSettings, subject: ReviewSubject) -> bool:
+        service = RepositoryContextService.from_review_context(
+            clone_url=runtime.code_repo_clone_url,
+            local_path=runtime.code_repo_local_path,
+            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
+            access_token=runtime.code_repo_access_token,
+            auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
+        )
+        return service.is_ready()
+
+    def _build_repository_context_service(self, payload: dict[str, Any]) -> RepositoryContextService:
+        runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
+        subject = dict(payload.get("subject") or {})
+        return RepositoryContextService.from_review_context(
+            clone_url=runtime.code_repo_clone_url,
+            local_path=runtime.code_repo_local_path,
+            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
+            access_token=runtime.code_repo_access_token,
+            auto_sync=runtime.code_repo_auto_sync,
+            subject=subject,
+        )
+
+    def _extract_java_ddd_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        service = self._build_repository_context_service(payload)
+        file_path = str(payload.get("file_path") or "").strip()
+        line_start = int(payload.get("line_start") or 1)
+        related_files = [
+            str(item).strip()
+            for item in list(payload.get("related_files") or [])
+            if str(item).strip() and str(item).strip() != file_path
+        ]
+        subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
+        excerpt = self._diff_excerpt.extract_excerpt(str(subject.unified_diff or ""), file_path, line_start)
+        primary_context = service.load_file_context(file_path, line_start, radius=20)
+        symbol_queries, _ = self._extract_repo_search_terms(
+            excerpt,
+            primary_context=primary_context,
+            file_path=file_path,
+        )
+        symbol_contexts = [
+            self._filter_symbol_context(
+                service.search_symbol_context(symbol, globs=["*.java", "*.xml"], definition_limit=2, reference_limit=4)
+            )
+            for symbol in symbol_queries[:3]
+        ]
+        if Path(file_path).suffix.lower() != ".java":
+            return {}
+        return self._java_ddd_context_assembler.build_context_pack(
+            service,
+            file_path=file_path,
+            line_start=line_start,
+            primary_context=primary_context,
+            related_files=related_files,
+            symbol_contexts=symbol_contexts,
+            excerpt=excerpt,
+        )
+
+    def _build_transaction_call_chain(self, java_context: dict[str, Any]) -> list[str]:
+        chain: list[str] = []
+        current = dict(java_context.get("current_class_context") or {})
+        if current:
+            class_name = str(current.get("class_name") or current.get("path") or "").strip()
+            if class_name:
+                chain.append(f"current:{class_name}")
+        for key, prefix in [("caller_contexts", "caller"), ("callee_contexts", "callee")]:
+            for item in list(java_context.get(key) or []):
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol") or item.get("path") or "").strip()
+                entry = f"{prefix}:{symbol}" if symbol else ""
+                if entry and entry not in chain:
+                    chain.append(entry)
+        return chain[:8]
+
+    def _java_ddd_runtime_tools_for_expert(self, expert_id: str, file_path: str) -> list[str]:
+        if Path(str(file_path or "")).suffix.lower() != ".java":
+            return []
+        mapping = {
+            "security_compliance": ["controller_entry_guard_inspector", "application_service_boundary_inspector", "transaction_boundary_inspector"],
+            "performance_reliability": ["transaction_boundary_inspector", "repository_query_risk_inspector"],
+            "database_analysis": ["repository_query_risk_inspector"],
+            "architecture_design": ["application_service_boundary_inspector", "aggregate_invariant_inspector"],
+            "ddd_specification": ["aggregate_invariant_inspector", "transaction_boundary_inspector"],
+        }
+        return list(mapping.get(expert_id, []))
 
     def _extract_repo_search_terms(
         self,
@@ -599,42 +966,354 @@ class ReviewToolGateway:
         symbol_contexts: list[dict[str, Any]],
         *,
         primary_file_path: str,
+        related_files: list[str] | None = None,
+        search_keyword_sources: list[dict[str, str]] | None = None,
         max_snippets: int = 4,
     ) -> list[dict[str, Any]]:
         snippets: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
+        symbol_priorities = self._build_symbol_priority_map(search_keyword_sources or [])
+        ranked_anchors = self._collect_ranked_symbol_anchors(symbol_contexts, symbol_priorities=symbol_priorities)
+        best_anchor_by_path: dict[str, dict[str, Any]] = {}
+        for anchor in ranked_anchors:
+            path = str(anchor.get("path") or "").strip()
+            if (
+                not path
+                or path == primary_file_path
+                or path in best_anchor_by_path
+                or not self._is_source_like_path(path)
+            ):
+                continue
+            best_anchor_by_path[path] = anchor
+        for anchor in best_anchor_by_path.values():
+            path = str(anchor.get("path") or "").strip()
+            if (
+                not path
+                or path == primary_file_path
+                or path in seen_paths
+                or not self._is_source_like_path(path)
+            ):
+                continue
+            line_number = int(anchor.get("line_number") or 1)
+            context_snippet = self._load_related_context_window(service, path, line_number)
+            snippet = str(context_snippet.get("snippet") or "").strip()
+            if not snippet:
+                continue
+            snippets.append(
+                {
+                    "path": path,
+                    "symbol": str(anchor.get("symbol") or "").strip(),
+                    "kind": str(anchor.get("kind") or "reference").strip(),
+                    "line_start": line_number,
+                    "snippet": snippet,
+                }
+            )
+            seen_paths.add(path)
+            if len(snippets) >= max_snippets:
+                return snippets
+        for related_path in list(related_files or []):
+            normalized_path = str(related_path or "").strip()
+            if (
+                not normalized_path
+                or normalized_path == primary_file_path
+                or normalized_path in seen_paths
+                or not self._is_source_like_path(normalized_path)
+            ):
+                continue
+            line_number = self._pick_related_context_line(
+                service,
+                normalized_path,
+                symbol_contexts,
+                symbol_priorities=symbol_priorities,
+            )
+            context_snippet = self._load_related_context_window(service, normalized_path, line_number)
+            snippet = str(context_snippet.get("snippet") or "").strip()
+            if not snippet:
+                continue
+            snippets.append(
+                {
+                    "path": normalized_path,
+                    "symbol": Path(normalized_path).stem,
+                    "kind": "reference",
+                    "line_start": line_number,
+                    "snippet": snippet,
+                }
+            )
+            seen_paths.add(normalized_path)
+            if len(snippets) >= max_snippets:
+                return snippets
+        return snippets
+
+    def _derive_related_files_from_anchors(
+        self,
+        ranked_anchors: list[dict[str, Any]],
+        *,
+        primary_file_path: str,
+        max_files: int = 3,
+    ) -> list[str]:
+        related_files: list[str] = []
+        seen_paths: set[str] = set()
+        for anchor in ranked_anchors:
+            path = str(anchor.get("path") or "").strip()
+            if (
+                not path
+                or path == primary_file_path
+                or path in seen_paths
+                or not self._is_source_like_path(path)
+            ):
+                continue
+            seen_paths.add(path)
+            related_files.append(path)
+            if len(related_files) >= max_files:
+                break
+        return related_files
+
+    def _load_related_context(
+        self,
+        service: RepositoryContextService,
+        related_path: str,
+        *,
+        symbol_contexts: list[dict[str, Any]],
+        symbol_priorities: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        line_number = self._pick_related_context_line(
+            service,
+            related_path,
+            symbol_contexts,
+            symbol_priorities=symbol_priorities,
+        )
+        return self._load_related_context_window(service, related_path, line_number)
+
+    def _load_related_context_window(
+        self,
+        service: RepositoryContextService,
+        related_path: str,
+        line_number: int,
+    ) -> dict[str, Any]:
+        normalized_line = max(1, int(line_number or 1))
+        target = (service.local_path / related_path).resolve()
+        if not target.exists() or not target.is_file():
+            return service.load_file_range(related_path, normalized_line, normalized_line, padding=3)
+        lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        start = max(0, normalized_line - 3)
+        end = min(len(lines), normalized_line + 6)
+        snippet = "\n".join(f"{index + 1:>4} | {lines[index]}" for index in range(start, end))
+        return {
+            "path": related_path,
+            "snippet": snippet,
+            "line_start": normalized_line,
+            "line_end": normalized_line,
+        }
+
+    def _pick_related_context_line(
+        self,
+        service: RepositoryContextService,
+        related_path: str,
+        symbol_contexts: list[dict[str, Any]],
+        *,
+        symbol_priorities: dict[str, int] | None = None,
+    ) -> int:
+        normalized_path = str(related_path or "").strip()
+        best_anchor = self._select_best_anchor_for_path(
+            normalized_path,
+            symbol_contexts,
+            symbol_priorities=symbol_priorities or {},
+        )
+        if best_anchor:
+            return max(1, int(best_anchor.get("line_number") or best_anchor.get("line_start") or 1))
+        file_symbol = Path(normalized_path).stem.strip()
+        if file_symbol:
+            symbol_context = self._filter_symbol_context(
+                service.search_symbol_context(file_symbol, globs=[f"*{Path(normalized_path).suffix}"], definition_limit=1, reference_limit=0)
+            )
+            fallback_anchor = self._select_best_anchor_for_path(
+                normalized_path,
+                [symbol_context],
+                symbol_priorities=symbol_priorities or {},
+            )
+            if fallback_anchor:
+                return max(1, int(fallback_anchor.get("line_number") or fallback_anchor.get("line_start") or 1))
+        return self._first_meaningful_code_line(service, normalized_path)
+
+    def _collect_ranked_symbol_anchors(
+        self,
+        symbol_contexts: list[dict[str, Any]],
+        *,
+        symbol_priorities: dict[str, int] | None = None,
+    ) -> list[dict[str, Any]]:
+        anchors: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int, str]] = set()
+        priorities = dict(symbol_priorities or {})
         for context in symbol_contexts:
             symbol = str(context.get("symbol") or "").strip()
-            for kind in ("definitions", "references"):
-                for item in list(context.get(kind) or []):
+            for raw_kind in ("definitions", "references"):
+                kind = "definition" if raw_kind == "definitions" else "reference"
+                for item in list(context.get(raw_kind) or []):
                     if not isinstance(item, dict):
                         continue
                     path = str(item.get("path") or "").strip()
-                    if (
-                        not path
-                        or path == primary_file_path
-                        or path in seen_paths
-                        or not self._is_source_like_path(path)
-                    ):
+                    line_number = int(item.get("line_number") or item.get("line_start") or 1)
+                    snippet = str(item.get("snippet") or "").strip()
+                    if not path or not self._is_source_like_path(path):
                         continue
-                    line_number = int(item.get("line_number") or 1)
-                    context_snippet = service.load_file_context(path, line_number, radius=10)
-                    snippet = str(context_snippet.get("snippet") or "").strip()
-                    if not snippet:
+                    key = (path, kind, line_number, symbol)
+                    if key in seen:
                         continue
-                    snippets.append(
+                    seen.add(key)
+                    score = self._score_symbol_anchor(
+                        symbol=symbol,
+                        kind=kind,
+                        path=path,
+                        line_number=line_number,
+                        snippet=snippet,
+                        symbol_priority=priorities.get(symbol, 0),
+                    )
+                    anchors.append(
                         {
-                            "path": path,
                             "symbol": symbol,
-                            "kind": "definition" if kind == "definitions" else "reference",
-                            "line_start": line_number,
+                            "kind": kind,
+                            "path": path,
+                            "line_number": line_number,
                             "snippet": snippet,
+                            "score": score,
                         }
                     )
-                    seen_paths.add(path)
-                    if len(snippets) >= max_snippets:
-                        return snippets
-        return snippets
+        anchors.sort(
+            key=lambda item: (
+                -int(item.get("score") or 0),
+                str(item.get("path") or ""),
+                int(item.get("line_number") or 1),
+            )
+        )
+        return anchors
+
+    def _select_best_anchor_for_path(
+        self,
+        target_path: str,
+        symbol_contexts: list[dict[str, Any]],
+        *,
+        symbol_priorities: dict[str, int] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_path = str(target_path or "").strip()
+        if not normalized_path:
+            return None
+        anchors = [
+            item
+            for item in self._collect_ranked_symbol_anchors(
+                symbol_contexts,
+                symbol_priorities=symbol_priorities or {},
+            )
+            if str(item.get("path") or "").strip() == normalized_path
+        ]
+        return anchors[0] if anchors else None
+
+    def _score_symbol_anchor(
+        self,
+        *,
+        symbol: str,
+        kind: str,
+        path: str,
+        line_number: int,
+        snippet: str,
+        symbol_priority: int = 0,
+    ) -> int:
+        score = symbol_priority * 10
+        normalized_kind = str(kind or "").strip()
+        if normalized_kind == "definition":
+            score += 40
+        if self._looks_like_java_signature(snippet, symbol=symbol):
+            score += 35
+        if self._looks_like_java_call_site(snippet, symbol=symbol):
+            score += 20
+        if self._looks_like_low_value_context(snippet):
+            score -= 60
+        if Path(path).suffix.lower() == ".java":
+            score += 5
+        if symbol_priority > 0:
+            score += 25
+        if line_number <= 5:
+            score -= 10
+        return score
+
+    def _build_symbol_priority_map(self, keyword_sources: list[dict[str, str]]) -> dict[str, int]:
+        priorities: dict[str, int] = {}
+        for index, item in enumerate(keyword_sources):
+            if not isinstance(item, dict):
+                continue
+            keyword = str(item.get("keyword") or "").strip()
+            source = str(item.get("source") or "").strip()
+            if not keyword:
+                continue
+            if source == "diff_hunk":
+                base = 3
+            elif source == "source_context":
+                base = 2
+            elif source == "file_name":
+                base = 1
+            else:
+                base = 0
+            priorities.setdefault(keyword, max(base - min(index, 2), 0))
+        return priorities
+
+    def _looks_like_java_signature(self, snippet: str, *, symbol: str) -> bool:
+        normalized = str(snippet or "").strip()
+        if not normalized:
+            return False
+        escaped_symbol = re.escape(str(symbol or "").strip())
+        patterns = [
+            rf"\b(?:public|protected|private|static|final|abstract|sealed|non-sealed)?\s*(?:class|interface|enum|record)\s+{escaped_symbol}\b",
+            rf"\b{escaped_symbol}\s*\(",
+            rf"\b(?:public|protected|private|static|final|default|abstract|synchronized|native|strictfp)\b.*\b{escaped_symbol}\s*\(",
+        ]
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    def _looks_like_java_call_site(self, snippet: str, *, symbol: str) -> bool:
+        normalized = str(snippet or "").strip()
+        if not normalized:
+            return False
+        escaped_symbol = re.escape(str(symbol or "").strip())
+        return bool(
+            re.search(rf"(?:\.|\b){escaped_symbol}\s*\(", normalized)
+            or re.search(rf"\bnew\s+{escaped_symbol}\s*\(", normalized)
+        )
+
+    def _looks_like_low_value_context(self, snippet: str) -> bool:
+        normalized = str(snippet or "").strip()
+        if not normalized:
+            return True
+        lowered = normalized.lower()
+        if lowered.startswith("package ") or lowered.startswith("import "):
+            return True
+        if lowered.startswith("/*") or lowered.startswith("*") or lowered.startswith("//"):
+            return True
+        if "copyright" in lowered or "@author" in lowered:
+            return True
+        return False
+
+    def _first_meaningful_code_line(self, service: RepositoryContextService, relative_path: str) -> int:
+        target = (service.local_path / relative_path).resolve()
+        if not target.exists() or not target.is_file():
+            return 1
+        lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        in_block_comment = False
+        for index, raw_line in enumerate(lines, start=1):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if in_block_comment:
+                if "*/" in stripped:
+                    in_block_comment = False
+                continue
+            if stripped.startswith("/*"):
+                if "*/" not in stripped:
+                    in_block_comment = True
+                continue
+            if stripped.startswith("*") or stripped.startswith("//"):
+                continue
+            if stripped.startswith("package ") or stripped.startswith("import "):
+                continue
+            return index
+        return 1
 
     def _flatten_symbol_hits(self, symbol_contexts: list[dict[str, Any]], key: str) -> list[str]:
         hits: list[str] = []

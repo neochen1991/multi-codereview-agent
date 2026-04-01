@@ -536,6 +536,73 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     assert parsed["suggested_code"] == "export function map() {}"
 
 
+def test_review_runner_keeps_selected_security_expert_executable(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    review.subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        changed_files=[
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java "
+            "b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+            '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+        ),
+    )
+    review.selected_experts = ["security_compliance"]
+    runner.review_repo.save(review)
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        security = next(expert for expert in experts if expert.expert_id == "security_compliance")
+        return {
+            "requested_expert_ids": ["security_compliance"],
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": ["security_compliance"],
+            "selected_experts": [{"expert_id": "security_compliance", "expert_name": security.name_zh, "reason": "综合 MR 保守执行"}],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    recorded_jobs: list[dict[str, object]] = []
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        recorded_jobs.extend(expert_jobs)
+        return []
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", lambda state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts, partial_failure_count=0: (
+            "selected security expert executed",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    assert recorded_jobs, "security_compliance 应该进入 expert_jobs，而不是被 orchestration 阶段跳过"
+    assert any(job["expert"].expert_id == "security_compliance" for job in recorded_jobs)
+    skipped_messages = [
+        message
+        for message in runner.message_repo.list(review_id)
+        if message.message_type == "expert_skipped" and message.expert_id == "security_compliance"
+    ]
+    assert not skipped_messages
+
+
 def test_review_runner_expert_messages_include_rule_screening_metadata(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -1168,6 +1235,380 @@ def test_review_runner_downgrades_weak_performance_signal(storage_root: Path):
     assert float(stabilized["confidence"]) <= 0.35
 
 
+def test_review_runner_downgrades_finding_when_required_inputs_are_missing(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "控制器输入校验缺失",
+            "claim": "当前入口缺少必要校验，会直接放过非法请求。",
+            "finding_type": "direct_defect",
+            "severity": "high",
+            "confidence": 0.88,
+            "evidence": ["diff 中删除了校验调用"],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": False,
+        },
+        "security_compliance",
+        "src/main/java/com/example/UserController.java",
+        18,
+        {"excerpt": "18 | - validate(request)\n19 | + create(request)"},
+        input_completeness={
+            "missing_sections": ["语言通用规范提示", "关联源码上下文"],
+        },
+    )
+
+    assert stabilized["finding_type"] == "risk_hypothesis"
+    assert stabilized["verification_needed"] is True
+    assert stabilized["direct_evidence"] is False
+    assert stabilized["severity"] == "medium"
+    assert float(stabilized["confidence"]) <= 0.35
+    assert any("语言通用规范提示" in item for item in stabilized["assumptions"])
+    assert "先补齐 语言通用规范提示 / 关联源码上下文" in str(stabilized["verification_plan"])
+
+
+def test_review_runner_builds_fallback_finding_when_expert_fails_with_matched_rules(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_test",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/ddd",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/CourseCreator.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/example/CourseCreator.java b/src/main/java/com/example/CourseCreator.java\n"
+                "--- a/src/main/java/com/example/CourseCreator.java\n"
+                "+++ b/src/main/java/com/example/CourseCreator.java\n"
+                "@@ -18,1 +18,1 @@\n"
+                "-        Course course = Course.create(id, name, duration);\n"
+                "+        Course course = new Course(id, name, duration);\n"
+            ),
+        ),
+        selected_experts=["ddd_specification"],
+    )
+    expert = ExpertProfile(
+        expert_id="ddd_specification",
+        name="DDD",
+        name_zh="DDD规范专家",
+        role="ddd",
+        enabled=True,
+        focus_areas=["聚合边界"],
+        system_prompt="prompt",
+        review_spec="聚合必须在聚合根内守护不变量",
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="command",
+        metadata={
+            "repository_context": {
+                "primary_context": {
+                    "path": "src/main/java/com/example/CourseCreator.java",
+                    "snippet": "18 | Course course = new Course(id, name, duration);",
+                },
+                "context_files": ["src/main/java/com/example/CourseCreator.java"],
+            },
+            "target_hunk": {
+                "file_path": "src/main/java/com/example/CourseCreator.java",
+                "hunk_header": "@@ -18,1 +18,1 @@",
+                "start_line": 18,
+                "end_line": 18,
+                "changed_lines": [18],
+                "excerpt": "+        Course course = new Course(id, name, duration);",
+            },
+        },
+    )
+
+    finding = runner._build_failed_expert_fallback_finding(
+        {
+            "review": review,
+            "expert": expert,
+            "command_message": command_message,
+            "file_path": "src/main/java/com/example/CourseCreator.java",
+            "line_start": 18,
+            "bound_documents": [],
+            "rule_screening": {
+                "enabled_rules": 2,
+                "matched_rules_for_llm": [
+                    {
+                        "rule_id": "DDD-JDDD-001",
+                        "title": "Aggregate 必须在聚合根内守护不变量，禁止外部裸改状态",
+                        "priority": "P1",
+                        "decision": "must_review",
+                        "reason": "直接 new Course 可能绕过工厂和领域事件录制。",
+                    }
+                ],
+                "must_review_count": 1,
+                "possible_hit_count": 0,
+            },
+        },
+        "request_timeout:The read operation timed out",
+    )
+
+    assert finding is not None
+    assert finding.finding_type == "risk_hypothesis"
+    assert finding.verification_needed is True
+    assert "DDD-JDDD-001" in finding.matched_rules
+    assert finding.confidence >= 0.28
+    assert "专家执行失败" in finding.evidence[0]
+
+
+def test_review_runner_builds_signal_aware_fallback_finding_when_expert_fails(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_demo",
+        status="running",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/query-risk",
+            target_ref="main",
+            title="query semantics regression",
+            changed_files=["src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"],
+            unified_diff="",
+        ),
+        selected_experts=["database_analysis"],
+    )
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库分析专家",
+        role="database",
+        enabled=True,
+        focus_areas=["SQL"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="command",
+        metadata={
+            "repository_context": {},
+            "target_hunk": {
+                "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+                "hunk_header": "@@ -60,1 +60,1 @@",
+                "start_line": 60,
+                "end_line": 63,
+                "changed_lines": [62],
+                "excerpt": (
+                    "-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n"
+                    "+        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+                ),
+            },
+        },
+    )
+
+    finding = runner._build_failed_expert_fallback_finding(
+        {
+            "review": review,
+            "expert": expert,
+            "command_message": command_message,
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 62,
+            "bound_documents": [],
+            "rule_screening": {
+                "enabled_rules": 2,
+                "matched_rules_for_llm": [
+                    {
+                        "rule_id": "PERF-SQL-001",
+                        "title": "大结果集查询必须显式分页或限流",
+                        "priority": "P1",
+                        "decision": "must_review",
+                        "reason": "精确匹配已放宽为模糊查询，存在查询语义退化风险。",
+                    }
+                ],
+                "must_review_count": 1,
+                "possible_hit_count": 0,
+            },
+        },
+        "request_timeout:The read operation timed out",
+    )
+
+    assert finding is not None
+    assert "查询语义" in finding.title
+    assert "精确匹配" in finding.summary
+    assert any("equal" in item.lower() and "like" in item.lower() for item in finding.evidence)
+
+
+def test_review_runner_enriches_ddd_finding_with_canonical_terms(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "Course创建绕过聚合工厂方法，破坏不变量守护与领域事件生成",
+            "claim": "将 Course.create() 工厂方法改为 new Course() 直接构造，绕过了聚合根内部的不变量校验。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.4,
+            "line_start": 18,
+            "line_end": 18,
+            "matched_rules": ["DDD-JDDD-001"],
+            "violated_guidelines": [],
+            "evidence": [],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": True,
+        },
+        "ddd_specification",
+        "src/main/java/com/example/CourseCreator.java",
+        18,
+        {
+            "hunk_header": "@@ -18,1 +18,1 @@",
+            "start_line": 18,
+            "end_line": 18,
+            "changed_lines": [18],
+            "excerpt": "+        Course course = new Course(id, name, duration);",
+        },
+    )
+
+    assert "aggregate factory bypass" in str(stabilized["title"]).lower()
+    claim = str(stabilized["claim"]).lower()
+    assert "course.create" in claim
+    assert "aggregate" in claim
+    assert "factory" in claim
+    assert "domain event" in claim
+
+
+def test_review_runner_enriches_java_quality_signal_language(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "查询与消费逻辑存在退化风险",
+            "claim": "当前改动可能导致查询与消费行为退化。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.4,
+            "line_start": 40,
+            "line_end": 40,
+            "matched_rules": ["PERF-SQL-001"],
+            "violated_guidelines": [],
+            "evidence": [],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": True,
+        },
+        "database_analysis",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        40,
+        {
+            "hunk_header": "@@ -20,7 +20,7 @@",
+            "start_line": 20,
+            "end_line": 60,
+            "changed_lines": [23, 40, 56],
+            "excerpt": (
+                "-\tprivate final Integer CHUNKS = 200;\n"
+                "+\tprivate final Integer chunksTmp = 200;\n"
+                "-\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk\"\n"
+                "+\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC\"\n"
+                "-\t\t\t\te.printStackTrace();\n"
+            ),
+        },
+        repository_context={},
+    )
+
+    assert "CHUNKS -> chunksTmp" in str(stabilized["claim"])
+    assert "静默吞掉异常" in str(stabilized["claim"])
+
+
+def test_review_runner_enriches_query_semantics_signal_language(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "共享查询语义退化",
+            "claim": "当前改动会扩大查询结果范围。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.4,
+            "line_start": 62,
+            "line_end": 62,
+            "matched_rules": ["PERF-SQL-001"],
+            "violated_guidelines": [],
+            "evidence": [],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": True,
+        },
+        "database_analysis",
+        "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        62,
+        {
+            "hunk_header": "@@ -60,1 +60,1 @@",
+            "start_line": 60,
+            "end_line": 63,
+            "changed_lines": [62],
+            "excerpt": (
+                "-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n"
+                "+        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+            ),
+        },
+        repository_context={},
+    )
+
+    assert "equal 精确匹配放宽成 like/contains 模糊匹配" in str(stabilized["claim"])
+    assert "查询语义" in str(stabilized["title"])
+    assert "精确匹配" in str(stabilized["summary"])
+    assert any("equal" in str(item).lower() and "like" in str(item).lower() for item in list(stabilized["evidence"]))
+
+
+def test_review_runner_enriches_naming_and_exception_signals_into_summary(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "事件消费逻辑存在退化风险",
+            "summary": "当前改动会让消费逻辑更难维护。",
+            "claim": "当前改动可能导致事件消费行为退化。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.4,
+            "line_start": 40,
+            "line_end": 40,
+            "matched_rules": ["PERF-SQL-001"],
+            "violated_guidelines": [],
+            "evidence": [],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": True,
+        },
+        "correctness_business",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        40,
+        {
+            "hunk_header": "@@ -20,7 +20,7 @@",
+            "start_line": 20,
+            "end_line": 60,
+            "changed_lines": [23, 40, 56],
+            "excerpt": (
+                "-\tprivate final Integer CHUNKS = 200;\n"
+                "+\tprivate final Integer chunksTmp = 200;\n"
+                "-\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk\"\n"
+                "+\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on ASC\"\n"
+                "-\t\t\t\te.printStackTrace();\n"
+            ),
+        },
+        repository_context={},
+    )
+
+    assert "命名规范" in str(stabilized["title"])
+    assert "CHUNKS" in str(stabilized["summary"])
+    assert "chunksTmp" in str(stabilized["summary"])
+    assert "静默吞掉异常" in str(stabilized["summary"])
+
+
 def test_review_runner_stabilize_expert_analysis_reanchors_line_start_to_target_hunk(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -1303,6 +1744,123 @@ def test_review_runner_fails_when_no_enabled_experts(storage_root: Path):
 
     assert review.status == "failed"
     assert review.phase == "failed"
+
+
+def test_review_runner_preserves_results_when_single_expert_fails(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    architecture = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构与设计",
+        role="architecture",
+        enabled=True,
+        focus_areas=["DDD"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    correctness = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务规则"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+
+    monkeypatch.setattr(runner.registry, "list_enabled", lambda: [architecture, correctness])
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "select_review_experts",
+        lambda *_args, **_kwargs: {
+            "requested_expert_ids": ["architecture_design", "correctness_business"],
+            "candidate_expert_ids": ["architecture_design", "correctness_business"],
+            "selected_expert_ids": ["architecture_design", "correctness_business"],
+            "selected_experts": [
+                {"expert_id": "architecture_design", "expert_name": "架构与设计", "reason": "命中架构风险"},
+                {"expert_id": "correctness_business", "expert_name": "正确性", "reason": "命中正确性风险"},
+            ],
+            "skipped_experts": [],
+            "llm": {},
+        },
+    )
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_command",
+        lambda _subject, expert, _runtime, route_hint=None: {
+            "file_path": "backend/app/main.py",
+            "line_start": 2,
+            "summary": f"{expert.name_zh} 审查 backend/app/main.py",
+            "routeable": True,
+            "related_files": [],
+            "target_hunk": {},
+            "repository_context": {},
+            "expected_checks": [],
+            "disallowed_inference": [],
+            "routing_reason": "test",
+            "routing_confidence": 0.9,
+            "llm": {},
+        },
+    )
+    monkeypatch.setattr(runner.knowledge_service, "retrieve_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.knowledge_service,
+        "screen_rules_for_expert",
+        lambda *_args, **_kwargs: {
+            "total_rules": 0,
+            "enabled_rules": 0,
+            "must_review_count": 0,
+            "possible_hit_count": 0,
+            "matched_rule_count": 0,
+            "matched_rules_for_llm": [],
+            "batch_summaries": [],
+        },
+    )
+    monkeypatch.setattr(runner.graph, "invoke", lambda _state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(runner.main_agent_service, "build_final_summary", lambda *_args, **_kwargs: ("final", {}))
+
+    def _fake_run_expert_from_command(**kwargs):
+        expert = kwargs["expert"]
+        if expert.expert_id == "architecture_design":
+            raise TimeoutError("expert timed out")
+        kwargs["finding_payloads"].append(
+            {
+                "finding_id": "fdg_demo",
+                "expert_id": expert.expert_id,
+                "title": "发现问题",
+                "summary": "summary",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.61,
+                "file_path": "backend/app/main.py",
+                "line_start": 2,
+                "evidence": ["evidence"],
+                "cross_file_evidence": [],
+                "assumptions": [],
+                "context_files": ["backend/app/main.py"],
+            }
+        )
+
+    monkeypatch.setattr(runner, "_run_expert_from_command", _fake_run_expert_from_command)
+
+    runner.run_once(review_id)
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+
+    assert review.status == "completed"
+    assert review.subject.metadata["expert_execution"]["partial_failure_count"] == 1
+    progress = review.subject.metadata["expert_review_progress"]
+    assert progress["total_expert_jobs"] == 2
+    assert progress["started_count"] == 2
+    assert progress["completed_count"] == 1
+    assert progress["failed_count"] == 1
+    assert progress["last_event"] in {"completed", "failed"}
+    assert "1 个专家任务执行失败" in review.report_summary
+    assert any(event.event_type == "expert_failed" for event in runner.event_repo.list(review_id))
+    assert any(event.event_type == "review_completed" for event in runner.event_repo.list(review_id))
 
 
 def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_context(storage_root: Path):
@@ -1609,6 +2167,38 @@ def test_review_runner_build_code_excerpt_prefers_repository_source_context(stor
 
 def test_review_runner_build_finding_code_context_contains_diff_and_related_context(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
+    workspace_repo = storage_root / "workspace-repo"
+    target_file = workspace_repo / "apps" / "api" / "order" / "order.service.ts"
+    related_file = workspace_repo / "apps" / "api" / "order" / "order.controller.ts"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(
+        "\n".join(
+            [
+                "export class OrderService {",
+                "  async createOrder(payload) {",
+                "    validateOrder(payload);",
+                "    auditCreate(payload.id);",
+                "    return payload;",
+                "  }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    related_file.write_text(
+        "\n".join(
+            [
+                "export class OrderController {",
+                "  async create(req) {",
+                "    return this.orderService.createOrder(req.body);",
+                "  }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     subject = ReviewSubject(
         subject_type="mr",
         repo_id="repo",
@@ -1632,6 +2222,7 @@ def test_review_runner_build_finding_code_context_contains_diff_and_related_cont
             "-return this.orderService.createOrder(req.body)\n"
             "+return this.orderService.createOrder(req.body)\n"
         ),
+        metadata={"trigger_source": "manual_real_case_test", "workspace_repo_path": str(workspace_repo)},
     )
 
     context = runner._build_finding_code_context(
@@ -1648,6 +2239,8 @@ def test_review_runner_build_finding_code_context_contains_diff_and_related_cont
         },
         {
             "routing_reason": "需要检查 service 到 controller 的契约是否一致",
+            "java_review_mode": "general",
+            "java_context_signals": ["controller_entry", "transaction_boundary", "repository_dependency"],
             "primary_context": {
                 "path": "apps/api/order/order.service.ts",
                 "snippet": "   4 | async createOrder(payload) {\n   5 |   validateOrder(payload);\n   6 | }",
@@ -1666,8 +2259,101 @@ def test_review_runner_build_finding_code_context_contains_diff_and_related_cont
     assert "validateOrder(payload);" in str(context["target_file_full_diff"])
     assert "order.controller.ts" in str(context["related_diff_summary"])
     assert context["target_hunk"]["changed_lines"] == [5, 6]
+    assert "auditCreate(payload.id);" in str(context["problem_source_context"]["snippet"])
+    assert "return payload;" in str(context["source_file_context"])
+    assert context["java_review_mode"] == "general"
+    assert context["java_context_signals"] == ["controller_entry", "transaction_boundary", "repository_dependency"]
     assert len(context["related_contexts"]) == 1
     assert context["symbol_contexts"][0]["symbol"] == "createOrder"
+
+
+def test_review_runner_runtime_repo_context_overrides_stale_command_context(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    merged = runner._merge_runtime_repository_context(
+        {
+            "related_contexts": [
+                {
+                    "path": "src/main/java/com/example/PetController.java",
+                    "line_start": 1,
+                    "snippet": "   1 | /*\n   2 |  * Copyright header",
+                }
+            ],
+            "related_source_snippets": [],
+            "symbol_contexts": [],
+        },
+        [
+            {
+                "tool_name": "repo_context_search",
+                "related_contexts": [
+                    {
+                        "path": "src/main/java/com/example/PetController.java",
+                        "line_start": 106,
+                        "snippet": " 106 | public String processCreationForm(Owner owner, @Valid Pet pet, BindingResult result,",
+                    }
+                ],
+                "related_source_snippets": [
+                    {
+                        "path": "src/main/java/com/example/PetController.java",
+                        "symbol": "processCreationForm",
+                        "kind": "reference",
+                        "line_start": 106,
+                        "snippet": " 106 | public String processCreationForm(Owner owner, @Valid Pet pet, BindingResult result,",
+                    }
+                ],
+                "symbol_contexts": [
+                    {
+                        "symbol": "processCreationForm",
+                        "references": [
+                            {
+                                "path": "src/main/java/com/example/PetController.java",
+                                "line_number": 106,
+                                "snippet": "public String processCreationForm(Owner owner, @Valid Pet pet, BindingResult result,",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert merged["related_contexts"][0]["line_start"] == 106
+    assert merged["related_source_snippets"][0]["line_start"] == 106
+    assert merged["symbol_contexts"][0]["symbol"] == "processCreationForm"
+
+
+def test_review_runner_build_java_review_focus_switches_between_general_and_ddd(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    general_focus = runner._build_java_ddd_review_focus(
+        "java",
+        "architecture_design",
+        {
+            "java_review_mode": "general",
+            "java_context_signals": ["controller_entry", "transaction_boundary", "repository_dependency"],
+            "current_class_context": {"snippet": "public void create() {}", "path": "src/main/java/com/acme/UserService.java"},
+            "caller_contexts": [{"path": "src/main/java/com/acme/UserController.java", "snippet": "userService.create();"}],
+            "callee_contexts": [{"path": "src/main/java/com/acme/UserRepository.java", "snippet": "userRepository.insert();"}],
+            "transaction_context": {"transactional_method": "create"},
+            "persistence_contexts": [{"path": "src/main/resources/mapper/UserMapper.xml", "snippet": "<select />"}],
+        },
+    )
+    ddd_focus = runner._build_java_ddd_review_focus(
+        "java",
+        "ddd_specification",
+        {
+            "java_review_mode": "ddd_enhanced",
+            "java_context_signals": ["ddd_package_layout", "domain_model_context", "domain_aggregate"],
+            "current_class_context": {"snippet": "order.setStatus(CLOSED);", "path": "src/main/java/com/acme/order/app/OrderApplicationService.java"},
+            "domain_model_contexts": [{"path": "src/main/java/com/acme/order/domain/OrderAggregate.java", "snippet": "class OrderAggregate {}", "symbol": "OrderAggregate"}],
+        },
+    )
+
+    assert "Java 通用审查要求" in general_focus
+    assert "Java 通用模式" in general_focus
+    assert "聚合边界是否被破坏" in general_focus
+    assert "Java DDD 增强模式" in ddd_focus
+    assert "Java DDD 增强要求" in ddd_focus
 
 
 def test_review_runner_extract_design_alignment_returns_tool_payload(storage_root: Path):
@@ -2054,3 +2740,196 @@ def test_review_runner_builds_knowledge_context_metadata(storage_root: Path):
     ]
     assert metadata["query_terms"] == ["order_service", "symbol_query", "routing_reason"]
     assert metadata["knowledge_sources"] == ["knowledge_search", "repo_context_search"]
+
+
+def test_review_runner_prompt_includes_input_completeness_summary(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/input-contract",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/UserController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/UserController.java b/src/main/java/com/example/UserController.java\n"
+            "--- a/src/main/java/com/example/UserController.java\n"
+            "+++ b/src/main/java/com/example/UserController.java\n"
+            "@@ -8,1 +8,1 @@\n"
+            "-    create(request);\n"
+            "+    create(request);\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        enabled=True,
+        focus_areas=["输入校验", "权限边界"],
+        system_prompt="prompt",
+        review_spec="入口必须完成参数校验与权限校验",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/example/UserController.java",
+        8,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={
+            "routing_reason": "入口参数校验变化",
+            "primary_context": {"path": "src/main/java/com/example/UserController.java", "snippet": "8 | create(request);"},
+            "related_contexts": [{"path": "src/main/java/com/example/UserService.java", "snippet": "12 | userService.create(request);"}],
+        },
+        target_hunk={"hunk_header": "@@ -8,1 +8,1 @@", "excerpt": "+    create(request);"},
+        bound_documents=[],
+        disallowed_inference=["不要假定隐藏的统一校验链路一定存在"],
+        expected_checks=["检查入口校验与权限边界"],
+        active_skills=[],
+        rule_screening={
+            "enabled_rules": 2,
+            "matched_rules_for_llm": [{"rule_id": "SEC-JAVA-001", "title": "Java 入口必须保留显式校验"}],
+        },
+    )
+
+    assert "输入完整性校验" in prompt
+    assert "专家规范: 已提供" in prompt
+    assert "语言通用规范提示: 已提供" in prompt
+    assert "绑定规则: 1 条命中 / 2 条启用" in prompt
+    assert "关联源码上下文: 1 段" in prompt
+    assert "遵循 Java / Spring 通用代码规范" in prompt
+
+
+def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/context-payload",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/UserService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/UserService.java b/src/main/java/com/example/UserService.java\n"
+            "--- a/src/main/java/com/example/UserService.java\n"
+            "+++ b/src/main/java/com/example/UserService.java\n"
+            "@@ -12,1 +12,2 @@\n"
+            "-        userRepository.findByStatus(status);\n"
+            "+        validate(status);\n"
+            "+        userRepository.findByStatus(status);\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        focus_areas=["查询风险"],
+        system_prompt="prompt",
+        review_spec="检查事务边界与查询放大风险",
+    )
+    context = runner._build_finding_code_context(
+        subject,
+        "src/main/java/com/example/UserService.java",
+        12,
+        {
+            "file_path": "src/main/java/com/example/UserService.java",
+            "hunk_header": "@@ -12,1 +12,2 @@",
+            "start_line": 12,
+            "end_line": 13,
+            "changed_lines": [12, 13],
+            "excerpt": "+        userRepository.findByStatus(status);",
+        },
+        {
+            "primary_context": {
+                "path": "src/main/java/com/example/UserService.java",
+                "snippet": "  12 | validate(status);\n  13 | userRepository.findByStatus(status);",
+            },
+            "related_contexts": [
+                {
+                    "path": "src/main/java/com/example/UserRepository.java",
+                    "snippet": "  20 | List<UserRecord> findByStatus(String status);",
+                }
+            ],
+            "context_files": [
+                "src/main/java/com/example/UserService.java",
+                "src/main/java/com/example/UserRepository.java",
+            ],
+        },
+        expert=expert,
+        bound_documents=[],
+        rule_screening={
+            "enabled_rules": 3,
+            "matched_rules_for_llm": [
+                {"rule_id": "PERF-JAVA-001", "title": "查询接口必须显式分页或限流", "priority": "P1"}
+            ],
+        },
+    )
+
+    assert context["input_completeness"]["review_spec_present"] is True
+    assert context["input_completeness"]["language_guidance_present"] is True
+    assert context["input_completeness"]["matched_rule_count"] == 1
+    assert context["input_completeness"]["related_context_count"] == 1
+    assert context["review_inputs"]["expert_id"] == "performance_reliability"
+    assert context["review_inputs"]["language_guidance_language"] == "java"
+    assert context["review_inputs"]["language_guidance_present"] is True
+    assert "事务与副作用" in context["review_inputs"]["language_guidance_topics"]
+    assert context["review_inputs"]["matched_rules"][0]["rule_id"] == "PERF-JAVA-001"
+
+
+def test_review_runner_build_knowledge_review_context_includes_java_mode_and_signals(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构与设计专家",
+        role="architecture",
+        enabled=True,
+        focus_areas=["分层边界"],
+        system_prompt="prompt",
+        knowledge_sources=["knowledge_search"],
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/java-mode",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/order/app/OrderApplicationService.java"],
+    )
+
+    context = runner._build_knowledge_review_context(
+        subject,
+        expert,
+        "src/main/java/com/acme/order/app/OrderApplicationService.java",
+        21,
+        {
+            "routing_reason": "应用服务可能越层修改领域状态",
+            "java_review_mode": "ddd_enhanced",
+            "java_context_signals": ["application_service_layer", "transaction_boundary", "domain_model_context"],
+        },
+        {
+            "hunk_header": "@@ -15,9 +15,9 @@ public final class OrderApplicationService {",
+            "excerpt": "\n".join(
+                [
+                    "-        Order order = Order.create(id, status);",
+                    "+        Order order = new Order(id, status);",
+                    "-        repository.save(order);",
+                    "         eventBus.publish(order.pullDomainEvents());",
+                    "+        repository.save(order);",
+                ]
+            ),
+        },
+    )
+
+    assert "java_mode:ddd_enhanced" in context["query_terms"]
+    assert "java_signal:application_service_layer" in context["query_terms"]
+    assert "java_signal:transaction_boundary" in context["query_terms"]
+    assert "java_signal:domain_model_context" in context["query_terms"]
+    assert "java_quality:factory_bypass" in context["query_terms"]
+    assert "java_quality:event_ordering_risk" in context["query_terms"]
+    assert "java_term:create" in context["query_terms"]

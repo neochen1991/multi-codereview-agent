@@ -188,6 +188,8 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
     ...((item.definitions || []).map((entry) => ({ title: `符号定义 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
     ...((item.references || []).map((entry) => ({ title: `符号引用 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
   ]);
+  const inputCompleteness = codeContext?.input_completeness;
+  const reviewInputs = codeContext?.review_inputs;
 
   return (
     <Card className="module-card" title="问题详情">
@@ -277,6 +279,82 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           ))}
         </Space>
       </div>
+
+      {inputCompleteness || reviewInputs ? (
+        <div style={{ marginTop: 16 }}>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>审查输入回放</Paragraph>
+          <Descriptions
+            column={1}
+            size="small"
+            items={[
+              {
+                key: "expert_spec",
+                label: "专家规范",
+                children: (
+                  <Tag color={inputCompleteness?.review_spec_present ? "success" : "error"}>
+                    {inputCompleteness?.review_spec_present ? "已注入" : "缺失"}
+                  </Tag>
+                ),
+              },
+              {
+                key: "language_guidance",
+                label: "语言通用规范提示",
+                children: (
+                  <Space wrap>
+                    <Tag color={inputCompleteness?.language_guidance_present ? "success" : "error"}>
+                      {inputCompleteness?.language_guidance_present ? "已注入" : "缺失"}
+                    </Tag>
+                    {reviewInputs?.language_guidance_language ? <Tag>{reviewInputs.language_guidance_language}</Tag> : null}
+                    {(reviewInputs?.language_guidance_topics || []).slice(0, 4).map((topic) => (
+                      <Tag key={topic} color="blue">
+                        {topic}
+                      </Tag>
+                    ))}
+                  </Space>
+                ),
+              },
+              {
+                key: "rule_inputs",
+                label: "规则与文档",
+                children: (
+                  <Space wrap>
+                    <Tag>{`命中规则 ${inputCompleteness?.matched_rule_count || 0}`}</Tag>
+                    <Tag>{`启用规则 ${inputCompleteness?.enabled_rule_count || 0}`}</Tag>
+                    <Tag>{`绑定文档 ${inputCompleteness?.bound_document_count || 0}`}</Tag>
+                    {(reviewInputs?.matched_rules || []).slice(0, 4).map((rule) => (
+                      <Tag key={rule.rule_id || rule.title} color="purple">
+                        {rule.rule_id || rule.title}
+                      </Tag>
+                    ))}
+                  </Space>
+                ),
+              },
+              {
+                key: "source_inputs",
+                label: "代码输入",
+                children: (
+                  <Space wrap>
+                    <Tag color={inputCompleteness?.target_file_diff_present ? "success" : "error"}>
+                      {inputCompleteness?.target_file_diff_present ? "变更代码已注入" : "变更代码缺失"}
+                    </Tag>
+                    <Tag color={inputCompleteness?.source_context_present ? "success" : "error"}>
+                      {inputCompleteness?.source_context_present ? "当前源码已注入" : "当前源码缺失"}
+                    </Tag>
+                    <Tag color={(inputCompleteness?.related_context_count || 0) > 0 ? "success" : "error"}>
+                      {`关联源码 ${(inputCompleteness?.related_context_count || 0) > 0 ? "已注入" : "缺失"}`}
+                    </Tag>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+          {inputCompleteness?.missing_sections?.length ? (
+            <Paragraph type="warning" style={{ marginBottom: 0 }}>
+              缺失输入：{inputCompleteness.missing_sections.join(" / ")}。系统已按低可信审查结果处理。
+            </Paragraph>
+          ) : null}
+        </div>
+      ) : null}
 
       {governanceDecision ? (
         <div style={{ marginTop: 16 }}>

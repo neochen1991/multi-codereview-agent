@@ -10,8 +10,14 @@ focus_areas:
 activation_hints:
 - auth
 - security
+- valid
+- validation
+- bindingresult
+- requestbody
+- requestparam
 required_checks:
 - 权限边界是否被绕过
+- 输入校验是否被绕过
 out_of_scope:
 - 不要代替性能专家判断容量瓶颈
 preferred_artifacts:

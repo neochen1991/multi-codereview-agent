@@ -1,4 +1,7 @@
+from datetime import UTC, datetime
+
 from app.domain.models.expert_profile import ExpertProfile
+from app.domain.models.review import ReviewTask
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.llm_chat_service import LLMTextResult
@@ -258,6 +261,59 @@ def test_main_agent_prefers_security_hunk_for_security_expert():
 
     assert command["file_path"] == "backend/app/security/authz.py"
     assert "PermissionError" in command["target_hunk"]["excerpt"]
+
+
+def test_main_agent_final_summary_marks_partial_failures_as_inconclusive():
+    class StubLLM:
+        def __init__(self) -> None:
+            self.fallback_text = ""
+            self.user_prompt = ""
+
+        def resolve_main_agent(self, _runtime: RuntimeSettings):
+            return None
+
+        def complete_text(self, **kwargs):
+            self.fallback_text = str(kwargs.get("fallback_text") or "")
+            self.user_prompt = str(kwargs.get("user_prompt") or "")
+            return LLMTextResult(
+                text=self.fallback_text,
+                mode="fallback",
+                provider="stub",
+                model="stub-model",
+                base_url="https://example.invalid",
+                api_key_env="DUMMY_API_KEY",
+            )
+
+    agent = MainAgentService()
+    stub = StubLLM()
+    agent._llm = stub  # type: ignore[assignment]
+    review = ReviewTask(
+        review_id="rev_partial",
+        status="completed",
+        phase="completed",
+        analysis_mode="light",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OwnerController.java"],
+        ),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    summary, _ = agent.build_final_summary(
+        review,
+        [],
+        RuntimeSettings(allow_llm_fallback=True),
+        partial_failure_count=1,
+    )
+
+    assert "部分完成" in summary
+    assert "失败" in summary
+    assert "专家执行失败数: 1" in stub.user_prompt
 
 
 def test_main_agent_prefers_migration_hunk_for_database_expert():
@@ -974,6 +1030,160 @@ def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
     assert plan["architecture_design"]["file_path"] == "apps/api/orders/order.service.ts"
 
 
+def test_main_agent_light_routing_plan_preserves_selected_security_expert():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        changed_files=[
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java "
+            "b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+            '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["鉴权授权", "输入校验"],
+            activation_hints=["auth", "security", "validation"],
+            system_prompt="prompt",
+        )
+    ]
+
+    plan = agent.build_routing_plan(subject, experts, RuntimeSettings(), analysis_mode="light")
+
+    route = plan["security_compliance"]
+    assert route["routeable"] is True
+    assert route["routing_source"] == "selected_override"
+    assert "保守执行策略继续审查" in route["routing_reason"]
+    assert route["routing_override_reason"] == "当前变更未命中安全相关线索"
+
+
+def test_main_agent_routing_plan_overrides_llm_skip_for_selected_expert(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        changed_files=[
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java "
+            "b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+            '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["鉴权授权", "输入校验"],
+            activation_hints=["auth", "security", "validation"],
+            system_prompt="prompt",
+        )
+    ]
+
+    def fake_complete_text(**_: object) -> LLMTextResult:
+        return LLMTextResult(
+            text=(
+                '{"expert_routes":[],'
+                '"skipped_experts":['
+                '{"expert_id":"security_compliance","reason":"当前变更未命中安全相关线索"}'
+                "]}",
+            ),
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    plan = agent.build_routing_plan(subject, experts, RuntimeSettings(allow_llm_fallback=True))
+
+    route = plan["security_compliance"]
+    assert route["routeable"] is True
+    assert route["routing_source"] == "selected_override"
+    assert route["routing_override_reason"] == "当前变更未命中安全相关线索"
+
+
+def test_main_agent_build_command_respects_route_hint_routeable_override():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        changed_files=[
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java "
+            "b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+            '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["鉴权授权", "输入校验"],
+        activation_hints=["auth", "security", "validation"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(
+        subject,
+        expert,
+        RuntimeSettings(),
+        route_hint={
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 63,
+            "target_hunk": {"excerpt": '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'},
+            "repo_hits": {},
+            "routeable": True,
+            "skip_reason": "",
+            "confidence": 0.31,
+            "routing_reason": "主Agent已选中该专家，本轮按保守执行策略继续审查。",
+        },
+    )
+
+    assert command["routeable"] is True
+    assert command["skip_reason"] == ""
+
+
 def test_main_agent_select_review_experts_uses_llm_result(monkeypatch):
     agent = MainAgentService()
     subject = ReviewSubject(
@@ -1315,12 +1525,19 @@ def test_main_agent_routing_prompt_includes_target_file_full_diff_and_related_su
         }
     ]
 
-    prompt = agent._build_routing_user_prompt(subject=subject, experts=experts, candidate_hunks=candidate_hunks)
+    prompt = agent._build_routing_user_prompt(
+        subject=subject,
+        experts=experts,
+        candidate_hunks=candidate_hunks,
+        runtime_settings=RuntimeSettings(),
+    )
 
     assert "目标文件完整 diff" in prompt
     assert "validateOrder(payload);" in prompt
     assert "其他变更文件摘要" in prompt
     assert "authGuard" in prompt
+    assert "语言通用规范提示" in prompt
+    assert "JavaScript / TypeScript 通用代码规范" in prompt
 
 
 def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
@@ -1369,8 +1586,165 @@ def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
         subject=subject,
         experts=experts,
         requested_expert_ids=["correctness_business"],
+        runtime_settings=RuntimeSettings(),
     )
 
     assert "业务变更文件完整 diff" in prompt
     assert "validateOrder(payload);" in prompt
     assert "authGuard" in prompt
+    assert "语言通用规范提示" in prompt
+    assert "JavaScript / TypeScript 通用代码规范" in prompt
+
+
+def test_main_agent_readds_security_expert_for_java_validation_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["输入校验"],
+            activation_hints=["auth", "security", "valid", "validation", "bindingresult"],
+            required_checks=["输入校验是否被绕过"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务规则"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/validation",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/UserController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/UserController.java b/src/main/java/com/example/UserController.java\n"
+            "--- a/src/main/java/com/example/UserController.java\n"
+            "+++ b/src/main/java/com/example/UserController.java\n"
+            "@@ -18,1 +18,1 @@\n"
+            "-public String create(@Valid UserRequest request, BindingResult result) {\n"
+            "+public String create(UserRequest request, BindingResult result) {\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["security_compliance", "correctness_business"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "correctness_business", "reason": "业务校验变化", "confidence": 0.9}
+            ],
+            "skipped_experts": [
+                {"expert_id": "security_compliance", "reason": "LLM 认为不属于典型安全问题"}
+            ],
+        },
+        fallback_ids=["correctness_business"],
+    )
+
+    assert "security_compliance" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["security_compliance"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务规则"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="architecture_design",
+            name="Architecture",
+            name_zh="架构与设计专家",
+            role="architecture",
+            enabled=True,
+            focus_areas=["分层架构"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["安全边界"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="ddd_specification",
+            name="DDD",
+            name_zh="DDD规范专家",
+            role="ddd",
+            enabled=True,
+            focus_areas=["聚合边界"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        changed_files=[
+            "src/main/java/com/example/CourseCreator.java",
+            "src/main/java/com/example/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/CourseCreator.java b/src/main/java/com/example/CourseCreator.java\n"
+            "--- a/src/main/java/com/example/CourseCreator.java\n"
+            "+++ b/src/main/java/com/example/CourseCreator.java\n"
+            "@@ -18,2 +18,3 @@\n"
+            "-        Course course = Course.create(id, name, duration);\n"
+            "+        Course course = new Course(id, name, duration);\n"
+            "-        repository.save(course);\n"
+            "+        eventBus.publish(course.pullDomainEvents());\n"
+            "+        repository.save(course);\n"
+            "diff --git a/src/main/java/com/example/HibernateCriteriaConverter.java b/src/main/java/com/example/HibernateCriteriaConverter.java\n"
+            "--- a/src/main/java/com/example/HibernateCriteriaConverter.java\n"
+            "+++ b/src/main/java/com/example/HibernateCriteriaConverter.java\n"
+            "@@ -60,1 +60,1 @@\n"
+            "-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n"
+            "+        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "architecture_design", "security_compliance", "ddd_specification"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "correctness_business", "reason": "业务正确性变化明显", "confidence": 0.9},
+                {"expert_id": "ddd_specification", "reason": "涉及聚合创建与事件顺序", "confidence": 0.88},
+            ],
+            "skipped_experts": [
+                {"expert_id": "architecture_design", "reason": "LLM 认为只是实现细节"},
+                {"expert_id": "security_compliance", "reason": "LLM 认为未命中安全关键词"},
+            ],
+        },
+        fallback_ids=["correctness_business"],
+    )
+
+    assert "architecture_design" in merged["selected_expert_ids"]
+    assert "security_compliance" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["architecture_design"]["source"] == "heuristic_selected"
+    assert selected["security_compliance"]["source"] == "heuristic_selected"

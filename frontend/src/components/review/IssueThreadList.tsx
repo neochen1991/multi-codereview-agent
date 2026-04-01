@@ -29,6 +29,9 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
             const finding = issueFindingMap?.[item.issue_id] || null;
             const routingReason = finding?.code_context?.routing_reason || "";
             const hunkHeader = finding?.code_context?.target_hunk?.hunk_header || "";
+            const inputCompleteness = finding?.code_context?.input_completeness;
+            const hasMissingInputs = Boolean(inputCompleteness?.missing_sections?.length);
+            const languageGuidancePresent = Boolean(inputCompleteness?.language_guidance_present);
             return (
               <List.Item
                 className={selectedIssueId === item.issue_id ? "thread-selected" : ""}
@@ -45,6 +48,12 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
                       <Tag color={item.verified ? "success" : "warning"}>
                         {item.verified ? "已核验" : "待核验"}
                       </Tag>
+                      {hasMissingInputs ? <Tag color="gold">输入不完整</Tag> : null}
+                      {!hasMissingInputs && finding ? (
+                        <Tag color={languageGuidancePresent ? "success" : "default"}>
+                          {languageGuidancePresent ? "语言规范已注入" : "语言规范未知"}
+                        </Tag>
+                      ) : null}
                       <span>{item.title}</span>
                     </div>
                   }

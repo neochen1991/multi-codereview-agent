@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/neochen/multi-codereview-agent -type f -name CLAUDE.md -o -name README.md -o -name *.json -name pyproject.toml -o -name Makefile -o -name Dockerfile)"
+    ]
+  }
+}

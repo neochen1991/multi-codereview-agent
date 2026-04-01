@@ -162,3 +162,49 @@ def test_repository_context_service_ignores_java_test_named_files(tmp_path: Path
 
     assert result["matches"]
     assert all(not item["path"].endswith("OrderServiceTest.java") for item in result["matches"])
+
+
+def test_repository_context_service_falls_back_to_workspace_for_manual_review(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    target = workspace / "src" / "service.ts"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    target.write_text("export const foo = () => repo.search()\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    service = RepositoryContextService.from_review_context(
+        clone_url="",
+        local_path="",
+        default_branch="main",
+        subject={
+            "changed_files": ["src/service.ts"],
+            "metadata": {"trigger_source": "manual"},
+        },
+    )
+
+    assert service.is_ready() is True
+    assert service.local_path == workspace
+
+
+def test_repository_context_service_prefers_workspace_repo_path_from_subject_metadata(tmp_path: Path):
+    configured_repo = tmp_path / "configured"
+    configured_repo.mkdir(parents=True)
+    workspace_repo = tmp_path / "workspace-repo"
+    (workspace_repo / ".git").mkdir(parents=True)
+    (workspace_repo / "src").mkdir(parents=True)
+
+    service = RepositoryContextService.from_review_context(
+        clone_url="https://github.com/example/repo.git",
+        local_path=configured_repo,
+        default_branch="main",
+        subject={
+            "changed_files": ["src/OwnerController.java"],
+            "metadata": {
+                "trigger_source": "manual_real_case_test",
+                "workspace_repo_path": str(workspace_repo),
+            },
+        },
+    )
+
+    assert service.local_path == workspace_repo

@@ -1,5 +1,5 @@
 import React from "react";
-import { Card, Descriptions, Empty, Tag, Typography } from "antd";
+import { Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
 
@@ -15,6 +15,8 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
   const confidenceBreakdown = issue?.confidence_breakdown || {};
   const codeContext = finding?.code_context;
   const contextFiles = codeContext?.context_files || finding?.context_files || [];
+  const inputCompleteness = codeContext?.input_completeness;
+  const reviewInputs = codeContext?.review_inputs;
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
@@ -98,6 +100,57 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
                   <Descriptions.Item label="上下文文件">
                     {contextFiles.length ? contextFiles.join("、") : "-"}
                   </Descriptions.Item>
+                </Descriptions>
+              </div>
+            ) : null}
+
+            {finding && (inputCompleteness || reviewInputs) ? (
+              <div style={{ marginTop: 16 }}>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>审查输入质量</Paragraph>
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="专家规范">
+                    <Tag color={inputCompleteness?.review_spec_present ? "success" : "error"}>
+                      {inputCompleteness?.review_spec_present ? "已注入" : "缺失"}
+                    </Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="语言通用规范提示">
+                    <Space wrap>
+                      <Tag color={inputCompleteness?.language_guidance_present ? "success" : "error"}>
+                        {inputCompleteness?.language_guidance_present ? "已注入" : "缺失"}
+                      </Tag>
+                      {reviewInputs?.language_guidance_language ? <Tag>{reviewInputs.language_guidance_language}</Tag> : null}
+                      {(reviewInputs?.language_guidance_topics || []).slice(0, 4).map((topic) => (
+                        <Tag key={topic} color="blue">
+                          {topic}
+                        </Tag>
+                      ))}
+                    </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="规则与文档">
+                    <Space wrap>
+                      <Tag>{`命中规则 ${inputCompleteness?.matched_rule_count || 0}`}</Tag>
+                      <Tag>{`启用规则 ${inputCompleteness?.enabled_rule_count || 0}`}</Tag>
+                      <Tag>{`绑定文档 ${inputCompleteness?.bound_document_count || 0}`}</Tag>
+                    </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="代码输入">
+                    <Space wrap>
+                      <Tag color={inputCompleteness?.target_file_diff_present ? "success" : "error"}>
+                        {inputCompleteness?.target_file_diff_present ? "变更代码已注入" : "变更代码缺失"}
+                      </Tag>
+                      <Tag color={inputCompleteness?.source_context_present ? "success" : "error"}>
+                        {inputCompleteness?.source_context_present ? "当前源码已注入" : "当前源码缺失"}
+                      </Tag>
+                      <Tag color={(inputCompleteness?.related_context_count || 0) > 0 ? "success" : "error"}>
+                        {`关联源码 ${(inputCompleteness?.related_context_count || 0) > 0 ? "已注入" : "缺失"}`}
+                      </Tag>
+                    </Space>
+                  </Descriptions.Item>
+                  {inputCompleteness?.missing_sections?.length ? (
+                    <Descriptions.Item label="缺失输入">
+                      <Tag color="gold">{inputCompleteness.missing_sections.join(" / ")}</Tag>
+                    </Descriptions.Item>
+                  ) : null}
                 </Descriptions>
               </div>
             ) : null}
