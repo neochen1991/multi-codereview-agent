@@ -406,6 +406,11 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [processSidebarTab, setProcessSidebarTab] = useState<ProcessSidebarTabKey>("issues");
   const [review, setReview] = useState<ReviewSummary | null>(null);
   const [replay, setReplay] = useState<ReviewReplayBundle | null>(null);
+  const [report, setReport] = useState<ReviewReplayBundle["report"] | null>(null);
+  const [messages, setMessages] = useState<ReviewReplayBundle["messages"]>([]);
+  const [issues, setIssues] = useState<ReviewReplayBundle["issues"]>([]);
+  const [events, setEvents] = useState<ReviewReplayBundle["events"]>([]);
+  const [findings, setFindings] = useState<ReviewReplayBundle["report"]["findings"]>([]);
   const [artifacts, setArtifacts] = useState<ReviewArtifacts | null>(null);
   const [experts, setExperts] = useState<ExpertProfile[]>([]);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null);
@@ -450,42 +455,109 @@ const ReviewWorkbenchPage: React.FC = () => {
     syncTabToUrl(nextTab, options?.replace ?? true);
   };
 
-  const loadReviewBundle = async (targetReviewId: string) => {
-    // 工作台恢复和轮询刷新统一走这一条数据加载链，
-    // 确保概览、过程、结果看到的都是同一份后端快照。
+  const applyReviewDetail = (detail: ReviewSummary) => {
+    setReview((current) => ({
+      ...(current || detail),
+      ...detail,
+    }));
+    setForm({
+      subject_type: detail.subject.subject_type === "branch" ? "branch" : "mr",
+      analysis_mode: detail.analysis_mode === "light" ? "light" : "standard",
+      mr_url: detail.subject.mr_url || "",
+      title: detail.subject.title || "",
+      source_ref: detail.subject.source_ref || "",
+      target_ref: detail.subject.target_ref || "main",
+      selected_experts:
+        detail.selected_experts && detail.selected_experts.length > 0
+          ? detail.selected_experts
+          : defaultFormState.selected_experts,
+      design_docs: normalizeDesignDocs(
+        ((detail.subject.metadata || {}) as Record<string, unknown>).design_docs,
+      ),
+    });
+  };
+
+  const loadReviewBase = async (targetReviewId: string) => {
+    const detail = await reviewApi.get(targetReviewId);
+    applyReviewDetail(detail);
+    return detail;
+  };
+
+  const loadProcessBundle = async (targetReviewId: string) => {
+    const [nextIssues, nextEvents, nextMessages, nextFindings] = await Promise.all([
+      reviewApi.listIssues(targetReviewId),
+      reviewApi.listEvents(targetReviewId),
+      reviewApi.listMessages(targetReviewId),
+      reviewApi.listFindings(targetReviewId),
+    ]);
+    setIssues(nextIssues);
+    setEvents(nextEvents);
+    setMessages(nextMessages);
+    setFindings(nextFindings);
+    return { issues: nextIssues, events: nextEvents, messages: nextMessages, findings: nextFindings };
+  };
+
+  const loadResultBundle = async (targetReviewId: string) => {
+    const [nextReport, artifactBundle] = await Promise.all([
+      reviewApi.getReport(targetReviewId),
+      reviewApi.getArtifacts(targetReviewId).catch(() => null),
+    ]);
+    setReport(nextReport);
+    setIssues(nextReport.issues || []);
+    setFindings(nextReport.findings || []);
+    setArtifacts(artifactBundle);
+    return { report: nextReport, artifacts: artifactBundle };
+  };
+
+  const loadReplayBundle = async (targetReviewId: string) => {
+    const replayBundle = await reviewApi.getReplay(targetReviewId);
+    setReplay(replayBundle);
+    setReview(replayBundle.review || null);
+    setIssues(replayBundle.issues || []);
+    setEvents(replayBundle.events || []);
+    setMessages(replayBundle.messages || []);
+    setReport(replayBundle.report || null);
+    setFindings(replayBundle.report?.findings || []);
+    return replayBundle;
+  };
+
+  const syncSelectionFromData = (nextIssues: DebateIssue[], nextFindings: ReviewFinding[]) => {
+    setSelectedIssueId((prev) => (nextIssues.some((item) => item.issue_id === prev) ? prev : nextIssues[0]?.issue_id || ""));
+    setSelectedFindingId((prev) =>
+      nextFindings.some((item) => item.finding_id === prev) ? prev : nextFindings[0]?.finding_id || "",
+    );
+  };
+
+  const loadWorkspaceData = async (targetReviewId: string) => {
     setLoading(true);
     try {
-      const [detail, replayBundle, artifactBundle] = await Promise.all([
-        reviewApi.get(targetReviewId),
-        reviewApi.getReplay(targetReviewId),
-        reviewApi.getArtifacts(targetReviewId).catch(() => null),
-      ]);
-      setReview(replayBundle?.review || detail);
-      setReplay(replayBundle);
-      setArtifacts(artifactBundle);
-      setForm({
-        subject_type: detail.subject.subject_type === "branch" ? "branch" : "mr",
-        analysis_mode: detail.analysis_mode === "light" ? "light" : "standard",
-        mr_url: detail.subject.mr_url || "",
-        title: detail.subject.title || "",
-        source_ref: detail.subject.source_ref || "",
-        target_ref: detail.subject.target_ref || "main",
-        selected_experts:
-          detail.selected_experts && detail.selected_experts.length > 0
-            ? detail.selected_experts
-            : defaultFormState.selected_experts,
-        design_docs: normalizeDesignDocs(
-          ((detail.subject.metadata || {}) as Record<string, unknown>).design_docs,
-        ),
-      });
-      setSelectedIssueId((prev) =>
-        replayBundle.issues.some((item) => item.issue_id === prev) ? prev : replayBundle.issues[0]?.issue_id || "",
-      );
-      setSelectedFindingId((prev) =>
-        replayBundle.report.findings.some((item) => item.finding_id === prev)
-          ? prev
-          : replayBundle.report.findings[0]?.finding_id || "",
-      );
+      const detail = await loadReviewBase(targetReviewId);
+      if (activeStep === "process") {
+        const processBundle = await loadProcessBundle(targetReviewId);
+        if (processMainTab === "replay") {
+          const replayBundle = await loadReplayBundle(targetReviewId);
+          syncSelectionFromData(replayBundle.issues || [], replayBundle.report?.findings || []);
+        } else {
+          setReplay(null);
+          syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
+        }
+        return;
+      }
+      if (activeStep === "result") {
+        const [processBundle, resultBundle] = await Promise.all([loadProcessBundle(targetReviewId), loadResultBundle(targetReviewId)]);
+        setReplay(null);
+        syncSelectionFromData(resultBundle.report?.issues || processBundle.issues || [], resultBundle.report?.findings || []);
+        return;
+      }
+      setReplay(null);
+      setReport(null);
+      setArtifacts(null);
+      setIssues([]);
+      setEvents([]);
+      setMessages([]);
+      setFindings([]);
+      syncSelectionFromData([], []);
+      applyReviewDetail(detail);
     } catch (error: any) {
       message.error(error?.message || "加载审核详情失败");
     } finally {
@@ -521,7 +593,12 @@ const ReviewWorkbenchPage: React.FC = () => {
     if (!reviewId) {
       setReview(null);
       setReplay(null);
+      setReport(null);
       setArtifacts(null);
+      setIssues([]);
+      setEvents([]);
+      setMessages([]);
+      setFindings([]);
       setForm({
         ...defaultFormState,
         analysis_mode: runtimeSettings?.default_analysis_mode || "standard",
@@ -540,8 +617,8 @@ const ReviewWorkbenchPage: React.FC = () => {
     setSelectedFindingId("");
     setDecisionComment("");
     setFindingModalOpen(false);
-    void loadReviewBundle(reviewId);
-  }, [requestedTab, reviewId, runtimeSettings]);
+    void loadWorkspaceData(reviewId);
+  }, [activeStep, processMainTab, requestedTab, reviewId, runtimeSettings]);
 
   useEffect(() => {
     if (!requestedTab || requestedTab === activeStep) return;
@@ -567,19 +644,19 @@ const ReviewWorkbenchPage: React.FC = () => {
     // 过程页使用 SSE 增量刷新，保证主 Agent / 专家消息尽快出现在界面上。
     if (!reviewId) return;
     return subscribeReviewEventStream(buildReviewEventStreamUrl(reviewId), () => {
-      void loadReviewBundle(reviewId);
+      void loadWorkspaceData(reviewId);
     });
-  }, [reviewId]);
+  }, [activeStep, processMainTab, reviewId]);
 
   useEffect(() => {
     // 对 running/pending 状态再补一层轮询兜底，防止流式连接偶发断开。
     if (!reviewId) return;
     if (!review || !["pending", "running"].includes(review.status)) return;
     const timer = window.setInterval(() => {
-      void loadReviewBundle(reviewId);
+      void loadWorkspaceData(reviewId);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [review, reviewId]);
+  }, [activeStep, processMainTab, review, reviewId]);
 
   useEffect(() => {
     if (activeStep !== "process" || review?.status !== "running" || !review?.started_at) return;
@@ -590,11 +667,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [activeStep, review?.started_at, review?.status]);
 
-  const issues = replay?.issues || [];
-  const events = replay?.events || [];
-  const report = replay?.report || null;
-  const findings = report?.findings || [];
-  const allMessages = replay?.messages || [];
+  const allMessages = messages;
   const issueFilterDecisions = useMemo(() => normalizeIssueFilterDecisions(allMessages), [allMessages]);
   const expertSelectionSummary = useMemo(() => readExpertSelectionSummary(review), [review]);
   const overviewExpertSelectionSummary = useMemo(
@@ -850,7 +923,7 @@ const ReviewWorkbenchPage: React.FC = () => {
               }
             : prev,
         );
-        await loadReviewBundle(reviewId);
+        await loadWorkspaceData(reviewId);
         message.success("审核已启动");
       } catch (error: any) {
         message.error(error?.message || "启动审核失败");
@@ -882,7 +955,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             }
           : prev,
       );
-      await loadReviewBundle(reviewId);
+      await loadWorkspaceData(reviewId);
       message.success("审核已启动");
     } catch (error: any) {
       message.error(error?.message || "启动审核失败");
@@ -966,7 +1039,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           ) : null}
           <Space>
             {reviewId ? <Text type="secondary">Review ID: {reviewId}</Text> : <Text type="secondary">尚未创建审核</Text>}
-            {reviewId ? <Button onClick={() => reviewId && void loadReviewBundle(reviewId)}>刷新</Button> : null}
+            {reviewId ? <Button onClick={() => reviewId && void loadWorkspaceData(reviewId)}>刷新</Button> : null}
           </Space>
         </Space>
       </Card>
@@ -1211,7 +1284,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                             decision: "approved",
                             comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
                           });
-                          await loadReviewBundle(reviewId);
+                          await loadWorkspaceData(reviewId);
                           setDecisionComment("");
                           message.success("已记录人工批准结论");
                         } catch (error: any) {
@@ -1230,7 +1303,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                             decision: "rejected",
                             comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
                           });
-                          await loadReviewBundle(reviewId);
+                          await loadWorkspaceData(reviewId);
                           setDecisionComment("");
                           message.success("已记录人工驳回结论");
                         } catch (error: any) {

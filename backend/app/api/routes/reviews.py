@@ -146,6 +146,16 @@ def list_findings(review_id: str) -> list[dict[str, object]]:
     ]
 
 
+@router.get("/reviews/{review_id}/messages")
+def list_messages(review_id: str) -> list[dict[str, object]]:
+    """返回某次审核的全部消息，供过程页按需加载。"""
+
+    return [
+        item.model_dump(mode="json")
+        for item in review_service_module.review_service.list_all_messages(review_id)
+    ]
+
+
 @router.get("/reviews/{review_id}/report")
 def get_report(review_id: str) -> dict[str, object]:
     """返回用于结果页展示的完整审核报告。"""

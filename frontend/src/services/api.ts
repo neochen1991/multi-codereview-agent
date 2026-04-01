@@ -646,6 +646,10 @@ export const reviewApi = {
     const { data } = await api.get(`/reviews/${reviewId}/findings`);
     return data;
   },
+  async listMessages(reviewId: string): Promise<ConversationMessage[]> {
+    const { data } = await api.get(`/reviews/${reviewId}/messages`);
+    return data;
+  },
   async listIssues(reviewId: string): Promise<DebateIssue[]> {
     const { data } = await api.get(`/reviews/${reviewId}/issues`);
     return data;
