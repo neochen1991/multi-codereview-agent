@@ -107,7 +107,13 @@ class LLMChatService:
         prompt_tokens = 0
         completion_tokens = 0
         total_tokens = 0
-        request_preview = self._build_request_preview(request_body, system_prompt=system_prompt, user_prompt=user_prompt)
+        preview_limit = self._effective_preview_limit(runtime_settings)
+        request_preview = self._build_request_preview(
+            request_body,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            preview_limit=preview_limit,
+        )
         context_preview = self._stringify_context(log_context)
         total_started_at = time.perf_counter()
         for attempt in range(1, safe_attempts + 1):
@@ -142,7 +148,7 @@ class LLMChatService:
                     )
                     response.raise_for_status()
                     response_text = getattr(response, "text", "")
-                    response_preview = self._truncate(response_text)
+                    response_preview = self._truncate(response_text, preview_limit)
                     content_type = str((getattr(response, "headers", {}) or {}).get("Content-Type", ""))
                     attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
                     logger.info(
@@ -210,7 +216,7 @@ class LLMChatService:
                     resolution.model,
                     exc.response.status_code,
                     attempt_elapsed_ms,
-                    self._truncate(getattr(exc.response, "text", "")),
+                    self._truncate(getattr(exc.response, "text", ""), preview_limit),
                 )
                 if 500 <= exc.response.status_code < 600 and attempt < safe_attempts:
                     time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
@@ -467,28 +473,50 @@ class LLMChatService:
         *,
         system_prompt: str,
         user_prompt: str,
+        preview_limit: int | None,
     ) -> str:
         preview = {
             "model": request_body.get("model"),
             "temperature": request_body.get("temperature"),
-            "system_prompt": self._truncate(system_prompt),
-            "user_prompt": self._truncate(user_prompt),
+            "system_prompt": self._truncate(system_prompt, preview_limit),
+            "user_prompt": self._truncate(user_prompt, preview_limit),
         }
-        return self._safe_json(preview)
+        return self._safe_json(preview, preview_limit)
 
-    def _safe_json(self, value: object) -> str:
+    def _safe_json(self, value: object, limit: int | None = None) -> str:
         try:
-            return self._truncate(json.dumps(value, ensure_ascii=False))
+            return self._truncate(json.dumps(value, ensure_ascii=False), limit)
         except Exception:
-            return self._truncate(repr(value))
+            return self._truncate(repr(value), limit)
 
     def _stringify_context(self, log_context: dict[str, object] | None) -> str:
         if not log_context:
             return "-"
-        return self._safe_json(log_context)
+        return self._safe_json(log_context, self._PREVIEW_LIMIT)
 
     def _truncate(self, value: object, limit: int | None = None) -> str:
-        return str(value or "")
+        text = str(value or "")
+        if limit is None:
+            safe_limit = self._PREVIEW_LIMIT
+        else:
+            safe_limit = int(limit)
+        if safe_limit < 0:
+            return text
+        if safe_limit <= 0:
+            return ""
+        if len(text) <= safe_limit:
+            return text
+        return f"{text[:safe_limit].rstrip()}...<truncated>"
+
+    def _effective_preview_limit(self, runtime_settings: RuntimeSettings | None) -> int | None:
+        if runtime_settings is None:
+            return self._PREVIEW_LIMIT
+        if not bool(getattr(runtime_settings, "llm_log_truncate_enabled", True)):
+            return -1
+        return max(
+            200,
+            int(getattr(runtime_settings, "llm_log_preview_limit", self._PREVIEW_LIMIT) or self._PREVIEW_LIMIT),
+        )
 
     def _decode_payload(self, *, response_text: str, content_type: str) -> dict[str, object]:
         cleaned = response_text.lstrip("\ufeff").strip()

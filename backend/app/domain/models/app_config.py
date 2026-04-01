@@ -79,6 +79,8 @@ class RuntimeConfig(BaseModel):
     light_llm_retry_count: int = 2
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
+    llm_log_truncate_enabled: bool = True
+    llm_log_preview_limit: int = 1600
 
 
 class NetworkConfig(BaseModel):
@@ -173,6 +175,8 @@ class AppConfig(BaseModel):
                 light_llm_retry_count=runtime.light_llm_retry_count,
                 light_max_parallel_experts=runtime.light_max_parallel_experts,
                 light_max_debate_rounds=runtime.light_max_debate_rounds,
+                llm_log_truncate_enabled=runtime.llm_log_truncate_enabled,
+                llm_log_preview_limit=runtime.llm_log_preview_limit,
             ),
             network=NetworkConfig(
                 verify_ssl=runtime.verify_ssl,
@@ -225,6 +229,8 @@ class AppConfig(BaseModel):
             light_llm_retry_count=self.runtime.light_llm_retry_count,
             light_max_parallel_experts=self.runtime.light_max_parallel_experts,
             light_max_debate_rounds=self.runtime.light_max_debate_rounds,
+            llm_log_truncate_enabled=self.runtime.llm_log_truncate_enabled,
+            llm_log_preview_limit=self.runtime.llm_log_preview_limit,
             default_llm_provider=self.llm.default_provider,
             default_llm_base_url=self.llm.default_base_url,
             default_llm_model=self.llm.default_model,

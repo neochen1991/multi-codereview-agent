@@ -259,6 +259,8 @@ const SettingsPage: React.FC = () => {
                 light_llm_retry_count: Number(values.light_llm_retry_count || 2),
                 light_max_parallel_experts: Number(values.light_max_parallel_experts || 1),
                 light_max_debate_rounds: Number(values.light_max_debate_rounds || 1),
+                llm_log_truncate_enabled: Boolean(values.llm_log_truncate_enabled),
+                llm_log_preview_limit: Number(values.llm_log_preview_limit || 1600),
                 default_llm_provider: values.default_llm_provider || "dashscope-openai-compatible",
                 default_llm_base_url: values.default_llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
                 default_llm_model: values.default_llm_model || "kimi-k2.5",
@@ -596,6 +598,20 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="light_max_debate_rounds" label="轻量模式最大辩论轮次">
                           <InputNumber min={1} max={3} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_log_truncate_enabled" label="截断 LLM 日志预览" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="llm_log_preview_limit"
+                          label="LLM 日志预览长度"
+                          extra="仅影响日志预览，不影响实际发送给模型的内容。"
+                        >
+                          <InputNumber min={200} max={20000} step={200} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>

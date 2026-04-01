@@ -436,6 +436,8 @@ export interface RuntimeSettings {
   light_llm_retry_count: number;
   light_max_parallel_experts: number;
   light_max_debate_rounds: number;
+  llm_log_truncate_enabled: boolean;
+  llm_log_preview_limit: number;
   default_llm_provider: string;
   default_llm_base_url: string;
   default_llm_model: string;

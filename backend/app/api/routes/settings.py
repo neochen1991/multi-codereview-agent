@@ -56,6 +56,8 @@ class RuntimeSettingsRequest(BaseModel):
     light_llm_retry_count: int = 2
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
+    llm_log_truncate_enabled: bool = True
+    llm_log_preview_limit: int = 1600
     default_llm_provider: str = settings.DEFAULT_LLM_PROVIDER
     default_llm_base_url: str = settings.DEFAULT_LLM_BASE_URL
     default_llm_model: str = settings.DEFAULT_LLM_MODEL
