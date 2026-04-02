@@ -536,10 +536,7 @@ export interface ReviewDesignDocumentInput {
 export interface ReviewReplayBundle {
   review: ReviewSummary;
   events: ReviewEvent[];
-  issues: DebateIssue[];
   messages: ConversationMessage[];
-  report: ReviewReport;
-  feedback_labels: FeedbackLabel[];
 }
 
 export interface ReviewArtifacts {
@@ -620,6 +617,10 @@ export const reviewApi = {
   },
   async get(reviewId: string): Promise<ReviewSummary> {
     const { data } = await api.get(`/reviews/${reviewId}`);
+    return data;
+  },
+  async getSnapshot(reviewId: string): Promise<ReviewSummary> {
+    const { data } = await api.get(`/reviews/${reviewId}/snapshot`);
     return data;
   },
   async start(reviewId: string): Promise<{ review_id: string; status: string; phase: string }> {

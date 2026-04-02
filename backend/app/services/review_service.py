@@ -779,7 +779,6 @@ class ReviewService:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
         issues = self.list_issues(review_id)
-        messages = self.list_all_messages(review_id)
         issue_count = len(issues)
         summary = (
             f"本次代码审核共收敛 {len(findings)} 条发现，"
@@ -797,7 +796,7 @@ class ReviewService:
             issues=issues,
             issue_count=issue_count,
             human_review_status=review.human_review_status,
-            llm_usage_summary=self._build_llm_usage_summary(messages),
+            llm_usage_summary=self.message_repo.summarize_llm_usage(review_id),
             confidence_summary={
                 "high_confidence_count": len(
                     [item for item in findings if item.confidence >= 0.85]
@@ -814,41 +813,131 @@ class ReviewService:
             },
         )
 
-    def _build_llm_usage_summary(self, messages: list[ConversationMessage]) -> dict[str, int]:
-        seen_call_ids: set[str] = set()
-        total_calls = 0
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
-        for message in messages:
-            metadata = message.metadata or {}
-            call_id = str(metadata.get("llm_call_id") or "").strip()
-            mode = str(metadata.get("mode") or "").strip().lower()
-            if not call_id or call_id in seen_call_ids or mode in {"", "pending", "template", "rule_only_light"}:
-                continue
-            seen_call_ids.add(call_id)
-            total_calls += 1
-            prompt_tokens += self._safe_int(metadata.get("prompt_tokens"))
-            completion_tokens += self._safe_int(metadata.get("completion_tokens"))
-            total_tokens += self._safe_int(metadata.get("total_tokens"))
-        return {
-            "total_calls": total_calls,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }
+    def build_review_snapshot(self, review_id: str) -> dict[str, object]:
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        return self._build_light_review_payload(review)
 
     def build_replay_bundle(self, review_id: str) -> dict[str, object]:
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)
         return {
-            "review": review.model_dump(mode="json"),
+            "review": self._build_light_review_payload(review),
             "events": [item.model_dump(mode="json") for item in self.list_events(review_id)],
-            "issues": [item.model_dump(mode="json") for item in self.list_issues(review_id)],
-            "messages": [item.model_dump(mode="json") for item in self.list_all_messages(review_id)],
-            "report": self.build_report(review_id).model_dump(mode="json"),
-            "feedback_labels": [item.model_dump(mode="json") for item in self.list_feedback_labels(review_id)],
+            "messages": [self._build_replay_message(item) for item in self.list_all_messages(review_id)],
+        }
+
+    def build_process_messages(self, review_id: str) -> list[dict[str, object]]:
+        return [self._build_process_message(item) for item in self.list_all_messages(review_id)]
+
+    def _build_light_review_payload(self, review: ReviewTask) -> dict[str, object]:
+        payload = review.model_dump(mode="json")
+        subject = payload.get("subject")
+        if isinstance(subject, dict):
+            subject["unified_diff"] = ""
+            metadata = subject.get("metadata")
+            if isinstance(metadata, dict):
+                subject["metadata"] = self._build_light_subject_metadata(metadata)
+        return payload
+
+    def _build_light_subject_metadata(self, metadata: dict[str, object]) -> dict[str, object]:
+        payload = dict(metadata or {})
+        design_docs = payload.get("design_docs")
+        if isinstance(design_docs, list):
+            payload["design_docs"] = [
+                {
+                    "doc_id": item.get("doc_id"),
+                    "title": item.get("title"),
+                    "filename": item.get("filename"),
+                    "doc_type": item.get("doc_type"),
+                }
+                for item in design_docs
+                if isinstance(item, dict)
+            ]
+        return payload
+
+    def _build_replay_message(self, message: ConversationMessage) -> dict[str, object]:
+        metadata = dict(message.metadata or {})
+        replay_metadata = {
+            "file_path": metadata.get("file_path"),
+            "rule_screening": metadata.get("rule_screening"),
+        }
+        return {
+            "message_id": message.message_id,
+            "review_id": message.review_id,
+            "issue_id": message.issue_id,
+            "expert_id": message.expert_id,
+            "message_type": message.message_type,
+            "content": "",
+            "created_at": message.created_at,
+            "metadata": {key: value for key, value in replay_metadata.items() if value is not None},
+        }
+
+    def _build_process_message(self, message: ConversationMessage) -> dict[str, object]:
+        allowed_metadata_keys = {
+            "decision",
+            "file_path",
+            "line_start",
+            "active_skills",
+            "design_alignment_status",
+            "design_doc_titles",
+            "skill_name",
+            "target_expert_id",
+            "target_expert_name",
+            "tool_name",
+            "analysis_mode",
+            "bound_documents",
+            "business_changed_files",
+            "changed_file_count",
+            "changed_files",
+            "compare_mode",
+            "expert_execution_elapsed_ms",
+            "expert_job_count",
+            "input_completeness",
+            "issue_filter_decisions",
+            "knowledge_context",
+            "matched_rules",
+            "mode",
+            "model",
+            "phase",
+            "platform_kind",
+            "provider",
+            "reply_to_expert_id",
+            "review_inputs",
+            "review_url",
+            "routing_elapsed_ms",
+            "rule_based_reasoning",
+            "rule_screening",
+            "rule_screening_batch",
+            "selected_expert_ids",
+            "selected_experts",
+            "selection_elapsed_ms",
+            "skill_result",
+            "skipped_experts",
+            "source_ref",
+            "target_hunk",
+            "target_ref",
+            "title",
+            "tool_result",
+            "violated_guidelines",
+        }
+        metadata = dict(message.metadata or {})
+        compact_metadata = {
+            key: metadata.get(key)
+            for key in allowed_metadata_keys
+            if metadata.get(key) is not None
+        }
+        return {
+            "message_id": message.message_id,
+            "review_id": message.review_id,
+            "issue_id": message.issue_id,
+            "expert_id": message.expert_id,
+            "message_type": message.message_type,
+            "content": message.content,
+            "created_at": message.created_at,
+            "metadata": compact_metadata,
         }
 
     def _existing_auto_queue_keys(self) -> set[str]:

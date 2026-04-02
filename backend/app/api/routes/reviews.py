@@ -90,6 +90,16 @@ def get_review(review_id: str) -> dict[str, object]:
     return review.model_dump(mode="json")
 
 
+@router.get("/reviews/{review_id}/snapshot")
+def get_review_snapshot(review_id: str) -> dict[str, object]:
+    """返回用于高频刷新的轻量审核快照，不携带完整 diff。"""
+
+    try:
+        return review_service_module.review_service.build_review_snapshot(review_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+
+
 @router.post("/reviews/{review_id}/start", status_code=status.HTTP_202_ACCEPTED)
 def start_review(review_id: str) -> dict[str, object]:
     """以后台异步方式启动审核执行。"""
@@ -150,10 +160,7 @@ def list_findings(review_id: str) -> list[dict[str, object]]:
 def list_messages(review_id: str) -> list[dict[str, object]]:
     """返回某次审核的全部消息，供过程页按需加载。"""
 
-    return [
-        item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_all_messages(review_id)
-    ]
+    return review_service_module.review_service.build_process_messages(review_id)
 
 
 @router.get("/reviews/{review_id}/report")

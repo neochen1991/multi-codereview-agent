@@ -1331,21 +1331,12 @@ class MainAgentService:
                         f"  越界边界: {' / '.join(expert.out_of_scope) or '无'}",
                     ]
                 )
-            )
+        )
         primary_file_path = str(business_changed_files[0]) if business_changed_files else str(subject.changed_files[0]) if subject.changed_files else ""
         target_file_full_diff = self._build_file_diff_context(subject, primary_file_path, max_lines=80)
         related_diff_summary = self._build_related_diff_summary(subject, primary_file_path, max_files=2, max_lines_per_file=12)
-        source_context_summary = self._build_main_agent_source_context_summary(
-            subject,
-            runtime_settings,
-            primary_file_path=primary_file_path,
-            related_file_paths=business_changed_files,
-            primary_radius=8,
-            primary_max_lines=12,
-            related_radius=5,
-            related_max_files=2,
-            related_max_lines=6,
-        )
+        java_quality = self._collect_java_quality_signals(subject)
+        java_quality_summary = self._build_java_quality_signal_summary(java_quality)
         language_general_guidance = self._build_language_general_guidance_summary(
             business_changed_files or [str(item) for item in list(subject.changed_files or [])]
         )
@@ -1359,7 +1350,7 @@ class MainAgentService:
             f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
             f"业务变更文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
-            f"变更源码与关联上下文:\n{source_context_summary}\n\n"
+            f"Java 质量信号摘要:\n{java_quality_summary}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
             f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
             "请输出 JSON，格式为：\n"
@@ -1372,6 +1363,18 @@ class MainAgentService:
             "  ]\n"
             "}"
         )
+
+    def _build_java_quality_signal_summary(self, java_quality: dict[str, list[str]]) -> str:
+        signals = [str(item).strip() for item in list(java_quality.get("signals") or []) if str(item).strip()]
+        matched_terms = [str(item).strip() for item in list(java_quality.get("matched_terms") or []) if str(item).strip()]
+        if not signals and not matched_terms:
+            return "当前变更未提取到额外的 Java 质量信号。"
+        lines: list[str] = []
+        if signals:
+            lines.append(f"- signals: {', '.join(signals)}")
+        if matched_terms:
+            lines.append(f"- matched_terms: {', '.join(matched_terms[:12])}")
+        return "\n".join(lines)
 
     def _build_file_diff_context(self, subject: ReviewSubject, file_path: str, *, max_lines: int = 160) -> str:
         if not file_path:

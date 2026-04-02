@@ -1592,6 +1592,8 @@ def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
     assert "业务变更文件完整 diff" in prompt
     assert "validateOrder(payload);" in prompt
     assert "authGuard" in prompt
+    assert "Java 质量信号摘要" in prompt
+    assert "变更源码与关联上下文" not in prompt
     assert "语言通用规范提示" in prompt
     assert "JavaScript / TypeScript 通用代码规范" in prompt
 

@@ -570,21 +570,29 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       {renderContextSnippet("当前类完整问题片段", currentClassContext)}
 
-      {parentContractContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`父接口 / 抽象类 ${index + 1}`, item),
-      )}
+      {parentContractContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`parent-contract-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`父接口 / 抽象类 ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
-      {callerContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`调用方 Controller / ApplicationService ${index + 1}`, item),
-      )}
+      {callerContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`caller-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`调用方 Controller / ApplicationService ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
-      {calleeContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`被调方 Repository / DomainService ${index + 1}`, item),
-      )}
+      {calleeContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`callee-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`被调方 Repository / DomainService ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
-      {domainModelContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`相关 Aggregate / ValueObject / DomainEvent ${index + 1}`, item),
-      )}
+      {domainModelContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`domain-model-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`相关 Aggregate / ValueObject / DomainEvent ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
       {transactionContext?.transaction_boundary_snippet ? (
         <div style={{ marginTop: 16 }}>
@@ -613,17 +621,25 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
         </div>
       ) : null}
 
-      {persistenceContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`ORM 映射实体 / SQL / Mapper ${index + 1}`, item),
-      )}
+      {persistenceContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`persistence-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`ORM 映射实体 / SQL / Mapper ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
-      {relatedContexts.slice(0, 3).map((item, index) =>
-        renderContextSnippet(`关联上下文代码 ${index + 1}`, item),
-      )}
+      {relatedContexts.slice(0, 3).map((item, index) => (
+        <React.Fragment key={`related-context-${item.path || "unknown"}-${item.line_start || index}`}>
+          {renderContextSnippet(`关联上下文代码 ${index + 1}`, item)}
+        </React.Fragment>
+      ))}
 
-      {symbolContexts.slice(0, 4).map((item, index) =>
-        renderContextSnippet(item.title || `符号上下文 ${index + 1}`, item.snippet),
-      )}
+      {symbolContexts.slice(0, 4).map((item, index) => (
+        <React.Fragment
+          key={`symbol-context-${item.title || "unknown"}-${item.snippet?.path || "unknown"}-${item.snippet?.line_start || index}`}
+        >
+          {renderContextSnippet(item.title || `符号上下文 ${index + 1}`, item.snippet)}
+        </React.Fragment>
+      ))}
 
       <div style={{ marginTop: 16 }}>
         <Button onClick={onJumpToProcess} disabled={!onJumpToProcess}>

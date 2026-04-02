@@ -62,7 +62,7 @@ class ReviewToolGateway:
         design_docs: list[dict[str, Any]] | None = None,
         extra_tools: list[str] | None = None,
         active_skills: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+        ) -> list[dict[str, Any]]:
         """按专家白名单执行本轮允许的运行时工具。"""
         runtime_allowlist = set(runtime.runtime_tool_allowlist)
         allowed_tools = [
@@ -89,6 +89,8 @@ class ReviewToolGateway:
             if tool_name not in allowed_tools:
                 allowed_tools.append(tool_name)
         results: list[dict[str, Any]] = []
+        builtin_base_payload = self._build_builtin_tool_base_payload(expert, subject, runtime)
+        plugin_base_payload: dict[str, Any] | None = None
         MemoryProbe.log(
             "tool_gateway.invoke_start",
             expert_id=expert.expert_id,
@@ -108,9 +110,7 @@ class ReviewToolGateway:
                 )
                 continue
             payload = {
-                "expert": expert.model_dump(mode="json"),
-                "subject": subject.model_dump(mode="json"),
-                "runtime": runtime.model_dump(mode="json"),
+                **builtin_base_payload,
                 "file_path": file_path,
                 "line_start": line_start,
                 "related_files": list(related_files or []),
@@ -120,7 +120,19 @@ class ReviewToolGateway:
             try:
                 output = self._gateway.invoke_binding(tool_name, payload)
             except KeyError:
-                output = self._invoke_plugin_tool(tool_name, payload)
+                if plugin_base_payload is None:
+                    plugin_base_payload = self._build_plugin_tool_base_payload(expert, subject, runtime)
+                output = self._invoke_plugin_tool(
+                    tool_name,
+                    {
+                        **plugin_base_payload,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "related_files": list(related_files or []),
+                        "design_docs": list(design_docs or []),
+                        "active_skills": list(active_skills or []),
+                    },
+                )
                 if output is None:
                     continue
             merged_output = {"tool_name": tool_name, **output}
@@ -133,6 +145,69 @@ class ReviewToolGateway:
                 result_count=len(results),
             )
         return results
+
+    def _build_builtin_tool_base_payload(
+        self,
+        expert: ExpertProfile,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings,
+    ) -> dict[str, Any]:
+        return {
+            "expert": {
+                "expert_id": expert.expert_id,
+                "focus_areas": list(expert.focus_areas),
+                "knowledge_sources": list(expert.knowledge_sources),
+            },
+            "subject": {
+                "subject_type": subject.subject_type,
+                "repo_id": subject.repo_id,
+                "project_id": subject.project_id,
+                "source_ref": subject.source_ref,
+                "target_ref": subject.target_ref,
+                "title": subject.title,
+                "mr_url": subject.mr_url,
+                "changed_files": list(subject.changed_files),
+                "unified_diff": subject.unified_diff,
+                "metadata": self._build_builtin_subject_metadata(subject),
+            },
+            "runtime": {
+                "default_target_branch": runtime.default_target_branch,
+                "code_repo_clone_url": runtime.code_repo_clone_url,
+                "code_repo_local_path": runtime.code_repo_local_path,
+                "code_repo_default_branch": runtime.code_repo_default_branch,
+                "code_repo_access_token": runtime.code_repo_access_token,
+                "code_repo_auto_sync": runtime.code_repo_auto_sync,
+                "database_sources": [item.model_dump(mode="json") for item in runtime.database_sources],
+            },
+        }
+
+    def _build_builtin_subject_metadata(self, subject: ReviewSubject) -> dict[str, Any]:
+        metadata = dict(subject.metadata or {})
+        allowed_keys = {
+            "trigger_source",
+            "workspace_repo_path",
+            "repo_context_workspace_path",
+            "workspace_repo",
+            "repo_context_local_fallback",
+            "local_workspace_fallback",
+        }
+        return {
+            key: metadata.get(key)
+            for key in allowed_keys
+            if metadata.get(key) not in (None, "", [], {})
+        }
+
+    def _build_plugin_tool_base_payload(
+        self,
+        expert: ExpertProfile,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings,
+    ) -> dict[str, Any]:
+        return {
+            "expert": expert.model_dump(mode="json"),
+            "subject": subject.model_dump(mode="json"),
+            "runtime": runtime.model_dump(mode="json"),
+        }
 
     def _register_defaults(self) -> None:
         """注册项目内置的运行时工具。"""

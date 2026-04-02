@@ -319,3 +319,104 @@ def test_build_report_uses_real_issue_count_not_finding_count(tmp_path: Path):
     assert len(report.findings) == 2
     assert len(report.issues) == 1
     assert report.issue_count == 1
+
+
+def test_build_replay_bundle_uses_snapshot_review_without_unified_diff(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_replay",
+            "project_id": "proj_replay",
+            "source_ref": "feature/replay",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/110",
+            "title": "replay review",
+            "unified_diff": "diff --git a/a.java b/a.java\n+class A {}",
+            "design_docs": [
+                {
+                    "doc_id": "doc-1",
+                    "title": "设计说明",
+                    "filename": "design.md",
+                    "content": "# very large design content",
+                    "doc_type": "design_spec",
+                }
+            ],
+        }
+    )
+    service.event_repo.append(
+        ReviewEvent(review_id=review.review_id, event_type="review_started", phase="queued", message="queued")
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="",
+            expert_id="main_agent",
+            message_type="main_agent_expert_selection",
+            content="selection details that should not be replayed in full",
+            metadata={"file_path": "src/main/java/A.java", "rule_screening": {"matched_rule_count": 1}, "large": "x" * 200},
+        )
+    )
+
+    bundle = service.build_replay_bundle(review.review_id)
+
+    assert bundle["review"]["subject"]["unified_diff"] == ""
+    assert bundle["review"]["subject"]["metadata"]["design_docs"] == [
+        {
+            "doc_id": "doc-1",
+            "title": "设计说明",
+            "filename": "design.md",
+            "doc_type": "design_spec",
+        }
+    ]
+    assert len(bundle["events"]) == 2
+    assert len(bundle["messages"]) == 1
+    assert bundle["messages"][0]["content"] == ""
+    assert bundle["messages"][0]["metadata"] == {
+        "file_path": "src/main/java/A.java",
+        "rule_screening": {"matched_rule_count": 1},
+    }
+
+
+def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_process",
+            "project_id": "proj_process",
+            "source_ref": "feature/process",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/111",
+            "title": "process review",
+        }
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="issue-1",
+            expert_id="architecture_design",
+            message_type="expert_analysis",
+            content="full analysis content should remain available",
+            metadata={
+                "file_path": "src/main/java/A.java",
+                "line_start": 42,
+                "rule_screening": {"matched_rule_count": 2},
+                "tool_result": {"summary": "compact"},
+                "review_inputs": {"language_guidance_present": True},
+                "large_unused_blob": "x" * 500,
+            },
+        )
+    )
+
+    messages = service.build_process_messages(review.review_id)
+
+    assert len(messages) == 1
+    assert messages[0]["content"] == "full analysis content should remain available"
+    assert messages[0]["metadata"] == {
+        "file_path": "src/main/java/A.java",
+        "line_start": 42,
+        "rule_screening": {"matched_rule_count": 2},
+        "tool_result": {"summary": "compact"},
+        "review_inputs": {"language_guidance_present": True},
+    }

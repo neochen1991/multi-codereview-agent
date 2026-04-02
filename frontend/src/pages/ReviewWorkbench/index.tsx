@@ -25,6 +25,7 @@ import {
   type ReviewDesignDocumentInput,
   type ReviewFinding,
   type ReviewReplayBundle,
+  type ReviewReport,
   type ReviewSummary,
   type RuleScreeningMetadata,
   type RuntimeSettings,
@@ -406,11 +407,11 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [processSidebarTab, setProcessSidebarTab] = useState<ProcessSidebarTabKey>("issues");
   const [review, setReview] = useState<ReviewSummary | null>(null);
   const [replay, setReplay] = useState<ReviewReplayBundle | null>(null);
-  const [report, setReport] = useState<ReviewReplayBundle["report"] | null>(null);
+  const [report, setReport] = useState<ReviewReport | null>(null);
   const [messages, setMessages] = useState<ReviewReplayBundle["messages"]>([]);
-  const [issues, setIssues] = useState<ReviewReplayBundle["issues"]>([]);
+  const [issues, setIssues] = useState<DebateIssue[]>([]);
   const [events, setEvents] = useState<ReviewReplayBundle["events"]>([]);
-  const [findings, setFindings] = useState<ReviewReplayBundle["report"]["findings"]>([]);
+  const [findings, setFindings] = useState<ReviewFinding[]>([]);
   const [artifacts, setArtifacts] = useState<ReviewArtifacts | null>(null);
   const [experts, setExperts] = useState<ExpertProfile[]>([]);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null);
@@ -456,10 +457,33 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   const applyReviewDetail = (detail: ReviewSummary) => {
-    setReview((current) => ({
-      ...(current || detail),
-      ...detail,
-    }));
+    setReview((current) => {
+      const currentSubject = (current || detail).subject || detail.subject;
+      const currentMetadata =
+        currentSubject?.metadata && typeof currentSubject.metadata === "object"
+          ? (currentSubject.metadata as Record<string, unknown>)
+          : {};
+      const nextMetadata =
+        detail.subject?.metadata && typeof detail.subject.metadata === "object"
+          ? (detail.subject.metadata as Record<string, unknown>)
+          : {};
+      const nextSubject = {
+        ...currentSubject,
+        ...(detail.subject || {}),
+        metadata: {
+          ...currentMetadata,
+          ...nextMetadata,
+        },
+      };
+      if (!detail.subject?.unified_diff && currentSubject?.unified_diff) {
+        nextSubject.unified_diff = currentSubject.unified_diff;
+      }
+      return {
+        ...(current || detail),
+        ...detail,
+        subject: nextSubject,
+      };
+    });
     setForm({
       subject_type: detail.subject.subject_type === "branch" ? "branch" : "mr",
       analysis_mode: detail.analysis_mode === "light" ? "light" : "standard",
@@ -479,6 +503,12 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   const loadReviewBase = async (targetReviewId: string) => {
     const detail = await reviewApi.get(targetReviewId);
+    applyReviewDetail(detail);
+    return detail;
+  };
+
+  const loadReviewSnapshot = async (targetReviewId: string) => {
+    const detail = await reviewApi.getSnapshot(targetReviewId);
     applyReviewDetail(detail);
     return detail;
   };
@@ -512,12 +542,11 @@ const ReviewWorkbenchPage: React.FC = () => {
   const loadReplayBundle = async (targetReviewId: string) => {
     const replayBundle = await reviewApi.getReplay(targetReviewId);
     setReplay(replayBundle);
-    setReview(replayBundle.review || null);
-    setIssues(replayBundle.issues || []);
+    if (replayBundle.review) {
+      applyReviewDetail(replayBundle.review);
+    }
     setEvents(replayBundle.events || []);
     setMessages(replayBundle.messages || []);
-    setReport(replayBundle.report || null);
-    setFindings(replayBundle.report?.findings || []);
     return replayBundle;
   };
 
@@ -528,15 +557,18 @@ const ReviewWorkbenchPage: React.FC = () => {
     );
   };
 
-  const loadWorkspaceData = async (targetReviewId: string) => {
+  const loadWorkspaceData = async (targetReviewId: string, options?: { forceFullReview?: boolean }) => {
     setLoading(true);
     try {
-      const detail = await loadReviewBase(targetReviewId);
+      const detail =
+        options?.forceFullReview || !review?.subject?.unified_diff
+          ? await loadReviewBase(targetReviewId)
+          : await loadReviewSnapshot(targetReviewId);
       if (activeStep === "process") {
         const processBundle = await loadProcessBundle(targetReviewId);
         if (processMainTab === "replay") {
           const replayBundle = await loadReplayBundle(targetReviewId);
-          syncSelectionFromData(replayBundle.issues || [], replayBundle.report?.findings || []);
+          syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
         } else {
           setReplay(null);
           syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
@@ -617,7 +649,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     setSelectedFindingId("");
     setDecisionComment("");
     setFindingModalOpen(false);
-    void loadWorkspaceData(reviewId);
+    void loadWorkspaceData(reviewId, { forceFullReview: true });
   }, [activeStep, processMainTab, requestedTab, reviewId, runtimeSettings]);
 
   useEffect(() => {
@@ -654,7 +686,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     if (!review || !["pending", "running"].includes(review.status)) return;
     const timer = window.setInterval(() => {
       void loadWorkspaceData(reviewId);
-    }, 2500);
+    }, 10000);
     return () => window.clearInterval(timer);
   }, [activeStep, processMainTab, review, reviewId]);
 
@@ -1039,7 +1071,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           ) : null}
           <Space>
             {reviewId ? <Text type="secondary">Review ID: {reviewId}</Text> : <Text type="secondary">尚未创建审核</Text>}
-            {reviewId ? <Button onClick={() => reviewId && void loadWorkspaceData(reviewId)}>刷新</Button> : null}
+            {reviewId ? <Button onClick={() => reviewId && void loadWorkspaceData(reviewId, { forceFullReview: true })}>刷新</Button> : null}
           </Space>
         </Space>
       </Card>
@@ -1142,7 +1174,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                     className="process-sidebar-tabs"
                     activeKey={processSidebarTab}
                     onChange={(key) => setProcessSidebarTab(key as ProcessSidebarTabKey)}
-                    destroyInactiveTabPane
+                    destroyOnHidden
                     items={[
                       {
                         key: "issues",
@@ -1192,7 +1224,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 className="process-main-tabs"
                 activeKey={processMainTab}
                 onChange={(key) => setProcessMainTab(key as ProcessMainTabKey)}
-                destroyInactiveTabPane
+                destroyOnHidden
                 items={[
                   {
                     key: "dialogue",
@@ -1375,7 +1407,7 @@ const ReviewWorkbenchPage: React.FC = () => {
               onCancel={() => setFindingModalOpen(false)}
               footer={null}
               width={1240}
-              destroyOnClose={false}
+              destroyOnHidden={false}
             >
               <Suspense fallback={<WorkbenchPanelFallback description="问题详情加载中..." />}>
                 <CodeReviewConclusionPanel
