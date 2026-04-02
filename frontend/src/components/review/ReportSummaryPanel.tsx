@@ -1,7 +1,7 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
 
-import type { DebateIssue, ReviewFinding, ReviewReport } from "@/services/api";
+import type { DebateIssue, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
 
 const { Paragraph } = Typography;
 
@@ -9,6 +9,7 @@ type ReportSummaryPanelProps = {
   report: ReviewReport | null;
   findings: ReviewFinding[];
   issues: DebateIssue[];
+  review?: ReviewSummary | null;
   className?: string;
   onNavigateToGroup?: (
     group:
@@ -25,7 +26,11 @@ type ReportSummaryPanelProps = {
   ) => void;
 };
 
-const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]): string => {
+const isReviewStillRunning = (review?: ReviewSummary | null): boolean =>
+  Boolean(review && ["pending", "queued", "running"].includes(String(review.status || "").toLowerCase()));
+
+const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[], review?: ReviewSummary | null): string => {
+  if (isReviewStillRunning(review)) return "审核进行中，结果尚未最终收敛";
   const highRiskCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
   if ((report?.confidence_summary.needs_human_count || 0) > 0) return "阻塞合并，等待人工确认";
   if (highRiskCount > 0) return "建议修复高风险问题后再合并";
@@ -33,8 +38,9 @@ const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]
   return "可直接合并";
 };
 
-const getVerdict = (report: ReviewReport | null, findings: ReviewFinding[]): { label: string; color: string } => {
-  const decision = getMergeDecision(report, findings);
+const getVerdict = (report: ReviewReport | null, findings: ReviewFinding[], review?: ReviewSummary | null): { label: string; color: string } => {
+  if (isReviewStillRunning(review)) return { label: "In progress", color: "processing" };
+  const decision = getMergeDecision(report, findings, review);
   if (decision.includes("阻塞")) return { label: "Request changes", color: "error" };
   if (findings.length > 0 || decision.includes("修复")) return { label: "Comment", color: "warning" };
   return { label: "Approve", color: "success" };
@@ -153,7 +159,7 @@ const clickableStatistic = (
   </button>
 );
 
-const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, className, onNavigateToGroup }) => {
+const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, review, className, onNavigateToGroup }) => {
   const totalCount = findings.length;
   const formalIssueCount = issues.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
@@ -176,9 +182,9 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       ).length
     : 0;
   const topFinding = findings[0] || null;
-  const mergeDecision = getMergeDecision(report, findings);
+  const mergeDecision = getMergeDecision(report, findings, review);
   const overallPriority = getOverallPriority(findings);
-  const verdict = getVerdict(report, findings);
+  const verdict = getVerdict(report, findings, review);
   const humanReview = getHumanReviewTone(report?.human_review_status || "not_required");
   const pendingHumanCount = report?.confidence_summary.needs_human_count || 0;
   const llmUsage = report?.llm_usage_summary || {
@@ -210,7 +216,9 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
         </Button>
       </Space>
       <Paragraph style={{ marginBottom: 16 }}>
-        {report?.summary || "运行审核后，这里会显示最终的 Code Review 报告摘要、风险统计和裁决状态。"}
+        {isReviewStillRunning(review)
+          ? "当前审核仍在运行中，以下统计与建议仅代表阶段性结果，最终结论以任务完成后的收敛结果为准。"
+          : report?.summary || "运行审核后，这里会显示最终的 Code Review 报告摘要、风险统计和裁决状态。"}
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>

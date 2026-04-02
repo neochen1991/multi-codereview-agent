@@ -1491,6 +1491,12 @@ class ReviewRunner:
         command_message: ConversationMessage,
         file_path: str,
         line_start: int,
+        repository_context: dict[str, object] | None = None,
+        target_hunk: dict[str, object] | None = None,
+        related_files: list[str] | None = None,
+        business_changed_files: list[str] | None = None,
+        expected_checks: list[str] | None = None,
+        disallowed_inference: list[str] | None = None,
         runtime_settings,
         analysis_mode: Literal["standard", "light"],
         llm_request_options: dict[str, int | float],
@@ -1498,6 +1504,7 @@ class ReviewRunner:
         knowledge_context: dict[str, object],
         rule_screening: dict[str, object],
         finding_payloads: list[dict[str, object]],
+        **_: object,
     ) -> None:
         """执行单个专家任务。
 
@@ -1531,7 +1538,7 @@ class ReviewRunner:
             runtime_settings,
             file_path=file_path,
             line_start=line_start,
-            related_files=list(job.get("related_files") or []),
+            related_files=list(related_files or []),
             design_docs=design_docs,
             extra_tools=self._collect_skill_tools(active_skills),
             active_skills=[str(skill.skill_id) for skill in active_skills if str(getattr(skill, "skill_id", "")).strip()],
@@ -1543,12 +1550,10 @@ class ReviewRunner:
             runtime_tool_result_count=len(runtime_tool_results),
         )
         repository_context = self._merge_runtime_repository_context(
-            dict(job.get("repository_context") or {}),
+            dict(repository_context or {}),
             runtime_tool_results,
         )
-        repository_context["routing_reason"] = job.get("routing_reason", "")
-        repository_context["routing_confidence"] = job.get("routing_confidence", 0.0)
-        target_hunk = dict(job.get("target_hunk") or {})
+        target_hunk = dict(target_hunk or {})
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
             self.message_repo.append(
@@ -1624,12 +1629,12 @@ class ReviewRunner:
                     "bound_documents": self._build_bound_document_metadata(bound_documents),
                     "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                     "rule_screening": self._build_rule_screening_metadata(rule_screening),
-                    "related_files": list(job.get("related_files") or []),
-                    "business_changed_files": list(job.get("business_changed_files") or []),
+                    "related_files": list(related_files or []),
+                    "business_changed_files": list(business_changed_files or []),
                     "target_hunk": target_hunk,
                     "repository_context": self._build_repository_context_metadata(repository_context),
-                    "expected_checks": list(job.get("expected_checks") or []),
-                    "disallowed_inference": list(job.get("disallowed_inference") or []),
+                    "expected_checks": list(expected_checks or []),
+                    "disallowed_inference": list(disallowed_inference or []),
                     "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
                     "design_doc_titles": self._normalize_text_list(
                         [item.get("title") for item in design_docs],
@@ -1713,8 +1718,8 @@ class ReviewRunner:
                 repository_context,
                 target_hunk,
                 bound_documents,
-                list(job.get("disallowed_inference") or []),
-                list(job.get("expected_checks") or []),
+                list(disallowed_inference or []),
+                list(expected_checks or []),
                 active_skills,
                 rule_screening,
             ),

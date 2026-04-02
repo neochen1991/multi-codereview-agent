@@ -1290,6 +1290,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                       report={report}
                       findings={findings}
                       issues={issues}
+                      review={review}
                       onNavigateToGroup={focusResultGroup}
                     />
                   </Suspense>

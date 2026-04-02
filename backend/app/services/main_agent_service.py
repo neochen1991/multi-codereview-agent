@@ -142,13 +142,9 @@ class MainAgentService:
                     "api_key_env": "",
                     "mode": "rule_only_light",
                     "error": "",
-        }
-        return baseline_routes
+                }
+            return baseline_routes
 
-    def clear_runtime_caches(self) -> None:
-        """清理主 Agent 本地缓存，避免常驻进程保留历史上下文。"""
-
-        self._repo_context_cache.clear()
         candidate_hunks = self._build_candidate_hunks(subject, repository_service)
         if not candidate_hunks or not experts:
             return baseline_routes
@@ -194,6 +190,11 @@ class MainAgentService:
         for route in merged.values():
             route["routing_llm"] = self._llm_metadata(result)
         return merged
+
+    def clear_runtime_caches(self) -> None:
+        """清理主 Agent 本地缓存，避免常驻进程保留历史上下文。"""
+
+        self._repo_context_cache.clear()
 
     def select_review_experts(
         self,
