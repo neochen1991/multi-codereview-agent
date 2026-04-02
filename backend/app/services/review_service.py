@@ -275,6 +275,9 @@ class ReviewService:
     def list_reviews(self) -> list[ReviewTask]:
         return self.review_repo.list()
 
+    def list_review_summaries(self) -> list[dict[str, object]]:
+        return self.review_repo.list_light()
+
     def list_pending_queue(self) -> list[ReviewTask]:
         """返回待处理队列（pending 状态）并按创建时间升序排列。"""
 
@@ -293,6 +296,48 @@ class ReviewService:
             except ValueError:
                 return (0, -review.updated_at.timestamp())
         return (1, review.created_at.timestamp())
+
+    def _pending_sort_key_from_payload(self, review: dict[str, object]) -> tuple[int, float]:
+        metadata = {}
+        subject = review.get("subject")
+        if isinstance(subject, dict):
+            raw_metadata = subject.get("metadata")
+            if isinstance(raw_metadata, dict):
+                metadata = dict(raw_metadata)
+        priority_at = str(metadata.get("queue_priority_at") or "").strip()
+        if priority_at:
+            try:
+                return (0, -datetime.fromisoformat(priority_at.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                return (0, -self._updated_at_or_created_at(review))
+        return (1, self._created_at_timestamp(review))
+
+    def _started_at_or_created_at(self, review: dict[str, object]) -> float:
+        started_at = str(review.get("started_at") or "").strip()
+        if started_at:
+            try:
+                return datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        return self._created_at_timestamp(review)
+
+    def _updated_at_or_created_at(self, review: dict[str, object]) -> float:
+        updated_at = str(review.get("updated_at") or "").strip()
+        if updated_at:
+            try:
+                return datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        return self._created_at_timestamp(review)
+
+    def _created_at_timestamp(self, review: dict[str, object]) -> float:
+        created_at = str(review.get("created_at") or "").strip()
+        if created_at:
+            try:
+                return datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        return 0.0
 
     def list_pending_queue_with_diagnostics(self) -> list[dict[str, object]]:
         """返回待处理队列及每条任务当前未启动的原因说明。"""
@@ -329,6 +374,45 @@ class ReviewService:
                     "queue_blocker_code": blocker_code,
                     "queue_blocker_message": blocker_message,
                     "blocking_review_id": active_running.review_id if active_running is not None else "",
+                }
+            )
+        return response
+
+    def list_pending_queue_light_with_diagnostics(self) -> list[dict[str, object]]:
+        """返回首页用轻量队列视图，避免加载完整 review subject。"""
+
+        reviews = self.review_repo.list_light()
+        pending = [item for item in reviews if item.get("status") == "pending"]
+        pending.sort(key=self._pending_sort_key_from_payload)
+        running = sorted(
+            [item for item in reviews if item.get("status") == "running"],
+            key=self._started_at_or_created_at,
+        )
+        active_running = running[0] if running else None
+
+        response: list[dict[str, object]] = []
+        for index, item in enumerate(pending):
+            blocker_code = "ready"
+            blocker_message = "已满足启动条件，等待调度器拉起审核任务。"
+            if active_running is not None and index == 0:
+                blocker_code = "blocked_by_running_review"
+                blocker_message = f"前序任务 {active_running.get('review_id', '')} 正在执行，本任务会在它结束后自动启动。"
+            elif active_running is not None:
+                blocker_code = "waiting_for_turn_and_running_review"
+                blocker_message = (
+                    f"当前有任务 {active_running.get('review_id', '')} 正在执行，且前方还有 {index} 条待处理任务，本任务需继续排队。"
+                )
+            elif index > 0:
+                blocker_code = "waiting_for_turn"
+                blocker_message = f"前方还有 {index} 条待处理任务，本任务会按顺序自动启动。"
+            response.append(
+                item
+                | {
+                    "queue_position": index + 1,
+                    "is_next_candidate": index == 0 and active_running is None,
+                    "queue_blocker_code": blocker_code,
+                    "queue_blocker_message": blocker_message,
+                    "blocking_review_id": active_running.get("review_id", "") if active_running is not None else "",
                 }
             )
         return response

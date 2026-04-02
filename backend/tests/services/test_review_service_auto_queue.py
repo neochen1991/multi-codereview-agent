@@ -420,3 +420,66 @@ def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_pa
         "tool_result": {"summary": "compact"},
         "review_inputs": {"language_guidance_present": True},
     }
+
+
+def test_list_review_summaries_returns_lightweight_subject_payload(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_home",
+            "project_id": "proj_home",
+            "source_ref": "feature/home",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/1",
+            "title": "home review",
+            "changed_files": ["src/Main.java"],
+            "unified_diff": "x" * 1000,
+            "metadata": {"trigger_source": "auto_scheduler", "queue_priority_at": "2026-04-02T10:00:00+00:00"},
+        }
+    )
+
+    rows = service.list_review_summaries()
+
+    row = next(item for item in rows if item["review_id"] == review.review_id)
+    assert row["subject"]["title"] == "home review"
+    assert row["subject"]["unified_diff"] == ""
+    assert row["subject"]["changed_files"] == ["src/Main.java"]
+    assert row["subject"]["metadata"] == {"trigger_source": "auto_scheduler"}
+
+
+def test_list_pending_queue_light_with_diagnostics_preserves_queue_fields(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    running = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_running",
+            "project_id": "proj_running",
+            "source_ref": "feature/running",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/2",
+            "title": "running review",
+        }
+    )
+    running.status = "running"
+    running.phase = "expert_review"
+    service.review_repo.save(running)
+    pending = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_pending",
+            "project_id": "proj_pending",
+            "source_ref": "feature/pending",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/3",
+            "title": "pending review",
+        }
+    )
+
+    rows = service.list_pending_queue_light_with_diagnostics()
+
+    row = next(item for item in rows if item["review_id"] == pending.review_id)
+    assert row["queue_position"] == 1
+    assert row["queue_blocker_code"] == "blocked_by_running_review"
+    assert row["blocking_review_id"] == running.review_id
+    assert row["subject"]["title"] == "pending review"

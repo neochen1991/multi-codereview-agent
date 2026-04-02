@@ -15,8 +15,12 @@ class SqliteDatabase:
         """Open a SQLite connection with row access by column name."""
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=30.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA temp_store = MEMORY")
         return connection
 
     def initialize(self) -> None:

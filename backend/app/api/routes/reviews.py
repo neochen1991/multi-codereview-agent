@@ -42,17 +42,14 @@ def create_review(payload: CreateReviewRequest) -> dict[str, object]:
 def list_reviews() -> list[dict[str, object]]:
     """返回历史审核记录列表。"""
 
-    return [
-        item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_reviews()
-    ]
+    return review_service_module.review_service.list_review_summaries()
 
 
 @router.get("/reviews/queue")
 def list_pending_queue() -> list[dict[str, object]]:
     """返回待处理队列（pending），供首页展示自动审核排队情况。"""
 
-    return review_service_module.review_service.list_pending_queue_with_diagnostics()
+    return review_service_module.review_service.list_pending_queue_light_with_diagnostics()
 
 
 @router.post("/reviews/queue/sync")

@@ -89,6 +89,41 @@ class SqliteReviewRepository:
             ).fetchall()
         return [self._deserialize_row(row) for row in rows]
 
+    def list_light(self) -> list[dict[str, object]]:
+        """List lightweight review summaries without loading full subject payloads."""
+
+        query = """
+            SELECT
+                review_id,
+                status,
+                phase,
+                analysis_mode,
+                selected_experts_json,
+                human_review_status,
+                pending_human_issue_ids_json,
+                report_summary,
+                failure_reason,
+                created_at,
+                started_at,
+                completed_at,
+                duration_seconds,
+                updated_at,
+                json_extract(subject_json, '$.subject_type') AS subject_type,
+                json_extract(subject_json, '$.repo_id') AS repo_id,
+                json_extract(subject_json, '$.project_id') AS project_id,
+                json_extract(subject_json, '$.source_ref') AS source_ref,
+                json_extract(subject_json, '$.target_ref') AS target_ref,
+                json_extract(subject_json, '$.title') AS title,
+                json_extract(subject_json, '$.mr_url') AS mr_url,
+                json_extract(subject_json, '$.changed_files') AS changed_files_json,
+                json_extract(subject_json, '$.metadata.trigger_source') AS trigger_source
+            FROM reviews
+            ORDER BY updated_at DESC
+        """
+        with self._db.connect() as connection:
+            rows = connection.execute(query).fetchall()
+        return [self._deserialize_light_row(row) for row in rows]
+
     def _deserialize_row(self, row: object) -> ReviewTask:
         payload = {
             "review_id": row["review_id"],
@@ -108,3 +143,43 @@ class SqliteReviewRepository:
             "updated_at": row["updated_at"],
         }
         return ReviewTask.model_validate(payload)
+
+    def _deserialize_light_row(self, row: object) -> dict[str, object]:
+        trigger_source = row["trigger_source"]
+        metadata = {"trigger_source": trigger_source} if trigger_source else {}
+        changed_files = self._loads_list(row["changed_files_json"])
+        return {
+            "review_id": row["review_id"],
+            "status": row["status"],
+            "phase": row["phase"],
+            "analysis_mode": row["analysis_mode"],
+            "selected_experts": self._loads_list(row["selected_experts_json"]),
+            "human_review_status": row["human_review_status"],
+            "pending_human_issue_ids": self._loads_list(row["pending_human_issue_ids_json"]),
+            "report_summary": row["report_summary"],
+            "failure_reason": row["failure_reason"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "duration_seconds": row["duration_seconds"],
+            "updated_at": row["updated_at"],
+            "subject": {
+                "subject_type": row["subject_type"] or "",
+                "repo_id": row["repo_id"] or "",
+                "project_id": row["project_id"] or "",
+                "source_ref": row["source_ref"] or "",
+                "target_ref": row["target_ref"] or "",
+                "title": row["title"] or "",
+                "mr_url": row["mr_url"] or "",
+                "unified_diff": "",
+                "changed_files": changed_files,
+                "metadata": metadata,
+            },
+        }
+
+    def _loads_list(self, raw: object) -> list[object]:
+        try:
+            value = json.loads(str(raw or "[]"))
+        except Exception:
+            return []
+        return value if isinstance(value, list) else []
