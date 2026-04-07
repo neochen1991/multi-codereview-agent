@@ -117,6 +117,25 @@ def test_review_runner_emits_expert_selection_before_routing_plan(storage_root: 
     runner.run_once(review_id)
 
 
+def test_review_runner_skips_llm_expert_selection_when_user_selected_experts(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    def _should_not_be_called(*_args, **_kwargs):
+        raise AssertionError("用户已手动选择专家时不应调用 LLM 进行专家判定")
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _should_not_be_called)
+
+    runner.run_once(review_id)
+    messages = runner.message_repo.list(review_id)
+    selection = next(item for item in messages if item.message_type == "main_agent_expert_selection")
+    assert selection.metadata.get("mode") == "user_selected_direct"
+
+
 def test_review_runner_emits_routing_preparing_before_build_routing_plan(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

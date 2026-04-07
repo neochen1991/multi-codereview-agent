@@ -152,21 +152,30 @@ class ReviewRunner:
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
         effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
-        requested_selected_ids = review.selected_experts or settings.DEFAULT_EXPERT_IDS
+        requested_selected_ids = [
+            item for item in review.selected_experts if isinstance(item, str) and item.strip()
+        ]
         enabled_experts = self.registry.list_enabled()
         selection_started_at = time.perf_counter()
-        selection_plan = self.main_agent_service.select_review_experts(
-            review.subject,
-            enabled_experts,
-            effective_runtime_settings,
-            requested_expert_ids=requested_selected_ids,
-        )
+        if requested_selected_ids:
+            selection_plan = self._build_manual_expert_selection_plan(
+                requested_expert_ids=requested_selected_ids,
+                enabled_experts=enabled_experts,
+            )
+        else:
+            selection_plan = self.main_agent_service.select_review_experts(
+                review.subject,
+                enabled_experts,
+                effective_runtime_settings,
+                requested_expert_ids=requested_selected_ids,
+            )
         MemoryProbe.log(
             "review_runner.after_expert_selection",
             review_id=review.review_id,
             selected_expert_count=len(list(selection_plan.get("selected_expert_ids", []) or [])),
         )
         selection_elapsed_ms = round((time.perf_counter() - selection_started_at) * 1000, 1)
+        selection_mode = str((selection_plan.get("llm") or {}).get("mode") or "").strip().lower()
         selected_ids = [
             expert_id
             for expert_id in list(selection_plan.get("selected_expert_ids", []) or [])
@@ -211,7 +220,11 @@ class ReviewRunner:
                 review_id=review_id,
                 event_type="main_agent_expert_selection",
                 phase="coordination",
-                message="主Agent 已基于 MR 信息和专家画像确定本次参与审核的专家",
+                message=(
+                    "用户已手动选择专家，本轮将直接按用户选择执行审核"
+                    if selection_mode == "user_selected_direct"
+                    else "主Agent 已基于 MR 信息和专家画像确定本次参与审核的专家"
+                ),
                 payload={
                     "selection_elapsed_ms": selection_elapsed_ms,
                     "selected_expert_ids": selected_ids,
@@ -1298,6 +1311,17 @@ class ReviewRunner:
 
     def _build_expert_selection_summary(self, selection_plan: dict[str, object]) -> str:
         """生成“本次 MR 由哪些专家参与”的主 Agent 播报文案。"""
+        llm_mode = str((selection_plan.get("llm") or {}).get("mode") or "").strip().lower()
+        if llm_mode == "user_selected_direct":
+            selected_names = [
+                str(item.get("expert_name") or item.get("expert_id") or "").strip()
+                for item in list(selection_plan.get("selected_experts", []) or [])
+                if isinstance(item, dict)
+            ]
+            selected_names = [item for item in selected_names if item]
+            if selected_names:
+                return f"用户已手动选择专家，本轮将直接按用户选择执行审核：{'、'.join(selected_names)}。"
+            return "用户已手动选择专家，本轮将直接按用户选择执行审核。"
         selected = [
             item
             for item in list(selection_plan.get("selected_experts", []) or [])
@@ -1325,6 +1349,47 @@ class ReviewRunner:
         if skipped_text:
             return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。未纳入本轮的专家包括：{skipped_text}。"
         return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。"
+
+    def _build_manual_expert_selection_plan(
+        self,
+        *,
+        requested_expert_ids: list[str],
+        enabled_experts: list[ExpertProfile],
+    ) -> dict[str, object]:
+        enabled_by_id = {expert.expert_id: expert for expert in enabled_experts}
+        selected_ids = [expert_id for expert_id in requested_expert_ids if expert_id in enabled_by_id]
+        selected_experts = [
+            {
+                "expert_id": expert_id,
+                "expert_name": enabled_by_id[expert_id].name_zh,
+                "reason": "用户手动选择，直接执行",
+                "confidence": 1.0,
+            }
+            for expert_id in selected_ids
+        ]
+        skipped_experts = [
+            {
+                "expert_id": expert_id,
+                "reason": "该专家当前不可用或未启用，已跳过。",
+            }
+            for expert_id in requested_expert_ids
+            if expert_id not in enabled_by_id
+        ]
+        return {
+            "requested_expert_ids": list(requested_expert_ids),
+            "candidate_expert_ids": [expert.expert_id for expert in enabled_experts],
+            "selected_expert_ids": selected_ids,
+            "selected_experts": selected_experts,
+            "skipped_experts": skipped_experts,
+            "llm": {
+                "provider": "",
+                "model": "",
+                "base_url": "",
+                "api_key_env": "",
+                "mode": "user_selected_direct",
+                "error": "",
+            },
+        }
 
     def _build_routing_summary_message(self, routing_summary: dict[str, object]) -> str:
         """生成前端提示条和事件时间线都会复用的路由摘要文案。"""

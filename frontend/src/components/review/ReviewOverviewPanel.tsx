@@ -77,9 +77,8 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   // 不承担过程流和结果渲染逻辑。
   const statusLabel = reviewId ? status || "pending" : "未开始";
   const hasExperts = experts.length > 0;
-  const hasSelectedExperts = form.selected_experts.length > 0;
   const hasReviewInput = Boolean(form.mr_url.trim() || form.source_ref.trim());
-  const disableActions = loading || running || (!readonly && (!hasExperts || !hasSelectedExperts || !hasReviewInput));
+  const disableActions = loading || running || (!readonly && (!hasExperts || !hasReviewInput));
   const designDocNames = form.design_docs.map((item) => item.filename || item.title);
   const expertNameById = new Map(experts.map((item) => [item.expert_id, item.name_zh]));
   const expertById = new Map(experts.map((item) => [item.expert_id, item]));
@@ -106,7 +105,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           message={
             readonly
               ? "当前是审核记录查看模式。这里展示当时提交的审核对象与候选专家，实际参与集合由大模型在启动后判定，过程细节请切到“审核过程”，最终结论请切到“结论与行动”。"
-              : "先输入 Codehub MR 链接并选择候选专家，再启动审核。启动后主 Agent 会先让大模型判定本次真正参与审核的专家集合，然后再进入派工与审查。"
+              : "先输入 Codehub MR 链接，再选择候选专家（可选）并启动审核。若未选择候选专家，启动后主 Agent 会让大模型判定本次参与审核的专家集合；若已选择，系统将直接使用你选择的专家执行审查。"
           }
         />
         {!hasExperts ? (

@@ -51,6 +51,23 @@ def test_enqueue_open_merge_requests_creates_pending_reviews_and_deduplicates(tm
     assert queue[0].created_at <= queue[1].created_at
 
 
+def test_create_review_defaults_to_empty_selected_experts(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_default",
+            "project_id": "proj_default",
+            "source_ref": "feature/default",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/1",
+            "title": "default experts empty",
+        }
+    )
+
+    assert review.selected_experts == []
+
+
 def test_start_next_pending_review_recovers_interrupted_running_review(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     service.platform_adapter.normalize = lambda subject, runtime_settings=None: subject.model_copy(  # type: ignore[method-assign]

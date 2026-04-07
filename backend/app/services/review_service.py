@@ -128,7 +128,7 @@ class ReviewService:
             status="pending",
             phase="pending",
             analysis_mode=analysis_mode,
-            selected_experts=selected_experts or settings.DEFAULT_EXPERT_IDS,
+            selected_experts=selected_experts,
         )
         self.review_repo.save(task)
         logger.info(

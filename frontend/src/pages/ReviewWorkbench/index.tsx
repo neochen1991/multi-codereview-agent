@@ -91,14 +91,7 @@ const defaultFormState: ReviewFormState = {
   source_ref: "",
   target_ref: "",
   design_docs: [],
-  selected_experts: [
-    "correctness_business",
-    "architecture_design",
-    "security_compliance",
-    "performance_reliability",
-    "maintainability_code_health",
-    "test_verification",
-  ],
+  selected_experts: [],
 };
 
 const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result"];
