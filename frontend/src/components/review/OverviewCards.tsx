@@ -62,7 +62,7 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onFindingClick ? "overview-stat-button-clickable" : ""}`} onClick={onFindingClick}>
           <Card className="module-card">
-            <Statistic title="审核发现" value={findingCount} suffix={<Tag color="processing">evidence-first</Tag>} />
+            <Statistic title="待处理发现" value={findingCount} suffix={<Tag color="processing">evidence-first</Tag>} />
           </Card>
         </button>
       </Col>

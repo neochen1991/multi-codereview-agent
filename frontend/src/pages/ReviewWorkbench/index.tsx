@@ -1094,7 +1094,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             review?.selected_experts?.length ||
             form.selected_experts.length
           }
-          findingCount={findings.length}
+          findingCount={visibleFindings.length}
           issueCount={issues.length}
           humanGateCount={review?.pending_human_issue_ids?.length || 0}
           onStatusClick={focusProcessDialogue}
@@ -1283,6 +1283,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                       report={report}
                       findings={findings}
                       issues={issues}
+                      issueFilterDecisions={issueFilterDecisions}
                       review={review}
                       onNavigateToGroup={focusResultGroup}
                     />

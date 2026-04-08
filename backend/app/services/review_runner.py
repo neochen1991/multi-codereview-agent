@@ -611,7 +611,7 @@ class ReviewRunner:
         )
 
         expert_execution_started_at = time.perf_counter()
-        expert_failures = self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode)
+        expert_failures = self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode) or []
         MemoryProbe.log(
             "review_runner.after_expert_jobs",
             review_id=review.review_id,
@@ -886,14 +886,24 @@ class ReviewRunner:
             partial_failure_count=len(expert_failures),
         )
         self._abort_if_closed(review_id)
-        final_summary, final_llm = self.main_agent_service.build_final_summary(
-            review,
-            issues,
-            effective_runtime_settings,
-            partial_failure_count=len(expert_failures),
-            timeout_seconds=float(llm_request_options["timeout_seconds"]),
-            max_attempts=int(llm_request_options["max_attempts"]),
-        )
+        try:
+            final_summary, final_llm = self.main_agent_service.build_final_summary(
+                review,
+                issues,
+                effective_runtime_settings,
+                partial_failure_count=len(expert_failures),
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                max_attempts=int(llm_request_options["max_attempts"]),
+            )
+        except TypeError:
+            # 兼容旧签名（无 partial_failure_count 参数）的测试桩与扩展实现。
+            final_summary, final_llm = self.main_agent_service.build_final_summary(
+                review,
+                issues,
+                effective_runtime_settings,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                max_attempts=int(llm_request_options["max_attempts"]),
+            )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review_id,
@@ -1068,8 +1078,9 @@ class ReviewRunner:
             return None
         file_path = str(job.get("file_path") or "")
         line_start = int(job.get("line_start") or 1)
-        repository_context = dict(job.get("repository_context") or {})
-        target_hunk = dict(job.get("target_hunk") or {})
+        command_metadata = dict(getattr(command_message, "metadata", {}) or {})
+        repository_context = dict(job.get("repository_context") or command_metadata.get("repository_context") or {})
+        target_hunk = dict(job.get("target_hunk") or command_metadata.get("target_hunk") or {})
         must_review_count = int(rule_screening.get("must_review_count") or 0)
         possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
         top_rule = next((item for item in list(rule_screening.get("matched_rules_for_llm") or []) if isinstance(item, dict)), {})
@@ -1761,7 +1772,7 @@ class ReviewRunner:
         )
         self._abort_if_closed(review.review_id)
 
-        severity, confidence = self._score_finding(review.subject, expert.expert_id)
+        base_severity, base_confidence = self._score_finding(review.subject, expert.expert_id)
         input_completeness = self._build_review_input_completeness(
             review.subject,
             file_path,
@@ -1813,176 +1824,200 @@ class ReviewRunner:
             llm_error=llm_result.error,
         )
         self._abort_if_closed(review.review_id)
-        parsed = self._parse_expert_analysis(
+        parsed_candidates = self._parse_expert_analyses(
             llm_result.text,
             review.subject,
             expert,
             file_path,
             line_start,
         )
-        parsed = self._stabilize_expert_analysis(
-            parsed,
-            expert.expert_id,
-            file_path,
-            line_start,
-            target_hunk,
-            repository_context=repository_context,
-            input_completeness=input_completeness,
-        )
         design_alignment = self._extract_design_alignment(runtime_tool_results)
-        severity = self._normalize_severity(parsed.get("severity"), severity)
-        confidence = self._normalize_confidence(parsed.get("confidence"), confidence)
-        parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
-        finding = ReviewFinding(
-            review_id=review.review_id,
-            expert_id=expert.expert_id,
-            title=str(parsed.get("title") or self._build_finding_title(expert)),
-            summary=str(parsed.get("claim") or self._build_finding_summary(review.subject, expert.expert_id)),
-            finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
-            severity=severity,
-            confidence=confidence,
-            file_path=file_path,
-            line_start=parsed_line_start,
-            evidence=self._build_evidence(review.subject, expert, file_path, tool_evidence, parsed),
-            cross_file_evidence=[str(item).strip() for item in parsed.get("cross_file_evidence", []) if str(item).strip()],
-            assumptions=[str(item).strip() for item in parsed.get("assumptions", []) if str(item).strip()],
-            context_files=self._merge_context_files(
-                parsed.get("context_files", []),
-                repository_context,
-                runtime_tool_results,
-            ),
-            matched_rules=self._normalize_text_list(parsed.get("matched_rules"), []),
-            violated_guidelines=self._normalize_text_list(parsed.get("violated_guidelines"), []),
-            rule_based_reasoning=str(parsed.get("rule_based_reasoning") or "").strip(),
-            verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
-            verification_plan=str(parsed.get("verification_plan") or "").strip(),
-            design_alignment_status=str(parsed.get("design_alignment_status") or design_alignment.get("design_alignment_status") or "").strip(),
-            design_doc_titles=self._normalize_text_list(
-                design_alignment.get("design_doc_titles"),
-                [],
-            ),
-            matched_design_points=self._normalize_text_list(
-                parsed.get("matched_design_points"),
-                self._normalize_text_list(design_alignment.get("matched_implementation_points"), []),
-            ),
-            missing_design_points=self._normalize_text_list(
-                parsed.get("missing_design_points"),
-                self._normalize_text_list(design_alignment.get("missing_implementation_points"), []),
-            ),
-            extra_implementation_points=self._normalize_text_list(
-                parsed.get("extra_implementation_points"),
-                self._normalize_text_list(design_alignment.get("extra_implementation_points"), []),
-            ),
-            design_conflicts=self._normalize_text_list(
-                parsed.get("design_conflicts"),
-                self._normalize_text_list(design_alignment.get("conflicting_implementation_points"), []),
-            ),
-            remediation_strategy=str(
-                parsed.get("fix_strategy")
-                or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)
-            ),
-            remediation_suggestion=str(
-                parsed.get("suggested_fix")
-                or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)
-            ),
-            remediation_steps=self._normalize_text_list(
-                parsed.get("change_steps"),
-                self._build_remediation_steps(review.subject, expert.expert_id, file_path),
-            ),
-            code_excerpt=self._build_code_excerpt(
-                review.subject,
-                file_path,
-                parsed_line_start,
+        saved_count = 0
+        dedupe_keys: set[tuple[str, int, str, str]] = set()
+        candidate_count = len(parsed_candidates)
+        for index, raw_parsed in enumerate(parsed_candidates, start=1):
+            parsed = self._stabilize_expert_analysis(
+                raw_parsed,
                 expert.expert_id,
-            ),
-            code_context=self._build_finding_code_context(
-                review.subject,
                 file_path,
-                parsed_line_start,
+                line_start,
                 target_hunk,
-                repository_context,
-                expert=expert,
-                bound_documents=bound_documents,
-                rule_screening=rule_screening,
-            ),
-            suggested_code=str(
-                parsed.get("suggested_code")
-                or self._build_suggested_code(review.subject, file_path, parsed_line_start, expert.expert_id)
-            ),
-            suggested_code_language=self._infer_code_language(file_path),
-        )
-        if self._should_skip_finding(expert.expert_id, finding):
-            self.event_repo.append(
-                ReviewEvent(
+                repository_context=repository_context,
+                input_completeness=input_completeness,
+            )
+            severity = self._normalize_severity(parsed.get("severity"), base_severity)
+            confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
+            parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
+            dedupe_key = (
+                str(parsed.get("title") or "").strip().lower(),
+                parsed_line_start,
+                str(parsed.get("finding_type") or "risk_hypothesis").strip().lower(),
+                str(parsed.get("claim") or "").strip().lower(),
+            )
+            if dedupe_key in dedupe_keys:
+                continue
+            dedupe_keys.add(dedupe_key)
+
+            finding = ReviewFinding(
+                review_id=review.review_id,
+                expert_id=expert.expert_id,
+                title=str(parsed.get("title") or self._build_finding_title(expert)),
+                summary=str(parsed.get("claim") or self._build_finding_summary(review.subject, expert.expert_id)),
+                finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
+                severity=severity,
+                confidence=confidence,
+                file_path=file_path,
+                line_start=parsed_line_start,
+                evidence=self._build_evidence(review.subject, expert, file_path, tool_evidence, parsed),
+                cross_file_evidence=[str(item).strip() for item in parsed.get("cross_file_evidence", []) if str(item).strip()],
+                assumptions=[str(item).strip() for item in parsed.get("assumptions", []) if str(item).strip()],
+                context_files=self._merge_context_files(
+                    parsed.get("context_files", []),
+                    repository_context,
+                    runtime_tool_results,
+                ),
+                matched_rules=self._normalize_text_list(parsed.get("matched_rules"), []),
+                violated_guidelines=self._normalize_text_list(parsed.get("violated_guidelines"), []),
+                rule_based_reasoning=str(parsed.get("rule_based_reasoning") or "").strip(),
+                verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
+                verification_plan=str(parsed.get("verification_plan") or "").strip(),
+                design_alignment_status=str(parsed.get("design_alignment_status") or design_alignment.get("design_alignment_status") or "").strip(),
+                design_doc_titles=self._normalize_text_list(
+                    design_alignment.get("design_doc_titles"),
+                    [],
+                ),
+                matched_design_points=self._normalize_text_list(
+                    parsed.get("matched_design_points"),
+                    self._normalize_text_list(design_alignment.get("matched_implementation_points"), []),
+                ),
+                missing_design_points=self._normalize_text_list(
+                    parsed.get("missing_design_points"),
+                    self._normalize_text_list(design_alignment.get("missing_implementation_points"), []),
+                ),
+                extra_implementation_points=self._normalize_text_list(
+                    parsed.get("extra_implementation_points"),
+                    self._normalize_text_list(design_alignment.get("extra_implementation_points"), []),
+                ),
+                design_conflicts=self._normalize_text_list(
+                    parsed.get("design_conflicts"),
+                    self._normalize_text_list(design_alignment.get("conflicting_implementation_points"), []),
+                ),
+                remediation_strategy=str(
+                    parsed.get("fix_strategy")
+                    or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)
+                ),
+                remediation_suggestion=str(
+                    parsed.get("suggested_fix")
+                    or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)
+                ),
+                remediation_steps=self._normalize_text_list(
+                    parsed.get("change_steps"),
+                    self._build_remediation_steps(review.subject, expert.expert_id, file_path),
+                ),
+                code_excerpt=self._build_code_excerpt(
+                    review.subject,
+                    file_path,
+                    parsed_line_start,
+                    expert.expert_id,
+                ),
+                code_context=self._build_finding_code_context(
+                    review.subject,
+                    file_path,
+                    parsed_line_start,
+                    target_hunk,
+                    repository_context,
+                    expert=expert,
+                    bound_documents=bound_documents,
+                    rule_screening=rule_screening,
+                ),
+                suggested_code=str(
+                    parsed.get("suggested_code")
+                    or self._build_suggested_code(review.subject, file_path, parsed_line_start, expert.expert_id)
+                ),
+                suggested_code_language=self._infer_code_language(file_path),
+            )
+            if self._should_skip_finding(expert.expert_id, finding):
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_suppressed",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 的低证据发现已被抑制",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "file_path": finding.file_path,
+                            "line_start": finding.line_start,
+                            "finding_type": finding.finding_type,
+                        },
+                    )
+                )
+                continue
+            self._abort_if_closed(review.review_id)
+            self.finding_repo.save(review.review_id, finding)
+            MemoryProbe.log(
+                "expert.after_finding_save",
+                review_id=review.review_id,
+                expert_id=expert.expert_id,
+                finding_id=finding.finding_id,
+            )
+            message_content = (
+                llm_result.text.strip()
+                if index == 1
+                else f"[multi-finding {index}/{candidate_count}] {finding.title}\n{finding.summary}"
+            )
+            self.message_repo.append(
+                ConversationMessage(
                     review_id=review.review_id,
-                    event_type="finding_suppressed",
-                    phase="expert_review",
-                    message=f"{expert.name_zh} 的低证据发现已被抑制",
-                    payload={
-                        "expert_id": expert.expert_id,
+                    issue_id=finding.finding_id,
+                    expert_id=expert.expert_id,
+                    message_type="expert_analysis",
+                    content=message_content,
+                    metadata={
+                        "phase": "expert_review",
+                        "severity": finding.severity,
+                        "confidence": finding.confidence,
                         "file_path": finding.file_path,
                         "line_start": finding.line_start,
+                        "reply_to_expert_id": self.main_agent_service.agent_id,
+                        "reply_to_message_id": command_message.message_id,
+                        "target_expert_id": expert.expert_id,
+                        "allowed_tools": expert.tool_bindings,
+                        "allowed_runtime_tools": expert.runtime_tool_bindings,
+                        "knowledge_sources": expert.knowledge_sources,
+                        "active_skills": [skill.skill_id for skill in active_skills],
+                        "tool_evidence": [self._build_tool_result_metadata(item) for item in tool_evidence[:6]],
+                        "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
+                        "target_hunk": target_hunk,
+                        "repository_context": self._build_repository_context_metadata(repository_context),
+                        "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
+                        "bound_documents": self._build_bound_document_metadata(bound_documents),
+                        "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
+                        "rule_screening": self._build_rule_screening_metadata(rule_screening),
                         "finding_type": finding.finding_type,
+                        "context_files": finding.context_files,
+                        "assumptions": finding.assumptions,
+                        "matched_rules": finding.matched_rules,
+                        "violated_guidelines": finding.violated_guidelines,
+                        "rule_based_reasoning": finding.rule_based_reasoning,
+                        "design_alignment_status": finding.design_alignment_status,
+                        "design_doc_titles": finding.design_doc_titles,
+                        "matched_design_points": finding.matched_design_points,
+                        "missing_design_points": finding.missing_design_points,
+                        "extra_implementation_points": finding.extra_implementation_points,
+                        "design_conflicts": finding.design_conflicts,
+                        "analysis_mode": analysis_mode,
+                        "multi_finding_index": index,
+                        "multi_finding_total": candidate_count,
+                        "input_completeness": finding.code_context.get("input_completeness", {}),
+                        "review_inputs": finding.code_context.get("review_inputs", {}),
+                        **self._llm_message_metadata(llm_result),
                     },
                 )
             )
+            finding_payloads.append(finding.model_dump(mode="json"))
+            saved_count += 1
+        if saved_count <= 0:
             return
-        self._abort_if_closed(review.review_id)
-        self.finding_repo.save(review.review_id, finding)
-        MemoryProbe.log(
-            "expert.after_finding_save",
-            review_id=review.review_id,
-            expert_id=expert.expert_id,
-            finding_id=finding.finding_id,
-        )
-        self.message_repo.append(
-            ConversationMessage(
-                review_id=review.review_id,
-                issue_id=finding.finding_id,
-                expert_id=expert.expert_id,
-                message_type="expert_analysis",
-                content=llm_result.text.strip(),
-                metadata={
-                    "phase": "expert_review",
-                    "severity": finding.severity,
-                    "confidence": finding.confidence,
-                    "file_path": finding.file_path,
-                    "line_start": finding.line_start,
-                    "reply_to_expert_id": self.main_agent_service.agent_id,
-                    "reply_to_message_id": command_message.message_id,
-                    "target_expert_id": expert.expert_id,
-                    "allowed_tools": expert.tool_bindings,
-                    "allowed_runtime_tools": expert.runtime_tool_bindings,
-                    "knowledge_sources": expert.knowledge_sources,
-                    "active_skills": [skill.skill_id for skill in active_skills],
-                    "tool_evidence": [self._build_tool_result_metadata(item) for item in tool_evidence[:6]],
-                    "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
-                    "target_hunk": target_hunk,
-                    "repository_context": self._build_repository_context_metadata(repository_context),
-                    "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
-                    "bound_documents": self._build_bound_document_metadata(bound_documents),
-                    "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
-                    "rule_screening": self._build_rule_screening_metadata(rule_screening),
-                    "finding_type": finding.finding_type,
-                    "context_files": finding.context_files,
-                    "assumptions": finding.assumptions,
-                    "matched_rules": finding.matched_rules,
-                    "violated_guidelines": finding.violated_guidelines,
-                    "rule_based_reasoning": finding.rule_based_reasoning,
-                    "design_alignment_status": finding.design_alignment_status,
-                    "design_doc_titles": finding.design_doc_titles,
-                    "matched_design_points": finding.matched_design_points,
-                    "missing_design_points": finding.missing_design_points,
-                    "extra_implementation_points": finding.extra_implementation_points,
-                    "design_conflicts": finding.design_conflicts,
-                    "analysis_mode": analysis_mode,
-                    "input_completeness": finding.code_context.get("input_completeness", {}),
-                    "review_inputs": finding.code_context.get("review_inputs", {}),
-                    **self._llm_message_metadata(llm_result),
-                },
-            )
-        )
-        finding_payloads.append(finding.model_dump(mode="json"))
         self.event_repo.append(
             ReviewEvent(
                 review_id=review.review_id,
@@ -3026,8 +3061,10 @@ class ReviewRunner:
             f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
-            f"你必须只输出一个 JSON 对象，不要输出 Markdown，不要输出额外解释。\n"
-            f"JSON 字段要求:\n"
+            f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
+            f"该规则在标准模式和轻量模式都必须遵守。\n"
+            f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
+            f"每条 finding 的 JSON 字段要求:\n"
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
         )
 
@@ -3397,6 +3434,51 @@ class ReviewRunner:
             "extra_implementation_points": [],
             "design_conflicts": [],
         }
+
+    def _parse_expert_analyses(
+        self,
+        text: str,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+    ) -> list[dict[str, object]]:
+        payload = self._parse_json_payload(text)
+        candidates: list[dict[str, object]] = []
+        if isinstance(payload, list):
+            candidates = [item for item in payload if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            nested = payload.get("findings")
+            if isinstance(nested, list):
+                candidates = [item for item in nested if isinstance(item, dict)]
+            if not candidates:
+                candidates = [payload]
+        if not candidates:
+            candidates = [
+                self._parse_expert_analysis(
+                    text,
+                    subject,
+                    expert,
+                    file_path,
+                    line_start,
+                )
+            ]
+
+        normalized: list[dict[str, object]] = []
+        seen: set[tuple[str, int, str, str]] = set()
+        for item in candidates:
+            title = str(item.get("title") or "").strip().lower()
+            claim = str(item.get("claim") or "").strip().lower()
+            finding_type = str(item.get("finding_type") or "risk_hypothesis").strip().lower()
+            current_line = self._normalize_line_start(item.get("line_start"), line_start)
+            key = (title, current_line, finding_type, claim)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(dict(item))
+            if len(normalized) >= 5:
+                break
+        return normalized
 
     def _stabilize_expert_analysis(
         self,
@@ -4508,7 +4590,9 @@ class ReviewRunner:
             "summary": str(tool_result.get("summary") or "").strip(),
             "skipped": bool(tool_result.get("skipped")),
             "skip_reason": str(tool_result.get("skip_reason") or "").strip(),
-            "signal_summary": str(tool_result.get("signal_summary") or tool_result.get("java_quality_signal_summary") or "").strip(),
+            "signal_summary": str(
+                tool_result.get("signal_summary") or tool_result.get("java_quality_signal_summary") or ""
+            ).strip(),
             "signals": [
                 str(item).strip()
                 for item in list(tool_result.get("signals") or tool_result.get("java_quality_signals") or [])[:8]
@@ -4518,6 +4602,32 @@ class ReviewRunner:
                 str(item).strip()
                 for item in list(tool_result.get("context_files") or [])[:6]
                 if str(item).strip()
+            ],
+            "data_source_summary": dict(tool_result.get("data_source_summary") or {}),
+            "matched_tables": [
+                str(item).strip()
+                for item in list(tool_result.get("matched_tables") or [])[:8]
+                if str(item).strip()
+            ],
+            "table_columns": [
+                dict(item)
+                for item in list(tool_result.get("table_columns") or [])[:12]
+                if isinstance(item, dict)
+            ],
+            "constraints": [
+                dict(item)
+                for item in list(tool_result.get("constraints") or [])[:12]
+                if isinstance(item, dict)
+            ],
+            "indexes": [
+                dict(item)
+                for item in list(tool_result.get("indexes") or [])[:12]
+                if isinstance(item, dict)
+            ],
+            "table_stats": [
+                dict(item)
+                for item in list(tool_result.get("table_stats") or [])[:8]
+                if isinstance(item, dict)
             ],
         }
         return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
@@ -5005,7 +5115,12 @@ class ReviewRunner:
         }
         has_perf_signal = any(token in text_blob for token in perf_tokens)
         has_repo_context = len(finding.context_files) >= 2
-        if finding.finding_type == "risk_hypothesis" and (not has_perf_signal or not has_repo_context):
+        if (
+            finding.finding_type == "risk_hypothesis"
+            and (not has_perf_signal and not has_repo_context)
+            and not finding.matched_rules
+            and not finding.violated_guidelines
+        ):
             logger.info(
                 "suppressing weak performance finding review_id=%s file=%s line=%s has_perf_signal=%s has_repo_context=%s title=%s",
                 finding.review_id,
@@ -5099,31 +5214,38 @@ class ReviewRunner:
                 return line.split(marker, 1)[1].strip()
         return ""
 
-    def _parse_json_object(self, text: str) -> dict[str, object]:
+    def _parse_json_payload(self, text: str) -> object:
         content = text.strip()
+        if not content:
+            return None
         candidates = [content]
         if "```json" in content:
             fragment = content.split("```json", 1)[1].split("```", 1)[0].strip()
-            candidates.insert(0, fragment)
+            if fragment:
+                candidates.insert(0, fragment)
         if "```" in content and len(candidates) == 1:
             fragment = content.split("```", 1)[1].split("```", 1)[0].strip()
-            candidates.insert(0, fragment)
+            if fragment:
+                candidates.insert(0, fragment)
         for candidate in candidates:
             try:
-                payload = json.loads(candidate)
+                return json.loads(candidate)
             except Exception:
                 continue
-            if isinstance(payload, dict):
-                return payload
-        start = content.find("{")
-        end = content.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                payload = json.loads(content[start : end + 1])
-            except Exception:
-                return {}
-            if isinstance(payload, dict):
-                return payload
+        for open_char, close_char in (("{", "}"), ("[", "]")):
+            start = content.find(open_char)
+            end = content.rfind(close_char)
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(content[start : end + 1])
+                except Exception:
+                    continue
+        return None
+
+    def _parse_json_object(self, text: str) -> dict[str, object]:
+        payload = self._parse_json_payload(text)
+        if isinstance(payload, dict):
+            return payload
         return {}
 
     def _normalize_severity(self, value: object, fallback: str) -> str:

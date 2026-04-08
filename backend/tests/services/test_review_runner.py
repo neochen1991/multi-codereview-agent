@@ -575,6 +575,253 @@ def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage
     assert parsed["suggested_code"] == "export function map() {}"
 
 
+def test_review_runner_parse_expert_analyses_supports_findings_array(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    parsed_items = runner._parse_expert_analyses(
+        """
+        {
+          "findings": [
+            {
+              "title": "参数为空未校验",
+              "claim": "入口参数 request 可能为空导致 NPE",
+              "finding_type": "direct_defect",
+              "severity": "high",
+              "line_start": 18
+            },
+            {
+              "title": "SQL 缺少分页",
+              "claim": "查询未见 limit/page 保护，可能导致全表扫描",
+              "finding_type": "risk_hypothesis",
+              "severity": "medium",
+              "line_start": 42
+            }
+          ]
+        }
+        """,
+        subject,
+        expert,
+        "src/main/java/com/acme/FooService.java",
+        18,
+    )
+
+    assert len(parsed_items) == 2
+    assert parsed_items[0]["title"] == "参数为空未校验"
+    assert parsed_items[0]["finding_type"] == "direct_defect"
+    assert parsed_items[1]["title"] == "SQL 缺少分页"
+    assert parsed_items[1]["finding_type"] == "risk_hypothesis"
+
+
+def test_review_runner_saves_multiple_findings_from_single_expert_response(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_multi_findings_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/multi",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/OrderService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+                "--- a/src/main/java/com/acme/OrderService.java\n"
+                "+++ b/src/main/java/com/acme/OrderService.java\n"
+                "@@ -18,1 +18,2 @@\n"
+                "- repository.save(entity);\n"
+                "+ repository.save(entity);\n"
+                "+ log.info(\"saved\");\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请审查本段变更",
+        metadata={
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "target_hunk": {"hunk_header": "@@ -18,1 +18,2 @@", "excerpt": "+ repository.save(entity);"},
+            "repository_context": {"routing_reason": "关键路径改动"},
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"title":"空参未校验","claim":"request 为空时会触发异常","finding_type":"direct_defect","severity":"high","line_start":18,'
+                '"matched_rules":["CORR-001"],"violated_guidelines":["入参必须校验"],"rule_based_reasoning":"关键入口缺少空值保护。",'
+                '"evidence":["未见 request 判空"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"入口增加非空校验","suggested_fix":"添加 Objects.requireNonNull","change_steps":["补判空"],'
+                '"suggested_code":"Objects.requireNonNull(request);","confidence":0.9,"verification_needed":false,"verification_plan":""},'
+                '{"title":"日志泄露业务标识","claim":"日志打印了敏感业务标识","finding_type":"risk_hypothesis","severity":"medium","line_start":19,'
+                '"matched_rules":["CORR-LOG-001"],"violated_guidelines":["日志最小披露"],"rule_based_reasoning":"日志字段需脱敏。",'
+                '"evidence":["新增 log.info 调用"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"收敛日志字段","suggested_fix":"去掉敏感字段","change_steps":["改日志模板"],'
+                '"suggested_code":"log.info(\\"saved\\");","confidence":0.76,"verification_needed":true,"verification_plan":"核对日志规范"}'
+                ']}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/OrderService.java",
+        line_start=18,
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 2
+    assert len(finding_payloads) == 2
+
+
+def test_review_runner_saves_multiple_findings_from_single_expert_response_in_light_mode(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_multi_findings_light_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/multi-light",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/OrderService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+                "--- a/src/main/java/com/acme/OrderService.java\n"
+                "+++ b/src/main/java/com/acme/OrderService.java\n"
+                "@@ -18,1 +18,2 @@\n"
+                "- repository.save(entity);\n"
+                "+ repository.save(entity);\n"
+                "+ log.info(\"saved\");\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请审查本段变更",
+        metadata={
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "target_hunk": {"hunk_header": "@@ -18,1 +18,2 @@", "excerpt": "+ repository.save(entity);"},
+            "repository_context": {"routing_reason": "关键路径改动"},
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"title":"空参未校验","claim":"request 为空时会触发异常","finding_type":"direct_defect","severity":"high","line_start":18,'
+                '"matched_rules":["CORR-001"],"violated_guidelines":["入参必须校验"],"rule_based_reasoning":"关键入口缺少空值保护。",'
+                '"evidence":["未见 request 判空"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"入口增加非空校验","suggested_fix":"添加 Objects.requireNonNull","change_steps":["补判空"],'
+                '"suggested_code":"Objects.requireNonNull(request);","confidence":0.9,"verification_needed":false,"verification_plan":""},'
+                '{"title":"日志泄露业务标识","claim":"日志打印了敏感业务标识","finding_type":"risk_hypothesis","severity":"medium","line_start":19,'
+                '"matched_rules":["CORR-LOG-001"],"violated_guidelines":["日志最小披露"],"rule_based_reasoning":"日志字段需脱敏。",'
+                '"evidence":["新增 log.info 调用"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"收敛日志字段","suggested_fix":"去掉敏感字段","change_steps":["改日志模板"],'
+                '"suggested_code":"log.info(\\"saved\\");","confidence":0.76,"verification_needed":true,"verification_plan":"核对日志规范"}'
+                ']}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/OrderService.java",
+        line_start=18,
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="light",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 2
+    assert len(finding_payloads) == 2
+
+
 def test_review_runner_keeps_selected_security_expert_executable(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

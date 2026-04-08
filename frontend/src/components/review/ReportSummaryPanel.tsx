@@ -1,7 +1,7 @@
 import React from "react";
 import { Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
 
-import type { DebateIssue, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
+import type { DebateIssue, IssueFilterDecision, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
 
 const { Paragraph } = Typography;
 
@@ -9,6 +9,7 @@ type ReportSummaryPanelProps = {
   report: ReviewReport | null;
   findings: ReviewFinding[];
   issues: DebateIssue[];
+  issueFilterDecisions?: IssueFilterDecision[];
   review?: ReviewSummary | null;
   className?: string;
   onNavigateToGroup?: (
@@ -25,6 +26,11 @@ type ReportSummaryPanelProps = {
       | "design_concern",
   ) => void;
 };
+
+const THRESHOLD_RULE_CODES = new Set([
+  "below_issue_priority_threshold",
+  "below_priority_confidence_threshold",
+]);
 
 const isReviewStillRunning = (review?: ReviewSummary | null): boolean =>
   Boolean(review && ["pending", "queued", "running"].includes(String(review.status || "").toLowerCase()));
@@ -159,7 +165,15 @@ const clickableStatistic = (
   </button>
 );
 
-const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, findings, issues, review, className, onNavigateToGroup }) => {
+const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
+  report,
+  findings,
+  issues,
+  issueFilterDecisions = [],
+  review,
+  className,
+  onNavigateToGroup,
+}) => {
   const totalCount = findings.length;
   const formalIssueCount = issues.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
@@ -170,6 +184,20 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       issueByFindingId.set(findingId, issue);
     }
   }
+  const thresholdFilteredFindingIds = new Set<string>();
+  for (const decision of issueFilterDecisions) {
+    if (!THRESHOLD_RULE_CODES.has(decision.rule_code)) continue;
+    for (const findingId of decision.finding_ids || []) {
+      if (findingId) thresholdFilteredFindingIds.add(findingId);
+    }
+  }
+  const pendingFindingCount = findings.filter((item) => {
+    if (issueByFindingId.has(item.finding_id)) return false;
+    if (thresholdFilteredFindingIds.has(item.finding_id)) return false;
+    return true;
+  }).length;
+  const promotedFindingCount = findings.filter((item) => issueByFindingId.has(item.finding_id)).length;
+  const thresholdFilteredCount = findings.filter((item) => thresholdFilteredFindingIds.has(item.finding_id)).length;
   const verifiedFindingCount = findings.filter((item) => Boolean(issueByFindingId.get(item.finding_id)?.verified)).length;
   const blockingCount = report
     ? findings.filter((item) =>
@@ -222,7 +250,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          {clickableStatistic("审核发现", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
+          {clickableStatistic("待处理发现", pendingFindingCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
           {clickableStatistic("正式议题", formalIssueCount)}
@@ -242,9 +270,12 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({ report, finding
         </Col>
       </Row>
       <Space wrap style={{ marginTop: 16 }}>
+        <Tag color="default">{`发现总数 ${totalCount}`}</Tag>
+        <Tag color={promotedFindingCount > 0 ? "processing" : "default"}>{`已升级为正式议题 ${promotedFindingCount}`}</Tag>
+        <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`阈值过滤 ${thresholdFilteredCount}`}</Tag>
         <Tag color={blockingCount > 0 ? "error" : "default"}>{`阻塞合并 ${blockingCount}`}</Tag>
         <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`建议先修 ${shouldFixCount}`}</Tag>
-        <Tag color="success">{`非阻塞 ${Math.max(findings.length - blockingCount - shouldFixCount, 0)}`}</Tag>
+        <Tag color="success">{`非阻塞 ${Math.max(totalCount - blockingCount - shouldFixCount, 0)}`}</Tag>
         {Object.entries(typeCounts).map(([key, count]) => (
           <Tag key={key}>{`${findingTypeLabel(key)} ${count}`}</Tag>
         ))}
