@@ -193,13 +193,30 @@ def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
 
 
+def _is_valid_git_repo(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
 def ensure_repo_cache(repository: RepoDefinition, cache_root: Path = DEFAULT_CACHE_ROOT) -> Path:
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_path = cache_root / repository.repo_key
-    if (cache_path / ".git").exists():
+    if _is_valid_git_repo(cache_path):
         return cache_path
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
     seed = Path(repository.preferred_local_path) if repository.preferred_local_path else None
-    source = str(seed) if seed and (seed / ".git").exists() else repository.clone_url
+    source = str(seed) if seed and _is_valid_git_repo(seed) else repository.clone_url
     _run_git(["git", "clone", "--quiet", source, str(cache_path)])
     return cache_path
 

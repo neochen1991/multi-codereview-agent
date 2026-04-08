@@ -136,6 +136,29 @@ def test_review_runner_skips_llm_expert_selection_when_user_selected_experts(sto
     assert selection.metadata.get("mode") == "user_selected_direct"
 
 
+def test_review_runner_skips_routing_plan_llm_when_user_selected_experts(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    def _should_not_select(*_args, **_kwargs):
+        raise AssertionError("用户已手动选择专家时不应再次调用专家选择 LLM")
+
+    def _should_not_route(*_args, **_kwargs):
+        raise AssertionError("用户已手动选择专家且专家覆盖全部 hunk 时不应再调用 routing_plan LLM")
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _should_not_select)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _should_not_route)
+
+    runner.run_once(review_id)
+    messages = runner.message_repo.list(review_id)
+    routing_ready = next(item for item in messages if item.message_type == "main_agent_routing_ready")
+    assert routing_ready.metadata.get("selected_expert_ids") == ["correctness_business"]
+
+
 def test_review_runner_emits_routing_preparing_before_build_routing_plan(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

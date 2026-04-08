@@ -255,6 +255,64 @@ def test_knowledge_rule_screening_service_can_use_llm(storage_root: Path, monkey
     assert result["batch_summaries"][0]["input_rule_count"] == 2
 
 
+def test_knowledge_rule_screening_service_can_parse_llm_json_wrapped_in_text(storage_root: Path, monkeypatch) -> None:
+    ingestion = KnowledgeIngestionService(storage_root)
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="性能规则",
+            expert_id="performance_reliability",
+            doc_type="review_rule",
+            source_filename="perf-rules.md",
+            content=(
+                "## RULE: PERF-POOL-001 线程池扩容必须配套容量评估\n\n"
+                "### 一级场景\n数据库访问\n\n"
+                "### 二级场景\n连接池配置\n\n"
+                "### 三级场景\n连接池扩容缺少容量评估\n\n"
+                "### 描述\n检查连接池扩容是否同步评估下游容量，并关注 maximumPoolSize 与 datasource 容量。\n\n"
+                "### 问题代码示例\n```java\nconfig.setMaximumPoolSize(256);\n```\n\n"
+                "### 问题代码行\nconfig.setMaximumPoolSize(256);\n\n"
+                "### 误报代码\n```java\nconfig.setMaximumPoolSize(32);\n```\n\n"
+                "### 语言\njava\n\n"
+                "### 问题级别\nP1\n"
+            ),
+        )
+    )
+    service = KnowledgeRuleScreeningService(storage_root)
+
+    monkeypatch.setattr(
+        service._llm,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                "下面是筛选结果，请只取 JSON:\n"
+                '{"rules":[{"rule_id":"PERF-POOL-001","decision":"must_review","reason":"MR 直接修改了连接池容量参数","matched_terms":["hikari","maximumPoolSize"],"matched_signals":["semantic:pool"]}]}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    result = service.screen(
+        "performance_reliability",
+        {
+            "changed_files": ["src/main/java/com/acme/HikariConfig.java"],
+            "query_terms": ["hikari", "maximumPoolSize", "datasource"],
+            "focus_file": "src/main/java/com/acme/HikariConfig.java",
+        },
+        runtime_settings=RuntimeSettings(rule_screening_mode="llm", rule_screening_batch_size=8),
+        analysis_mode="standard",
+        review_id="rev_llm_screen_wrapped",
+    )
+
+    assert result["screening_mode"] == "llm"
+    assert result["screening_fallback_used"] is False
+    assert result["must_review_count"] == 1
+    assert result["matched_rules_for_llm"][0]["rule_id"] == "PERF-POOL-001"
+
+
 def test_knowledge_rule_screening_service_records_llm_batches(storage_root: Path, monkeypatch) -> None:
     ingestion = KnowledgeIngestionService(storage_root)
     ingestion.ingest(
@@ -415,6 +473,61 @@ def test_knowledge_rule_screening_service_falls_back_when_llm_result_invalid(sto
         runtime_settings=RuntimeSettings(rule_screening_mode="llm"),
         analysis_mode="standard",
         review_id="rev_llm_fallback",
+    )
+
+    assert result["screening_mode"] == "heuristic"
+    assert result["screening_fallback_used"] is True
+    assert result["matched_rules_for_llm"][0]["rule_id"] == "PERF-POOL-001"
+
+
+def test_knowledge_rule_screening_service_falls_back_when_llm_uses_transport_fallback(storage_root: Path, monkeypatch) -> None:
+    ingestion = KnowledgeIngestionService(storage_root)
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="性能规则",
+            expert_id="performance_reliability",
+            doc_type="review_rule",
+            source_filename="perf-rules.md",
+            content=(
+                "## RULE: PERF-POOL-001 线程池扩容必须配套容量评估\n\n"
+                "### 一级场景\n数据库访问\n\n"
+                "### 二级场景\n连接池配置\n\n"
+                "### 三级场景\n连接池扩容缺少容量评估\n\n"
+                "### 描述\n检查连接池扩容是否同步评估下游容量，并关注 maximumPoolSize 与 datasource 容量。\n\n"
+                "### 问题代码示例\n```java\nconfig.setMaximumPoolSize(256);\n```\n\n"
+                "### 问题代码行\nconfig.setMaximumPoolSize(256);\n\n"
+                "### 误报代码\n```java\nconfig.setMaximumPoolSize(32);\n```\n\n"
+                "### 语言\njava\n\n"
+                "### 问题级别\nP1\n"
+            ),
+        )
+    )
+    service = KnowledgeRuleScreeningService(storage_root)
+
+    monkeypatch.setattr(
+        service._llm,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text='{"rules":[]}',
+            mode="fallback",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            error="request_timeout",
+        ),
+    )
+
+    result = service.screen(
+        "performance_reliability",
+        {
+            "changed_files": ["src/main/java/com/acme/HikariConfig.java"],
+            "query_terms": ["hikari", "maximumPoolSize", "datasource"],
+            "focus_file": "src/main/java/com/acme/HikariConfig.java",
+        },
+        runtime_settings=RuntimeSettings(rule_screening_mode="llm"),
+        analysis_mode="standard",
+        review_id="rev_llm_transport_fallback",
     )
 
     assert result["screening_mode"] == "heuristic"

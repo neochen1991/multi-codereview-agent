@@ -345,12 +345,15 @@ class ReviewRunner:
             )
         )
         routing_started_at = time.perf_counter()
-        routing_plan = self.main_agent_service.build_routing_plan(
-            review.subject,
-            experts,
-            effective_runtime_settings,
-            analysis_mode=analysis_mode,
-        )
+        if selection_mode == "user_selected_direct":
+            routing_plan = self._build_manual_routing_plan(review.subject, experts)
+        else:
+            routing_plan = self.main_agent_service.build_routing_plan(
+                review.subject,
+                experts,
+                effective_runtime_settings,
+                analysis_mode=analysis_mode,
+            )
         MemoryProbe.log(
             "review_runner.after_routing_plan",
             review_id=review.review_id,
@@ -1420,6 +1423,27 @@ class ReviewRunner:
                 "error": "",
             },
         }
+
+    def _build_manual_routing_plan(
+        self,
+        subject: ReviewSubject,
+        experts: list[ExpertProfile],
+    ) -> dict[str, dict[str, object]]:
+        plan: dict[str, dict[str, object]] = {}
+        for expert in experts:
+            plan[expert.expert_id] = {
+                "expert_id": expert.expert_id,
+                "routeable": True,
+                "reason": "用户已手动选择专家，系统直接进入全量 hunk 审查。",
+                "file_path": self._pick_file_path(subject, expert.expert_id),
+                "line_start": 1,
+                "routing_llm": {
+                    "mode": "user_selected_direct",
+                    "provider": "",
+                    "model": "",
+                },
+            }
+        return plan
 
     def _build_routing_summary_message(self, routing_summary: dict[str, object]) -> str:
         """生成前端提示条和事件时间线都会复用的路由摘要文案。"""

@@ -224,8 +224,29 @@ class KnowledgeRuleScreeningService:
                     "batch_index": human_batch_index,
                 },
             )
+            llm_mode = str(llm_result.mode or "").strip().lower()
+            llm_error = str(llm_result.error or "").strip()
+            if llm_mode == "fallback" or llm_error:
+                logger.warning(
+                    "knowledge rule llm screening unavailable expert_id=%s review_id=%s batch_index=%s/%s mode=%s error=%s",
+                    str(expert_id).strip(),
+                    str(review_id).strip(),
+                    human_batch_index,
+                    total_batches,
+                    llm_mode,
+                    llm_error,
+                )
+                return None
             parsed = self._parse_llm_screening_result(llm_result.text)
             if parsed is None:
+                logger.warning(
+                    "knowledge rule llm screening parse failed expert_id=%s review_id=%s batch_index=%s/%s raw_preview=%s",
+                    str(expert_id).strip(),
+                    str(review_id).strip(),
+                    human_batch_index,
+                    total_batches,
+                    self._truncate_text(str(llm_result.text or ""), 800),
+                )
                 return None
             aggregated_rules.extend(parsed)
             batch_summaries.append(
@@ -507,21 +528,49 @@ class KnowledgeRuleScreeningService:
         return "\n".join(lines)
 
     def _parse_llm_screening_result(self, text: str) -> list[dict[str, object]] | None:
-        raw = str(text or "").strip()
+        raw = str(text or "").replace("\ufeff", "").strip()
         if not raw:
             return None
         fenced = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", raw, re.IGNORECASE)
-        candidate = fenced.group(1).strip() if fenced else raw
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        rules = payload.get("rules")
-        if not isinstance(rules, list):
-            return None
-        return [item for item in rules if isinstance(item, dict)]
+        candidates: list[str] = []
+        if fenced:
+            candidates.append(fenced.group(1).strip())
+        else:
+            candidates.append(raw)
+            extracted = self._extract_json_payload(raw)
+            if extracted and extracted not in candidates:
+                candidates.append(extracted)
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            rules = payload.get("rules")
+            if not isinstance(rules, list):
+                continue
+            return [item for item in rules if isinstance(item, dict)]
+        return None
+
+    def _extract_json_payload(self, text: str) -> str | None:
+        decoder = json.JSONDecoder()
+        for marker in ("{", "["):
+            start = text.find(marker)
+            if start < 0:
+                continue
+            try:
+                _, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            return text[start : start + end].strip()
+        return None
+
+    def _truncate_text(self, text: str, limit: int) -> str:
+        safe_limit = max(80, int(limit or 0))
+        if len(text) <= safe_limit:
+            return text
+        return text[:safe_limit].rstrip() + "...<truncated>"
 
     def _screen_rule(self, rule: KnowledgeReviewRule, signal_payload: dict[str, object]) -> dict[str, object]:
         if not self._is_rule_supported_by_java_mode(rule, signal_payload):
