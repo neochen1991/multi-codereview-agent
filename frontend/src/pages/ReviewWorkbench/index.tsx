@@ -1379,7 +1379,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             <div ref={resultFindingsRef}>
               <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
                 <FindingsPanel
-                  findings={visibleFindings}
+                  findings={findings}
                   issues={issues}
                   issueFilterDecisions={issueFilterDecisions}
                   selectedFindingId={selectedFindingId}

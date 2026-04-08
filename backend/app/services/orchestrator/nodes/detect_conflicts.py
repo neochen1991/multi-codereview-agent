@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from app.services.orchestrator.state import ReviewState
 
 
@@ -86,7 +88,8 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         file_path = str(finding.get("file_path", "")).strip() or "unknown"
         line_start = int(finding.get("line_start", 1) or 1)
         line_bucket = max(1, ((line_start - 1) // 25) + 1)
-        key = f"{file_path}::{line_bucket}"
+        semantic_key = _build_conflict_semantic_key(finding)
+        key = f"{file_path}::{line_bucket}::{semantic_key}"
         grouped.setdefault(key, []).append(finding)
     conflicts: list[dict[str, object]] = []
     for key, items in grouped.items():
@@ -143,6 +146,73 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     next_state["conflicts"] = conflicts
     next_state["issue_filter_decisions"] = issue_filter_decisions
     return next_state
+
+
+def _build_conflict_semantic_key(finding: dict[str, object]) -> str:
+    matched_rules = [
+        str(item).strip().lower()
+        for item in list(finding.get("matched_rules") or [])
+        if str(item).strip()
+    ]
+    violated_guidelines = [
+        str(item).strip().lower()
+        for item in list(finding.get("violated_guidelines") or [])
+        if str(item).strip()
+    ]
+    finding_type = str(finding.get("finding_type") or "risk_hypothesis").strip().lower()
+    severity = str(finding.get("severity") or "medium").strip().lower()
+    title = str(finding.get("title") or "").strip().lower()
+    summary = str(finding.get("summary") or "").strip().lower()
+    title_terms = _extract_conflict_terms(title)
+    if title_terms:
+        return f"title|{'_'.join(title_terms[:4])}"
+    if matched_rules:
+        return f"rule|{matched_rules[0]}"
+    if violated_guidelines:
+        return f"guideline|{violated_guidelines[0]}"
+    summary_terms = _extract_conflict_terms(summary)
+    if summary_terms:
+        return f"summary|{'_'.join(summary_terms[:4])}"
+    return f"{finding_type}|severity|{severity}"
+
+
+def _extract_conflict_terms(text: str) -> list[str]:
+    stop_words = {
+        "current",
+        "there",
+        "this",
+        "that",
+        "with",
+        "from",
+        "into",
+        "must",
+        "need",
+        "should",
+        "here",
+        "code",
+        "review",
+        "issue",
+        "risk",
+        "possible",
+        "maybe",
+        "java",
+        "当前",
+        "这里",
+        "代码",
+        "问题",
+        "需要",
+        "建议",
+        "可能",
+        "存在",
+    }
+    terms: list[str] = []
+    for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff_]+", text):
+        normalized = token.strip().lower()
+        if len(normalized) < 2 or normalized in stop_words:
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    return terms
 
 
 def _classify_issue_candidate(

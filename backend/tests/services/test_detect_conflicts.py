@@ -394,3 +394,103 @@ def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
     assert conflict["confidence_breakdown"]["base_weighted_confidence"] == 0.84
     assert conflict["confidence_breakdown"]["evidence_bonus"] == 0.01
     assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.1
+
+
+def test_detect_conflicts_splits_different_semantic_findings_in_same_line_bucket():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_semantic_sql",
+                "expert_id": "database_analysis",
+                "title": "SQL 查询语义被放宽为模糊匹配",
+                "summary": "equal 被改成 like，查询语义发生变化，可能扩大结果集。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": False,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["builder.equal -> builder.like"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询语义不能静默放宽"],
+            },
+            {
+                "finding_id": "fdg_semantic_name",
+                "expert_id": "maintainability_code_health",
+                "title": "临时变量命名不符合约定",
+                "summary": "chunksTmp 这种命名会降低可读性，且与常量语义不一致。",
+                "finding_type": "design_concern",
+                "severity": "medium",
+                "confidence": 0.9,
+                "verification_needed": True,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 66,
+                "evidence": ["命名与语义不一致"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["命名一致性"],
+                "violated_guidelines": ["变量命名需表达稳定语义"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 2
+    conflict_finding_ids = [tuple(conflict["finding_ids"]) for conflict in result["conflicts"]]
+    assert ("fdg_semantic_sql",) in conflict_finding_ids
+    assert ("fdg_semantic_name",) in conflict_finding_ids
+
+
+def test_detect_conflicts_keeps_same_semantic_findings_grouped_together():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_same_1",
+                "expert_id": "security_compliance",
+                "title": "权限绕过风险",
+                "summary": "资源级鉴权被绕过，存在未授权访问路径。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.92,
+                "verification_needed": False,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 21,
+                "evidence": ["资源级鉴权被绕开"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["高风险接口必须做资源级鉴权"],
+            },
+            {
+                "finding_id": "fdg_same_2",
+                "expert_id": "architecture_design",
+                "title": "权限绕过风险",
+                "summary": "入口层没有守住鉴权边界，导致未授权路径可达。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.81,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 22,
+                "evidence": ["入口层缺少统一鉴权守卫"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["安全校验不能依赖调用方自觉"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_same_1", "fdg_same_2"]
