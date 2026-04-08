@@ -95,6 +95,7 @@ class ReviewRunner:
 
     def bootstrap_demo_review(self) -> str:
         review_id = f"rev_{uuid4().hex[:8]}"
+        demo_file_path = "src/demo/example_service.py"
         task = ReviewTask(
             review_id=review_id,
             status="pending",
@@ -105,15 +106,15 @@ class ReviewRunner:
                 source_ref="feature/demo",
                 target_ref="main",
                 title="Demo review",
-                changed_files=["backend/app/main.py"],
+                changed_files=[demo_file_path],
                 unified_diff=(
-                    "diff --git a/backend/app/main.py b/backend/app/main.py\n"
-                    "--- a/backend/app/main.py\n"
-                    "+++ b/backend/app/main.py\n"
+                    f"diff --git a/{demo_file_path} b/{demo_file_path}\n"
+                    f"--- a/{demo_file_path}\n"
+                    f"+++ b/{demo_file_path}\n"
                     "@@ -1,2 +1,3 @@\n"
-                    " from fastapi import FastAPI\n"
-                    "+from fastapi.middleware.cors import CORSMiddleware\n"
-                    " app = FastAPI()\n"
+                    " def process(payload):\n"
+                    "+    trace_id = payload.get('trace_id')\n"
+                    "     return True\n"
                 ),
             ),
             selected_experts=settings.DEFAULT_EXPERT_IDS,
@@ -2731,39 +2732,34 @@ class ReviewRunner:
         line_start: int,
         expert_id: str,
     ) -> str:
-        lines = [
-            f"{line_start:>4} | def review_guard(payload):",
-            f"{line_start + 1:>4} |     if payload.get('enabled'):",
-            f"{line_start + 2:>4} |         return True",
-            f"{line_start + 3:>4} |     return False",
-        ]
-        if expert_id == "security_compliance":
+        language = self._infer_code_language(file_path)
+        if language == "java":
             lines = [
-                f"{line_start:>4} | def review_guard(payload, user):",
-                f"{line_start + 1:>4} |     if payload.get('enabled'):",
-                f"{line_start + 2:>4} |         return True",
-                f"{line_start + 3:>4} |     return False  # missing permission check",
+                f"{line_start:>4} | public void process(Request request) {{",
+                f"{line_start + 1:>4} |     if (request == null) {{ return; }}",
+                f"{line_start + 2:>4} |     repository.save(request.toEntity());",
+                f"{line_start + 3:>4} | }}",
             ]
-        if expert_id == "architecture_design":
+        elif language == "typescript" or language == "javascript":
             lines = [
-                f"{line_start:>4} | def review_guard(payload):",
-                f"{line_start + 1:>4} |     service = RuntimeService()",
-                f"{line_start + 2:>4} |     service.repo.save(payload)",
-                f"{line_start + 3:>4} |     return service.policy.allow(payload)",
+                f"{line_start:>4} | function process(input) {{",
+                f"{line_start + 1:>4} |   if (!input) return;",
+                f"{line_start + 2:>4} |   return service.save(input);",
+                f"{line_start + 3:>4} | }}",
             ]
-        if expert_id == "performance_reliability":
+        elif language == "sql":
             lines = [
-                f"{line_start:>4} | def load_reviews(db):",
-                f"{line_start + 1:>4} |     rows = db.query('select * from reviews')",
-                f"{line_start + 2:>4} |     return [hydrate(row) for row in rows]",
-                f"{line_start + 3:>4} |     # missing timeout / batching / rollback handling",
+                f"{line_start:>4} | BEGIN;",
+                f"{line_start + 1:>4} | UPDATE target_table",
+                f"{line_start + 2:>4} | SET updated_at = NOW()",
+                f"{line_start + 3:>4} | WHERE id = ?;",
             ]
-        if expert_id == "test_verification":
+        else:
             lines = [
-                f"{line_start:>4} | def review_guard(payload):",
-                f"{line_start + 1:>4} |     if payload.get('enabled'):",
-                f"{line_start + 2:>4} |         return True",
-                f"{line_start + 3:>4} |     return False  # no regression test covers this branch",
+                f"{line_start:>4} | # fallback excerpt for unavailable repository context",
+                f"{line_start + 1:>4} | # expert={expert_id}",
+                f"{line_start + 2:>4} | # please verify against real source in repository",
+                f"{line_start + 3:>4} | pass",
             ]
         return f"# {file_path}\n" + "\n".join(lines)
 
@@ -5182,6 +5178,7 @@ class ReviewRunner:
             return runtime_settings
         return runtime_settings.model_copy(
             update={
+                "default_analysis_mode": "light",
                 "default_max_debate_rounds": min(
                     int(getattr(runtime_settings, "default_max_debate_rounds", 1) or 1),
                     int(getattr(runtime_settings, "light_max_debate_rounds", 1) or 1),

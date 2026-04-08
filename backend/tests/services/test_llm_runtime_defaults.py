@@ -746,3 +746,186 @@ def test_llm_chat_retries_windows_connection_reset_os_error_and_succeeds(
     assert result.text == "ok after reset retry"
     assert "request_error_kind=connection_reset" in caplog.text
     assert "will_retry=True" in caplog.text
+
+
+def test_llm_chat_compresses_prompt_in_light_mode(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    captured_payload: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            captured_payload.update(json)
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_analysis_mode": "light",
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    long_system = "S" * 10000
+    long_user = "中" * 160000
+    result = service.complete_text(
+        system_prompt=long_system,
+        user_prompt=long_user,
+        resolution=service.resolve_main_agent(runtime),
+        runtime_settings=runtime,
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"analysis_mode": "light", "review_id": "rev_light_prompt_budget"},
+    )
+
+    assert result.mode == "live"
+    assert isinstance(captured_payload.get("messages"), list)
+    messages = captured_payload["messages"]  # type: ignore[index]
+    assert isinstance(messages, list) and len(messages) == 2
+    request_system = str((messages[0] or {}).get("content") or "")
+    request_user = str((messages[1] or {}).get("content") or "")
+    assert service._estimate_tokens(request_system) + service._estimate_tokens(request_user) <= 110000
+    assert "[light prompt compressed]" in request_system or "[light prompt compressed]" in request_user
+
+
+def test_llm_chat_standard_mode_does_not_apply_light_summary(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    captured_payload: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            captured_payload.update(json)
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_analysis_mode": "standard",
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    system_prompt = "《审视规范文档》开始\n" + ("规则A\n" * 40) + "《审视规范文档》结束"
+    user_prompt = "规范提要:\n" + ("必须校验输入\n" * 60) + "JSON 字段要求:\n{}"
+    result = service.complete_text(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        resolution=service.resolve_main_agent(runtime),
+        runtime_settings=runtime,
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"analysis_mode": "standard", "review_id": "rev_standard_no_light_summary"},
+    )
+
+    assert result.mode == "live"
+    messages = captured_payload.get("messages")
+    assert isinstance(messages, list) and len(messages) == 2
+    sent_system = str((messages[0] or {}).get("content") or "")
+    sent_user = str((messages[1] or {}).get("content") or "")
+    assert "[light summary: doc block compressed]" not in sent_system
+    assert "[light summary: doc block compressed]" not in sent_user
+
+
+def test_llm_chat_light_mode_summarizes_doc_block(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    captured_payload: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            captured_payload.update(json)
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_analysis_mode": "light",
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    system_prompt = "《审视规范文档》开始\n" + ("规则A 必须校验输入\n" * 20000) + "《审视规范文档》结束"
+    user_prompt = "规范提要:\n" + ("必须校验输入，禁止拼接SQL\n" * 8000) + "JSON 字段要求:\n{}"
+    result = service.complete_text(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        resolution=service.resolve_main_agent(runtime),
+        runtime_settings=runtime,
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"analysis_mode": "light", "review_id": "rev_light_doc_summary"},
+    )
+
+    assert result.mode == "live"
+    messages = captured_payload.get("messages")
+    assert isinstance(messages, list) and len(messages) == 2
+    sent_system = str((messages[0] or {}).get("content") or "")
+    sent_user = str((messages[1] or {}).get("content") or "")
+    assert "[light summary: doc block compressed]" in sent_system or "[light summary: doc block compressed]" in sent_user

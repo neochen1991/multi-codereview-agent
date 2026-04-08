@@ -14,10 +14,9 @@ def test_platform_adapter_normalizes_branch_subject():
     )
     normalized = adapter.normalize(subject)
     assert normalized.subject_type == "branch"
-    assert normalized.changed_files
-    assert normalized.unified_diff
-    assert f"diff --git a/{normalized.changed_files[0]}" in normalized.unified_diff
-    assert f"diff --git a/{normalized.changed_files[1]}" in normalized.unified_diff
+    assert normalized.changed_files == []
+    assert normalized.unified_diff == ""
+    assert normalized.metadata["remote_diff_available"] is False
 
 
 def test_platform_adapter_infers_refs_from_merge_request_url():

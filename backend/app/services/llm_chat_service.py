@@ -90,6 +90,13 @@ class LLMChatService:
                 allow_fallback=allow_fallback,
             )
 
+        system_prompt, user_prompt = self._apply_prompt_budget_if_light_mode(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            runtime_settings=runtime_settings,
+            log_context=log_context,
+        )
+
         request_body = {
             "model": resolution.model,
             "messages": [
@@ -386,6 +393,341 @@ class LLMChatService:
             write=write_timeout,
             pool=pool_timeout,
         )
+
+    def _apply_prompt_budget_if_light_mode(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        runtime_settings: RuntimeSettings | None,
+        log_context: dict[str, object] | None,
+    ) -> tuple[str, str]:
+        if not self._is_light_mode(runtime_settings, log_context):
+            return system_prompt, user_prompt
+
+        max_input_tokens = self._resolve_light_input_token_budget(runtime_settings)
+        if self._estimate_tokens(system_prompt) + self._estimate_tokens(user_prompt) <= max_input_tokens:
+            return system_prompt, user_prompt
+
+        # 智能裁剪：优先保留规则规范、问题信息、变更代码和关联上下文，再压缩次要区块。
+        target_system_tokens = max(4000, int(max_input_tokens * 0.22))
+        target_user_tokens = max(12000, max_input_tokens - target_system_tokens)
+        trimmed_system = self._smart_compress_system_prompt(system_prompt, target_system_tokens)
+        trimmed_user = self._smart_compress_user_prompt(user_prompt, target_user_tokens)
+
+        # 二次兜底：仍超预算时，再做比例截断。
+        total_tokens = self._estimate_tokens(trimmed_system) + self._estimate_tokens(trimmed_user)
+        if total_tokens > max_input_tokens:
+            overflow = total_tokens - max_input_tokens
+            user_cut_tokens = int(overflow * 0.8)
+            system_cut_tokens = max(0, overflow - user_cut_tokens)
+            trimmed_user = self._truncate_to_tokens(trimmed_user, max(3000, self._estimate_tokens(trimmed_user) - user_cut_tokens))
+            trimmed_system = self._truncate_to_tokens(trimmed_system, max(2000, self._estimate_tokens(trimmed_system) - system_cut_tokens))
+
+        if len(trimmed_system) != len(system_prompt) or len(trimmed_user) != len(user_prompt):
+            logger.info(
+                "llm light prompt compressed max_input_tokens=%s system_tokens=%s->%s user_tokens=%s->%s",
+                max_input_tokens,
+                self._estimate_tokens(system_prompt),
+                self._estimate_tokens(trimmed_system),
+                self._estimate_tokens(user_prompt),
+                self._estimate_tokens(trimmed_user),
+            )
+            logger.info(
+                "llm light prompt compressed max_chars_hint=%s system_len=%s->%s user_len=%s->%s",
+                self._resolve_light_prompt_char_budget(runtime_settings),
+                len(system_prompt),
+                len(trimmed_system),
+                len(user_prompt),
+                len(trimmed_user),
+            )
+        return trimmed_system, trimmed_user
+
+    def _is_light_mode(
+        self,
+        runtime_settings: RuntimeSettings | None,
+        log_context: dict[str, object] | None,
+    ) -> bool:
+        mode_from_context = str((log_context or {}).get("analysis_mode") or "").strip().lower()
+        if mode_from_context in {"light", "standard"}:
+            return mode_from_context == "light"
+        return str(getattr(runtime_settings, "default_analysis_mode", "") or "").strip().lower() == "light"
+
+    def _resolve_light_prompt_char_budget(self, runtime_settings: RuntimeSettings | None) -> int:
+        configured = int(getattr(runtime_settings, "light_llm_max_prompt_chars", 0) or 0) if runtime_settings else 0
+        # 默认按 95k 字符控制，避免触发 131072 token 输入上限（尤其中文/混合文本场景）。
+        budget = configured if configured > 0 else 95000
+        return max(12000, budget)
+
+    def _resolve_light_input_token_budget(self, runtime_settings: RuntimeSettings | None) -> int:
+        configured = int(getattr(runtime_settings, "light_llm_max_input_tokens", 0) or 0) if runtime_settings else 0
+        # 保守留出输出和协议冗余，默认输入上限 110k token。
+        budget = configured if configured > 0 else 110000
+        return max(16000, min(120000, budget))
+
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        ascii_count = sum(1 for ch in text if ord(ch) < 128)
+        non_ascii_count = len(text) - ascii_count
+        # 经验估算：英文约 4 chars/token，中文约 1 char/token。
+        return int(non_ascii_count + ascii_count / 4) + 1
+
+    def _truncate_to_tokens(self, text: str, token_budget: int) -> str:
+        if token_budget <= 0:
+            return ""
+        if self._estimate_tokens(text) <= token_budget:
+            return text
+        # 用字符预算近似 token 预算，最后再回落校正。
+        char_budget = max(200, int(token_budget * 3.2))
+        trimmed = self._truncate_middle(text, char_budget)
+        while self._estimate_tokens(trimmed) > token_budget and len(trimmed) > 200:
+            char_budget = max(200, int(char_budget * 0.9))
+            trimmed = self._truncate_middle(text, char_budget)
+        return trimmed
+
+    def _smart_compress_system_prompt(self, prompt: str, target_tokens: int) -> str:
+        if self._estimate_tokens(prompt) <= target_tokens:
+            return prompt
+        # system prompt 重点保留规范和执行纪律。
+        important_markers = [
+            "《审视规范文档》开始",
+            "《审视规范文档》结束",
+            "《已激活 Skills》开始",
+            "《已激活 Skills》结束",
+            "《绑定参考文档》开始",
+            "《绑定参考文档》结束",
+            "《规则筛选结果》开始",
+            "《规则筛选结果》结束",
+            "执行纪律：",
+        ]
+        sections = self._split_by_markers(prompt, important_markers)
+        if not sections:
+            return self._truncate_to_tokens(prompt, target_tokens)
+        weights: dict[str, float] = {
+            "《审视规范文档》开始": 1.4,
+            "《规则筛选结果》开始": 1.2,
+            "执行纪律：": 1.3,
+            "《绑定参考文档》开始": 1.0,
+            "《已激活 Skills》开始": 0.8,
+        }
+        summarized = self._summarize_sections_for_light_mode(
+            sections,
+            headers={
+                "《审视规范文档》开始",
+                "《绑定参考文档》开始",
+                "《已激活 Skills》开始",
+            },
+        )
+        return self._compress_sections_by_weight(summarized, target_tokens, weights)
+
+    def _smart_compress_user_prompt(self, prompt: str, target_tokens: int) -> str:
+        if self._estimate_tokens(prompt) <= target_tokens:
+            return prompt
+        section_headers = [
+            "能力约束:",
+            "规范提要:",
+            "已激活技能:",
+            "已绑定参考文档:",
+            "规则遍历结果:",
+            "输入完整性校验:",
+            "语言通用规范提示:",
+            "本次审核绑定的详细设计文档:",
+            "目标 hunk:",
+            "目标文件完整 diff:",
+            "其他变更文件摘要:",
+            "运行时工具调用结果:",
+            "代码仓上下文:",
+            "关键源码上下文:",
+            "当前代码片段:",
+            "必查项:",
+            "禁止推断:",
+            "JSON 字段要求:",
+        ]
+        sections = self._split_by_headers(prompt, section_headers)
+        if not sections:
+            return self._truncate_to_tokens(prompt, target_tokens)
+        # 高权重 = 尽量保留；低权重 = 优先压缩。
+        weights: dict[str, float] = {
+            "规范提要:": 1.2,
+            "规则遍历结果:": 1.3,
+            "输入完整性校验:": 1.2,
+            "语言通用规范提示:": 1.1,
+            "目标 hunk:": 1.3,
+            "目标文件完整 diff:": 1.5,
+            "关键源码上下文:": 1.5,
+            "当前代码片段:": 1.4,
+            "禁止推断:": 1.2,
+            "JSON 字段要求:": 1.4,
+            "已激活技能:": 0.6,
+            "本次审核绑定的详细设计文档:": 0.8,
+            "其他变更文件摘要:": 0.9,
+            "运行时工具调用结果:": 0.8,
+            "代码仓上下文:": 1.0,
+            "能力约束:": 0.9,
+            "已绑定参考文档:": 1.0,
+            "必查项:": 1.0,
+        }
+        summarized = self._summarize_sections_for_light_mode(
+            sections,
+            headers={
+                "规范提要:",
+                "已绑定参考文档:",
+                "本次审核绑定的详细设计文档:",
+                "已激活技能:",
+            },
+        )
+        return self._compress_sections_by_weight(summarized, target_tokens, weights)
+
+    def _summarize_sections_for_light_mode(
+        self,
+        sections: list[tuple[str, str]],
+        *,
+        headers: set[str],
+    ) -> list[tuple[str, str]]:
+        summarized: list[tuple[str, str]] = []
+        for header, body in sections:
+            if header not in headers:
+                summarized.append((header, body))
+                continue
+            summarized.append((header, self._summarize_doc_block_for_light_mode(body)))
+        return summarized
+
+    def _summarize_doc_block_for_light_mode(self, text: str) -> str:
+        if not text.strip():
+            return text
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if len(lines) <= 18 and self._estimate_tokens(text) <= 1600:
+            return text
+
+        kept: list[str] = []
+        # 保留最前面的说明，避免丢失上下文。
+        kept.extend(lines[:6])
+
+        # 保留包含规则/标题/关键词的信息行。
+        focus_tokens = (
+            "rule", "规则", "title", "标题", "must", "should", "禁止", "必须", "风险", "安全", "性能", "事务",
+            "aggregate", "domain", "sql", "缓存", "测试", "边界", "一致性"
+        )
+        for line in lines[6:]:
+            lower = line.lower()
+            if any(token in lower for token in focus_tokens):
+                kept.append(line)
+            if len(kept) >= 24:
+                break
+
+        # 保留最后几行，通常是执行纪律/输出要求。
+        tail_candidates = lines[-4:]
+        for line in tail_candidates:
+            if line not in kept:
+                kept.append(line)
+
+        summary = "\n".join(kept[:30]).strip()
+        if not summary:
+            summary = "\n".join(lines[:12]).strip()
+        return summary + "\n...[light summary: doc block compressed]...\n"
+
+    def _split_by_headers(self, text: str, headers: list[str]) -> list[tuple[str, str]]:
+        lines = text.splitlines(keepends=True)
+        sections: list[tuple[str, str]] = []
+        current_header = "preamble"
+        current_lines: list[str] = []
+        header_set = set(headers)
+        for line in lines:
+            stripped = line.strip()
+            if stripped in header_set:
+                if current_lines:
+                    sections.append((current_header, "".join(current_lines)))
+                current_header = stripped
+                current_lines = []
+                continue
+            current_lines.append(line)
+        if current_lines:
+            sections.append((current_header, "".join(current_lines)))
+        return sections
+
+    def _split_by_markers(self, text: str, markers: list[str]) -> list[tuple[str, str]]:
+        positions: list[tuple[int, str]] = []
+        for marker in markers:
+            idx = text.find(marker)
+            if idx >= 0:
+                positions.append((idx, marker))
+        if not positions:
+            return []
+        positions.sort(key=lambda item: item[0])
+        sections: list[tuple[str, str]] = []
+        start = 0
+        if positions[0][0] > 0:
+            sections.append(("preamble", text[: positions[0][0]]))
+            start = positions[0][0]
+        for index, (pos, marker) in enumerate(positions):
+            next_pos = positions[index + 1][0] if index + 1 < len(positions) else len(text)
+            block_start = pos + len(marker)
+            body = text[block_start:next_pos]
+            sections.append((marker, body))
+        return sections
+
+    def _compress_sections_by_weight(
+        self,
+        sections: list[tuple[str, str]],
+        target_tokens: int,
+        weights: dict[str, float],
+    ) -> str:
+        base_min_tokens = 320
+        token_needs = [max(base_min_tokens, self._estimate_tokens(body)) for _, body in sections]
+        total_need = sum(token_needs)
+        if total_need <= target_tokens:
+            return self._rebuild_sections(sections)
+
+        weighted_total = sum(weights.get(header, 1.0) for header, _ in sections)
+        allocated: list[int] = []
+        for idx, (header, _) in enumerate(sections):
+            ratio = weights.get(header, 1.0) / weighted_total if weighted_total > 0 else 1.0 / max(1, len(sections))
+            budget = max(base_min_tokens, int(target_tokens * ratio))
+            allocated.append(min(token_needs[idx], budget))
+
+        shrink_order = sorted(
+            range(len(sections)),
+            key=lambda i: weights.get(sections[i][0], 1.0),
+        )
+        while sum(allocated) > target_tokens and shrink_order:
+            changed = False
+            for idx in shrink_order:
+                if sum(allocated) <= target_tokens:
+                    break
+                if allocated[idx] <= 180:
+                    continue
+                allocated[idx] = max(180, allocated[idx] - 120)
+                changed = True
+            if not changed:
+                break
+
+        compressed_sections: list[tuple[str, str]] = []
+        for (header, body), budget in zip(sections, allocated):
+            compressed_sections.append((header, self._truncate_to_tokens(body, budget)))
+        return self._rebuild_sections(compressed_sections)
+
+    def _rebuild_sections(self, sections: list[tuple[str, str]]) -> str:
+        chunks: list[str] = []
+        for header, body in sections:
+            if header != "preamble":
+                chunks.append(f"{header}\n")
+            chunks.append(body)
+        return "".join(chunks)
+
+    def _truncate_middle(self, text: str, max_chars: int) -> str:
+        if max_chars <= 0:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 80:
+            return text[:max_chars]
+        head_len = int(max_chars * 0.65)
+        tail_len = max_chars - head_len - 32
+        if tail_len < 0:
+            tail_len = 0
+        marker = "\n\n...[light prompt compressed]...\n\n"
+        return text[:head_len].rstrip() + marker + (text[-tail_len:].lstrip() if tail_len > 0 else "")
 
     def _classify_timeout_exception(self, exc: httpx.TimeoutException) -> str:
         """把 httpx 超时异常归类成更易排查的日志标签。"""
