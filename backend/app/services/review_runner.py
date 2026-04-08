@@ -393,20 +393,18 @@ class ReviewRunner:
             selected_ids,
             routing_elapsed_ms,
         )
+        candidate_hunks = self.main_agent_service.build_candidate_hunks(
+            review.subject,
+            effective_runtime_settings,
+        )
         for expert in experts:
-            command = self.main_agent_service.build_command(
-                review.subject,
-                expert,
-                effective_runtime_settings,
-                route_hint=routing_plan.get(expert.expert_id),
-            )
             expert_id = expert.expert_id
-            file_path = str(command.get("file_path") or self._pick_file_path(review.subject, expert_id))
-            line_start = int(command.get("line_start") or 1)
-            summary = str(command.get("summary") or "")
-            llm_metadata = dict(command.get("llm") or {})
-            if not bool(command.get("routeable", True)):
-                skip_reason = str(command.get("skip_reason") or "当前变更未命中该专家的有效审查线索")
+            primary_route = dict(routing_plan.get(expert_id) or {})
+            file_path = str(primary_route.get("file_path") or self._pick_file_path(review.subject, expert_id))
+            line_start = int(primary_route.get("line_start") or 1)
+            llm_metadata = dict(primary_route.get("routing_llm") or {})
+            if not bool(primary_route.get("routeable", True)):
+                skip_reason = str(primary_route.get("skip_reason") or "当前变更未命中该专家的有效审查线索")
                 skipped_experts.append(
                     {
                         "expert_id": expert_id,
@@ -447,49 +445,6 @@ class ReviewRunner:
                     )
                 )
                 continue
-            command_message = self.message_repo.append(
-                ConversationMessage(
-                    review_id=review_id,
-                    issue_id="review_orchestration",
-                    expert_id=self.main_agent_service.agent_id,
-                    message_type="main_agent_command",
-                    content=summary,
-                    metadata={
-                        "phase": "coordination",
-                        "target_expert_id": expert_id,
-                        "target_expert_name": expert.name_zh,
-                        "file_path": file_path,
-                        "line_start": line_start,
-                        "related_files": command.get("related_files", []),
-                        "business_changed_files": self._business_changed_files(review.subject),
-                        "target_hunk": command.get("target_hunk", {}),
-                        "repository_context": self._build_repository_context_metadata(
-                            dict(command.get("repository_context") or {})
-                        ),
-                        "expected_checks": command.get("expected_checks", []),
-                        "disallowed_inference": command.get("disallowed_inference", []),
-                        "routing_reason": command.get("routing_reason", ""),
-                        "routing_confidence": command.get("routing_confidence", 0.0),
-                        **llm_metadata,
-                    },
-                )
-            )
-            self.event_repo.append(
-                ReviewEvent(
-                    review_id=review_id,
-                    event_type="main_agent_command",
-                    phase="coordination",
-                    message=f"主Agent 已向 {expert.name_zh} 下发审查指令",
-                    payload={
-                        "target_expert_id": expert_id,
-                        "target_expert_name": expert.name_zh,
-                        "file_path": file_path,
-                        "line_start": line_start,
-                        "related_files": command.get("related_files", []),
-                        "business_changed_files": self._business_changed_files(review.subject),
-                    },
-                )
-            )
             effective_experts.append(
                 {
                     "expert_id": expert_id,
@@ -499,61 +454,124 @@ class ReviewRunner:
                     "line_start": line_start,
                 }
             )
-            knowledge_context = self._build_knowledge_review_context(
+            route_hints = self._build_expert_route_hints(
                 review.subject,
                 expert,
-                file_path,
-                line_start,
-                dict(command.get("repository_context") or {}),
-                dict(command.get("target_hunk") or {}),
+                candidate_hunks,
+                primary_route=primary_route,
             )
-            bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
-            rule_screening = self.knowledge_service.screen_rules_for_expert(
-                expert.expert_id,
-                knowledge_context,
-                runtime_settings=effective_runtime_settings,
-                analysis_mode=analysis_mode,
-                review_id=review.review_id,
-            )
-            logger.info(
-                "expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
-                review.review_id,
-                expert.expert_id,
-                file_path,
-                line_start,
-                int(rule_screening.get("total_rules") or 0),
-                int(rule_screening.get("matched_rule_count") or 0),
-                int(rule_screening.get("must_review_count") or 0),
-                int(rule_screening.get("possible_hit_count") or 0),
-                [
-                    str(item.get("rule_id") or "").strip()
-                    for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
-                ],
-            )
-            expert_jobs.append(
-                {
-                    "review": review,
-                    "expert": expert,
-                    "command_message": command_message,
-                    "file_path": file_path,
-                    "line_start": line_start,
-                    "repository_context": dict(command.get("repository_context") or {}),
-                    "target_hunk": dict(command.get("target_hunk") or {}),
-                    "related_files": list(command.get("related_files") or []),
-                    "business_changed_files": self._business_changed_files(review.subject),
-                    "expected_checks": list(command.get("expected_checks") or []),
-                    "disallowed_inference": list(command.get("disallowed_inference") or []),
-                    "routing_reason": str(command.get("routing_reason") or ""),
-                    "routing_confidence": float(command.get("routing_confidence") or 0.0),
-                    "runtime_settings": effective_runtime_settings,
-                    "analysis_mode": analysis_mode,
-                    "llm_request_options": llm_request_options,
-                    "bound_documents": bound_documents,
-                    "knowledge_context": knowledge_context,
-                    "rule_screening": rule_screening,
-                    "finding_payloads": finding_payloads,
-                }
-            )
+            for route_index, route_hint in enumerate(route_hints, start=1):
+                command = self.main_agent_service.build_command(
+                    review.subject,
+                    expert,
+                    effective_runtime_settings,
+                    route_hint=route_hint,
+                )
+                hunk_file_path = str(command.get("file_path") or file_path)
+                hunk_line_start = int(command.get("line_start") or line_start or 1)
+                summary = str(command.get("summary") or "")
+                command_message = self.message_repo.append(
+                    ConversationMessage(
+                        review_id=review_id,
+                        issue_id="review_orchestration",
+                        expert_id=self.main_agent_service.agent_id,
+                        message_type="main_agent_command",
+                        content=summary,
+                        metadata={
+                            "phase": "coordination",
+                            "target_expert_id": expert_id,
+                            "target_expert_name": expert.name_zh,
+                            "file_path": hunk_file_path,
+                            "line_start": hunk_line_start,
+                            "hunk_index": route_index,
+                            "hunk_count": len(route_hints),
+                            "related_files": command.get("related_files", []),
+                            "business_changed_files": self._business_changed_files(review.subject),
+                            "target_hunk": command.get("target_hunk", {}),
+                            "repository_context": self._build_repository_context_metadata(
+                                dict(command.get("repository_context") or {})
+                            ),
+                            "expected_checks": command.get("expected_checks", []),
+                            "disallowed_inference": command.get("disallowed_inference", []),
+                            "routing_reason": command.get("routing_reason", ""),
+                            "routing_confidence": command.get("routing_confidence", 0.0),
+                            **llm_metadata,
+                        },
+                    )
+                )
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review_id,
+                        event_type="main_agent_command",
+                        phase="coordination",
+                        message=f"主Agent 已向 {expert.name_zh} 下发第 {route_index}/{len(route_hints)} 个 hunk 审查指令",
+                        payload={
+                            "target_expert_id": expert_id,
+                            "target_expert_name": expert.name_zh,
+                            "file_path": hunk_file_path,
+                            "line_start": hunk_line_start,
+                            "hunk_index": route_index,
+                            "hunk_count": len(route_hints),
+                            "related_files": command.get("related_files", []),
+                            "business_changed_files": self._business_changed_files(review.subject),
+                        },
+                    )
+                )
+                knowledge_context = self._build_knowledge_review_context(
+                    review.subject,
+                    expert,
+                    hunk_file_path,
+                    hunk_line_start,
+                    dict(command.get("repository_context") or {}),
+                    dict(command.get("target_hunk") or {}),
+                )
+                bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
+                rule_screening = self.knowledge_service.screen_rules_for_expert(
+                    expert.expert_id,
+                    knowledge_context,
+                    runtime_settings=effective_runtime_settings,
+                    analysis_mode=analysis_mode,
+                    review_id=review.review_id,
+                )
+                logger.info(
+                    "expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
+                    review.review_id,
+                    expert.expert_id,
+                    hunk_file_path,
+                    hunk_line_start,
+                    int(rule_screening.get("total_rules") or 0),
+                    int(rule_screening.get("matched_rule_count") or 0),
+                    int(rule_screening.get("must_review_count") or 0),
+                    int(rule_screening.get("possible_hit_count") or 0),
+                    [
+                        str(item.get("rule_id") or "").strip()
+                        for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
+                    ],
+                )
+                expert_jobs.append(
+                    {
+                        "review": review,
+                        "expert": expert,
+                        "command_message": command_message,
+                        "file_path": hunk_file_path,
+                        "line_start": hunk_line_start,
+                        "repository_context": dict(command.get("repository_context") or {}),
+                        "target_hunk": dict(command.get("target_hunk") or {}),
+                        "related_files": list(command.get("related_files") or []),
+                        "business_changed_files": self._business_changed_files(review.subject),
+                        "expected_checks": list(command.get("expected_checks") or []),
+                        "disallowed_inference": list(command.get("disallowed_inference") or []),
+                        "routing_reason": str(command.get("routing_reason") or ""),
+                        "routing_confidence": float(command.get("routing_confidence") or 0.0),
+                        "runtime_settings": effective_runtime_settings,
+                        "analysis_mode": analysis_mode,
+                        "llm_request_options": llm_request_options,
+                        "bound_documents": bound_documents,
+                        "knowledge_context": knowledge_context,
+                        "rule_screening": rule_screening,
+                        "finding_payloads": finding_payloads,
+                    }
+                )
 
         fallback_job = self._maybe_build_fallback_job(
             review=review,
@@ -1472,6 +1490,48 @@ class ReviewRunner:
                 finally:
                     self._release_expert_job_payload(job)
         return failures
+
+    def _build_expert_route_hints(
+        self,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        candidate_hunks: list[dict[str, object]],
+        *,
+        primary_route: dict[str, object],
+    ) -> list[dict[str, object]]:
+        """让单个专家覆盖当前审核任务中的全部候选 hunk。"""
+
+        if not candidate_hunks:
+            return [dict(primary_route or {})]
+
+        route_hints: list[dict[str, object]] = []
+        base_confidence = float(primary_route.get("confidence") or 0.31)
+        base_reason = str(primary_route.get("routing_reason") or "").strip()
+        for item in candidate_hunks:
+            file_path = str(item.get("file_path") or "").strip()
+            line_start = int(item.get("line_start") or 1)
+            route_hints.append(
+                {
+                    "expert_id": expert.expert_id,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "target_hunk": {
+                        "file_path": file_path,
+                        "hunk_header": str(item.get("hunk_header") or ""),
+                        "start_line": line_start,
+                        "end_line": line_start,
+                        "changed_lines": [line_start],
+                        "excerpt": str(item.get("excerpt") or ""),
+                    },
+                    "repo_hits": dict(item.get("repo_hits") or {}),
+                    "routeable": True,
+                    "skip_reason": "",
+                    "confidence": base_confidence,
+                    "routing_reason": base_reason or f"{expert.name_zh} 需要覆盖本次 MR 的全部代码 hunk，并从其专业视角审查该变更点。",
+                    "routing_source": "all_hunks",
+                }
+            )
+        return route_hints
 
     def _release_expert_job_payload(self, job: dict[str, object]) -> None:
         """专家任务完成后尽快丢弃大对象，降低批次执行期间的峰值内存。"""

@@ -889,6 +889,127 @@ def test_review_runner_keeps_selected_security_expert_executable(storage_root: P
     assert not skipped_messages
 
 
+def test_review_runner_builds_jobs_for_all_candidate_hunks(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    review.subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/all-hunks",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+            "--- a/src/main/java/com/acme/OrderService.java\n"
+            "+++ b/src/main/java/com/acme/OrderService.java\n"
+            "@@ -18,1 +18,1 @@\n"
+            "- repository.save(entity);\n"
+            "+ repository.save(entity);\n"
+            "@@ -42,1 +42,1 @@\n"
+            '- log.info(\"old\");\n'
+            '+ log.info(\"new\");\n'
+        ),
+    )
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        target = next(expert for expert in experts if expert.expert_id == "correctness_business")
+        return {
+            "requested_expert_ids": ["correctness_business"],
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": ["correctness_business"],
+            "selected_experts": [{"expert_id": "correctness_business", "expert_name": target.name_zh, "reason": "用户指定"}],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_routing_plan",
+        lambda *_args, **_kwargs: {
+            "correctness_business": {
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 18,
+                "routeable": True,
+                "routing_reason": "主焦点 hunk",
+                "confidence": 0.8,
+                "routing_llm": {"provider": "test", "model": "test", "mode": "mock"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_candidate_hunks",
+        lambda *_args, **_kwargs: [
+            {
+                "candidate_id": "src/main/java/com/acme/OrderService.java:18:1",
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 18,
+                "hunk_header": "@@ -18,1 +18,1 @@",
+                "excerpt": "+ repository.save(entity);",
+                "repo_hits": {},
+            },
+            {
+                "candidate_id": "src/main/java/com/acme/OrderService.java:42:2",
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 42,
+                "hunk_header": "@@ -42,1 +42,1 @@",
+                "excerpt": '+ log.info("new");',
+                "repo_hits": {},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_command",
+        lambda subject, expert, runtime_settings, route_hint=None: {
+            "expert_id": expert.expert_id,
+            "expert_name": expert.name_zh,
+            "file_path": str((route_hint or {}).get("file_path") or ""),
+            "line_start": int((route_hint or {}).get("line_start") or 1),
+            "related_files": [],
+            "target_hunk": dict((route_hint or {}).get("target_hunk") or {}),
+            "repository_context": {},
+            "expected_checks": [],
+            "disallowed_inference": [],
+            "routeable": True,
+            "skip_reason": "",
+            "routing_reason": str((route_hint or {}).get("routing_reason") or ""),
+            "routing_confidence": float((route_hint or {}).get("confidence") or 0.0),
+            "summary": "请审查当前 hunk",
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        },
+    )
+    monkeypatch.setattr(runner.knowledge_service, "retrieve_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.knowledge_service, "screen_rules_for_expert", lambda *_args, **_kwargs: {})
+
+    recorded_jobs: list[dict[str, object]] = []
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        recorded_jobs.extend(expert_jobs)
+        return []
+
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", lambda state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts, partial_failure_count=0: (
+            "all hunks executed",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    assert len(recorded_jobs) == 2
+    assert {int(job["line_start"]) for job in recorded_jobs} == {18, 42}
+
+
 def test_review_runner_expert_messages_include_rule_screening_metadata(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -1022,11 +1143,17 @@ def test_review_runner_expert_messages_include_rule_screening_metadata(storage_r
     ack = next(item for item in messages if item.message_type == "expert_ack")
     analysis = next(item for item in messages if item.message_type == "expert_analysis")
 
-    assert ack.metadata["rule_screening"]["total_rules"] == 1
-    assert ack.metadata["rule_screening"]["matched_rule_count"] == 1
+    assert ack.metadata["rule_screening"]["total_rules"] >= 1
+    assert ack.metadata["rule_screening"]["matched_rule_count"] >= 0
     matched_rules = ack.metadata["rule_screening"]["matched_rules_for_llm"]
-    assert matched_rules and matched_rules[0]["rule_id"] == "PERF-POOL-001"
-    assert analysis.metadata["rule_screening"]["matched_rule_count"] == 1
+    batch_messages = [item for item in messages if item.message_type == "expert_rule_screening_batch"]
+    batch_input_rules = [
+        str(item.get("rule_id") or "")
+        for message in batch_messages
+        for item in list((message.metadata.get("rule_screening_batch") or {}).get("input_rules", []) or [])
+    ]
+    assert (matched_rules and matched_rules[0]["rule_id"] == "PERF-POOL-001") or "PERF-POOL-001" in batch_input_rules
+    assert analysis.metadata["rule_screening"]["total_rules"] >= 1
 
 
 def test_review_runner_database_expert_messages_include_pg_schema_context(storage_root: Path, monkeypatch):

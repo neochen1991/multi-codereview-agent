@@ -191,6 +191,16 @@ class MainAgentService:
             route["routing_llm"] = self._llm_metadata(result)
         return merged
 
+    def build_candidate_hunks(
+        self,
+        subject: ReviewSubject,
+        runtime_settings: RuntimeSettings,
+    ) -> list[dict[str, object]]:
+        """返回当前审核任务中需要覆盖的全部候选代码 hunk。"""
+
+        repository_service = self._build_repository_service(runtime_settings, subject)
+        return self._build_candidate_hunks(subject, repository_service)
+
     def clear_runtime_caches(self) -> None:
         """清理主 Agent 本地缓存，避免常驻进程保留历史上下文。"""
 
