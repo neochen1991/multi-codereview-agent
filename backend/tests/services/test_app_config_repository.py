@@ -27,6 +27,8 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
                 "codehub_access_token": "codehub_token",
                 "light_llm_timeout_seconds": 180,
                 "light_max_parallel_experts": 1,
+                "light_llm_max_prompt_chars": 88000,
+                "light_llm_max_input_tokens": 98000,
                 "code_repo_clone_url": "codehub-g.huawei.com/PIP/FND/projectname/merge_requests",
                 "auto_review_enabled": True,
                 "auto_review_poll_interval_seconds": 300,
@@ -48,6 +50,8 @@ def test_app_config_repository_reads_and_writes_root_config(tmp_path: Path):
     assert reloaded.codehub_access_token == "codehub_token"
     assert reloaded.light_llm_timeout_seconds == 180
     assert reloaded.light_max_parallel_experts == 1
+    assert reloaded.light_llm_max_prompt_chars == 88000
+    assert reloaded.light_llm_max_input_tokens == 98000
     assert reloaded.code_repo_clone_url == "codehub-g.huawei.com/PIP/FND/projectname/merge_requests"
     assert reloaded.auto_review_enabled is True
     assert reloaded.auto_review_repo_url == "codehub-g.huawei.com/PIP/FND/projectname/merge_requests"

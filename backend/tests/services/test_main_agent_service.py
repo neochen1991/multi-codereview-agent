@@ -1750,3 +1750,64 @@ def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
     selected = {item["expert_id"]: item for item in merged["selected_experts"]}
     assert selected["architecture_design"]["source"] == "heuristic_selected"
     assert selected["security_compliance"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_maintainability_for_magic_value_and_naming_signals():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务规则"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="可维护性与代码健康专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["复杂度", "命名"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/quality",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -40,3 +40,7 @@\n"
+            '+        String orderStatusTmp = "MANUAL_RETRY";\n'
+            "+        if (retryCount > 37) {\n"
+            "+            return processWithPriority(orderStatusTmp, 86400);\n"
+            "+        }\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "correctness_business", "reason": "业务流程变化", "confidence": 0.88},
+            ],
+            "skipped_experts": [
+                {"expert_id": "maintainability_code_health", "reason": "LLM 未关注语言层质量问题"},
+            ],
+        },
+        fallback_ids=["correctness_business"],
+    )
+
+    assert "maintainability_code_health" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["maintainability_code_health"]["source"] == "heuristic_selected"

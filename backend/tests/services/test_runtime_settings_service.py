@@ -92,6 +92,8 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
             "default_analysis_mode": "light",
             "standard_llm_timeout_seconds": 90,
             "runtime_tool_allowlist": ["repo_context_search"],
+            "light_llm_max_prompt_chars": 88000,
+            "light_llm_max_input_tokens": 98000,
         }
     )
 
@@ -103,6 +105,8 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert runtime.default_analysis_mode == "light"
     assert runtime.standard_llm_timeout_seconds == 90
     assert runtime.runtime_tool_allowlist == ["repo_context_search"]
+    assert runtime.light_llm_max_prompt_chars == 88000
+    assert runtime.light_llm_max_input_tokens == 98000
 
     config_repository = FileAppConfigRepository(config_path=storage_root.parent / "config.json", storage_root=storage_root)
     config_runtime = config_repository.get_runtime_settings()
@@ -115,12 +119,16 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert config_runtime.default_analysis_mode == "standard"
     assert config_runtime.standard_llm_timeout_seconds == 120
     assert config_runtime.light_llm_timeout_seconds == 210
+    assert config_runtime.light_llm_max_prompt_chars == 95000
+    assert config_runtime.light_llm_max_input_tokens == 110000
     assert config_runtime.rule_screening_llm_timeout_seconds == 150
 
     sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
     assert sqlite_payload["default_analysis_mode"] == "light"
     assert sqlite_payload["standard_llm_timeout_seconds"] == 90
     assert sqlite_payload["runtime_tool_allowlist"] == ["repo_context_search"]
+    assert sqlite_payload["light_llm_max_prompt_chars"] == 88000
+    assert sqlite_payload["light_llm_max_input_tokens"] == 98000
     assert "code_repo_clone_url" not in sqlite_payload
     assert "auto_review_enabled" not in sqlite_payload
     assert "database_sources" not in sqlite_payload

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from uuid import uuid4
@@ -406,14 +407,26 @@ class LLMChatService:
             return system_prompt, user_prompt
 
         max_input_tokens = self._resolve_light_input_token_budget(runtime_settings)
-        if self._estimate_tokens(system_prompt) + self._estimate_tokens(user_prompt) <= max_input_tokens:
+        max_prompt_chars = self._resolve_light_prompt_char_budget(runtime_settings)
+        if (
+            self._estimate_tokens(system_prompt) + self._estimate_tokens(user_prompt) <= max_input_tokens
+            and len(system_prompt) + len(user_prompt) <= max_prompt_chars
+        ):
             return system_prompt, user_prompt
 
         # 智能裁剪：优先保留规则规范、问题信息、变更代码和关联上下文，再压缩次要区块。
         target_system_tokens = max(4000, int(max_input_tokens * 0.22))
         target_user_tokens = max(12000, max_input_tokens - target_system_tokens)
-        trimmed_system = self._smart_compress_system_prompt(system_prompt, target_system_tokens)
-        trimmed_user = self._smart_compress_user_prompt(user_prompt, target_user_tokens)
+        trimmed_system = self._smart_compress_system_prompt(
+            system_prompt,
+            target_system_tokens,
+            log_context=log_context,
+        )
+        trimmed_user = self._smart_compress_user_prompt(
+            user_prompt,
+            target_user_tokens,
+            log_context=log_context,
+        )
 
         # 二次兜底：仍超预算时，再做比例截断。
         total_tokens = self._estimate_tokens(trimmed_system) + self._estimate_tokens(trimmed_user)
@@ -423,6 +436,14 @@ class LLMChatService:
             system_cut_tokens = max(0, overflow - user_cut_tokens)
             trimmed_user = self._truncate_to_tokens(trimmed_user, max(3000, self._estimate_tokens(trimmed_user) - user_cut_tokens))
             trimmed_system = self._truncate_to_tokens(trimmed_system, max(2000, self._estimate_tokens(trimmed_system) - system_cut_tokens))
+
+        total_chars = len(trimmed_system) + len(trimmed_user)
+        if total_chars > max_prompt_chars:
+            trimmed_system, trimmed_user = self._fit_prompts_to_char_budget(
+                trimmed_system,
+                trimmed_user,
+                max_prompt_chars,
+            )
 
         if len(trimmed_system) != len(system_prompt) or len(trimmed_user) != len(user_prompt):
             logger.info(
@@ -486,7 +507,13 @@ class LLMChatService:
             trimmed = self._truncate_middle(text, char_budget)
         return trimmed
 
-    def _smart_compress_system_prompt(self, prompt: str, target_tokens: int) -> str:
+    def _smart_compress_system_prompt(
+        self,
+        prompt: str,
+        target_tokens: int,
+        *,
+        log_context: dict[str, object] | None = None,
+    ) -> str:
         if self._estimate_tokens(prompt) <= target_tokens:
             return prompt
         # system prompt 重点保留规范和执行纪律。
@@ -518,10 +545,17 @@ class LLMChatService:
                 "《绑定参考文档》开始",
                 "《已激活 Skills》开始",
             },
+            focus_tokens=tuple(self._build_expert_compression_profile(log_context).get("focus_tokens") or ()),
         )
         return self._compress_sections_by_weight(summarized, target_tokens, weights)
 
-    def _smart_compress_user_prompt(self, prompt: str, target_tokens: int) -> str:
+    def _smart_compress_user_prompt(
+        self,
+        prompt: str,
+        target_tokens: int,
+        *,
+        log_context: dict[str, object] | None = None,
+    ) -> str:
         if self._estimate_tokens(prompt) <= target_tokens:
             return prompt
         section_headers = [
@@ -547,8 +581,14 @@ class LLMChatService:
         sections = self._split_by_headers(prompt, section_headers)
         if not sections:
             return self._truncate_to_tokens(prompt, target_tokens)
+        profile = self._build_expert_compression_profile(log_context)
+        refined_sections = self._refine_sections_for_light_mode(
+            sections,
+            profile=profile,
+            anchor_tokens=self._extract_anchor_tokens_from_sections(sections),
+        )
         # 高权重 = 尽量保留；低权重 = 优先压缩。
-        weights: dict[str, float] = {
+        weights = self._apply_expert_header_boosts({
             "规范提要:": 1.2,
             "规则遍历结果:": 1.3,
             "输入完整性校验:": 1.2,
@@ -567,15 +607,16 @@ class LLMChatService:
             "能力约束:": 0.9,
             "已绑定参考文档:": 1.0,
             "必查项:": 1.0,
-        }
+        }, profile)
         summarized = self._summarize_sections_for_light_mode(
-            sections,
+            refined_sections,
             headers={
                 "规范提要:",
                 "已绑定参考文档:",
                 "本次审核绑定的详细设计文档:",
                 "已激活技能:",
             },
+            focus_tokens=tuple(profile.get("focus_tokens") or ()),
         )
         return self._compress_sections_by_weight(summarized, target_tokens, weights)
 
@@ -584,16 +625,17 @@ class LLMChatService:
         sections: list[tuple[str, str]],
         *,
         headers: set[str],
+        focus_tokens: tuple[str, ...] = (),
     ) -> list[tuple[str, str]]:
         summarized: list[tuple[str, str]] = []
         for header, body in sections:
             if header not in headers:
                 summarized.append((header, body))
                 continue
-            summarized.append((header, self._summarize_doc_block_for_light_mode(body)))
+            summarized.append((header, self._summarize_doc_block_for_light_mode(body, focus_tokens=focus_tokens)))
         return summarized
 
-    def _summarize_doc_block_for_light_mode(self, text: str) -> str:
+    def _summarize_doc_block_for_light_mode(self, text: str, *, focus_tokens: tuple[str, ...] = ()) -> str:
         if not text.strip():
             return text
         lines = [line.rstrip() for line in text.splitlines() if line.strip()]
@@ -605,13 +647,13 @@ class LLMChatService:
         kept.extend(lines[:6])
 
         # 保留包含规则/标题/关键词的信息行。
-        focus_tokens = (
+        effective_focus_tokens = (
             "rule", "规则", "title", "标题", "must", "should", "禁止", "必须", "风险", "安全", "性能", "事务",
             "aggregate", "domain", "sql", "缓存", "测试", "边界", "一致性"
-        )
+        ) + tuple(focus_tokens)
         for line in lines[6:]:
             lower = line.lower()
-            if any(token in lower for token in focus_tokens):
+            if any(token in lower for token in effective_focus_tokens):
                 kept.append(line)
             if len(kept) >= 24:
                 break
@@ -626,6 +668,201 @@ class LLMChatService:
         if not summary:
             summary = "\n".join(lines[:12]).strip()
         return summary + "\n...[light summary: doc block compressed]...\n"
+
+    def _build_expert_compression_profile(self, log_context: dict[str, object] | None) -> dict[str, object]:
+        expert_id = str((log_context or {}).get("expert_id") or "").strip().lower()
+        profiles: dict[str, dict[str, object]] = {
+            "security_compliance": {
+                "focus_tokens": (
+                    "sql", "select", "update", "delete", "insert", "where", "auth", "token", "jwt", "permission",
+                    "tenant", "header", "request", "input", "sanitize", "xss", "csrf", "secret", "password",
+                ),
+                "header_boosts": {
+                    "目标文件完整 diff:": 0.15,
+                    "关键源码上下文:": 0.2,
+                    "运行时工具调用结果:": 0.12,
+                    "代码仓上下文:": 0.12,
+                },
+            },
+            "performance_reliability": {
+                "focus_tokens": (
+                    "for", "while", "stream", "parallel", "batch", "list", "map", "set", "cache", "redis",
+                    "query", "join", "page", "limit", "loop", "pool", "thread",
+                ),
+                "header_boosts": {
+                    "目标文件完整 diff:": 0.12,
+                    "关键源码上下文:": 0.24,
+                    "代码仓上下文:": 0.18,
+                    "其他变更文件摘要:": 0.08,
+                },
+            },
+            "database_analysis": {
+                "focus_tokens": (
+                    "sql", "select", "insert", "update", "delete", "join", "where", "index", "page", "limit",
+                    "mapper", "mybatis", "jpa", "repository", "transaction",
+                ),
+                "header_boosts": {
+                    "目标文件完整 diff:": 0.12,
+                    "关键源码上下文:": 0.22,
+                    "运行时工具调用结果:": 0.12,
+                    "代码仓上下文:": 0.14,
+                },
+            },
+            "ddd_specification": {
+                "focus_tokens": (
+                    "aggregate", "entity", "valueobject", "domain", "applicationservice", "repository",
+                    "factory", "assembler", "command", "query", "domainservice", "acl",
+                ),
+                "header_boosts": {
+                    "关键源码上下文:": 0.22,
+                    "代码仓上下文:": 0.2,
+                    "本次审核绑定的详细设计文档:": 0.16,
+                    "目标 hunk:": 0.1,
+                },
+            },
+            "architecture_design": {
+                "focus_tokens": (
+                    "service", "facade", "adapter", "controller", "gateway", "repository", "domain",
+                    "dependency", "interface", "implementation", "boundary",
+                ),
+                "header_boosts": {
+                    "关键源码上下文:": 0.2,
+                    "代码仓上下文:": 0.18,
+                    "其他变更文件摘要:": 0.12,
+                },
+            },
+            "test_verification": {
+                "focus_tokens": (
+                    "test", "assert", "mock", "when", "then", "expect", "verify", "exception", "boundary",
+                ),
+                "header_boosts": {
+                    "当前代码片段:": 0.1,
+                    "关键源码上下文:": 0.12,
+                    "代码仓上下文:": 0.12,
+                    "其他变更文件摘要:": 0.08,
+                },
+            },
+        }
+        return profiles.get(expert_id, {"focus_tokens": (), "header_boosts": {}})
+
+    def _apply_expert_header_boosts(
+        self,
+        weights: dict[str, float],
+        profile: dict[str, object],
+    ) -> dict[str, float]:
+        merged = dict(weights)
+        for header, boost in dict(profile.get("header_boosts") or {}).items():
+            merged[str(header)] = merged.get(str(header), 1.0) + float(boost or 0.0)
+        return merged
+
+    def _refine_sections_for_light_mode(
+        self,
+        sections: list[tuple[str, str]],
+        *,
+        profile: dict[str, object],
+        anchor_tokens: set[str],
+    ) -> list[tuple[str, str]]:
+        focus_tokens = tuple(str(token).lower() for token in tuple(profile.get("focus_tokens") or ()))
+        context_headers = {
+            "目标 hunk:",
+            "目标文件完整 diff:",
+            "其他变更文件摘要:",
+            "运行时工具调用结果:",
+            "代码仓上下文:",
+            "关键源码上下文:",
+            "当前代码片段:",
+        }
+        refined: list[tuple[str, str]] = []
+        for header, body in sections:
+            if header in context_headers:
+                refined.append(
+                    (
+                        header,
+                        self._summarize_context_block_for_light_mode(
+                            header,
+                            body,
+                            anchor_tokens=anchor_tokens,
+                            focus_tokens=focus_tokens,
+                        ),
+                    )
+                )
+            else:
+                refined.append((header, body))
+        return refined
+
+    def _summarize_context_block_for_light_mode(
+        self,
+        header: str,
+        text: str,
+        *,
+        anchor_tokens: set[str],
+        focus_tokens: tuple[str, ...],
+    ) -> str:
+        if not text.strip() or self._estimate_tokens(text) <= 900:
+            return text
+        lines = text.splitlines()
+        if len(lines) <= 36:
+            return text
+
+        chosen: set[int] = set(range(min(4, len(lines))))
+        chosen.update(range(max(0, len(lines) - 4), len(lines)))
+        structural_tokens = (
+            "@@", "class ", "interface ", "enum ", "record ", "public ", "private ", "protected ", "void ",
+            "return ", "if ", "for ", "while ", "catch ", "throws ", "select ", "update ", "delete ", "insert ",
+        )
+        for idx, raw_line in enumerate(lines):
+            lower = raw_line.lower()
+            score = 0
+            if any(token and token in lower for token in anchor_tokens):
+                score += 6
+            if any(token and token in lower for token in focus_tokens):
+                score += 4
+            if any(token in lower for token in structural_tokens):
+                score += 1
+            if header == "目标文件完整 diff:" and raw_line.startswith(("@@", "+", "-")):
+                score += 1
+            if header == "运行时工具调用结果:" and any(token in lower for token in ("table", "index", "query", "call", "stack", "sql")):
+                score += 2
+            if score <= 0:
+                continue
+            for neighbor in range(max(0, idx - 2), min(len(lines), idx + 3)):
+                chosen.add(neighbor)
+
+        selected = [lines[idx] for idx in sorted(chosen)]
+        if len(selected) >= len(lines):
+            return text
+        summary = "\n".join(selected).strip()
+        if not summary:
+            summary = "\n".join(lines[:24]).strip()
+        return summary + "\n...[light summary: context block compressed]...\n"
+
+    def _extract_anchor_tokens_from_sections(self, sections: list[tuple[str, str]]) -> set[str]:
+        collected: list[str] = []
+        for header, body in sections:
+            if header not in {"目标 hunk:", "当前代码片段:", "目标文件完整 diff:"}:
+                continue
+            collected.extend(self._extract_identifier_tokens(body))
+        return set(collected)
+
+    def _extract_identifier_tokens(self, text: str) -> list[str]:
+        raw_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+        stopwords = {
+            "public", "private", "protected", "class", "void", "return", "string", "boolean", "integer",
+            "static", "final", "null", "true", "false", "this", "that", "with", "from", "into", "while",
+            "where", "select", "insert", "update", "delete", "value", "values", "table", "and", "the",
+            "filler", "line", "lines", "snippet", "context", "other", "noise",
+        }
+        normalized: list[str] = []
+        for token in raw_tokens:
+            lowered = token.lower()
+            if lowered in stopwords or len(lowered) < 3:
+                continue
+            normalized.append(lowered)
+            parts = [part.lower() for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+", token) if part]
+            for part in parts:
+                if part not in stopwords and len(part) >= 3:
+                    normalized.append(part)
+        return normalized[:80]
 
     def _split_by_headers(self, text: str, headers: list[str]) -> list[tuple[str, str]]:
         lines = text.splitlines(keepends=True)
@@ -728,6 +965,53 @@ class LLMChatService:
             tail_len = 0
         marker = "\n\n...[light prompt compressed]...\n\n"
         return text[:head_len].rstrip() + marker + (text[-tail_len:].lstrip() if tail_len > 0 else "")
+
+    def _fit_prompts_to_char_budget(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_prompt_chars: int,
+    ) -> tuple[str, str]:
+        trimmed_system = system_prompt
+        trimmed_user = user_prompt
+        min_system_chars = min(800, max_prompt_chars)
+        min_user_chars = min(1000, max_prompt_chars)
+
+        while len(trimmed_system) + len(trimmed_user) > max_prompt_chars:
+            overflow_chars = len(trimmed_system) + len(trimmed_user) - max_prompt_chars
+            user_cut_chars = max(1, int(overflow_chars * 0.8))
+            system_cut_chars = max(1, overflow_chars - user_cut_chars)
+
+            next_user_budget = max(min_user_chars, len(trimmed_user) - user_cut_chars)
+            next_system_budget = max(min_system_chars, len(trimmed_system) - system_cut_chars)
+
+            next_user = self._truncate_middle(trimmed_user, next_user_budget)
+            next_system = self._truncate_middle(trimmed_system, next_system_budget)
+
+            # `_truncate_middle` 会插入 marker，极端情况下单轮裁剪后字符数可能几乎不变，
+            # 这里再做一次强制切片，确保最终严格不超过配置预算。
+            if len(next_user) >= len(trimmed_user) and len(trimmed_user) > min_user_chars:
+                next_user = trimmed_user[: max(min_user_chars, len(trimmed_user) - max(user_cut_chars, 64))]
+            if len(next_system) >= len(trimmed_system) and len(trimmed_system) > min_system_chars:
+                next_system = trimmed_system[: max(min_system_chars, len(trimmed_system) - max(system_cut_chars, 32))]
+
+            if next_user == trimmed_user and next_system == trimmed_system:
+                remaining = max_prompt_chars - min(len(trimmed_system), min_system_chars)
+                trimmed_system = trimmed_system[:min(len(trimmed_system), min_system_chars)]
+                trimmed_user = trimmed_user[: max(0, min(len(trimmed_user), remaining))]
+                break
+
+            trimmed_user = next_user
+            trimmed_system = next_system
+
+        combined_len = len(trimmed_system) + len(trimmed_user)
+        if combined_len > max_prompt_chars:
+            user_allowance = max(0, max_prompt_chars - len(trimmed_system))
+            trimmed_user = trimmed_user[:user_allowance]
+            combined_len = len(trimmed_system) + len(trimmed_user)
+        if combined_len > max_prompt_chars:
+            trimmed_system = trimmed_system[: max(0, max_prompt_chars - len(trimmed_user))]
+        return trimmed_system, trimmed_user
 
     def _classify_timeout_exception(self, exc: httpx.TimeoutException) -> str:
         """把 httpx 超时异常归类成更易排查的日志标签。"""

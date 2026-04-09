@@ -191,6 +191,11 @@ export interface DebateIssue {
   confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
   participant_expert_ids: string[];
+  aggregated_titles?: string[];
+  aggregated_summaries?: string[];
+  aggregated_remediation_strategies?: string[];
+  aggregated_remediation_suggestions?: string[];
+  aggregated_remediation_steps?: string[];
   evidence: string[];
   needs_human: boolean;
   verified: boolean;
@@ -436,6 +441,8 @@ export interface RuntimeSettings {
   light_llm_retry_count: number;
   light_max_parallel_experts: number;
   light_max_debate_rounds: number;
+  light_llm_max_prompt_chars: number;
+  light_llm_max_input_tokens: number;
   llm_log_truncate_enabled: boolean;
   llm_log_preview_limit: number;
   default_llm_provider: string;

@@ -79,6 +79,8 @@ class RuntimeConfig(BaseModel):
     light_llm_retry_count: int = 2
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
+    light_llm_max_prompt_chars: int = 95000
+    light_llm_max_input_tokens: int = 110000
     llm_log_truncate_enabled: bool = True
     llm_log_preview_limit: int = 1600
 
@@ -175,6 +177,8 @@ class AppConfig(BaseModel):
                 light_llm_retry_count=runtime.light_llm_retry_count,
                 light_max_parallel_experts=runtime.light_max_parallel_experts,
                 light_max_debate_rounds=runtime.light_max_debate_rounds,
+                light_llm_max_prompt_chars=runtime.light_llm_max_prompt_chars,
+                light_llm_max_input_tokens=runtime.light_llm_max_input_tokens,
                 llm_log_truncate_enabled=runtime.llm_log_truncate_enabled,
                 llm_log_preview_limit=runtime.llm_log_preview_limit,
             ),
@@ -229,6 +233,8 @@ class AppConfig(BaseModel):
             light_llm_retry_count=self.runtime.light_llm_retry_count,
             light_max_parallel_experts=self.runtime.light_max_parallel_experts,
             light_max_debate_rounds=self.runtime.light_max_debate_rounds,
+            light_llm_max_prompt_chars=self.runtime.light_llm_max_prompt_chars,
+            light_llm_max_input_tokens=self.runtime.light_llm_max_input_tokens,
             llm_log_truncate_enabled=self.runtime.llm_log_truncate_enabled,
             llm_log_preview_limit=self.runtime.llm_log_preview_limit,
             default_llm_provider=self.llm.default_provider,

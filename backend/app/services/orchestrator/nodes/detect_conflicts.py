@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from app.services.orchestrator.state import ReviewState
 
 
@@ -76,7 +74,7 @@ def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
 
 
 def detect_conflicts(state: ReviewState) -> ReviewState:
-    """按文件和行号窗口对 findings 做聚合，形成 conflict 候选。"""
+    """按文件和代码行聚合 findings，形成 conflict 候选。"""
 
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
@@ -87,9 +85,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     for finding in findings:
         file_path = str(finding.get("file_path", "")).strip() or "unknown"
         line_start = int(finding.get("line_start", 1) or 1)
-        line_bucket = max(1, ((line_start - 1) // 25) + 1)
-        semantic_key = _build_conflict_semantic_key(finding)
-        key = f"{file_path}::{line_bucket}::{semantic_key}"
+        key = f"{file_path}::{line_start}"
         grouped.setdefault(key, []).append(finding)
     conflicts: list[dict[str, object]] = []
     for key, items in grouped.items():
@@ -122,17 +118,36 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         if any(str(item.get("severity")) == "blocker" for item in eligible_items):
             highest_severity = "blocker"
         confidence, confidence_breakdown = _score_issue_confidence(eligible_items)
+        aggregated_titles = _collect_unique_values(eligible_items, "title")
+        aggregated_summaries = _collect_unique_values(eligible_items, "summary")
+        aggregated_remediation_strategies = _collect_unique_values(
+            eligible_items,
+            "remediation_strategy",
+        )
+        aggregated_remediation_suggestions = _collect_unique_values(
+            eligible_items,
+            "remediation_suggestion",
+        )
+        aggregated_remediation_steps = _collect_unique_list_values(
+            eligible_items,
+            "remediation_steps",
+        )
         conflicts.append(
             {
                 "issue_id": first.get("finding_id"),
                 "topic": key,
-                "title": first.get("title"),
-                "summary": first.get("summary"),
+                "title": _build_issue_title(aggregated_titles),
+                "summary": _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions),
                 "finding_type": first.get("finding_type", "risk_hypothesis"),
                 "file_path": first.get("file_path"),
                 "line_start": first.get("line_start"),
                 "finding_ids": [item.get("finding_id") for item in eligible_items],
                 "participant_expert_ids": [item.get("expert_id") for item in eligible_items],
+                "aggregated_titles": aggregated_titles,
+                "aggregated_summaries": aggregated_summaries,
+                "aggregated_remediation_strategies": aggregated_remediation_strategies,
+                "aggregated_remediation_suggestions": aggregated_remediation_suggestions,
+                "aggregated_remediation_steps": aggregated_remediation_steps,
                 "evidence": [e for item in eligible_items for e in item.get("evidence", [])],
                 "cross_file_evidence": [e for item in eligible_items for e in item.get("cross_file_evidence", [])],
                 "assumptions": [e for item in eligible_items for e in item.get("assumptions", [])],
@@ -148,71 +163,42 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     return next_state
 
 
-def _build_conflict_semantic_key(finding: dict[str, object]) -> str:
-    matched_rules = [
-        str(item).strip().lower()
-        for item in list(finding.get("matched_rules") or [])
-        if str(item).strip()
-    ]
-    violated_guidelines = [
-        str(item).strip().lower()
-        for item in list(finding.get("violated_guidelines") or [])
-        if str(item).strip()
-    ]
-    finding_type = str(finding.get("finding_type") or "risk_hypothesis").strip().lower()
-    severity = str(finding.get("severity") or "medium").strip().lower()
-    title = str(finding.get("title") or "").strip().lower()
-    summary = str(finding.get("summary") or "").strip().lower()
-    title_terms = _extract_conflict_terms(title)
-    if title_terms:
-        return f"title|{'_'.join(title_terms[:4])}"
-    if matched_rules:
-        return f"rule|{matched_rules[0]}"
-    if violated_guidelines:
-        return f"guideline|{violated_guidelines[0]}"
-    summary_terms = _extract_conflict_terms(summary)
-    if summary_terms:
-        return f"summary|{'_'.join(summary_terms[:4])}"
-    return f"{finding_type}|severity|{severity}"
+def _build_issue_title(titles: list[str]) -> str:
+    if not titles:
+        return "待裁决议题"
+    if len(titles) == 1:
+        return titles[0]
+    return f"同一代码行存在 {len(titles)} 个问题：{titles[0]}"
 
 
-def _extract_conflict_terms(text: str) -> list[str]:
-    stop_words = {
-        "current",
-        "there",
-        "this",
-        "that",
-        "with",
-        "from",
-        "into",
-        "must",
-        "need",
-        "should",
-        "here",
-        "code",
-        "review",
-        "issue",
-        "risk",
-        "possible",
-        "maybe",
-        "java",
-        "当前",
-        "这里",
-        "代码",
-        "问题",
-        "需要",
-        "建议",
-        "可能",
-        "存在",
-    }
-    terms: list[str] = []
-    for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff_]+", text):
-        normalized = token.strip().lower()
-        if len(normalized) < 2 or normalized in stop_words:
-            continue
-        if normalized not in terms:
-            terms.append(normalized)
-    return terms
+def _build_issue_summary(summaries: list[str], remediation_suggestions: list[str]) -> str:
+    parts: list[str] = []
+    if summaries:
+        parts.append("问题汇总：")
+        parts.extend(f"- {item}" for item in summaries)
+    if remediation_suggestions:
+        parts.append("修复建议汇总：")
+        parts.extend(f"- {item}" for item in remediation_suggestions)
+    return "\n".join(parts).strip() or "当前议题聚合了同一代码行上的多个 finding。"
+
+
+def _collect_unique_values(items: list[dict[str, object]], field: str) -> list[str]:
+    values: list[str] = []
+    for item in items:
+        value = str(item.get(field) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _collect_unique_list_values(items: list[dict[str, object]], field: str) -> list[str]:
+    values: list[str] = []
+    for item in items:
+        for entry in list(item.get(field) or []):
+            value = str(entry or "").strip()
+            if value and value not in values:
+                values.append(value)
+    return values
 
 
 def _classify_issue_candidate(

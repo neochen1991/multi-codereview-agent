@@ -91,6 +91,9 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
             if not patched_code and finding.suggested_code:
                 patched_code = finding.suggested_code
         if not suggestion_parts:
+            suggestion_parts.extend(issue.aggregated_remediation_suggestions or [])
+            suggestion_parts.extend(issue.aggregated_remediation_steps or [])
+        if not suggestion_parts:
             suggestion_parts.append("请结合审核结论补充修复方案。")
         if not patched_code:
             patched_code = "// TODO: replace with actual patched code before real CodeHub submission"
@@ -99,6 +102,8 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
             part
             for part in [
                 issue.summary,
+                "聚合问题：",
+                *[title for title in issue.aggregated_titles if title],
                 "关联证据：",
                 *[finding.summary for finding in related_findings if finding.summary],
             ]

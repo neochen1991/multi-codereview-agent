@@ -804,6 +804,17 @@ class ReviewRunner:
                 confidence_breakdown=dict(item.get("confidence_breakdown") or {}),
                 finding_ids=[str(value) for value in item.get("finding_ids", [])],
                 participant_expert_ids=[str(value) for value in item.get("participant_expert_ids", [])],
+                aggregated_titles=[str(value) for value in item.get("aggregated_titles", [])],
+                aggregated_summaries=[str(value) for value in item.get("aggregated_summaries", [])],
+                aggregated_remediation_strategies=[
+                    str(value) for value in item.get("aggregated_remediation_strategies", [])
+                ],
+                aggregated_remediation_suggestions=[
+                    str(value) for value in item.get("aggregated_remediation_suggestions", [])
+                ],
+                aggregated_remediation_steps=[
+                    str(value) for value in item.get("aggregated_remediation_steps", [])
+                ],
                 evidence=[str(value) for value in item.get("evidence", [])],
                 cross_file_evidence=[str(value) for value in item.get("cross_file_evidence", [])],
                 assumptions=[str(value) for value in item.get("assumptions", [])],
@@ -3025,9 +3036,10 @@ class ReviewRunner:
         normalized = str(language or "").strip().lower()
         if normalized == "java":
             return (
-                "- 遵循 Java / Spring 通用代码规范：命名清晰，单个方法职责收敛，避免把校验、事务、持久化、远程调用混成一个长方法。\n"
+                "- 遵循 Java / Spring 通用代码规范：命名清晰，单个方法职责收敛，避免把校验、事务、持久化、远程调用混成一个长方法，避免使用 tmp/data/value 这类弱语义命名。\n"
                 "- 关注输入校验、空值处理、异常边界、日志脱敏、权限/租户隔离，以及 @Transactional 范围内的副作用。\n"
                 "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写、EAGER/级联加载风险。\n"
+                "- 检查条件分支、状态码、重试次数、批量阈值、字符串标识等是否以魔法值形式直接散落在业务逻辑中，是否应提取为常量、枚举或配置。\n"
                 "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据，证据不足时只能输出 risk_hypothesis。"
             )
         if normalized in {"javascript", "jsx", "typescript", "tsx"}:
@@ -3295,7 +3307,7 @@ class ReviewRunner:
     def _build_language_guidance_topics(self, language: str) -> list[str]:
         normalized = str(language or "").strip().lower()
         if normalized == "java":
-            return ["命名与职责", "输入校验与安全边界", "事务与副作用", "Repository/ORM 查询风险"]
+            return ["命名与职责", "常量与魔法值", "输入校验与安全边界", "事务与副作用", "Repository/ORM 查询风险"]
         if normalized in {"javascript", "jsx", "typescript", "tsx"}:
             return ["命名与职责", "输入校验与鉴权边界", "异步错误处理", "数据访问与性能边界"]
         return []
@@ -3372,6 +3384,14 @@ class ReviewRunner:
                     "- 重点检查聚合根是否真正维护不变量，ValueObject 是否保持不可变语义。",
                     "- 重点检查 DomainEvent 是否在正确边界发布，Repository 是否只服务聚合根而不是应用层拼装。",
                     "- 必须说明当前改动是落在领域层、应用层还是基础设施层，以及是否破坏 DDD 分层职责。",
+                ]
+            )
+        elif expert_id == "maintainability_code_health":
+            base.extend(
+                [
+                    "- 重点检查新增变量、方法、常量命名是否表达真实业务语义，是否出现 tmp/data/value/obj 等弱语义命名。",
+                    "- 重点检查 if/switch/查询/构造函数参数中的数字、字符串、状态码是否属于应被提取的魔法值。",
+                    "- 如果命名或魔法值会直接提高理解成本、修改风险或误用概率，可以输出 direct_defect 或 design_concern，不要一律降级成纯提示。",
                 ]
             )
         else:
@@ -3847,6 +3867,20 @@ class ReviewRunner:
                 summary_parts.append(rename_summary)
             if rename_phrase not in evidence:
                 evidence.append(rename_phrase)
+
+        if "magic_value_literal" in signal_set:
+            magic_terms = [term for term in list(signal_terms.get("magic_value_literal") or []) if term]
+            magic_display = " / ".join(magic_terms[:3]) if magic_terms else "新增字面量"
+            magic_summary = f"当前改动把 {magic_display} 直接写进业务逻辑，形成魔法值，后续理解、复用和统一修改成本会升高。"
+            if "魔法值" not in title:
+                title = f"{title}（魔法值散落）" if title else "魔法值散落"
+            if "魔法值" not in claim:
+                claim = f"{claim.rstrip('。')}；并直接引入魔法值（{magic_display}）。".strip("；")
+            if magic_summary not in summary_parts:
+                summary_parts.append(magic_summary)
+            evidence_phrase = f"检测到魔法值字面量：{magic_display}"
+            if evidence_phrase not in evidence:
+                evidence.append(evidence_phrase)
 
         if "exception_swallowed" in signal_set and "静默吞掉" not in claim_blob and "空 catch" not in claim_blob:
             swallow_phrase = "当前变更还让 catch 块静默吞掉异常"

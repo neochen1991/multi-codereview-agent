@@ -61,6 +61,13 @@ class JavaQualitySignalExtractor:
             signal_terms["naming_convention_violation"] = naming_violation
             summary_parts.append("检测到常量或标识符命名退化")
 
+        magic_value_terms = self._detect_magic_value_literals(diff_excerpt)
+        if magic_value_terms:
+            signals.append("magic_value_literal")
+            matched_terms.extend(magic_value_terms)
+            signal_terms["magic_value_literal"] = magic_value_terms
+            summary_parts.append("检测到疑似魔法值直接落在业务逻辑中")
+
         if self._detect_exception_swallowed(diff_lower, combined_lower):
             signals.append("exception_swallowed")
             swallow_terms = ["catch", "printstacktrace", "throw", "logger"]
@@ -113,6 +120,16 @@ class JavaQualitySignalExtractor:
         return removed_limit or added_unbounded_select or no_paging_visible
 
     def _detect_naming_convention_violation(self, diff_excerpt: str) -> list[str]:
+        added_identifiers: list[str] = []
+        for line in diff_excerpt.splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            for pattern in [
+                r"\b(?:final\s+)?[A-Za-z_][A-Za-z0-9_<>]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*=",
+                r"\b(?:public|private|protected)\s+[A-Za-z_][A-Za-z0-9_<>]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            ]:
+                added_identifiers.extend(re.findall(pattern, line))
+
         declaration_removed = re.findall(
             r"^-.*?\b(?:final\s+)?[A-Za-z_][A-Za-z0-9_<>]*\s+([A-Z][A-Z0-9_]{2,})\s*=",
             diff_excerpt,
@@ -130,7 +147,51 @@ class JavaQualitySignalExtractor:
         added_non_constant = re.findall(r"^\+.*?\b([a-z][A-Za-z0-9_]*)\b\s*=", diff_excerpt, flags=re.MULTILINE)
         if removed_constant and added_non_constant:
             return [removed_constant[0], added_non_constant[0]]
+        for identifier in added_identifiers:
+            if self._looks_like_bad_java_identifier(identifier):
+                return [identifier]
         return []
+
+    def _looks_like_bad_java_identifier(self, identifier: str) -> bool:
+        normalized = str(identifier or "").strip()
+        if len(normalized) < 3:
+            return False
+        lower = normalized.lower()
+        if lower.endswith(("tmp", "temp", "data", "value", "obj", "info")):
+            return True
+        if "__" in normalized:
+            return True
+        if re.search(r"[a-z][A-Z]{2,}", normalized):
+            return True
+        if normalized[0].isupper() and not normalized.isupper():
+            return True
+        return False
+
+    def _detect_magic_value_literals(self, diff_excerpt: str) -> list[str]:
+        suspicious: list[str] = []
+        whitelist = {"0", "1", "-1", "2", "10", "100", "1000", "true", "false"}
+        for raw_line in diff_excerpt.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            lowered = line.lower()
+            if any(token in lowered for token in ("static final", "private static final", "public static final", "enum ")):
+                continue
+            if any(token in lowered for token in ('"http', '"select ', "@value(", "@requestparam(", "@jsonproperty(")):
+                continue
+            for literal in re.findall(r"(?<![A-Za-z0-9_])(-?\d{2,})(?![A-Za-z0-9_])", line):
+                if literal in whitelist:
+                    continue
+                if literal not in suspicious:
+                    suspicious.append(literal)
+            for literal in re.findall(r'"([^"\n]{3,})"', line):
+                if any(ch.isspace() for ch in literal) and len(literal) <= 12:
+                    continue
+                if re.fullmatch(r"[A-Za-z0-9_/.-]{3,}", literal) and literal.upper() != literal:
+                    continue
+                if literal not in suspicious and len(literal) >= 3:
+                    suspicious.append(literal)
+        return suspicious[:4]
 
     def _detect_exception_swallowed(self, diff_lower: str, combined_lower: str) -> bool:
         removed_handling = any(

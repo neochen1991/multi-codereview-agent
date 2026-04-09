@@ -446,10 +446,10 @@ def test_llm_chat_uses_intranet_friendly_httpx_timeouts(monkeypatch, tmp_path: P
 
     timeout = captured["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.connect == 36.0
-    assert timeout.read == 150.0
-    assert timeout.write == 36.0
-    assert timeout.pool == 36.0
+    assert timeout.connect == 40.0
+    assert timeout.read == 180.0
+    assert timeout.write == 40.0
+    assert timeout.pool == 40.0
     assert result.mode == "live"
 
 
@@ -808,6 +808,138 @@ def test_llm_chat_compresses_prompt_in_light_mode(monkeypatch, tmp_path: Path):
     request_user = str((messages[1] or {}).get("content") or "")
     assert service._estimate_tokens(request_system) + service._estimate_tokens(request_user) <= 110000
     assert "[light prompt compressed]" in request_system or "[light prompt compressed]" in request_user
+
+
+def test_llm_chat_uses_configured_light_prompt_budget(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    captured_payload: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            captured_payload.update(json)
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_analysis_mode": "light",
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+            "light_llm_max_input_tokens": 40000,
+            "light_llm_max_prompt_chars": 30000,
+        }
+    )
+
+    long_system = "S" * 12000
+    long_user = "中" * 80000
+    result = service.complete_text(
+        system_prompt=long_system,
+        user_prompt=long_user,
+        resolution=service.resolve_main_agent(runtime),
+        runtime_settings=runtime,
+        fallback_text="fallback",
+        allow_fallback=False,
+        log_context={"analysis_mode": "light", "review_id": "rev_light_prompt_budget_configured"},
+    )
+
+    assert result.mode == "live"
+    messages = captured_payload["messages"]  # type: ignore[index]
+    assert isinstance(messages, list) and len(messages) == 2
+    request_system = str((messages[0] or {}).get("content") or "")
+    request_user = str((messages[1] or {}).get("content") or "")
+    assert service._estimate_tokens(request_system) + service._estimate_tokens(request_user) <= 40000
+    assert len(request_system) + len(request_user) <= 30000
+
+
+def test_light_prompt_compression_keeps_security_relevant_context():
+    service = LLMChatService()
+    user_prompt = (
+        "目标 hunk:\n"
+        "@@ -10,6 +10,20 @@\n"
+        "+ public UserProfile loadUserProfile(HttpServletRequest request) {\n"
+        '+   String jwtToken = request.getHeader("Authorization");\n'
+        "+   String userId = tokenParser.parse(jwtToken);\n"
+        '+   String sql = \"select * from users where user_id = ?\";\n'
+        "+ }\n"
+        "关键源码上下文:\n"
+        + "\n".join(f"filler line {idx}" for idx in range(220))
+        + "\npublic UserProfile loadUserProfile(HttpServletRequest request) {\n"
+        + '  String jwtToken = request.getHeader("Authorization");\n'
+        + "  validateJwtToken(jwtToken);\n"
+        + '  String sql = \"select * from users where user_id = ?\";\n'
+        + "}\n"
+        + "\n".join(f"other filler {idx}" for idx in range(220))
+        + "\npublic void runBatchSettlement() {\n"
+        + "  for (Order item : orderList) {\n"
+        + "    settlementService.process(item);\n"
+        + "  }\n"
+        + "}\n"
+        "\n当前代码片段:\n"
+        + "\n".join(f"snippet filler {idx}" for idx in range(180))
+    )
+
+    compressed = service._smart_compress_user_prompt(
+        user_prompt,
+        1200,
+        log_context={"analysis_mode": "light", "expert_id": "security_compliance"},
+    )
+
+    assert "validateJwtToken" in compressed
+    assert 'request.getHeader("Authorization")' in compressed
+    assert 'select * from users where user_id = ?' in compressed
+
+
+def test_light_prompt_compression_prioritizes_hunk_method_context():
+    service = LLMChatService()
+    user_prompt = (
+        "目标 hunk:\n"
+        "@@ -30,6 +30,18 @@\n"
+        "+ public OrderResult processOrder(OrderCommand command) {\n"
+        "+   validateCommand(command);\n"
+        "+   return orderDomainService.processOrder(command);\n"
+        "+ }\n"
+        "代码仓上下文:\n"
+        + "\n".join(f"context filler {idx}" for idx in range(260))
+        + "\npublic OrderResult processOrder(OrderCommand command) {\n"
+        + "  validateCommand(command);\n"
+        + "  return orderDomainService.processOrder(command);\n"
+        + "}\n"
+        + "\n".join(f"noise line {idx}" for idx in range(260))
+        + "\npublic void rebuildSearchIndex() {\n"
+        + "  searchIndexer.rebuildAll();\n"
+        + "}\n"
+    )
+
+    compressed = service._smart_compress_user_prompt(
+        user_prompt,
+        1000,
+        log_context={"analysis_mode": "light", "expert_id": "architecture_design"},
+    )
+
+    assert "processOrder(OrderCommand command)" in compressed
+    assert "validateCommand(command)" in compressed
 
 
 def test_llm_chat_standard_mode_does_not_apply_light_summary(monkeypatch, tmp_path: Path):

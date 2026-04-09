@@ -65,6 +65,8 @@ class RuntimeSettingsService:
             "light_llm_retry_count",
             "light_max_parallel_experts",
             "light_max_debate_rounds",
+            "light_llm_max_prompt_chars",
+            "light_llm_max_input_tokens",
             "llm_log_truncate_enabled",
             "llm_log_preview_limit",
             "allow_llm_fallback",

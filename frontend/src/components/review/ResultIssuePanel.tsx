@@ -122,6 +122,9 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           `关联发现 ${issue.finding_ids.length}`,
           `参与专家 ${issue.participant_expert_ids.length}`,
         ];
+        if ((issue.aggregated_titles || []).length > 1) {
+          metaSummaryParts.push(`聚合问题 ${issue.aggregated_titles?.length || 0}`);
+        }
         if (distinctFiles.length > 1) {
           metaSummaryParts.push(`涉及文件 ${distinctFiles.length}`);
         }

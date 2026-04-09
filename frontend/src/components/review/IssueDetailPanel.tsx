@@ -5,6 +5,8 @@ import type { DebateIssue, ReviewFinding } from "@/services/api";
 
 const { Paragraph } = Typography;
 
+const uniqueList = (values?: string[]) => Array.from(new Set((values || []).map((item) => String(item || "").trim()).filter(Boolean)));
+
 type IssueDetailPanelProps = {
   issue: DebateIssue | null;
   finding?: ReviewFinding | null;
@@ -17,6 +19,11 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
   const contextFiles = codeContext?.context_files || finding?.context_files || [];
   const inputCompleteness = codeContext?.input_completeness;
   const reviewInputs = codeContext?.review_inputs;
+  const aggregatedTitles = uniqueList(issue?.aggregated_titles);
+  const aggregatedSummaries = uniqueList(issue?.aggregated_summaries);
+  const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
+  const aggregatedSuggestions = uniqueList(issue?.aggregated_remediation_suggestions);
+  const aggregatedSteps = uniqueList(issue?.aggregated_remediation_steps);
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
@@ -81,6 +88,77 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
                   ) : null}
                   {"hypothesis_penalty" in confidenceBreakdown ? (
                     <Descriptions.Item label="推测扣分">{String(confidenceBreakdown.hypothesis_penalty)}</Descriptions.Item>
+                  ) : null}
+                </Descriptions>
+              </div>
+            ) : null}
+
+            {aggregatedTitles.length || aggregatedSummaries.length ? (
+              <div style={{ marginTop: 16 }}>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合问题</Paragraph>
+                <Descriptions column={1} size="small">
+                  {aggregatedTitles.length ? (
+                    <Descriptions.Item label="问题标题">
+                      <Space wrap>
+                        {aggregatedTitles.map((title) => (
+                          <Tag key={title} color="blue">
+                            {title}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  {aggregatedSummaries.length ? (
+                    <Descriptions.Item label="问题说明">
+                      <div>
+                        {aggregatedSummaries.map((summary) => (
+                          <Paragraph key={summary} style={{ marginBottom: 8 }}>
+                            {summary}
+                          </Paragraph>
+                        ))}
+                      </div>
+                    </Descriptions.Item>
+                  ) : null}
+                </Descriptions>
+              </div>
+            ) : null}
+
+            {aggregatedStrategies.length || aggregatedSuggestions.length || aggregatedSteps.length ? (
+              <div style={{ marginTop: 16 }}>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合修复方案</Paragraph>
+                <Descriptions column={1} size="small">
+                  {aggregatedStrategies.length ? (
+                    <Descriptions.Item label="修复思路">
+                      <div>
+                        {aggregatedStrategies.map((item) => (
+                          <Paragraph key={item} style={{ marginBottom: 8 }}>
+                            {item}
+                          </Paragraph>
+                        ))}
+                      </div>
+                    </Descriptions.Item>
+                  ) : null}
+                  {aggregatedSuggestions.length ? (
+                    <Descriptions.Item label="修复建议">
+                      <div>
+                        {aggregatedSuggestions.map((item) => (
+                          <Paragraph key={item} style={{ marginBottom: 8 }}>
+                            {item}
+                          </Paragraph>
+                        ))}
+                      </div>
+                    </Descriptions.Item>
+                  ) : null}
+                  {aggregatedSteps.length ? (
+                    <Descriptions.Item label="修复步骤">
+                      <div>
+                        {aggregatedSteps.map((item, index) => (
+                          <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
+                            {index + 1}. {item}
+                          </Paragraph>
+                        ))}
+                      </div>
+                    </Descriptions.Item>
                   ) : null}
                 </Descriptions>
               </div>

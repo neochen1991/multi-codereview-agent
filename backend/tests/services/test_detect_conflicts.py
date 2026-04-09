@@ -257,7 +257,7 @@ def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue()
                 "confidence": 0.97,
                 "verification_needed": True,
                 "file_path": "src/app/controller/OrderController.java",
-                "line_start": 56,
+                "line_start": 55,
                 "evidence": ["鉴权分支被显式绕开", "存在未授权访问路径"],
                 "cross_file_evidence": [],
                 "context_files": [],
@@ -338,7 +338,7 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
                 "confidence": 0.78,
                 "verification_needed": True,
                 "file_path": "src/app/controller/OrderController.java",
-                "line_start": 22,
+                "line_start": 21,
                 "evidence": ["入口层缺少统一鉴权守卫"],
                 "cross_file_evidence": ["controller -> interceptor 没有接入"],
                 "context_files": ["src/app/interceptor/AuthInterceptor.java"],
@@ -396,7 +396,7 @@ def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
     assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.1
 
 
-def test_detect_conflicts_splits_different_semantic_findings_in_same_line_bucket():
+def test_detect_conflicts_splits_findings_on_different_lines():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -447,7 +447,7 @@ def test_detect_conflicts_splits_different_semantic_findings_in_same_line_bucket
     assert ("fdg_semantic_name",) in conflict_finding_ids
 
 
-def test_detect_conflicts_keeps_same_semantic_findings_grouped_together():
+def test_detect_conflicts_keeps_same_line_findings_grouped_together():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -480,12 +480,15 @@ def test_detect_conflicts_keeps_same_semantic_findings_grouped_together():
                 "confidence": 0.81,
                 "verification_needed": True,
                 "file_path": "src/app/controller/OrderController.java",
-                "line_start": 22,
+                "line_start": 21,
                 "evidence": ["入口层缺少统一鉴权守卫"],
                 "cross_file_evidence": [],
                 "context_files": [],
                 "matched_rules": ["SEC-AUTH-001"],
                 "violated_guidelines": ["安全校验不能依赖调用方自觉"],
+                "remediation_strategy": "在入口层补齐统一鉴权守卫",
+                "remediation_suggestion": "恢复资源级鉴权并补充拒绝分支",
+                "remediation_steps": ["补充入口鉴权", "增加未授权访问测试"],
             },
         ],
     }
@@ -494,3 +497,69 @@ def test_detect_conflicts_keeps_same_semantic_findings_grouped_together():
 
     assert len(result["conflicts"]) == 1
     assert result["conflicts"][0]["finding_ids"] == ["fdg_same_1", "fdg_same_2"]
+    assert len(result["conflicts"][0]["aggregated_titles"]) == 1
+    assert "在入口层补齐统一鉴权守卫" in result["conflicts"][0]["aggregated_remediation_strategies"]
+    assert "补充入口鉴权" in result["conflicts"][0]["aggregated_remediation_steps"]
+
+
+def test_detect_conflicts_groups_same_line_different_problems_into_one_issue():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_line_1",
+                "expert_id": "database_analysis",
+                "title": "SQL 查询语义被放宽为模糊匹配",
+                "summary": "equal 被改成 like，查询语义发生变化，可能扩大结果集。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": False,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["builder.equal -> builder.like"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询语义不能静默放宽"],
+                "remediation_strategy": "恢复精确匹配语义",
+                "remediation_suggestion": "把 like 改回 equal，并补充查询语义回归测试",
+                "remediation_steps": ["恢复 equal 条件", "补充 SQL 语义测试"],
+            },
+            {
+                "finding_id": "fdg_line_2",
+                "expert_id": "maintainability_code_health",
+                "title": "临时变量命名不符合约定",
+                "summary": "chunksTmp 这种命名会降低可读性，且与常量语义不一致。",
+                "finding_type": "design_concern",
+                "severity": "medium",
+                "confidence": 0.9,
+                "verification_needed": True,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["命名与语义不一致"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["命名一致性"],
+                "violated_guidelines": ["变量命名需表达稳定语义"],
+                "remediation_strategy": "把临时变量改成表达语义的名称",
+                "remediation_suggestion": "将 chunksTmp 重命名为语义稳定的变量名",
+                "remediation_steps": ["统一变量命名", "同步更新引用"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["finding_ids"] == ["fdg_line_1", "fdg_line_2"]
+    assert len(conflict["aggregated_titles"]) == 2
+    assert "SQL 查询语义被放宽为模糊匹配" in conflict["aggregated_titles"]
+    assert "临时变量命名不符合约定" in conflict["aggregated_titles"]
+    assert "恢复精确匹配语义" in conflict["aggregated_remediation_strategies"]
+    assert "把临时变量改成表达语义的名称" in conflict["aggregated_remediation_strategies"]
+    assert "恢复 equal 条件" in conflict["aggregated_remediation_steps"]
+    assert "统一变量命名" in conflict["aggregated_remediation_steps"]

@@ -60,3 +60,24 @@ def test_java_quality_signal_extractor_detects_factory_bypass_and_event_ordering
 
     assert "factory_bypass" in payload["signals"]
     assert "event_ordering_risk" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_magic_value_and_weak_naming() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,4 +40,8 @@ public class OrderService {",
+                    '+    String orderStatusTmp = "MANUAL_RETRY";',
+                    "+    if (retryCount > 37) {",
+                    "+        return processWithPriority(orderStatusTmp, 86400);",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "naming_convention_violation" in payload["signals"]
+    assert "magic_value_literal" in payload["signals"]

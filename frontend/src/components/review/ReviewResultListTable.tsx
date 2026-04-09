@@ -188,7 +188,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         rowKey="id"
         size="middle"
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
-        scroll={{ x: 1900 }}
+        scroll={{ x: 1520 }}
         dataSource={groupedRows}
         rowClassName={(record) => (record.id === selectedRowId ? "thread-selected" : "")}
         rowSelection={
@@ -244,6 +244,38 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             ),
           },
           {
+            title: "问题摘要",
+            dataIndex: "summary",
+            key: "summary",
+            width: 620,
+            render: (value: string, item: ReviewResultListRow) => (
+              <div className="review-summary-cell" style={{ whiteSpace: "normal" }}>
+                <div className="review-summary-title" title={item.title}>
+                  {item.title}
+                </div>
+                <div className="review-summary-text" title={value} style={{ whiteSpace: "normal", lineHeight: 1.6 }}>
+                  {value}
+                </div>
+                {item.metaSummary ? (
+                  <div
+                    className="review-summary-text"
+                    style={{ marginTop: 6, color: "var(--text-muted)", whiteSpace: "normal", lineHeight: 1.5 }}
+                    title={item.metaSummary}
+                  >
+                    {item.metaSummary}
+                  </div>
+                ) : null}
+              </div>
+            ),
+          },
+          {
+            title: "置信度",
+            dataIndex: "confidence",
+            key: "confidence",
+            width: 110,
+            render: (value: number) => `${(value * 100).toFixed(0)}%`,
+          },
+          {
             title: "问题类型",
             dataIndex: "finding_type",
             key: "finding_type",
@@ -272,80 +304,11 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             ),
           },
           {
-            title: "合并影响",
-            dataIndex: "mergeImpact",
-            key: "mergeImpact",
-            width: 170,
-            render: (value: string) => (
-              <Tag
-                color={
-                  value === "Blocking"
-                    ? "error"
-                    : value.includes("Should fix")
-                      ? "warning"
-                      : value === "Finding only"
-                        ? "default"
-                        : "success"
-                }
-              >
-                {value}
-              </Tag>
-            ),
-          },
-          {
             title: "优先级",
             dataIndex: "priority",
             key: "priority",
             width: 100,
             render: (value: string) => <Tag color="purple">{value}</Tag>,
-          },
-          {
-            title: "裁决状态",
-            key: "issue_status",
-            width: 240,
-            render: (_: unknown, item: ReviewResultListRow) => (
-              <div className="review-tag-stack">
-                {item.hasIssue ? (
-                  <>
-                    <Tag color={item.issueStatus === "resolved" ? "success" : item.needsHuman ? "error" : "processing"}>
-                      {item.issueStatus}
-                    </Tag>
-                    <Tag>{item.resolution}</Tag>
-                  </>
-                ) : (
-                  <>
-                    <Tag color="default">仅 finding</Tag>
-                    <Tag>未升级为 issue</Tag>
-                  </>
-                )}
-                {item.governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
-              </div>
-            ),
-          },
-          {
-            title: "治理说明",
-            key: "governance",
-            width: 280,
-            render: (_: unknown, item: ReviewResultListRow) =>
-              item.governanceDecision ? (
-                <div className="review-summary-cell">
-                  <div className="review-summary-title" title={item.governanceDecision.rule_label}>
-                    {item.governanceDecision.rule_label}
-                  </div>
-                  <div className="review-summary-text" title={item.governanceDecision.reason}>
-                    {item.governanceDecision.reason}
-                  </div>
-                </div>
-              ) : (
-                <span style={{ color: "var(--text-tertiary)" }}>-</span>
-              ),
-          },
-          {
-            title: "核验状态",
-            key: "verified",
-            width: 130,
-            render: (_: unknown, item: ReviewResultListRow) =>
-              item.verified ? <Tag color="success">已核验</Tag> : <Tag>未核验</Tag>,
           },
           {
             title: "设计一致性",
@@ -361,45 +324,6 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
               ) : (
                 <span style={{ color: "var(--text-tertiary)" }}>-</span>
               ),
-          },
-          {
-            title: "推荐动作",
-            dataIndex: "recommendedAction",
-            key: "recommendedAction",
-            width: 180,
-            render: (value: string) => (
-              <span className="review-action-chip" title={value}>
-                {value}
-              </span>
-            ),
-          },
-          {
-            title: "问题摘要",
-            dataIndex: "summary",
-            key: "summary",
-            width: 320,
-            render: (value: string, item: ReviewResultListRow) => (
-              <div className="review-summary-cell">
-                <div className="review-summary-title" title={item.title}>
-                  {item.title}
-                </div>
-                <div className="review-summary-text" title={value}>
-                  {value}
-                </div>
-                {item.metaSummary ? (
-                  <div className="review-summary-text" style={{ marginTop: 6, color: "var(--text-muted)" }} title={item.metaSummary}>
-                    {item.metaSummary}
-                  </div>
-                ) : null}
-              </div>
-            ),
-          },
-          {
-            title: "置信度",
-            dataIndex: "confidence",
-            key: "confidence",
-            width: 110,
-            render: (value: number) => `${(value * 100).toFixed(0)}%`,
           },
         ]}
       />

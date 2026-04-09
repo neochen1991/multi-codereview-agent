@@ -1210,9 +1210,10 @@ class MainAgentService:
         normalized = str(language or "").strip().lower()
         if normalized == "java":
             return (
-                "- 参考 Java / Spring 通用代码规范：命名清晰，职责单一，校验、事务、持久化、远程调用不要无边界混合。\n"
+                "- 参考 Java / Spring 通用代码规范：命名清晰，职责单一，校验、事务、持久化、远程调用不要无边界混合，避免临时变量名、弱语义命名和魔法值直接写进业务逻辑。\n"
                 "- 关注输入校验、空值与异常处理、日志脱敏、权限/租户隔离，以及 @Transactional 内的副作用。\n"
-                "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写等常见质量风险。"
+                "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写等常见质量风险。\n"
+                "- 检查条件分支、阈值、状态码、字符串标识是否以魔法值形式散落在代码中，是否应提取为常量、枚举或具名配置。"
             )
         if normalized in {"javascript", "jsx", "typescript", "tsx"}:
             return (
@@ -1653,10 +1654,10 @@ class MainAgentService:
                 0.76,
             )
 
-        if {"naming_convention_violation", "exception_swallowed"} & signal_set:
+        if {"naming_convention_violation", "magic_value_literal", "exception_swallowed"} & signal_set:
             _add_if_requested(
                 "maintainability_code_health",
-                "检测到命名规范或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
+                "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
                 0.72,
             )
 

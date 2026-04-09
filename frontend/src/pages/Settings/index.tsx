@@ -259,6 +259,8 @@ const SettingsPage: React.FC = () => {
                 light_llm_retry_count: Number(values.light_llm_retry_count || 2),
                 light_max_parallel_experts: Number(values.light_max_parallel_experts || 1),
                 light_max_debate_rounds: Number(values.light_max_debate_rounds || 1),
+                light_llm_max_prompt_chars: Number(values.light_llm_max_prompt_chars || 95000),
+                light_llm_max_input_tokens: Number(values.light_llm_max_input_tokens || 110000),
                 llm_log_truncate_enabled: Boolean(values.llm_log_truncate_enabled),
                 llm_log_preview_limit: Number(values.llm_log_preview_limit || 1600),
                 default_llm_provider: values.default_llm_provider || "dashscope-openai-compatible",
@@ -598,6 +600,24 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="light_max_debate_rounds" label="轻量模式最大辩论轮次">
                           <InputNumber min={1} max={3} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="light_llm_max_input_tokens"
+                          label="轻量模式上下文 token 上限"
+                          extra="智能压缩会以这个预算为准，超过时优先保留规则、变更代码和关键上下文。"
+                        >
+                          <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="light_llm_max_prompt_chars"
+                          label="轻量模式提示字符上限"
+                          extra="作为字符级兜底预算，防止混合中英文场景下提示过长。"
+                        >
+                          <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
