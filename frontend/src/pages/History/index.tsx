@@ -167,27 +167,27 @@ const HistoryPage: React.FC = () => {
           <Button type="link" size="small" onClick={() => openReviewTab(record.review_id, "result")}>
             结果
           </Button>
-          {record.status === "running" ? (
+          {["pending", "running", "waiting_human"].includes(record.status) ? (
             <Popconfirm
-              title="确认关闭这个运行中的任务吗？"
+              title="确认强制结束这个未完成任务吗？"
               description="关闭后会停止后续审核流程，并把任务状态更新为 closed。"
-              okText="确认关闭"
+              okText="确认结束"
               cancelText="取消"
               onConfirm={async () => {
                 setClosingReviewId(record.review_id);
                 try {
                   await reviewApi.close(record.review_id);
-                  message.success("任务已关闭");
+                  message.success("任务已强制结束");
                   await loadReviews();
                 } catch (error: any) {
-                  message.error(error?.message || "关闭任务失败");
+                  message.error(error?.message || "强制结束任务失败");
                 } finally {
                   setClosingReviewId("");
                 }
               }}
             >
               <Button type="link" size="small" danger loading={closingReviewId === record.review_id}>
-                关闭
+                强制结束
               </Button>
             </Popconfirm>
           ) : null}

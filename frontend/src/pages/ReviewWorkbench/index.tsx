@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { App as AntdApp, Button, Card, Col, Empty, Modal, Row, Space, Tabs, Tag, Typography } from "antd";
+import { App as AntdApp, Button, Card, Col, Empty, Modal, Popconfirm, Row, Space, Tabs, Tag, Typography } from "antd";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import ArtifactSummaryPanel from "@/components/review/ArtifactSummaryPanel";
@@ -1032,6 +1032,29 @@ const ReviewWorkbenchPage: React.FC = () => {
     openWorkspaceTab("result");
     scrollToRef(resultHumanRef);
   };
+  const canForceCloseReview = Boolean(reviewId && review && ["pending", "running", "waiting_human"].includes(review.status));
+  const forceCloseReview = async () => {
+    if (!reviewId) return;
+    setStarting(true);
+    try {
+      const closed = await reviewApi.close(reviewId);
+      setReview((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: closed.status,
+              phase: closed.phase,
+            }
+          : prev,
+      );
+      await loadWorkspaceData(reviewId, { forceFullReview: true });
+      message.success("任务已强制结束");
+    } catch (error: any) {
+      message.error(error?.message || "强制结束任务失败");
+    } finally {
+      setStarting(false);
+    }
+  };
 
   return (
     <div className="review-workbench-page">
@@ -1062,9 +1085,22 @@ const ReviewWorkbenchPage: React.FC = () => {
           {review?.report_summary ? (
             <Paragraph className="review-inline-summary">{review.report_summary}</Paragraph>
           ) : null}
-          <Space>
+          <Space wrap>
             {reviewId ? <Text type="secondary">Review ID: {reviewId}</Text> : <Text type="secondary">尚未创建审核</Text>}
             {reviewId ? <Button onClick={() => reviewId && void loadWorkspaceData(reviewId, { forceFullReview: true })}>刷新</Button> : null}
+            {canForceCloseReview ? (
+              <Popconfirm
+                title="确认强制结束这个未完成任务吗？"
+                description="结束后会停止后续审核流程，并把任务状态更新为 closed。"
+                okText="确认结束"
+                cancelText="取消"
+                onConfirm={() => void forceCloseReview()}
+              >
+                <Button danger loading={starting}>
+                  强制结束
+                </Button>
+              </Popconfirm>
+            ) : null}
           </Space>
         </Space>
       </Card>
