@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Card, Space, Table, Tag } from "antd";
+import { Button, Card, Space, Table, Tag, Tooltip } from "antd";
 
 import type { IssueFilterDecision } from "@/services/api";
 
@@ -249,23 +249,57 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             key: "summary",
             width: 620,
             render: (value: string, item: ReviewResultListRow) => (
-              <div className="review-summary-cell" style={{ whiteSpace: "normal" }}>
-                <div className="review-summary-title" title={item.title}>
-                  {item.title}
-                </div>
-                <div className="review-summary-text" title={value} style={{ whiteSpace: "normal", lineHeight: 1.6 }}>
-                  {value}
-                </div>
-                {item.metaSummary ? (
+              <Tooltip
+                placement="topLeft"
+                title={
+                  <div style={{ maxWidth: 720, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 8 }}>{item.title}</div>
+                    <div>{value}</div>
+                    {item.metaSummary ? <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>{item.metaSummary}</div> : null}
+                  </div>
+                }
+              >
+                <div className="review-summary-cell">
+                  <div
+                    className="review-summary-title"
+                    style={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {item.title}
+                  </div>
                   <div
                     className="review-summary-text"
-                    style={{ marginTop: 6, color: "var(--text-muted)", whiteSpace: "normal", lineHeight: 1.5 }}
-                    title={item.metaSummary}
+                    style={{
+                      lineHeight: 1.6,
+                      overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                    }}
                   >
-                    {item.metaSummary}
+                    {value}
                   </div>
-                ) : null}
-              </div>
+                  {item.metaSummary ? (
+                    <div
+                      className="review-summary-text"
+                      style={{
+                        marginTop: 6,
+                        color: "var(--text-muted)",
+                        lineHeight: 1.5,
+                        overflow: "hidden",
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                      }}
+                    >
+                      {item.metaSummary}
+                    </div>
+                  ) : null}
+                </div>
+              </Tooltip>
             ),
           },
           {
