@@ -29,6 +29,19 @@ class LlmUsageSummary(BaseModel):
     total_tokens: int = 0
 
 
+class IssueFilterDecision(BaseModel):
+    """结果页使用的轻量治理/阈值过滤决策。"""
+
+    topic: str = ""
+    rule_code: str = ""
+    rule_label: str = ""
+    reason: str = ""
+    severity: str = ""
+    finding_ids: list[str] = Field(default_factory=list)
+    finding_titles: list[str] = Field(default_factory=list)
+    expert_ids: list[str] = Field(default_factory=list)
+
+
 class ReviewReport(BaseModel):
     """面向前端结果页输出的最终 Code Review 报告模型。"""
 
@@ -43,3 +56,4 @@ class ReviewReport(BaseModel):
     confidence_summary: ConfidenceSummary = Field(default_factory=ConfidenceSummary)
     llm_usage_summary: LlmUsageSummary = Field(default_factory=LlmUsageSummary)
     human_review_status: str = "not_required"
+    issue_filter_decisions: list[IssueFilterDecision] = Field(default_factory=list)

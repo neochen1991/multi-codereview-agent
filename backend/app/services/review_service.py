@@ -933,6 +933,7 @@ class ReviewService:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
         issues = self.list_issues(review_id)
+        issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         issue_count = len(issues)
         summary = (
             f"本次代码审核共收敛 {len(findings)} 条发现，"
@@ -951,6 +952,7 @@ class ReviewService:
             issue_count=issue_count,
             human_review_status=review.human_review_status,
             llm_usage_summary=self.message_repo.summarize_llm_usage(review_id),
+            issue_filter_decisions=issue_filter_decisions,
             confidence_summary={
                 "high_confidence_count": len(
                     [item for item in findings if item.confidence >= 0.85]
@@ -966,6 +968,35 @@ class ReviewService:
                 "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
             },
         )
+
+    def _build_issue_filter_decisions(self, review_id: str) -> list[dict[str, object]]:
+        """提炼结果页需要的阈值过滤决策，避免结果页拉取全量消息。"""
+
+        decisions: list[dict[str, object]] = []
+        for message in self.list_all_messages(review_id):
+            if message.message_type != "issue_filter_applied":
+                continue
+            raw = message.metadata.get("issue_filter_decisions")
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                decisions.append(
+                    {
+                        "topic": str(item.get("topic") or ""),
+                        "rule_code": str(item.get("rule_code") or ""),
+                        "rule_label": str(item.get("rule_label") or ""),
+                        "reason": str(item.get("reason") or ""),
+                        "severity": str(item.get("severity") or ""),
+                        "finding_ids": [str(entry) for entry in (item.get("finding_ids") or []) if str(entry).strip()],
+                        "finding_titles": [
+                            str(entry) for entry in (item.get("finding_titles") or []) if str(entry).strip()
+                        ],
+                        "expert_ids": [str(entry) for entry in (item.get("expert_ids") or []) if str(entry).strip()],
+                    }
+                )
+        return decisions
 
     def build_review_snapshot(self, review_id: str) -> dict[str, object]:
         review = self.get_review(review_id)

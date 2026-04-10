@@ -319,6 +319,7 @@ export interface ReviewReport {
   confidence_summary: ConfidenceSummary;
   llm_usage_summary: LlmUsageSummary;
   human_review_status: string;
+  issue_filter_decisions?: IssueFilterDecision[];
 }
 
 export interface GovernanceMetrics {

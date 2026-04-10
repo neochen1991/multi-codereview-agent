@@ -569,9 +569,11 @@ const ReviewWorkbenchPage: React.FC = () => {
         return;
       }
       if (activeStep === "result") {
-        const [processBundle, resultBundle] = await Promise.all([loadProcessBundle(targetReviewId), loadResultBundle(targetReviewId)]);
+        const resultBundle = await loadResultBundle(targetReviewId);
+        setEvents([]);
+        setMessages([]);
         setReplay(null);
-        syncSelectionFromData(resultBundle.report?.issues || processBundle.issues || [], resultBundle.report?.findings || []);
+        syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
         return;
       }
       setReplay(null);
@@ -667,7 +669,7 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   useEffect(() => {
     // 过程页使用 SSE 增量刷新，保证主 Agent / 专家消息尽快出现在界面上。
-    if (!reviewId) return;
+    if (!reviewId || activeStep !== "process") return;
     return subscribeReviewEventStream(buildReviewEventStreamUrl(reviewId), () => {
       void loadWorkspaceData(reviewId);
     });
@@ -675,7 +677,7 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   useEffect(() => {
     // 对 running/pending 状态再补一层轮询兜底，防止流式连接偶发断开。
-    if (!reviewId) return;
+    if (!reviewId || activeStep !== "process") return;
     if (!review || !["pending", "running"].includes(review.status)) return;
     const timer = window.setInterval(() => {
       void loadWorkspaceData(reviewId);
@@ -693,7 +695,10 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [activeStep, review?.started_at, review?.status]);
 
   const allMessages = messages;
-  const issueFilterDecisions = useMemo(() => normalizeIssueFilterDecisions(allMessages), [allMessages]);
+  const issueFilterDecisions = useMemo(
+    () => (activeStep === "result" ? report?.issue_filter_decisions || [] : normalizeIssueFilterDecisions(allMessages)),
+    [activeStep, allMessages, report?.issue_filter_decisions],
+  );
   const expertSelectionSummary = useMemo(() => readExpertSelectionSummary(review), [review]);
   const overviewExpertSelectionSummary = useMemo(
     () => toOverviewExpertSelectionSummary(expertSelectionSummary),
