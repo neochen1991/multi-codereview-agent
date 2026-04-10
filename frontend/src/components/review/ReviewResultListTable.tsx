@@ -421,11 +421,46 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         key: "expert_labels",
         width: columnWidths.expert_labels,
         onHeaderCell: () => ({ width: columnWidths.expert_labels, onResize: (delta: number) => resizeColumn("expert_labels", delta) }),
-        render: (value: string[]) => (
-          <div className="review-tag-stack">
-            {value.length > 0 ? value.map((entry) => <Tag key={entry} color="geekblue">{entry}</Tag>) : <Tag color="default">-</Tag>}
-          </div>
-        ),
+        render: (value: string[]) => {
+          if (!value.length) return <Tag color="default">-</Tag>;
+          const visible = value.slice(0, 2);
+          const hiddenCount = Math.max(value.length - visible.length, 0);
+          return (
+            <Tooltip placement="topLeft" title={value.join("、")}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {visible.map((entry) => (
+                  <Tag
+                    key={entry}
+                    color="geekblue"
+                    style={{
+                      maxWidth: hiddenCount > 0 ? 48 : 68,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      marginInlineEnd: 0,
+                    }}
+                  >
+                    {entry}
+                  </Tag>
+                ))}
+                {hiddenCount > 0 ? (
+                  <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                    +{hiddenCount}
+                  </Tag>
+                ) : null}
+              </div>
+            </Tooltip>
+          );
+        },
       },
       {
         title: "优先级",
