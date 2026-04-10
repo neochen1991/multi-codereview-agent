@@ -63,6 +63,20 @@ class SqliteFindingRepository:
             ).fetchall()
         return [ReviewFinding.model_validate(json.loads(row["payload_json"])) for row in rows]
 
+    def get(self, review_id: str, finding_id: str) -> ReviewFinding | None:
+        with self._db.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM findings
+                WHERE review_id = ? AND finding_id = ?
+                """,
+                (review_id, finding_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return ReviewFinding.model_validate(json.loads(row["payload_json"]))
+
     def delete_for_review(self, review_id: str) -> None:
         with self._db.connect() as connection:
             connection.execute("DELETE FROM findings WHERE review_id = ?", (review_id,))

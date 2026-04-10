@@ -422,6 +422,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [findingModalOpen, setFindingModalOpen] = useState(false);
   const [resultFindingDetailsLoading, setResultFindingDetailsLoading] = useState(false);
   const [resultFindingDetailsError, setResultFindingDetailsError] = useState("");
+  const [resultFindingDetailCache, setResultFindingDetailCache] = useState<Record<string, ReviewFinding>>({});
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
   const workspaceLoadRef = useRef<{ key: string; promise: Promise<void> | null }>({ key: "", promise: null });
@@ -532,19 +533,9 @@ const ReviewWorkbenchPage: React.FC = () => {
     setIssues(nextReport.issues || []);
     setFindings(nextReport.findings || []);
     setArtifacts(artifactBundle);
-    setResultFindingDetailsLoading(true);
+    setResultFindingDetailCache({});
+    setResultFindingDetailsLoading(false);
     setResultFindingDetailsError("");
-    void reviewApi
-      .listFindings(targetReviewId)
-      .then((fullFindings) => {
-        setFindings(fullFindings);
-      })
-      .catch((error: any) => {
-        setResultFindingDetailsError(error?.message || "完整问题详情加载失败");
-      })
-      .finally(() => {
-        setResultFindingDetailsLoading(false);
-      });
     return { report: nextReport, artifacts: artifactBundle };
   };
 
@@ -609,6 +600,7 @@ const ReviewWorkbenchPage: React.FC = () => {
         setEvents([]);
         setMessages([]);
         setFindings([]);
+        setResultFindingDetailCache({});
         syncSelectionFromData([], []);
         applyReviewDetail(detail);
       } catch (error: any) {
@@ -659,6 +651,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setEvents([]);
       setMessages([]);
       setFindings([]);
+      setResultFindingDetailCache({});
       setForm({
         ...defaultFormState,
         analysis_mode: runtimeSettings?.default_analysis_mode || "standard",
@@ -774,6 +767,10 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => findings.find((item) => item.finding_id === selectedFindingId) || findings[0] || null,
     [findings, selectedFindingId],
   );
+  const selectedFindingDetail = useMemo(
+    () => (selectedFinding ? resultFindingDetailCache[selectedFinding.finding_id] || selectedFinding : null),
+    [resultFindingDetailCache, selectedFinding],
+  );
   const selectedFindingIssue = useMemo(
     () => (selectedFinding ? issueByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueByFindingId, selectedFinding],
@@ -824,20 +821,45 @@ const ReviewWorkbenchPage: React.FC = () => {
     [issueFilterDecisionByFindingId, selectedFinding],
   );
   const selectedFindingRuleScreening = useMemo(() => {
-    if (!selectedFinding || !replay?.messages?.length) return null;
+    if (!selectedFindingDetail || !replay?.messages?.length) return null;
     const candidate = replay.messages
       .slice()
       .reverse()
       .find((message) => {
         if (!["expert_analysis", "expert_ack", "debate_message"].includes(message.message_type)) return false;
-        if (message.expert_id !== selectedFinding.expert_id) return false;
+        if (message.expert_id !== selectedFindingDetail.expert_id) return false;
         const metadata = message.metadata || {};
         const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
-        if (filePath && selectedFinding.file_path && filePath !== selectedFinding.file_path) return false;
+        if (filePath && selectedFindingDetail.file_path && filePath !== selectedFindingDetail.file_path) return false;
         return Boolean(metadata.rule_screening);
       });
     return normalizeRuleScreeningMetadata(candidate?.metadata?.rule_screening);
-  }, [replay?.messages, selectedFinding]);
+  }, [replay?.messages, selectedFindingDetail]);
+
+  useEffect(() => {
+    if (activeStep !== "result" || !reviewId || !selectedFindingId) return;
+    if (resultFindingDetailCache[selectedFindingId]) {
+      setResultFindingDetailsLoading(false);
+      setResultFindingDetailsError("");
+      return;
+    }
+    setResultFindingDetailsLoading(true);
+    setResultFindingDetailsError("");
+    void reviewApi
+      .getFinding(reviewId, selectedFindingId)
+      .then((finding) => {
+        setResultFindingDetailCache((current) => ({
+          ...current,
+          [finding.finding_id]: finding,
+        }));
+      })
+      .catch((error: any) => {
+        setResultFindingDetailsError(error?.message || "完整问题详情加载失败");
+      })
+      .finally(() => {
+        setResultFindingDetailsLoading(false);
+      });
+  }, [activeStep, reviewId, resultFindingDetailCache, selectedFindingId]);
   const expertRuleCoverage = useMemo(() => {
     if (!replay?.messages?.length) return [] as ExpertRuleCoverageSummary[];
     const expertNameById = new Map(experts.map((item) => [item.expert_id, item.name_zh || item.expert_id]));
@@ -1491,7 +1513,7 @@ const ReviewWorkbenchPage: React.FC = () => {
             >
               <Suspense fallback={<WorkbenchPanelFallback description="问题详情加载中..." />}>
                 <CodeReviewConclusionPanel
-                  finding={selectedFinding}
+                  finding={selectedFindingDetail}
                   issue={selectedFindingIssue}
                   governanceDecision={selectedFindingGovernanceDecision}
                   ruleScreening={selectedFindingRuleScreening}

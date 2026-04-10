@@ -184,6 +184,16 @@ def list_findings(review_id: str) -> list[dict[str, object]]:
     ]
 
 
+@router.get("/reviews/{review_id}/findings/{finding_id}")
+def get_finding(review_id: str, finding_id: str) -> dict[str, object]:
+    """返回某条 finding 的完整详情。"""
+
+    finding = review_service_module.review_service.get_finding(review_id, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    return finding.model_dump(mode="json")
+
+
 @router.get("/reviews/{review_id}/messages")
 def list_messages(review_id: str) -> list[dict[str, object]]:
     """返回某次审核的全部消息，供过程页按需加载。"""

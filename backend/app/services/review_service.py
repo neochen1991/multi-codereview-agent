@@ -710,6 +710,9 @@ class ReviewService:
     def list_findings(self, review_id: str) -> list[ReviewFinding]:
         return self.finding_repo.list(review_id)
 
+    def get_finding(self, review_id: str, finding_id: str) -> ReviewFinding | None:
+        return self.finding_repo.get(review_id, finding_id)
+
     def list_issues(self, review_id: str) -> list[DebateIssue]:
         return self.issue_repo.list(review_id)
 
