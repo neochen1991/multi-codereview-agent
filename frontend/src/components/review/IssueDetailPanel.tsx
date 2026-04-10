@@ -63,6 +63,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               />
             ) : null}
             <Descriptions column={1} size="small">
+              <Descriptions.Item label="问题标题">
+                {issue.title || "-"}
+              </Descriptions.Item>
+              <Descriptions.Item label="问题描述">
+                <div>
+                  <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                    {issue.summary || "-"}
+                  </Paragraph>
+                </div>
+              </Descriptions.Item>
               <Descriptions.Item label="状态">
                 <Tag color={issue.status === "needs_human" ? "error" : issue.status === "resolved" ? "success" : "processing"}>
                   {issue.status}
@@ -125,7 +135,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             {aggregatedTitles.length || aggregatedSummaries.length ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合问题</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合子问题</Paragraph>
                 <Descriptions column={1} size="small">
                   {aggregatedTitles.length ? (
                     <Descriptions.Item label="问题标题">
@@ -141,11 +151,13 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   {aggregatedSummaries.length ? (
                     <Descriptions.Item label="问题说明">
                       <div>
-                        {aggregatedSummaries.map((summary) => (
+                        {aggregatedSummaries
+                          .filter((summary) => summary !== issue.summary)
+                          .map((summary) => (
                           <Paragraph key={summary} style={{ marginBottom: 8 }}>
                             {summary}
                           </Paragraph>
-                        ))}
+                          ))}
                       </div>
                     </Descriptions.Item>
                   ) : null}

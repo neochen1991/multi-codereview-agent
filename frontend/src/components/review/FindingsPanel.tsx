@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Tag } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
-import ReviewResultListTable, { type ReviewResultListRow } from "./ReviewResultListTable";
+import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 type FindingsPanelProps = {
   findings: ReviewFinding[];
@@ -46,6 +46,16 @@ const hasDesignEvidence = (finding: ReviewFinding): boolean =>
   (finding.missing_design_points?.length || 0) > 0 ||
   (finding.extra_implementation_points?.length || 0) > 0 ||
   (finding.design_conflicts?.length || 0) > 0;
+
+const buildFindingTypeLabels = (finding: ReviewFinding): string[] => {
+  const values = [
+    finding.title,
+    ...(finding.matched_rules || []),
+    ...(finding.violated_guidelines || []),
+    finding.summary,
+  ];
+  return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
+};
 
 const FindingsPanel: React.FC<FindingsPanelProps> = ({
   findings,
@@ -91,6 +101,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           summary: finding.summary,
           metaSummary: undefined,
           finding_type: finding.finding_type,
+          finding_type_labels: buildFindingTypeLabels(finding),
           severity: finding.severity,
           confidence: finding.confidence,
           expert_labels: finding.expert_id ? [finding.expert_id] : [],

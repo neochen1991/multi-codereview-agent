@@ -846,6 +846,131 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response_in_li
     assert len(finding_payloads) == 2
 
 
+def test_review_runner_reanchors_semantically_distinct_findings_to_different_hunks(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_multi_hunk_anchor_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/multi-anchor",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/BatchConsumer.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/BatchConsumer.java b/src/main/java/com/acme/BatchConsumer.java\n"
+                "--- a/src/main/java/com/acme/BatchConsumer.java\n"
+                "+++ b/src/main/java/com/acme/BatchConsumer.java\n"
+                "@@ -18,1 +18,1 @@\n"
+                "- private final Integer CHUNKS = 200;\n"
+                "+ private final Integer chunksTmp = 200;\n"
+                "@@ -40,1 +40,1 @@\n"
+                "- String sql = \"select * from events limit :chunk\";\n"
+                "+ String sql = \"select * from events\";\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请审查这个文件里的多个问题",
+        metadata={
+            "file_path": "src/main/java/com/acme/BatchConsumer.java",
+            "line_start": 18,
+            "target_hunk": {
+                "hunk_header": "@@ -18,1 +18,1 @@",
+                "start_line": 18,
+                "end_line": 18,
+                "changed_lines": [18],
+                "excerpt": "+ private final Integer chunksTmp = 200;",
+            },
+            "target_hunks": [
+                {
+                    "hunk_header": "@@ -18,1 +18,1 @@",
+                    "start_line": 18,
+                    "end_line": 18,
+                    "changed_lines": [18],
+                    "excerpt": "+ private final Integer chunksTmp = 200;",
+                },
+                {
+                    "hunk_header": "@@ -40,1 +40,1 @@",
+                    "start_line": 40,
+                    "end_line": 40,
+                    "changed_lines": [40],
+                    "excerpt": '+ String sql = "select * from events";',
+                },
+            ],
+            "repository_context": {"routing_reason": "同文件多 hunk 综合变更"},
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"title":"常量命名退化","claim":"chunksTmp 破坏常量命名规范，可读性下降","finding_type":"design_concern","severity":"medium","line_start":18,'
+                '"matched_rules":["JAVA-NAMING-001"],"violated_guidelines":["常量必须使用全大写命名"],"rule_based_reasoning":"常量命名退化。",'
+                '"evidence":["CHUNKS 改为 chunksTmp"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"恢复常量命名","suggested_fix":"改回 CHUNKS","change_steps":["恢复常量名"],'
+                '"suggested_code":"private static final Integer CHUNKS = 200;","confidence":0.82,"verification_needed":false,"verification_plan":""},'
+                '{"title":"SQL LIMIT 被移除","claim":"查询去掉 limit 后可能导致大结果集扫描","finding_type":"direct_defect","severity":"high","line_start":18,'
+                '"matched_rules":["PERF-SQL-001"],"violated_guidelines":["查询必须有分页或 limit 保护"],"rule_based_reasoning":"limit 保护消失。",'
+                '"evidence":["SQL 从 limit :chunk 变成无 limit"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"fix_strategy":"恢复分页保护","suggested_fix":"恢复 limit :chunk","change_steps":["把 SQL 改回带 limit"],'
+                '"suggested_code":"select * from events limit :chunk","confidence":0.91,"verification_needed":false,"verification_plan":""}'
+                ']}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/BatchConsumer.java",
+        line_start=18,
+        target_hunk=command_message.metadata["target_hunk"],
+        target_hunks=command_message.metadata["target_hunks"],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="light",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=finding_payloads,
+    )
+
+    findings = sorted(runner.finding_repo.list(review.review_id), key=lambda item: item.title)
+    assert len(findings) == 2
+    assert findings[0].line_start != findings[1].line_start
+    assert {item.line_start for item in findings} == {18, 40}
+
+
 def test_review_runner_keeps_selected_security_expert_executable(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

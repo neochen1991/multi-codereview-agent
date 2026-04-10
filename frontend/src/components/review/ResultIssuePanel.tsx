@@ -3,7 +3,7 @@ import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
-import ReviewResultListTable, { type ReviewResultListRow } from "./ReviewResultListTable";
+import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
 
@@ -57,6 +57,17 @@ const getDesignAlignmentStatus = (relatedFindings: ReviewFinding[]): string | un
   );
   if (misaligned) return "design_misaligned";
   return relatedFindings.find((finding) => finding.design_alignment_status)?.design_alignment_status;
+};
+
+const buildIssueTypeLabels = (issue: DebateIssue, findings: ReviewFinding[]): string[] => {
+  const values = [
+    issue.title,
+    issue.summary,
+    ...(issue.aggregated_titles || []),
+    ...(issue.aggregated_summaries || []),
+    ...findings.flatMap((finding) => [...(finding.matched_rules || []), ...(finding.violated_guidelines || []), finding.title]),
+  ];
+  return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
 };
 
 const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
@@ -133,6 +144,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
                   ),
                 ),
           finding_type: issue.finding_type || primaryFinding?.finding_type || "risk_hypothesis",
+          finding_type_labels: buildIssueTypeLabels(issue, relatedFindings),
           severity: issue.severity,
           confidence: issue.confidence,
           expert_labels: issue.participant_expert_ids || [],

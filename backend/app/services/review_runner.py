@@ -2073,20 +2073,25 @@ class ReviewRunner:
         dedupe_keys: set[tuple[str, int, str, str]] = set()
         candidate_count = len(parsed_candidates)
         for index, raw_parsed in enumerate(parsed_candidates, start=1):
-            raw_line_start = self._normalize_line_start(raw_parsed.get("line_start"), line_start)
-            matched_target_hunk = self._match_target_hunk_for_line(raw_line_start, target_hunk, target_hunks)
+            matched_target_hunk = self._resolve_finding_target_hunk(
+                raw_parsed,
+                fallback_line_start=line_start,
+                target_hunk=target_hunk,
+                target_hunks=target_hunks,
+            )
+            matched_hunk_line_start = self._normalize_optional_line_value(matched_target_hunk.get("start_line")) or line_start
             parsed = self._stabilize_expert_analysis(
                 raw_parsed,
                 expert.expert_id,
                 file_path,
-                line_start,
+                matched_hunk_line_start,
                 matched_target_hunk,
                 repository_context=repository_context,
                 input_completeness=input_completeness,
             )
             severity = self._normalize_severity(parsed.get("severity"), base_severity)
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
-            parsed_line_start = self._normalize_line_start(parsed.get("line_start"), line_start)
+            parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -5145,6 +5150,127 @@ class ReviewRunner:
             if start_line <= line_start <= end_line:
                 return item
         return dict(target_hunk or normalized_hunks[0])
+
+    def _resolve_finding_target_hunk(
+        self,
+        parsed: dict[str, object],
+        *,
+        fallback_line_start: int,
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        normalized_hunks = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
+        if not normalized_hunks:
+            return dict(target_hunk or {})
+
+        explicit_line_start = self._normalize_optional_line_value(parsed.get("line_start"))
+        if explicit_line_start is not None and explicit_line_start != fallback_line_start:
+            return self._match_target_hunk_for_line(explicit_line_start, target_hunk, normalized_hunks)
+
+        semantic_hunk = self._match_target_hunk_by_semantics(parsed, normalized_hunks)
+        if semantic_hunk is not None:
+            return semantic_hunk
+        if explicit_line_start is not None:
+            return self._match_target_hunk_for_line(explicit_line_start, target_hunk, normalized_hunks)
+        return dict(target_hunk or normalized_hunks[0])
+
+    def _match_target_hunk_by_semantics(
+        self,
+        parsed: dict[str, object],
+        target_hunks: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        if len(target_hunks) <= 1:
+            return None
+
+        semantic_parts: list[str] = []
+        for key in (
+            "title",
+            "claim",
+            "summary",
+            "fix_strategy",
+            "suggested_fix",
+            "rule_based_reasoning",
+            "suggested_code",
+        ):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "assumptions", "matched_rules", "violated_guidelines", "change_steps"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        if not finding_tokens:
+            return None
+
+        best_hunk: dict[str, object] | None = None
+        best_score = 0
+        second_best_score = 0
+        excerpt_phrases = [str(parsed.get("title") or "").strip(), str(parsed.get("claim") or "").strip()]
+        for hunk in target_hunks:
+            hunk_text = "\n".join(
+                [
+                    str(hunk.get("hunk_header") or "").strip(),
+                    str(hunk.get("excerpt") or "").strip(),
+                ]
+            )
+            hunk_tokens = self._extract_anchor_tokens(hunk_text)
+            overlap = finding_tokens & hunk_tokens
+            score = 0
+            for token in overlap:
+                score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+            excerpt_lower = str(hunk.get("excerpt") or "").lower()
+            for phrase in excerpt_phrases:
+                normalized_phrase = phrase.lower()
+                if normalized_phrase and len(normalized_phrase) >= 6 and normalized_phrase in excerpt_lower:
+                    score += 4
+            if score > best_score:
+                second_best_score = best_score
+                best_score = score
+                best_hunk = dict(hunk)
+            elif score > second_best_score:
+                second_best_score = score
+
+        if best_hunk is None or best_score <= 0:
+            return None
+        if second_best_score and best_score == second_best_score:
+            return None
+        return best_hunk
+
+    def _extract_anchor_tokens(self, text: str) -> set[str]:
+        if not text:
+            return set()
+        stopwords = {
+            "this",
+            "that",
+            "with",
+            "from",
+            "have",
+            "should",
+            "would",
+            "could",
+            "into",
+            "when",
+            "where",
+            "then",
+            "line",
+            "file",
+            "code",
+            "rule",
+            "must",
+            "need",
+            "using",
+            "java",
+        }
+        tokens: set[str] = set()
+        for raw_token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", text):
+            normalized = raw_token.strip("_").lower()
+            if len(normalized) >= 3 and normalized not in stopwords:
+                tokens.add(normalized)
+            for part in re.findall(r"[A-Z]+(?=[A-Z][a-z]|\d|_|$)|[A-Z]?[a-z]+|\d+", raw_token):
+                normalized_part = part.strip("_").lower()
+                if len(normalized_part) >= 3 and normalized_part not in stopwords:
+                    tokens.add(normalized_part)
+        return tokens
 
     def _merge_context_files(
         self,
