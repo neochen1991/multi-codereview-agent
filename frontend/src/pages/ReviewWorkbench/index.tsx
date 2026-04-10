@@ -422,6 +422,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [findingModalOpen, setFindingModalOpen] = useState(false);
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
+  const workspaceLoadRef = useRef<{ key: string; promise: Promise<void> | null }>({ key: "", promise: null });
   const processDialogueRef = useRef<HTMLDivElement | null>(null);
   const processIssuesRef = useRef<HTMLDivElement | null>(null);
   const resultSummaryRef = useRef<HTMLDivElement | null>(null);
@@ -551,45 +552,58 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   const loadWorkspaceData = async (targetReviewId: string, options?: { forceFullReview?: boolean }) => {
-    setLoading(true);
-    try {
-      const detail =
-        options?.forceFullReview || !review?.subject?.unified_diff
-          ? await loadReviewBase(targetReviewId)
-          : await loadReviewSnapshot(targetReviewId);
-      if (activeStep === "process") {
-        const processBundle = await loadProcessBundle(targetReviewId);
-        if (processMainTab === "replay") {
-          const replayBundle = await loadReplayBundle(targetReviewId);
-          syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
-        } else {
-          setReplay(null);
-          syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
+    const loadKey = [targetReviewId, activeStep, processMainTab, options?.forceFullReview ? "full" : "smart"].join("|");
+    if (workspaceLoadRef.current.promise && workspaceLoadRef.current.key === loadKey) {
+      return workspaceLoadRef.current.promise;
+    }
+
+    const task = (async () => {
+      setLoading(true);
+      try {
+        const detail =
+          options?.forceFullReview || !review?.subject?.unified_diff
+            ? await loadReviewBase(targetReviewId)
+            : await loadReviewSnapshot(targetReviewId);
+        if (activeStep === "process") {
+          const processBundle = await loadProcessBundle(targetReviewId);
+          if (processMainTab === "replay") {
+            await loadReplayBundle(targetReviewId);
+            syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
+          } else {
+            setReplay(null);
+            syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
+          }
+          return;
         }
-        return;
-      }
-      if (activeStep === "result") {
-        const resultBundle = await loadResultBundle(targetReviewId);
+        if (activeStep === "result") {
+          const resultBundle = await loadResultBundle(targetReviewId);
+          setEvents([]);
+          setMessages([]);
+          setReplay(null);
+          syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
+          return;
+        }
+        setReplay(null);
+        setReport(null);
+        setArtifacts(null);
+        setIssues([]);
         setEvents([]);
         setMessages([]);
-        setReplay(null);
-        syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
-        return;
+        setFindings([]);
+        syncSelectionFromData([], []);
+        applyReviewDetail(detail);
+      } catch (error: any) {
+        message.error(error?.message || "加载审核详情失败");
+      } finally {
+        setLoading(false);
+        if (workspaceLoadRef.current.key === loadKey) {
+          workspaceLoadRef.current = { key: "", promise: null };
+        }
       }
-      setReplay(null);
-      setReport(null);
-      setArtifacts(null);
-      setIssues([]);
-      setEvents([]);
-      setMessages([]);
-      setFindings([]);
-      syncSelectionFromData([], []);
-      applyReviewDetail(detail);
-    } catch (error: any) {
-      message.error(error?.message || "加载审核详情失败");
-    } finally {
-      setLoading(false);
-    }
+    })();
+
+    workspaceLoadRef.current = { key: loadKey, promise: task };
+    return task;
   };
 
   useEffect(() => {
@@ -645,7 +659,18 @@ const ReviewWorkbenchPage: React.FC = () => {
     setDecisionComment("");
     setFindingModalOpen(false);
     void loadWorkspaceData(reviewId, { forceFullReview: true });
-  }, [activeStep, processMainTab, requestedTab, reviewId, runtimeSettings]);
+  }, [activeStep, processMainTab, requestedTab, reviewId]);
+
+  useEffect(() => {
+    if (reviewId || !runtimeSettings) return;
+    setForm((current) => ({
+      ...current,
+      analysis_mode: current.analysis_mode || runtimeSettings.default_analysis_mode || "standard",
+      target_ref: current.target_ref || runtimeSettings.default_target_branch || "",
+      selected_experts:
+        current.selected_experts.length > 0 ? current.selected_experts : defaultFormState.selected_experts,
+    }));
+  }, [reviewId, runtimeSettings]);
 
   useEffect(() => {
     if (!requestedTab || requestedTab === activeStep) return;
