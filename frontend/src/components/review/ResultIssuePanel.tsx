@@ -207,6 +207,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         selectedRowIds={selectedIssueIds}
         onSelectedRowIdsChange={setSelectedIssueIds}
         emptyText="当前没有正式议题。若发现项未达到阈值，会保留在审核发现清单或阈值过滤清单中。"
+        disableHorizontalScroll
       />
       <Modal
         title="CodeHub 模拟提交结果"

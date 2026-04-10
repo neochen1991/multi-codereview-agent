@@ -41,6 +41,7 @@ type ReviewResultListTableProps = {
   selectedRowIds?: string[];
   onSelectedRowIdsChange?: (rowIds: string[]) => void;
   emptyText: string;
+  disableHorizontalScroll?: boolean;
 };
 
 type ColumnWidthKey =
@@ -202,6 +203,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
   selectedRowIds,
   onSelectedRowIdsChange,
   emptyText,
+  disableHorizontalScroll = false,
 }) => {
   const [fileKeyword, setFileKeyword] = useState("");
   const [findingTypeFilter, setFindingTypeFilter] = useState<string | undefined>(undefined);
@@ -497,7 +499,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         rowKey="id"
         size="middle"
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
-        scroll={{ x: tableScrollX }}
+        scroll={disableHorizontalScroll ? undefined : { x: tableScrollX }}
         dataSource={filteredRows}
         rowClassName={(record) => (record.id === selectedRowId ? "thread-selected" : "")}
         rowSelection={
