@@ -20,6 +20,7 @@ class RepositoryContextService:
 
     EXCLUDED_PATH_PARTS = {
         ".git",
+        ".idea",
         "node_modules",
         "dist",
         "build",
@@ -84,6 +85,7 @@ class RepositoryContextService:
             tuple[str, tuple[str, ...], int],
             list[dict[str, Any]],
         ] = OrderedDict()
+        self._search_root_prefixes: tuple[str, ...] | None = None
 
     @classmethod
     def from_review_context(
@@ -129,8 +131,9 @@ class RepositoryContextService:
             workspace_repo = Path(workspace_repo_path).expanduser()
             if workspace_repo.exists() and workspace_repo.is_dir():
                 return workspace_repo
-        normalized_local_path = Path(local_path).expanduser() if str(local_path or "").strip() else Path()
-        if str(normalized_local_path):
+        raw_local_path = str(local_path or "").strip()
+        normalized_local_path = Path(raw_local_path).expanduser() if raw_local_path else Path()
+        if raw_local_path:
             return normalized_local_path
         if not cls._should_use_workspace_fallback(subject):
             return normalized_local_path
@@ -476,6 +479,8 @@ class RepositoryContextService:
             "!**/*.lock",
             query,
         ]
+        for search_root_glob in self._build_search_root_globs():
+            cmd.extend(["--glob", search_root_glob])
         for pattern in globs:
             cmd.extend(["--glob", pattern])
         try:
@@ -566,6 +571,12 @@ class RepositoryContextService:
         if not normalized:
             return False
         path = Path(normalized)
+        allowed_roots = self._get_search_root_prefixes()
+        if allowed_roots and not any(
+            normalized == root or normalized.startswith(f"{root}/")
+            for root in allowed_roots
+        ):
+            return False
         if any(part in self.EXCLUDED_PATH_PARTS for part in path.parts):
             return False
         if self._looks_like_test_file(path):
@@ -575,6 +586,39 @@ class RepositoryContextService:
         if path.suffix.lower() in self.EXCLUDED_SUFFIXES:
             return False
         return True
+
+    def _get_search_root_prefixes(self) -> tuple[str, ...]:
+        if self._search_root_prefixes is not None:
+            return self._search_root_prefixes
+        if not self.is_ready():
+            self._search_root_prefixes = ()
+            return self._search_root_prefixes
+
+        prefixes: list[str] = []
+        for path in self.local_path.rglob("src"):
+            if not path.is_dir():
+                continue
+            try:
+                relative = path.relative_to(self.local_path).as_posix()
+            except ValueError:
+                continue
+            if not relative or relative == ".":
+                continue
+            relative_path = Path(relative)
+            if any(part in self.EXCLUDED_PATH_PARTS for part in relative_path.parts):
+                continue
+            if relative.startswith("."):
+                continue
+            prefixes.append(relative)
+
+        self._search_root_prefixes = tuple(sorted(dict.fromkeys(prefixes)))
+        return self._search_root_prefixes
+
+    def _build_search_root_globs(self) -> list[str]:
+        prefixes = self._get_search_root_prefixes()
+        if not prefixes:
+            return []
+        return [f"{prefix}/**" for prefix in prefixes]
 
     def _looks_like_test_file(self, path: Path) -> bool:
         lower_parts = [part.lower() for part in path.parts]

@@ -206,6 +206,35 @@ def test_repository_context_service_ignores_git_and_lock_noise(tmp_path: Path):
     assert all(not item["path"].endswith("yarn.lock") for item in result["matches"])
 
 
+def test_repository_context_service_ignores_idea_index_and_only_searches_src_roots(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    idea_index = repo_root / ".idea" / "workspace.xml"
+    docs_file = repo_root / "docs" / "architecture.md"
+    source_file = repo_root / "src" / "main" / "java" / "com" / "example" / "OrderService.java"
+    nested_source_file = repo_root / "modules" / "order" / "src" / "main" / "java" / "com" / "example" / "OrderAppService.java"
+    idea_index.parent.mkdir(parents=True, exist_ok=True)
+    docs_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    nested_source_file.parent.mkdir(parents=True, exist_ok=True)
+    idea_index.write_text("processOrder\n", encoding="utf-8")
+    docs_file.write_text("processOrder\n", encoding="utf-8")
+    source_file.write_text("public class OrderService { void processOrder() {} }\n", encoding="utf-8")
+    nested_source_file.write_text("public class OrderAppService { void processOrder() {} }\n", encoding="utf-8")
+
+    service = RepositoryContextService(
+        clone_url="https://github.com/example/repo.git",
+        local_path=repo_root,
+        default_branch="main",
+    )
+
+    result = service.search("processOrder")
+
+    assert result["matches"]
+    assert all(".idea/" not in item["path"] for item in result["matches"])
+    assert all(not item["path"].startswith("docs/") for item in result["matches"])
+    assert all("/src/" in f"/{item['path']}" for item in result["matches"])
+
+
 def test_repository_context_service_ignores_compiled_class_artifacts(tmp_path: Path):
     repo_root = tmp_path / "repo"
     class_file = repo_root / "target" / "classes" / "OrderService.class"
