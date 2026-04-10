@@ -45,3 +45,10 @@ class SqliteDatabase:
                 """
             ).fetchall()
         return [str(row["name"]) for row in rows]
+
+    def compact(self) -> None:
+        """Try to reclaim SQLite disk space after manual cleanup operations."""
+
+        with self.connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")

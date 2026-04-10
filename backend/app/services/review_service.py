@@ -5,6 +5,7 @@ import threading
 import os
 import logging
 import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -595,6 +596,23 @@ class ReviewService:
         )
         logger.info("failed review rerun requested review_id=%s rerun_count=%s", review.review_id, metadata["rerun_count"])
         return self.queue_start_review(review.review_id)
+
+    def delete_review(self, review_id: str) -> None:
+        """删除已结束的审核记录及其关联运行数据，并尽量回收 SQLite 空间。"""
+
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        if review.status not in {"completed", "failed", "closed"}:
+            raise ValueError("only_terminal_review_can_delete")
+
+        self._clear_review_runtime_outputs(review_id)
+        shutil.rmtree(self.storage_root / "reviews" / review_id, ignore_errors=True)
+        self.review_repo.delete(review_id)
+        self.review_repo.compact()
+        with self._active_reviews_lock:
+            self._active_reviews.discard(review_id)
+        logger.info("review deleted review_id=%s status=%s", review_id, review.status)
 
     def _clear_review_runtime_outputs(self, review_id: str) -> None:
         """清理某次审核上一轮运行产生的临时输出，避免重跑时混入旧结果。"""

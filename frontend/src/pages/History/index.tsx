@@ -42,6 +42,7 @@ const HistoryPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [closingReviewId, setClosingReviewId] = useState("");
   const [rerunningReviewId, setRerunningReviewId] = useState("");
+  const [deletingReviewId, setDeletingReviewId] = useState("");
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -212,6 +213,30 @@ const HistoryPage: React.FC = () => {
             >
               <Button type="link" size="small" loading={rerunningReviewId === record.review_id}>
                 重跑
+              </Button>
+            </Popconfirm>
+          ) : null}
+          {["completed", "failed", "closed"].includes(record.status) ? (
+            <Popconfirm
+              title="确认删除这条历史审核记录吗？"
+              description="删除后会同时清理该审核的过程消息、发现、议题、产物和 SQLite 记录，操作不可恢复。"
+              okText="确认删除"
+              cancelText="取消"
+              onConfirm={async () => {
+                setDeletingReviewId(record.review_id);
+                try {
+                  await reviewApi.delete(record.review_id);
+                  message.success("历史记录已删除");
+                  await loadReviews();
+                } catch (error: any) {
+                  message.error(error?.message || "删除历史记录失败");
+                } finally {
+                  setDeletingReviewId("");
+                }
+              }}
+            >
+              <Button type="link" size="small" danger loading={deletingReviewId === record.review_id}>
+                删除
               </Button>
             </Popconfirm>
           ) : null}

@@ -216,3 +216,56 @@ def test_rerun_non_failed_review_returns_conflict(client):
     response = client.post(f"/api/reviews/{created['review_id']}/rerun")
     assert response.status_code == 409
     assert response.json()["detail"] == "only failed review can rerun"
+
+
+def test_delete_terminal_review_removes_history_record(client, storage_root: Path):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_delete",
+            "project_id": "proj_delete",
+            "source_ref": "feature/delete",
+            "target_ref": "main",
+            "title": "delete review",
+        },
+    ).json()
+
+    service = client.app.state.auto_review_scheduler._review_service  # type: ignore[attr-defined]
+    review = service.get_review(created["review_id"])
+    assert review is not None
+    review.status = "completed"
+    review.phase = "completed"
+    service.review_repo.save(review)
+
+    response = client.delete(f"/api/reviews/{created['review_id']}")
+    assert response.status_code == 200
+    assert response.json() == {"review_id": created["review_id"], "status": "deleted"}
+
+    detail = client.get(f"/api/reviews/{created['review_id']}")
+    assert detail.status_code == 404
+
+    with sqlite3.connect(storage_root / "app.db") as connection:
+        row = connection.execute(
+            "SELECT review_id FROM reviews WHERE review_id = ?",
+            (created["review_id"],),
+        ).fetchone()
+    assert row is None
+
+
+def test_delete_pending_review_returns_conflict(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_delete_pending",
+            "project_id": "proj_delete_pending",
+            "source_ref": "feature/delete-pending",
+            "target_ref": "main",
+            "title": "delete pending review",
+        },
+    ).json()
+
+    response = client.delete(f"/api/reviews/{created['review_id']}")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "only terminal review can delete"

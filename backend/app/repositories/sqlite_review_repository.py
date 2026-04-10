@@ -124,6 +124,18 @@ class SqliteReviewRepository:
             rows = connection.execute(query).fetchall()
         return [self._deserialize_light_row(row) for row in rows]
 
+    def delete(self, review_id: str) -> None:
+        """Delete a single review task row."""
+
+        with self._db.connect() as connection:
+            connection.execute("DELETE FROM reviews WHERE review_id = ?", (review_id,))
+            connection.commit()
+
+    def compact(self) -> None:
+        """Reclaim unused SQLite space after review cleanup."""
+
+        self._db.compact()
+
     def _deserialize_row(self, row: object) -> ReviewTask:
         payload = {
             "review_id": row["review_id"],
