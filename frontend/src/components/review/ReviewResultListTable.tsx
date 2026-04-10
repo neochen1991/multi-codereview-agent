@@ -115,12 +115,14 @@ const ResizableTitleCell: React.FC<ResizableTitleProps> = ({ onResize, width, ch
           style={{
             position: "absolute",
             top: 0,
-            right: -4,
-            width: 8,
+            right: 0,
+            width: 12,
             height: "100%",
             cursor: "col-resize",
             userSelect: "none",
             zIndex: 2,
+            borderRight: "2px solid rgba(24, 144, 255, 0.28)",
+            background: "linear-gradient(to right, transparent 0%, rgba(24, 144, 255, 0.08) 100%)",
           }}
         />
       ) : null}
@@ -205,7 +207,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
   const [findingTypeFilter, setFindingTypeFilter] = useState<string | undefined>(undefined);
   const [severityFilter, setSeverityFilter] = useState<string | undefined>(undefined);
   const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
-  const storageKey = useMemo(() => `review-result-table-widths:${cardClassName}`, [cardClassName]);
+  const storageKey = useMemo(() => `review-result-table-widths:v2:${cardClassName}`, [cardClassName]);
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(() => {
     if (typeof window === "undefined") return DEFAULT_COLUMN_WIDTHS;
     try {
@@ -277,6 +279,11 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
       };
     });
   };
+
+  const tableScrollX = useMemo(
+    () => Object.values(columnWidths).reduce((total, current) => total + current, 0) + 120,
+    [columnWidths],
+  );
 
   const columns = useMemo<ColumnsType<ReviewResultListRow>>(
     () => [
@@ -490,7 +497,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         rowKey="id"
         size="middle"
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
-        scroll={{ x: 1520 }}
+        scroll={{ x: tableScrollX }}
         dataSource={filteredRows}
         rowClassName={(record) => (record.id === selectedRowId ? "thread-selected" : "")}
         rowSelection={
