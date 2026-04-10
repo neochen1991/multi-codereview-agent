@@ -83,6 +83,11 @@ class ReviewRunner:
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.knowledge_service.bootstrap_builtin_documents()
         self.graph = build_review_graph()
+        self._knowledge_runtime_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        self._source_excerpt_cache: dict[tuple[object, str, int, int], str] = {}
+        self._target_diff_cache: dict[tuple[object, str], str] = {}
+        self._related_diff_cache: dict[tuple[object, str], str] = {}
+        self._problem_context_cache: dict[tuple[object, str, int, int, int, tuple[int, ...]], dict[str, object]] = {}
 
     def _resolve_db_path(self, root: Path) -> Path:
         """Resolve SQLite path from storage root, honoring global default when unchanged."""
@@ -127,11 +132,21 @@ class ReviewRunner:
 
     def run_once(self, review_id: str) -> ReviewTask:
         """完整执行一次审核主链。"""
+        self._knowledge_runtime_cache.clear()
         review = self.review_repo.get(review_id)
         if review is None:
             raise KeyError(review_id)
         MemoryProbe.log("review_runner.start", review_id=review_id)
         self._abort_if_closed(review_id)
+        self._knowledge_runtime_cache.clear()
+        self._source_excerpt_cache.clear()
+        self._target_diff_cache.clear()
+        self._related_diff_cache.clear()
+        self._problem_context_cache.clear()
+        self._source_excerpt_cache.clear()
+        self._target_diff_cache.clear()
+        self._related_diff_cache.clear()
+        self._problem_context_cache.clear()
 
         review.status = "running"
         review.phase = "expert_review"
@@ -528,13 +543,13 @@ class ReviewRunner:
                     dict(command.get("repository_context") or {}),
                     dict(command.get("target_hunk") or {}),
                 )
-                bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
-                rule_screening = self.knowledge_service.screen_rules_for_expert(
-                    expert.expert_id,
-                    knowledge_context,
-                    runtime_settings=effective_runtime_settings,
-                    analysis_mode=analysis_mode,
+                bound_documents, rule_screening = self._prepare_knowledge_runtime_inputs(
                     review_id=review.review_id,
+                    expert_id=expert.expert_id,
+                    file_path=hunk_file_path,
+                    analysis_mode=analysis_mode,
+                    knowledge_context=knowledge_context,
+                    runtime_settings=effective_runtime_settings,
                 )
                 logger.info(
                     "expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
@@ -560,6 +575,7 @@ class ReviewRunner:
                         "line_start": hunk_line_start,
                         "repository_context": dict(command.get("repository_context") or {}),
                         "target_hunk": dict(command.get("target_hunk") or {}),
+                        "target_hunks": [dict(item) for item in list(command.get("target_hunks") or []) if isinstance(item, dict)],
                         "related_files": list(command.get("related_files") or []),
                         "business_changed_files": self._business_changed_files(review.subject),
                         "expected_checks": list(command.get("expected_checks") or []),
@@ -1534,35 +1550,53 @@ class ReviewRunner:
         *,
         primary_route: dict[str, object],
     ) -> list[dict[str, object]]:
-        """让单个专家覆盖当前审核任务中的全部候选 hunk。"""
+        """让单个专家覆盖当前审核任务中的全部候选 hunk，并按文件聚合为少量批次任务。"""
 
         if not candidate_hunks:
             return [dict(primary_route or {})]
 
+        grouped_hunks: dict[str, list[dict[str, object]]] = {}
+        for item in candidate_hunks:
+            file_path = str(item.get("file_path") or "").strip()
+            if not file_path:
+                continue
+            grouped_hunks.setdefault(file_path, []).append(item)
+
         route_hints: list[dict[str, object]] = []
         base_confidence = float(primary_route.get("confidence") or 0.31)
         base_reason = str(primary_route.get("routing_reason") or "").strip()
-        for item in candidate_hunks:
-            file_path = str(item.get("file_path") or "").strip()
-            line_start = int(item.get("line_start") or 1)
+        for file_path, grouped_items in grouped_hunks.items():
+            primary_item = sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))[0]
+            line_start = int(primary_item.get("line_start") or 1)
+            target_hunks = [
+                {
+                    "file_path": file_path,
+                    "hunk_header": str(item.get("hunk_header") or ""),
+                    "start_line": int(item.get("line_start") or 1),
+                    "end_line": int(item.get("line_start") or 1),
+                    "changed_lines": [int(item.get("line_start") or 1)],
+                    "excerpt": str(item.get("excerpt") or ""),
+                }
+                for item in sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))
+            ]
+            merged_repo_hits: dict[str, object] = {}
+            for item in grouped_items:
+                for key, value in dict(item.get("repo_hits") or {}).items():
+                    if key not in merged_repo_hits and value not in (None, "", [], {}):
+                        merged_repo_hits[key] = value
             route_hints.append(
                 {
                     "expert_id": expert.expert_id,
                     "file_path": file_path,
                     "line_start": line_start,
-                    "target_hunk": {
-                        "file_path": file_path,
-                        "hunk_header": str(item.get("hunk_header") or ""),
-                        "start_line": line_start,
-                        "end_line": line_start,
-                        "changed_lines": [line_start],
-                        "excerpt": str(item.get("excerpt") or ""),
-                    },
-                    "repo_hits": dict(item.get("repo_hits") or {}),
+                    "target_hunk": dict(target_hunks[0]),
+                    "target_hunks": target_hunks,
+                    "repo_hits": merged_repo_hits,
                     "routeable": True,
                     "skip_reason": "",
                     "confidence": base_confidence,
-                    "routing_reason": base_reason or f"{expert.name_zh} 需要覆盖本次 MR 的全部代码 hunk，并从其专业视角审查该变更点。",
+                    "routing_reason": base_reason
+                    or f"{expert.name_zh} 需要覆盖文件 {file_path} 内的 {len(target_hunks)} 个变更 hunk，并从其专业视角统一审查。",
                     "routing_source": "all_hunks",
                 }
             )
@@ -1577,6 +1611,7 @@ class ReviewRunner:
             "rule_screening",
             "repository_context",
             "target_hunk",
+            "target_hunks",
             "related_files",
             "business_changed_files",
             "expected_checks",
@@ -1585,6 +1620,77 @@ class ReviewRunner:
             job.pop(key, None)
         if sys.platform == "win32":
             gc.collect()
+
+    def _get_cached_knowledge_payload(
+        self,
+        *,
+        review_id: str,
+        expert_id: str,
+        file_path: str,
+        analysis_mode: str,
+    ) -> dict[str, object] | None:
+        key = (str(review_id).strip(), str(expert_id).strip(), str(file_path).strip(), str(analysis_mode).strip())
+        payload = self._knowledge_runtime_cache.get(key)
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _set_cached_knowledge_payload(
+        self,
+        *,
+        review_id: str,
+        expert_id: str,
+        file_path: str,
+        analysis_mode: str,
+        knowledge_context: dict[str, object],
+        bound_documents: list[object],
+        rule_screening: dict[str, object],
+    ) -> None:
+        key = (str(review_id).strip(), str(expert_id).strip(), str(file_path).strip(), str(analysis_mode).strip())
+        self._knowledge_runtime_cache[key] = {
+            "knowledge_context": dict(knowledge_context or {}),
+            "bound_documents": list(bound_documents or []),
+            "rule_screening": dict(rule_screening or {}),
+        }
+
+    def _prepare_knowledge_runtime_inputs(
+        self,
+        *,
+        review_id: str,
+        expert_id: str,
+        file_path: str,
+        analysis_mode: str,
+        knowledge_context: dict[str, object],
+        runtime_settings,
+    ) -> tuple[list[object], dict[str, object]]:
+        cached = self._get_cached_knowledge_payload(
+            review_id=review_id,
+            expert_id=expert_id,
+            file_path=file_path,
+            analysis_mode=analysis_mode,
+        )
+        if cached is not None:
+            return (
+                list(cached.get("bound_documents") or []),
+                dict(cached.get("rule_screening") or {}),
+            )
+
+        bound_documents = self.knowledge_service.retrieve_for_expert(expert_id, knowledge_context)
+        rule_screening = self.knowledge_service.screen_rules_for_expert(
+            expert_id,
+            knowledge_context,
+            runtime_settings=runtime_settings,
+            analysis_mode=analysis_mode,
+            review_id=review_id,
+        )
+        self._set_cached_knowledge_payload(
+            review_id=review_id,
+            expert_id=expert_id,
+            file_path=file_path,
+            analysis_mode=analysis_mode,
+            knowledge_context=knowledge_context,
+            bound_documents=bound_documents,
+            rule_screening=rule_screening,
+        )
+        return list(bound_documents), dict(rule_screening or {})
 
     def _update_expert_review_progress(
         self,
@@ -1655,6 +1761,38 @@ class ReviewRunner:
         self.review_repo.save(latest)
         return latest
 
+    def _get_cached_knowledge_preparation(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        file_path: str,
+        analysis_mode: str,
+        knowledge_context: dict[str, object],
+        runtime_settings,
+    ) -> tuple[list[object], dict[str, object]]:
+        cache_key = (review.review_id, expert.expert_id, str(file_path).strip(), str(analysis_mode).strip())
+        cached = self._knowledge_runtime_cache.get(cache_key)
+        if cached is not None:
+            return (
+                list(cached.get("bound_documents") or []),
+                dict(cached.get("rule_screening") or {}),
+            )
+
+        bound_documents = self.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
+        rule_screening = self.knowledge_service.screen_rules_for_expert(
+            expert.expert_id,
+            knowledge_context,
+            runtime_settings=runtime_settings,
+            analysis_mode=analysis_mode,
+            review_id=review.review_id,
+        )
+        self._knowledge_runtime_cache[cache_key] = {
+            "bound_documents": list(bound_documents),
+            "rule_screening": dict(rule_screening or {}),
+        }
+        return list(bound_documents), dict(rule_screening or {})
+
     def _run_expert_from_command(
         self,
         *,
@@ -1665,6 +1803,7 @@ class ReviewRunner:
         line_start: int,
         repository_context: dict[str, object] | None = None,
         target_hunk: dict[str, object] | None = None,
+        target_hunks: list[dict[str, object]] | None = None,
         related_files: list[str] | None = None,
         business_changed_files: list[str] | None = None,
         expected_checks: list[str] | None = None,
@@ -1726,6 +1865,7 @@ class ReviewRunner:
             runtime_tool_results,
         )
         target_hunk = dict(target_hunk or {})
+        target_hunks = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
         for tool_result in tool_evidence:
             tool_name = str(tool_result.get("tool_name") or "")
             self.message_repo.append(
@@ -1812,6 +1952,7 @@ class ReviewRunner:
                         [item.get("title") for item in design_docs],
                         [],
                     ),
+                    "target_hunks": target_hunks[:8],
                     **self._expert_llm_metadata(expert, runtime_settings),
                 },
             )
@@ -1889,6 +2030,7 @@ class ReviewRunner:
                 runtime_tool_results,
                 repository_context,
                 target_hunk,
+                target_hunks,
                 bound_documents,
                 list(disallowed_inference or []),
                 list(expected_checks or []),
@@ -1931,12 +2073,14 @@ class ReviewRunner:
         dedupe_keys: set[tuple[str, int, str, str]] = set()
         candidate_count = len(parsed_candidates)
         for index, raw_parsed in enumerate(parsed_candidates, start=1):
+            raw_line_start = self._normalize_line_start(raw_parsed.get("line_start"), line_start)
+            matched_target_hunk = self._match_target_hunk_for_line(raw_line_start, target_hunk, target_hunks)
             parsed = self._stabilize_expert_analysis(
                 raw_parsed,
                 expert.expert_id,
                 file_path,
                 line_start,
-                target_hunk,
+                matched_target_hunk,
                 repository_context=repository_context,
                 input_completeness=input_completeness,
             )
@@ -2019,7 +2163,7 @@ class ReviewRunner:
                     review.subject,
                     file_path,
                     parsed_line_start,
-                    target_hunk,
+                    matched_target_hunk,
                     repository_context,
                     expert=expert,
                     bound_documents=bound_documents,
@@ -2082,7 +2226,8 @@ class ReviewRunner:
                         "active_skills": [skill.skill_id for skill in active_skills],
                         "tool_evidence": [self._build_tool_result_metadata(item) for item in tool_evidence[:6]],
                         "runtime_tool_results": self._build_runtime_tool_results_metadata(runtime_tool_results),
-                        "target_hunk": target_hunk,
+                        "target_hunk": matched_target_hunk,
+                        "target_hunks": target_hunks[:8],
                         "repository_context": self._build_repository_context_metadata(repository_context),
                         "bound_document_titles": [str(getattr(item, "title", "") or "") for item in bound_documents[:8]],
                         "bound_documents": self._build_bound_document_metadata(bound_documents),
@@ -2571,6 +2716,25 @@ class ReviewRunner:
             return excerpt
         return self._build_fallback_code_excerpt(file_path, line_start, expert_id)
 
+    def _subject_cache_token(self, subject: ReviewSubject | dict[str, object]) -> tuple[object, ...]:
+        if isinstance(subject, ReviewSubject):
+            return (
+                str(subject.repo_id or "").strip(),
+                str(subject.source_ref or "").strip(),
+                str(subject.target_ref or "").strip(),
+                tuple(str(item).strip() for item in list(subject.changed_files or []) if str(item).strip()),
+                len(str(subject.unified_diff or "")),
+            )
+        if isinstance(subject, dict):
+            return (
+                str(subject.get("repo_id") or "").strip(),
+                str(subject.get("source_ref") or "").strip(),
+                str(subject.get("target_ref") or "").strip(),
+                tuple(str(item).strip() for item in list(subject.get("changed_files", []) or []) if str(item).strip()),
+                len(str(subject.get("unified_diff") or "")),
+            )
+        return ("unknown",)
+
     def _load_repository_source_excerpt(
         self,
         subject: ReviewSubject | dict[str, object],
@@ -2578,6 +2742,10 @@ class ReviewRunner:
         line_start: int,
         radius: int = 8,
     ) -> str:
+        cache_key = (self._subject_cache_token(subject), str(file_path).strip(), int(line_start or 1), int(radius or 8))
+        cached = self._source_excerpt_cache.get(cache_key)
+        if cached is not None:
+            return cached
         runtime = self.runtime_settings_service.get()
         service = RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
@@ -2590,25 +2758,39 @@ class ReviewRunner:
         if not service.is_ready():
             return ""
         context = service.load_file_context(file_path, max(1, line_start), radius=radius)
-        return str(context.get("snippet") or "").strip()
+        snippet = str(context.get("snippet") or "").strip()
+        self._source_excerpt_cache[cache_key] = snippet
+        return snippet
 
     def _build_target_file_full_diff(self, subject: ReviewSubject, file_path: str) -> str:
+        cache_key = (self._subject_cache_token(subject), str(file_path).strip())
+        cached = self._target_diff_cache.get(cache_key)
+        if cached is not None:
+            return cached
         full_diff = self.diff_excerpt_service.extract_file_diff(subject.unified_diff, file_path)
         if not full_diff:
-            return f"未从完整 diff 中提取到 {file_path} 的文件级变更，请结合目标 hunk 和代码仓上下文谨慎判断。"
+            result = f"未从完整 diff 中提取到 {file_path} 的文件级变更，请结合目标 hunk 和代码仓上下文谨慎判断。"
+            self._target_diff_cache[cache_key] = result
+            return result
         lines = full_diff.splitlines()
-        if len(lines) <= 160:
-            return full_diff
-        return "\n".join(lines[:160]) + "\n... [目标文件完整 diff 过长，已截断展示前 160 行]"
+        result = full_diff if len(lines) <= 160 else "\n".join(lines[:160]) + "\n... [目标文件完整 diff 过长，已截断展示前 160 行]"
+        self._target_diff_cache[cache_key] = result
+        return result
 
     def _build_related_diff_summary(self, subject: ReviewSubject, target_file_path: str) -> str:
+        cache_key = (self._subject_cache_token(subject), str(target_file_path).strip())
+        cached = self._related_diff_cache.get(cache_key)
+        if cached is not None:
+            return cached
         related_paths = [
             str(path).strip()
             for path in list(subject.changed_files or [])
             if str(path).strip() and str(path).strip() != target_file_path
         ]
         if not related_paths:
-            return "除目标文件外无其他变更文件。"
+            result = "除目标文件外无其他变更文件。"
+            self._related_diff_cache[cache_key] = result
+            return result
         sections: list[str] = []
         for path in related_paths[:4]:
             full_diff = self.diff_excerpt_service.extract_file_diff(subject.unified_diff, path)
@@ -2622,7 +2804,9 @@ class ReviewRunner:
         remaining = len(related_paths) - min(len(related_paths), 4)
         if remaining > 0:
             sections.append(f"... 其余 {remaining} 个变更文件未展开，请结合 changed_files 和代码仓上下文判断影响范围。")
-        return "\n\n".join(sections)
+        result = "\n\n".join(sections)
+        self._related_diff_cache[cache_key] = result
+        return result
 
     def _merge_runtime_repository_context(
         self,
@@ -2799,6 +2983,25 @@ class ReviewRunner:
         line_start: int,
         target_hunk: dict[str, object],
     ) -> dict[str, object]:
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if changed_lines:
+            start_line = min(changed_lines)
+            end_line = max(changed_lines)
+        else:
+            start_line = self._normalize_optional_line_value(target_hunk.get("start_line")) or line_start
+            end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
+        padding = self._compute_problem_context_padding(start_line, end_line, changed_lines)
+        cache_key = (
+            self._subject_cache_token(subject),
+            str(file_path).strip(),
+            int(line_start or 1),
+            int(start_line or 1),
+            int(end_line or start_line or 1),
+            tuple(changed_lines),
+        )
+        cached = self._problem_context_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         runtime = self.runtime_settings_service.get()
         service = RepositoryContextService.from_review_context(
             clone_url=runtime.code_repo_clone_url,
@@ -2810,14 +3013,6 @@ class ReviewRunner:
         )
         if not service.is_ready():
             return {}
-        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
-        if changed_lines:
-            start_line = min(changed_lines)
-            end_line = max(changed_lines)
-        else:
-            start_line = self._normalize_optional_line_value(target_hunk.get("start_line")) or line_start
-            end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
-        padding = self._compute_problem_context_padding(start_line, end_line, changed_lines)
         context = service.load_file_range(
             file_path,
             start_line,
@@ -2825,7 +3020,9 @@ class ReviewRunner:
             padding=padding,
             expand_to_block=True,
         )
-        return dict(context) if isinstance(context, dict) else {}
+        result = dict(context) if isinstance(context, dict) else {}
+        self._problem_context_cache[cache_key] = dict(result)
+        return result
 
     def _compute_problem_context_padding(
         self,
@@ -3061,6 +3258,7 @@ class ReviewRunner:
         runtime_tool_results: list[dict[str, object]],
         repository_context: dict[str, object],
         target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]] | None,
         bound_documents: list[object],
         disallowed_inference: list[str],
         expected_checks: list[str],
@@ -3091,6 +3289,7 @@ class ReviewRunner:
         repository_context_summary = self._build_repository_context_summary(prompt_repository_context, runtime_tool_results)
         repository_source_blocks = self._build_repository_source_blocks(prompt_repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
+        hunk_batch_summary = self._build_hunk_batch_summary(target_hunks or [])
         review_spec_summary = self._build_review_spec_summary(expert.review_spec)
         bound_documents_summary = self._build_bound_documents_summary(bound_documents)
         rule_screening_summary = self._build_rule_screening_summary(rule_screening or {})
@@ -3143,6 +3342,7 @@ class ReviewRunner:
             f"语言通用规范提示:\n{language_general_guidance or '当前目标文件未命中已配置的语言通用规范提示，请仅依据专家规范、规则和代码证据审查。'}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
+            f"同文件其他变更 hunk:\n{hunk_batch_summary}\n"
             f"目标文件完整 diff:\n{target_file_full_diff}\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n"
             f"运行时工具调用结果:\n{runtime_tool_summary}\n"
@@ -4910,6 +5110,41 @@ class ReviewRunner:
             excerpt_lines = excerpt.splitlines()
             lines.extend(excerpt_lines[:8])
         return "\n".join(lines) if lines else "未定位到明确 hunk，请结合当前代码片段谨慎判断。"
+
+    def _build_hunk_batch_summary(self, target_hunks: list[dict[str, object]]) -> str:
+        normalized = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
+        if len(normalized) <= 1:
+            return "当前文件仅有一个重点 hunk。"
+        sections: list[str] = []
+        for index, item in enumerate(normalized[:8], start=1):
+            header = str(item.get("hunk_header") or "").strip()
+            start_line = self._normalize_optional_line_value(item.get("start_line")) or self._normalize_optional_line_value(item.get("line_start")) or 1
+            excerpt = str(item.get("excerpt") or "").strip()
+            sections.append(f"{index}. L{start_line} {header}".strip())
+            if excerpt:
+                sections.extend(f"   {line}" for line in excerpt.splitlines()[:4])
+        if len(normalized) > 8:
+            sections.append(f"... 其余 {len(normalized) - 8} 个 hunk 未展开，但仍属于本次同文件联合审查范围。")
+        return "\n".join(sections)
+
+    def _match_target_hunk_for_line(
+        self,
+        line_start: int,
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        normalized_hunks = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
+        if not normalized_hunks:
+            return dict(target_hunk or {})
+        for item in normalized_hunks:
+            changed_lines = self._normalize_changed_line_values(item.get("changed_lines"))
+            if changed_lines and line_start in changed_lines:
+                return item
+            start_line = self._normalize_optional_line_value(item.get("start_line")) or line_start
+            end_line = self._normalize_optional_line_value(item.get("end_line")) or start_line
+            if start_line <= line_start <= end_line:
+                return item
+        return dict(target_hunk or normalized_hunks[0])
 
     def _merge_context_files(
         self,

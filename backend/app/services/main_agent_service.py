@@ -54,6 +54,9 @@ class MainAgentService:
             else 0
         )
         target_hunk = dict(target_focus.get("target_hunk") or {})
+        target_hunks = [dict(item) for item in list(target_focus.get("target_hunks") or []) if isinstance(item, dict)]
+        if not target_hunks and target_hunk:
+            target_hunks = [dict(target_hunk)]
         related_files = self._build_expert_related_files(subject, expert, file_path, change_chain["related_files"])
         routing_repo_excerpt = self._format_repo_matches(dict(target_focus.get("repo_hits") or {}))
         routing_reason = str(target_focus.get("routing_reason") or "").strip() or self._capability_service.build_routing_reason(
@@ -82,6 +85,7 @@ class MainAgentService:
             file_path,
             line_start,
             target_hunk=target_hunk,
+            target_hunks=target_hunks,
             routing_reason=routing_reason,
             expected_checks=expected_checks,
             disallowed_inference=disallowed_inference,
@@ -94,6 +98,7 @@ class MainAgentService:
             "line_start": line_start,
             "related_files": related_files,
             "target_hunk": target_hunk,
+            "target_hunks": target_hunks,
             "repository_context": repo_context,
             "expected_checks": expected_checks,
             "disallowed_inference": disallowed_inference,
@@ -418,6 +423,7 @@ class MainAgentService:
         line_start: int,
         *,
         target_hunk: dict[str, object] | None = None,
+        target_hunks: list[dict[str, object]] | None = None,
         routing_reason: str = "",
         expected_checks: list[str] | None = None,
         disallowed_inference: list[str] | None = None,
@@ -428,6 +434,7 @@ class MainAgentService:
         disallowed_text = " / ".join(list(disallowed_inference or [])[:3]) or "不要越界评论"
         related_text = " / ".join(list(related_files or [])[:4]) or "无"
         hunk_header = str((target_hunk or {}).get("hunk_header") or "未定位到明确 hunk")
+        hunk_count = len([item for item in list(target_hunks or []) if isinstance(item, dict)]) or (1 if target_hunk else 0)
         return (
             f"**派工指令**\n\n"
             f"**目标专家：** {expert.expert_id} / {expert.name_zh}\n\n"
@@ -435,6 +442,7 @@ class MainAgentService:
             f"**定向任务：** 请聚焦文件 `{file_path}` 第 **{line_start} 行** 附近的变更，"
             f"重点从“{focus}”视角审查。\n\n"
             f"**目标 hunk：** {hunk_header}\n"
+            f"**覆盖范围：** 当前文件共 {hunk_count or 1} 个变更 hunk，需要联合审查。\n"
             f"**派工理由：** {routing_reason or f'该变更与 {focus} 风险直接相关'}\n"
             f"**关联文件：** {related_text}\n"
             f"**必查项：** {checks_text}\n"

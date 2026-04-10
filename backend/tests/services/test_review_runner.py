@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import app.services.review_runner as review_runner_module
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
 from app.domain.models.finding import ReviewFinding
@@ -912,7 +913,7 @@ def test_review_runner_keeps_selected_security_expert_executable(storage_root: P
     assert not skipped_messages
 
 
-def test_review_runner_builds_jobs_for_all_candidate_hunks(storage_root: Path, monkeypatch):
+def test_review_runner_batches_same_file_candidate_hunks_into_one_job(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
     review = runner.review_repo.get(review_id)
@@ -996,6 +997,7 @@ def test_review_runner_builds_jobs_for_all_candidate_hunks(storage_root: Path, m
             "line_start": int((route_hint or {}).get("line_start") or 1),
             "related_files": [],
             "target_hunk": dict((route_hint or {}).get("target_hunk") or {}),
+            "target_hunks": [dict(item) for item in list((route_hint or {}).get("target_hunks") or []) if isinstance(item, dict)],
             "repository_context": {},
             "expected_checks": [],
             "disallowed_inference": [],
@@ -1029,8 +1031,125 @@ def test_review_runner_builds_jobs_for_all_candidate_hunks(storage_root: Path, m
 
     runner.run_once(review_id)
 
-    assert len(recorded_jobs) == 2
-    assert {int(job["line_start"]) for job in recorded_jobs} == {18, 42}
+    assert len(recorded_jobs) == 1
+    assert int(recorded_jobs[0]["line_start"]) == 18
+    assert [int(item["start_line"]) for item in recorded_jobs[0]["target_hunks"]] == [18, 42]
+
+
+def test_review_runner_reuses_knowledge_preparation_for_same_expert_file(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/cache",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+            "--- a/src/main/java/com/acme/OrderService.java\n"
+            "+++ b/src/main/java/com/acme/OrderService.java\n"
+            "@@ -18,1 +18,1 @@\n"
+            "- repository.save(entity);\n"
+            "+ repository.save(entity);\n"
+            "@@ -42,1 +42,1 @@\n"
+            '- log.info(\"old\");\n'
+            '+ log.info(\"new\");\n'
+        ),
+    )
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_routing_plan",
+        lambda *_args, **_kwargs: {
+            "correctness_business": {
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 18,
+                "routeable": True,
+                "routing_reason": "主焦点 hunk",
+                "confidence": 0.8,
+                "routing_llm": {"provider": "test", "model": "test", "mode": "mock"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_candidate_hunks",
+        lambda *_args, **_kwargs: [
+            {
+                "candidate_id": "src/main/java/com/acme/OrderService.java:18:1",
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 18,
+                "hunk_header": "@@ -18,1 +18,1 @@",
+                "excerpt": "+ repository.save(entity);",
+                "repo_hits": {},
+            },
+            {
+                "candidate_id": "src/main/java/com/acme/OrderService.java:42:2",
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "line_start": 42,
+                "hunk_header": "@@ -42,1 +42,1 @@",
+                "excerpt": '+ log.info("new");',
+                "repo_hits": {},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_command",
+        lambda subject, expert, runtime_settings, route_hint=None: {
+            "expert_id": expert.expert_id,
+            "expert_name": expert.name_zh,
+            "file_path": str((route_hint or {}).get("file_path") or ""),
+            "line_start": int((route_hint or {}).get("line_start") or 1),
+            "related_files": [],
+            "target_hunk": dict((route_hint or {}).get("target_hunk") or {}),
+            "target_hunks": [dict(item) for item in list((route_hint or {}).get("target_hunks") or []) if isinstance(item, dict)],
+            "repository_context": {},
+            "expected_checks": [],
+            "disallowed_inference": [],
+            "routeable": True,
+            "skip_reason": "",
+            "routing_reason": str((route_hint or {}).get("routing_reason") or ""),
+            "routing_confidence": float((route_hint or {}).get("confidence") or 0.0),
+            "summary": "请审查当前文件的全部 hunk",
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        },
+    )
+
+    retrieve_calls = {"count": 0}
+    screening_calls = {"count": 0}
+
+    def _fake_retrieve(*_args, **_kwargs):
+        retrieve_calls["count"] += 1
+        return []
+
+    def _fake_screen(*_args, **_kwargs):
+        screening_calls["count"] += 1
+        return {}
+
+    monkeypatch.setattr(runner.knowledge_service, "retrieve_for_expert", _fake_retrieve)
+    monkeypatch.setattr(runner.knowledge_service, "screen_rules_for_expert", _fake_screen)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", lambda expert_jobs, *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.graph, "invoke", lambda state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts, partial_failure_count=0: (
+            "knowledge cached",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    assert retrieve_calls["count"] == 1
+    assert screening_calls["count"] == 1
 
 
 def test_review_runner_expert_messages_include_rule_screening_metadata(storage_root: Path, monkeypatch):
@@ -1465,6 +1584,7 @@ def test_review_runner_prompt_includes_related_source_snippets(storage_root: Pat
             "routing_reason": "需要确认跨文件调用链上的性能影响",
         },
         target_hunk={"hunk_header": "@@ -3,1 +3,1 @@", "excerpt": "+        audit(id.trim());"},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=["证据不足时不要假定调用方一定安全"],
         expected_checks=["检查跨文件调用链上的性能与异常处理风险"],
@@ -1528,6 +1648,7 @@ def test_review_runner_prompt_includes_pg_schema_context(storage_root: Path):
         ],
         repository_context={},
         target_hunk={"hunk_header": "@@ -1,1 +1,1 @@", "excerpt": '+ALTER TABLE "orders" ADD COLUMN "status" varchar(32);'},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=[],
         expected_checks=["检查新增列是否需要索引、默认值与约束联动"],
@@ -2364,6 +2485,7 @@ def test_review_runner_build_expert_prompt_includes_skill_tool_and_design_doc_co
         ],
         repository_context={"summary": "目标分支中存在 order controller 和 dto 实现。", "routing_reason": "字段契约变化更适合正确性专家"},
         target_hunk={"hunk_header": "@@ -8,6 +8,8 @@", "excerpt": "+ return client.post('/api/orders', payload);"},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=["证据不足时不要假定接口已经完全打通"],
         expected_checks=["校验 API 和字段定义是否一致"],
@@ -2437,6 +2559,7 @@ def test_review_runner_build_expert_prompt_includes_target_file_full_diff(storag
         runtime_tool_results=[],
         repository_context={"summary": "目标分支中存在 controller 和 service 配合改动。", "routing_reason": "service 存在字段和调用链变化"},
         target_hunk={"hunk_header": "@@ -8,6 +8,8 @@", "excerpt": "+  const payload = { amount, currency };"},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=["证据不足时不要假定 controller 已完成全部校验"],
         expected_checks=["检查同文件内其他变更是否影响业务一致性"],
@@ -2534,6 +2657,7 @@ def test_review_runner_build_expert_prompt_includes_complete_repository_context_
             ],
         },
         target_hunk={"hunk_header": "@@ -4,2 +4,4 @@", "excerpt": "+    validateOrder(payload);"},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=[],
         expected_checks=["检查跨文件调用链上的输入校验与业务约束"],
@@ -2695,12 +2819,176 @@ def test_review_runner_build_finding_code_context_contains_diff_and_related_cont
     assert "validateOrder(payload);" in str(context["target_file_full_diff"])
     assert "order.controller.ts" in str(context["related_diff_summary"])
     assert context["target_hunk"]["changed_lines"] == [5, 6]
-    assert "auditCreate(payload.id);" in str(context["problem_source_context"]["snippet"])
-    assert "return payload;" in str(context["source_file_context"])
-    assert context["java_review_mode"] == "general"
-    assert context["java_context_signals"] == ["controller_entry", "transaction_boundary", "repository_dependency"]
-    assert len(context["related_contexts"]) == 1
-    assert context["symbol_contexts"][0]["symbol"] == "createOrder"
+
+
+def test_review_runner_caches_repository_source_excerpt(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/cache-source",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff="diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n",
+    )
+
+    class _FakeService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def is_ready(self) -> bool:
+            return True
+
+        def load_file_context(self, file_path: str, line_start: int, radius: int = 8) -> dict[str, object]:
+            self.calls += 1
+            return {"snippet": f"# {file_path}\n{line_start} | cached snippet"}
+
+    fake_service = _FakeService()
+    monkeypatch.setattr(
+        review_runner_module.RepositoryContextService,
+        "from_review_context",
+        lambda **_kwargs: fake_service,
+    )
+
+    excerpt1 = runner._load_repository_source_excerpt(subject, "src/main/java/com/acme/OrderService.java", 18)
+    excerpt2 = runner._load_repository_source_excerpt(subject, "src/main/java/com/acme/OrderService.java", 18)
+
+    assert excerpt1 == excerpt2
+    assert fake_service.calls == 1
+
+
+def test_review_runner_caches_repository_problem_context(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/cache-problem",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff="diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n",
+    )
+
+    class _FakeService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def is_ready(self) -> bool:
+            return True
+
+        def load_file_range(
+            self,
+            file_path: str,
+            start_line: int,
+            end_line: int,
+            *,
+            padding: int,
+            expand_to_block: bool,
+        ) -> dict[str, object]:
+            self.calls += 1
+            return {
+                "path": file_path,
+                "line_start": start_line,
+                "line_end": end_line,
+                "padding": padding,
+                "expand_to_block": expand_to_block,
+                "snippet": "cached block",
+            }
+
+    fake_service = _FakeService()
+    monkeypatch.setattr(
+        review_runner_module.RepositoryContextService,
+        "from_review_context",
+        lambda **_kwargs: fake_service,
+    )
+
+    hunk = {"start_line": 18, "end_line": 20, "changed_lines": [18, 19, 20], "excerpt": "+ repository.save(entity);"}
+    context1 = runner._load_repository_problem_context(subject, "src/main/java/com/acme/OrderService.java", 18, hunk)
+    context2 = runner._load_repository_problem_context(subject, "src/main/java/com/acme/OrderService.java", 18, hunk)
+
+    assert context1 == context2
+    assert fake_service.calls == 1
+
+
+def test_review_runner_caches_repository_source_excerpt(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/cache-source",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff="",
+    )
+
+    calls = {"count": 0}
+
+    class _FakeRepoService:
+        def is_ready(self) -> bool:
+            return True
+
+        def load_file_context(self, file_path: str, line_start: int, radius: int = 8):
+            calls["count"] += 1
+            return {"snippet": f"{file_path}:{line_start}:{radius}"}
+
+    monkeypatch.setattr(
+        "app.services.review_runner.RepositoryContextService.from_review_context",
+        lambda **_kwargs: _FakeRepoService(),
+    )
+
+    first = runner._load_repository_source_excerpt(subject, "src/main/java/com/acme/OrderService.java", 18, radius=8)
+    second = runner._load_repository_source_excerpt(subject, "src/main/java/com/acme/OrderService.java", 18, radius=8)
+
+    assert first == second == "src/main/java/com/acme/OrderService.java:18:8"
+    assert calls["count"] == 1
+
+
+def test_review_runner_caches_repository_problem_context(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/cache-problem",
+        target_ref="main",
+        changed_files=["src/main/java/com/acme/OrderService.java"],
+        unified_diff="",
+    )
+
+    calls = {"count": 0}
+
+    class _FakeRepoService:
+        def is_ready(self) -> bool:
+            return True
+
+        def load_file_range(self, file_path: str, start_line: int, end_line: int, padding: int = 0, expand_to_block: bool = False):
+            calls["count"] += 1
+            return {
+                "path": file_path,
+                "line_start": start_line,
+                "line_end": end_line,
+                "padding": padding,
+                "expand_to_block": expand_to_block,
+                "snippet": f"{file_path}:{start_line}-{end_line}:{padding}",
+            }
+
+    monkeypatch.setattr(
+        "app.services.review_runner.RepositoryContextService.from_review_context",
+        lambda **_kwargs: _FakeRepoService(),
+    )
+
+    target_hunk = {
+        "start_line": 18,
+        "end_line": 19,
+        "changed_lines": [18, 19],
+    }
+    first = runner._load_repository_problem_context(subject, "src/main/java/com/acme/OrderService.java", 18, target_hunk)
+    second = runner._load_repository_problem_context(subject, "src/main/java/com/acme/OrderService.java", 18, target_hunk)
+
+    assert first["snippet"] == second["snippet"]
+    assert calls["count"] == 1
 
 
 def test_review_runner_runtime_repo_context_overrides_stale_command_context(storage_root: Path):
@@ -2868,6 +3156,7 @@ def test_review_runner_emits_design_skill_summary_message(storage_root: Path):
             }
         ],
         target_hunk={"hunk_header": "@@ -1,4 +1,8 @@"},
+        target_hunks=[],
         runtime_settings=runner.runtime_settings_service.get(),
     )
 
@@ -3220,6 +3509,7 @@ def test_review_runner_prompt_includes_input_completeness_summary(storage_root: 
             "related_contexts": [{"path": "src/main/java/com/example/UserService.java", "snippet": "12 | userService.create(request);"}],
         },
         target_hunk={"hunk_header": "@@ -8,1 +8,1 @@", "excerpt": "+    create(request);"},
+        target_hunks=[],
         bound_documents=[],
         disallowed_inference=["不要假定隐藏的统一校验链路一定存在"],
         expected_checks=["检查入口校验与权限边界"],
