@@ -3,7 +3,6 @@ import { Alert, Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typogra
 
 import type {
   DebateIssue,
-  FindingCodeContextSnippet,
   IssueFilterDecision,
   ReviewFinding,
   RuleScreeningMetadata,
@@ -118,33 +117,10 @@ const renderSuggestedCode = (code: string) => (
   </div>
 );
 
-const renderContextSnippet = (title: string, snippet: FindingCodeContextSnippet | null | undefined) => {
-  if (!snippet?.snippet) return null;
-  return (
-    <div style={{ marginTop: 16 }}>
-      <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>{title}</Paragraph>
-      <div className="review-code-panel">
-        <div className="review-code-panel-header">
-          <span>{snippet.path || "关联代码"}</span>
-          {snippet.line_start ? <Tag>{`L${snippet.line_start}`}</Tag> : null}
-        </div>
-        <div className="review-code-frame">
-          {snippet.snippet.split("\n").filter(Boolean).map((line, index) => (
-            <div key={`${title}-${index}`} className="review-code-line">
-              <code>{line}</code>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
 // 结果弹窗负责把单条 finding 渲染成正式 Code Review 详情视图。
 const CodeReviewConclusionPanel: React.FC<Props> = ({
   finding,
   issue,
-  governanceDecision,
   ruleScreening,
   findingDetailsLoading = false,
   findingDetailsError = "",
@@ -175,25 +151,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet ||
     finding.code_excerpt;
-  const targetDiff = codeContext?.target_file_full_diff || codeContext?.target_hunk?.excerpt || "";
-  const relatedSourceSnippets = codeContext?.related_source_snippets || [];
-  const fallbackRelatedContexts = codeContext?.related_contexts || [];
-  const relatedContexts = (relatedSourceSnippets.length > 0 ? relatedSourceSnippets : fallbackRelatedContexts).filter(
-    (item) => item?.snippet,
-  );
-  const currentClassContext = codeContext?.current_class_context;
-  const parentContractContexts = (codeContext?.parent_contract_contexts || []).filter((item) => item?.snippet);
-  const callerContexts = (codeContext?.caller_contexts || []).filter((item) => item?.snippet);
-  const calleeContexts = (codeContext?.callee_contexts || []).filter((item) => item?.snippet);
-  const domainModelContexts = (codeContext?.domain_model_contexts || []).filter((item) => item?.snippet);
-  const persistenceContexts = (codeContext?.persistence_contexts || []).filter((item) => item?.snippet);
-  const transactionContext = codeContext?.transaction_context;
-  const symbolContexts = (codeContext?.symbol_contexts || []).flatMap((item) => [
-    ...((item.definitions || []).map((entry) => ({ title: `符号定义 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
-    ...((item.references || []).map((entry) => ({ title: `符号引用 · ${item.symbol || "unknown"}`, snippet: entry })) || []),
-  ]);
-  const inputCompleteness = codeContext?.input_completeness;
-  const reviewInputs = codeContext?.review_inputs;
   const hasFullDetails = Boolean(
     finding.code_excerpt ||
       finding.suggested_code ||
@@ -257,7 +214,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                     <Tag>未升级为 issue</Tag>
                   </>
                 )}
-                {governanceDecision ? <Tag color="default">未升级为 issue</Tag> : null}
               </>
             ),
           },
@@ -283,116 +239,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           },
         ]}
       />
-
-      <div style={{ marginTop: 16 }}>
-        <Space wrap>
-          {issue ? (
-            issue.verified ? <Tag color="success">已通过工具核验</Tag> : <Tag>待进一步核验</Tag>
-          ) : (
-            <Tag color="default">当前未进入 issue 收敛流程</Tag>
-          )}
-          {issue ? (
-            issue.needs_human ? <Tag color="error">需要人工确认</Tag> : <Tag color="processing">可由系统直接收敛</Tag>
-          ) : (
-            <Tag color="default">仅保留为 finding</Tag>
-          )}
-          {issue?.tool_name ? <Tag color="cyan">{issue.tool_name}</Tag> : null}
-          {issue?.verifier_name ? <Tag color="blue">{issue.verifier_name}</Tag> : null}
-          {issue?.participant_expert_ids?.map((expertId) => (
-            <Tag key={expertId}>{expertId}</Tag>
-          ))}
-          {(finding.context_files || []).slice(0, 4).map((path) => (
-            <Tag key={path}>{path}</Tag>
-          ))}
-        </Space>
-      </div>
-
-      {inputCompleteness || reviewInputs ? (
-        <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>审查输入回放</Paragraph>
-          <Descriptions
-            column={1}
-            size="small"
-            items={[
-              {
-                key: "expert_spec",
-                label: "专家规范",
-                children: (
-                  <Tag color={inputCompleteness?.review_spec_present ? "success" : "error"}>
-                    {inputCompleteness?.review_spec_present ? "已注入" : "缺失"}
-                  </Tag>
-                ),
-              },
-              {
-                key: "language_guidance",
-                label: "语言通用规范提示",
-                children: (
-                  <Space wrap>
-                    <Tag color={inputCompleteness?.language_guidance_present ? "success" : "error"}>
-                      {inputCompleteness?.language_guidance_present ? "已注入" : "缺失"}
-                    </Tag>
-                    {reviewInputs?.language_guidance_language ? <Tag>{reviewInputs.language_guidance_language}</Tag> : null}
-                    {(reviewInputs?.language_guidance_topics || []).slice(0, 4).map((topic) => (
-                      <Tag key={topic} color="blue">
-                        {topic}
-                      </Tag>
-                    ))}
-                  </Space>
-                ),
-              },
-              {
-                key: "rule_inputs",
-                label: "规则与文档",
-                children: (
-                  <Space wrap>
-                    <Tag>{`命中规则 ${inputCompleteness?.matched_rule_count || 0}`}</Tag>
-                    <Tag>{`启用规则 ${inputCompleteness?.enabled_rule_count || 0}`}</Tag>
-                    <Tag>{`绑定文档 ${inputCompleteness?.bound_document_count || 0}`}</Tag>
-                    {(reviewInputs?.matched_rules || []).slice(0, 4).map((rule) => (
-                      <Tag key={rule.rule_id || rule.title} color="purple">
-                        {rule.rule_id || rule.title}
-                      </Tag>
-                    ))}
-                  </Space>
-                ),
-              },
-              {
-                key: "source_inputs",
-                label: "代码输入",
-                children: (
-                  <Space wrap>
-                    <Tag color={inputCompleteness?.target_file_diff_present ? "success" : "error"}>
-                      {inputCompleteness?.target_file_diff_present ? "变更代码已注入" : "变更代码缺失"}
-                    </Tag>
-                    <Tag color={inputCompleteness?.source_context_present ? "success" : "error"}>
-                      {inputCompleteness?.source_context_present ? "当前源码已注入" : "当前源码缺失"}
-                    </Tag>
-                    <Tag color={(inputCompleteness?.related_context_count || 0) > 0 ? "success" : "error"}>
-                      {`关联源码 ${(inputCompleteness?.related_context_count || 0) > 0 ? "已注入" : "缺失"}`}
-                    </Tag>
-                  </Space>
-                ),
-              },
-            ]}
-          />
-          {inputCompleteness?.missing_sections?.length ? (
-            <Paragraph type="warning" style={{ marginBottom: 0 }}>
-              缺失输入：{inputCompleteness.missing_sections.join(" / ")}。系统已按低可信审查结果处理。
-            </Paragraph>
-          ) : null}
-        </div>
-      ) : null}
-
-      {governanceDecision ? (
-        <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>Issue 治理说明</Paragraph>
-          <Space wrap style={{ marginBottom: 8 }}>
-            <Tag color="default">{governanceDecision.rule_label}</Tag>
-            {governanceDecision.severity ? <Tag>{governanceDecision.severity}</Tag> : null}
-          </Space>
-          <Paragraph style={{ marginBottom: 0 }}>{governanceDecision.reason}</Paragraph>
-        </div>
-      ) : null}
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>
@@ -575,98 +421,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           </Col>
         </Row>
       </div>
-
-      {targetDiff ? (
-        <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>目标文件完整变更</Paragraph>
-          <div className="review-code-panel">
-            <div className="review-code-panel-header">
-              <span>{finding.file_path}</span>
-              <Tag color="purple">diff</Tag>
-            </div>
-            <div className="review-code-frame">
-              {targetDiff.split("\n").filter(Boolean).map((line, index) => (
-                <div key={`target-diff-${index}`} className="review-code-line">
-                  <code>{line}</code>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {renderContextSnippet("当前类完整问题片段", currentClassContext)}
-
-      {parentContractContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`parent-contract-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`父接口 / 抽象类 ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {callerContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`caller-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`调用方 Controller / ApplicationService ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {calleeContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`callee-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`被调方 Repository / DomainService ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {domainModelContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`domain-model-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`相关 Aggregate / ValueObject / DomainEvent ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {transactionContext?.transaction_boundary_snippet ? (
-        <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>事务边界所在方法和调用链</Paragraph>
-          <div className="review-code-panel">
-            <div className="review-code-panel-header">
-              <span>{transactionContext.transactional_path || "事务边界"}</span>
-              {transactionContext.transactional_method ? <Tag>{transactionContext.transactional_method}</Tag> : null}
-              {transactionContext.contains_remote_call ? <Tag color="volcano">远程调用</Tag> : null}
-              {transactionContext.contains_message_publish ? <Tag color="gold">消息发布</Tag> : null}
-              {transactionContext.contains_multi_repository_write ? <Tag color="purple">多仓储写入</Tag> : null}
-            </div>
-            <div className="review-code-frame">
-              {transactionContext.transaction_boundary_snippet.split("\n").filter(Boolean).map((line, index) => (
-                <div key={`transaction-${index}`} className="review-code-line">
-                  <code>{line}</code>
-                </div>
-              ))}
-            </div>
-          </div>
-          {(transactionContext.call_chain || []).length ? (
-            <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
-              调用链：{(transactionContext.call_chain || []).join(" -> ")}
-            </Paragraph>
-          ) : null}
-        </div>
-      ) : null}
-
-      {persistenceContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`persistence-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`ORM 映射实体 / SQL / Mapper ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {relatedContexts.slice(0, 3).map((item, index) => (
-        <React.Fragment key={`related-context-${item.path || "unknown"}-${item.line_start || index}`}>
-          {renderContextSnippet(`关联上下文代码 ${index + 1}`, item)}
-        </React.Fragment>
-      ))}
-
-      {symbolContexts.slice(0, 4).map((item, index) => (
-        <React.Fragment
-          key={`symbol-context-${item.title || "unknown"}-${item.snippet?.path || "unknown"}-${item.snippet?.line_start || index}`}
-        >
-          {renderContextSnippet(item.title || `符号上下文 ${index + 1}`, item.snippet)}
-        </React.Fragment>
-      ))}
 
       <div style={{ marginTop: 16 }}>
         <Button onClick={onJumpToProcess} disabled={!onJumpToProcess}>
