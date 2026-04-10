@@ -30,6 +30,12 @@ class CreateReviewRequest(BaseModel):
     design_docs: list[dict[str, object]] = Field(default_factory=list)
 
 
+class BatchDeleteReviewsRequest(BaseModel):
+    """定义批量删除历史审核记录的请求体。"""
+
+    review_ids: list[str] = Field(default_factory=list)
+
+
 @router.post("/reviews", status_code=status.HTTP_201_CREATED)
 def create_review(payload: CreateReviewRequest) -> dict[str, object]:
     """创建一条新的审核任务主记录。"""
@@ -154,6 +160,18 @@ def delete_review(review_id: str) -> dict[str, object]:
     except ValueError as error:
         raise HTTPException(status_code=409, detail="only terminal review can delete") from error
     return {"review_id": review_id, "status": "deleted"}
+
+
+@router.post("/reviews/batch-delete")
+def batch_delete_reviews(payload: BatchDeleteReviewsRequest) -> dict[str, object]:
+    """批量删除已结束的审核记录。"""
+
+    try:
+        return review_service_module.review_service.delete_reviews(payload.review_ids)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="only terminal review can delete") from error
 
 
 @router.get("/reviews/{review_id}/findings")

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Button, Card, Popconfirm, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import type { TableRowSelection } from "antd/es/table/interface";
 import { useNavigate } from "react-router-dom";
 
 import { reviewApi, type ReviewSummary } from "@/services/api";
@@ -43,6 +44,8 @@ const HistoryPage: React.FC = () => {
   const [closingReviewId, setClosingReviewId] = useState("");
   const [rerunningReviewId, setRerunningReviewId] = useState("");
   const [deletingReviewId, setDeletingReviewId] = useState("");
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -69,6 +72,19 @@ const HistoryPage: React.FC = () => {
   useEffect(() => {
     void loadReviews();
   }, []);
+
+  const terminalStatuses = new Set(["completed", "failed", "closed"]);
+  const selectedDeletableIds = reviews
+    .filter((record) => selectedRowKeys.includes(record.review_id) && terminalStatuses.has(record.status))
+    .map((record) => record.review_id);
+
+  const rowSelection: TableRowSelection<ReviewSummary> = {
+    selectedRowKeys,
+    onChange: (keys) => setSelectedRowKeys(keys),
+    getCheckboxProps: (record) => ({
+      disabled: !terminalStatuses.has(record.status),
+    }),
+  };
 
   const columns: ColumnsType<ReviewSummary> = [
     { title: "Review ID", dataIndex: "review_id", key: "review_id", width: 160 },
@@ -250,14 +266,44 @@ const HistoryPage: React.FC = () => {
       className="module-card"
       title="历史审核记录"
       extra={
-        <Button onClick={() => void loadReviews()} loading={loading}>
-          刷新列表
-        </Button>
+        <Space>
+          <Popconfirm
+            title="确认批量删除选中的历史记录吗？"
+            description="只会删除已结束记录，并清理关联消息、发现、议题和产物。SQLite 压缩会在后台统一执行一次。"
+            okText="确认删除"
+            cancelText="取消"
+            disabled={selectedDeletableIds.length === 0}
+            onConfirm={async () => {
+              if (selectedDeletableIds.length === 0) {
+                return;
+              }
+              setBatchDeleting(true);
+              try {
+                const result = await reviewApi.batchDelete(selectedDeletableIds);
+                message.success(`已删除 ${result.deleted_count} 条历史记录`);
+                setSelectedRowKeys([]);
+                await loadReviews();
+              } catch (error: any) {
+                message.error(error?.message || "批量删除历史记录失败");
+              } finally {
+                setBatchDeleting(false);
+              }
+            }}
+          >
+            <Button danger disabled={selectedDeletableIds.length === 0} loading={batchDeleting}>
+              批量删除
+            </Button>
+          </Popconfirm>
+          <Button onClick={() => void loadReviews()} loading={loading}>
+            刷新列表
+          </Button>
+        </Space>
       }
     >
       <Table
         className="review-list-table"
         rowKey="review_id"
+        rowSelection={rowSelection}
         columns={columns}
         dataSource={reviews}
         loading={loading}

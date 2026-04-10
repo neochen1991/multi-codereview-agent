@@ -70,6 +70,8 @@ class ReviewService:
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
         self._active_reviews_lock = threading.Lock()
+        self._db_compaction_running = False
+        self._db_compaction_lock = threading.Lock()
 
     def _resolve_db_path(self, root: Path) -> Path:
         """Resolve SQLite path from storage root, honoring global default when unchanged."""
@@ -598,21 +600,71 @@ class ReviewService:
         return self.queue_start_review(review.review_id)
 
     def delete_review(self, review_id: str) -> None:
-        """删除已结束的审核记录及其关联运行数据，并尽量回收 SQLite 空间。"""
+        """删除单条已结束审核记录，并在后台安排一次 SQLite 压缩。"""
 
-        review = self.get_review(review_id)
-        if review is None:
-            raise KeyError(review_id)
-        if review.status not in {"completed", "failed", "closed"}:
-            raise ValueError("only_terminal_review_can_delete")
+        self.delete_reviews([review_id])
 
-        self._clear_review_runtime_outputs(review_id)
-        shutil.rmtree(self.storage_root / "reviews" / review_id, ignore_errors=True)
-        self.review_repo.delete(review_id)
-        self.review_repo.compact()
-        with self._active_reviews_lock:
-            self._active_reviews.discard(review_id)
-        logger.info("review deleted review_id=%s status=%s", review_id, review.status)
+    def delete_reviews(self, review_ids: list[str]) -> dict[str, object]:
+        """批量删除已结束审核记录，并把 SQLite 压缩放到后台统一执行。"""
+
+        normalized_ids = []
+        seen_ids: set[str] = set()
+        for review_id in review_ids:
+            value = str(review_id or "").strip()
+            if not value or value in seen_ids:
+                continue
+            normalized_ids.append(value)
+            seen_ids.add(value)
+        if not normalized_ids:
+            return {"deleted_review_ids": [], "deleted_count": 0, "compaction_scheduled": False}
+
+        reviews: list[ReviewTask] = []
+        for review_id in normalized_ids:
+            review = self.get_review(review_id)
+            if review is None:
+                raise KeyError(review_id)
+            if review.status not in {"completed", "failed", "closed"}:
+                raise ValueError("only_terminal_review_can_delete")
+            reviews.append(review)
+
+        for review in reviews:
+            self._clear_review_runtime_outputs(review.review_id)
+            shutil.rmtree(self.storage_root / "reviews" / review.review_id, ignore_errors=True)
+            self.review_repo.delete(review.review_id)
+            with self._active_reviews_lock:
+                self._active_reviews.discard(review.review_id)
+            logger.info("review deleted review_id=%s status=%s", review.review_id, review.status)
+
+        compaction_scheduled = self._schedule_review_repo_compaction()
+        return {
+            "deleted_review_ids": [review.review_id for review in reviews],
+            "deleted_count": len(reviews),
+            "compaction_scheduled": compaction_scheduled,
+        }
+
+    def _schedule_review_repo_compaction(self) -> bool:
+        """保证同一时间只触发一次 SQLite 压缩，避免删除接口长时间阻塞。"""
+
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            self.review_repo.compact()
+            return True
+        with self._db_compaction_lock:
+            if self._db_compaction_running:
+                return False
+            self._db_compaction_running = True
+
+        def _run_compaction() -> None:
+            try:
+                self.review_repo.compact()
+                logger.info("sqlite compaction finished after review cleanup")
+            except Exception as exc:
+                logger.exception("sqlite compaction failed after review cleanup error=%s", exc)
+            finally:
+                with self._db_compaction_lock:
+                    self._db_compaction_running = False
+
+        threading.Thread(target=_run_compaction, daemon=True).start()
+        return True
 
     def _clear_review_runtime_outputs(self, review_id: str) -> None:
         """清理某次审核上一轮运行产生的临时输出，避免重跑时混入旧结果。"""

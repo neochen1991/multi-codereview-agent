@@ -269,3 +269,53 @@ def test_delete_pending_review_returns_conflict(client):
     response = client.delete(f"/api/reviews/{created['review_id']}")
     assert response.status_code == 409
     assert response.json()["detail"] == "only terminal review can delete"
+
+
+def test_batch_delete_reviews_removes_multiple_terminal_records(client, storage_root: Path):
+    first = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_batch_delete_1",
+            "project_id": "proj_batch_delete_1",
+            "source_ref": "feature/batch-delete-1",
+            "target_ref": "main",
+            "title": "batch delete review 1",
+        },
+    ).json()
+    second = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_batch_delete_2",
+            "project_id": "proj_batch_delete_2",
+            "source_ref": "feature/batch-delete-2",
+            "target_ref": "main",
+            "title": "batch delete review 2",
+        },
+    ).json()
+
+    service = client.app.state.auto_review_scheduler._review_service  # type: ignore[attr-defined]
+    for review_id in (first["review_id"], second["review_id"]):
+        review = service.get_review(review_id)
+        assert review is not None
+        review.status = "closed"
+        review.phase = "closed"
+        service.review_repo.save(review)
+
+    response = client.post(
+        "/api/reviews/batch-delete",
+        json={"review_ids": [first["review_id"], second["review_id"]]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deleted_count"] == 2
+    assert set(payload["deleted_review_ids"]) == {first["review_id"], second["review_id"]}
+    assert payload["compaction_scheduled"] is True
+
+    with sqlite3.connect(storage_root / "app.db") as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM reviews WHERE review_id IN (?, ?)",
+            (first["review_id"], second["review_id"]),
+        ).fetchone()[0]
+    assert count == 0

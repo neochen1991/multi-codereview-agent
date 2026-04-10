@@ -650,6 +650,14 @@ export const reviewApi = {
     const { data } = await api.delete(`/reviews/${reviewId}`);
     return data;
   },
+  async batchDelete(reviewIds: string[]): Promise<{
+    deleted_review_ids: string[];
+    deleted_count: number;
+    compaction_scheduled: boolean;
+  }> {
+    const { data } = await api.post("/reviews/batch-delete", { review_ids: reviewIds });
+    return data;
+  },
   async listEvents(reviewId: string): Promise<ReviewEvent[]> {
     const { data } = await api.get(`/reviews/${reviewId}/events`);
     return data;
