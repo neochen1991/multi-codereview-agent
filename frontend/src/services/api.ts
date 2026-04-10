@@ -183,6 +183,7 @@ export interface DebateIssue {
   title: string;
   summary: string;
   finding_type?: string;
+  aggregated_finding_types?: string[];
   file_path?: string;
   line_start?: number;
   status: string;

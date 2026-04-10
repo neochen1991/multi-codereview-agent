@@ -3,7 +3,7 @@ import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
-import ReviewResultListTable, { type ReviewResultGroup, type ReviewResultListRow } from "./ReviewResultListTable";
+import ReviewResultListTable, { type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
 
@@ -12,8 +12,6 @@ type ResultIssuePanelProps = {
   issues: DebateIssue[];
   findings: ReviewFinding[];
   selectedIssueId?: string;
-  activeGroup?: ReviewResultGroup;
-  onGroupChange?: (group: ReviewResultGroup) => void;
   onSelectIssue?: (issueId: string) => void;
 };
 
@@ -66,24 +64,13 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
   issues,
   findings,
   selectedIssueId,
-  activeGroup: activeGroupProp,
-  onGroupChange,
   onSelectIssue,
 }) => {
   const { message } = AntdApp.useApp();
-  const [internalActiveGroup, setInternalActiveGroup] = useState<ReviewResultGroup>("all");
   const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [exportResult, setExportResult] = useState<CodehubExportResponse | null>(null);
-  const activeGroup = activeGroupProp || internalActiveGroup;
-
-  const setActiveGroup = (group: ReviewResultGroup) => {
-    if (activeGroupProp == null) {
-      setInternalActiveGroup(group);
-    }
-    onGroupChange?.(group);
-  };
 
   const findingById = useMemo(() => {
     const map = new Map<string, ReviewFinding>();
@@ -135,6 +122,16 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           title: issue.title,
           summary: issue.summary,
           metaSummary: metaSummaryParts.join(" · "),
+          finding_types:
+            issue.aggregated_finding_types && issue.aggregated_finding_types.length > 0
+              ? issue.aggregated_finding_types
+              : Array.from(
+                  new Set(
+                    relatedFindings
+                      .map((finding) => String(finding.finding_type || "").trim())
+                      .filter(Boolean),
+                  ),
+                ),
           finding_type: issue.finding_type || primaryFinding?.finding_type || "risk_hypothesis",
           severity: issue.severity,
           confidence: issue.confidence,
@@ -193,8 +190,6 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           </Space>
         }
         rows={rows}
-        activeGroup={activeGroup}
-        onGroupChange={setActiveGroup}
         selectedRowId={selectedIssueId}
         onSelectRow={onSelectIssue}
         selectedRowIds={selectedIssueIds}

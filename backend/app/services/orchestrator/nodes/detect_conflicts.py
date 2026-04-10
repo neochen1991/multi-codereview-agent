@@ -54,6 +54,25 @@ FINDING_TYPE_WEIGHTS = {
 }
 
 
+def _collect_unique_finding_types(items: list[dict[str, object]]) -> list[str]:
+    finding_types: list[str] = []
+    for item in items:
+        value = str(item.get("finding_type") or "risk_hypothesis").strip() or "risk_hypothesis"
+        if value not in finding_types:
+            finding_types.append(value)
+    return finding_types
+
+
+def _select_primary_finding_type(items: list[dict[str, object]]) -> str:
+    finding_types = _collect_unique_finding_types(items)
+    if not finding_types:
+        return "risk_hypothesis"
+    return sorted(
+        finding_types,
+        key=lambda value: (-float(FINDING_TYPE_WEIGHTS.get(value, 0.65)), value),
+    )[0]
+
+
 def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
     """从状态图里读取 issue 过滤治理配置，并补齐默认值。"""
 
@@ -118,6 +137,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         if any(str(item.get("severity")) == "blocker" for item in eligible_items):
             highest_severity = "blocker"
         confidence, confidence_breakdown = _score_issue_confidence(eligible_items)
+        aggregated_finding_types = _collect_unique_finding_types(eligible_items)
         aggregated_titles = _collect_unique_values(eligible_items, "title")
         aggregated_summaries = _collect_unique_values(eligible_items, "summary")
         aggregated_remediation_strategies = _collect_unique_values(
@@ -138,7 +158,8 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "topic": key,
                 "title": _build_issue_title(aggregated_titles),
                 "summary": _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions),
-                "finding_type": first.get("finding_type", "risk_hypothesis"),
+                "finding_type": _select_primary_finding_type(eligible_items),
+                "aggregated_finding_types": aggregated_finding_types,
                 "file_path": first.get("file_path"),
                 "line_start": first.get("line_start"),
                 "finding_ids": [item.get("finding_id") for item in eligible_items],

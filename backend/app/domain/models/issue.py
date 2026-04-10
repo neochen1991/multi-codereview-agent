@@ -26,6 +26,7 @@ class DebateIssue(BaseModel):
     title: str
     summary: str
     finding_type: str = "risk_hypothesis"
+    aggregated_finding_types: list[str] = Field(default_factory=list)
     file_path: str = ""
     line_start: int = 1
     status: str = "open"

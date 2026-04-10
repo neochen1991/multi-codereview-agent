@@ -9,7 +9,6 @@ import ReviewOverviewPanel, {
   type ReviewFormState,
   type ReviewOverviewExpertSelectionSummary,
 } from "@/components/review/ReviewOverviewPanel";
-import type { ReviewResultGroup } from "@/components/review/ReviewResultListTable";
 import ReviewSubjectPanel from "@/components/review/ReviewSubjectPanel";
 import {
   buildReviewEventStreamUrl,
@@ -411,8 +410,6 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [selectedIssueId, setSelectedIssueId] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
-  const [findingsActiveGroup, setFindingsActiveGroup] = useState<ReviewResultGroup>("all");
-  const [issuesActiveGroup, setIssuesActiveGroup] = useState<ReviewResultGroup>("all");
   const [decisionComment, setDecisionComment] = useState("");
   const [elapsedNow, setElapsedNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(false);
@@ -1077,20 +1074,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     setProcessSidebarTab("issues");
     scrollToRef(processIssuesRef);
   };
-  const focusResultGroup = (
-    group:
-      | "all"
-      | "blocking"
-      | "should_fix"
-      | "non_blocking"
-      | "verified"
-      | "design_misaligned"
-      | "direct_defect"
-      | "risk_hypothesis"
-      | "test_gap"
-      | "design_concern",
-  ) => {
-    setFindingsActiveGroup(group);
+  const focusResultGroup = (_group?: string) => {
     openWorkspaceTab("result");
     scrollToRef(resultFindingsRef);
   };
@@ -1099,7 +1083,6 @@ const ReviewWorkbenchPage: React.FC = () => {
     scrollToRef(resultSummaryRef);
   };
   const focusResultHuman = () => {
-    setFindingsActiveGroup("blocking");
     openWorkspaceTab("result");
     scrollToRef(resultHumanRef);
   };
@@ -1458,8 +1441,6 @@ const ReviewWorkbenchPage: React.FC = () => {
                 issues={issues}
                 findings={findings}
                 selectedIssueId={selectedIssueId}
-                activeGroup={issuesActiveGroup}
-                onGroupChange={setIssuesActiveGroup}
                 onSelectIssue={(issueId) => {
                   setSelectedIssueId(issueId);
                   const issue = issues.find((item) => item.issue_id === issueId);
@@ -1490,8 +1471,6 @@ const ReviewWorkbenchPage: React.FC = () => {
                   issues={issues}
                   issueFilterDecisions={issueFilterDecisions}
                   selectedFindingId={selectedFindingId}
-                  activeGroup={findingsActiveGroup}
-                  onGroupChange={setFindingsActiveGroup}
                   onSelectFinding={(findingId) => {
                     setSelectedFindingId(findingId);
                     const issue = issueByFindingId.get(findingId);

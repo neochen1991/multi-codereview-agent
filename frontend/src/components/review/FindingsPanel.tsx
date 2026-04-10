@@ -1,17 +1,15 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import { Tag } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
-import ReviewResultListTable, { type ReviewResultGroup, type ReviewResultListRow } from "./ReviewResultListTable";
+import ReviewResultListTable, { type ReviewResultListRow } from "./ReviewResultListTable";
 
 type FindingsPanelProps = {
   findings: ReviewFinding[];
   issues: DebateIssue[];
   issueFilterDecisions?: IssueFilterDecision[];
   selectedFindingId?: string;
-  activeGroup?: ReviewResultGroup;
   onSelectFinding?: (findingId: string) => void;
-  onGroupChange?: (group: ReviewResultGroup) => void;
 };
 
 const getPriority = (finding: ReviewFinding): string => {
@@ -54,20 +52,8 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
   issues,
   issueFilterDecisions = [],
   selectedFindingId,
-  activeGroup: activeGroupProp,
   onSelectFinding,
-  onGroupChange,
 }) => {
-  const [internalActiveGroup, setInternalActiveGroup] = useState<ReviewResultGroup>("all");
-  const activeGroup = activeGroupProp || internalActiveGroup;
-
-  const setActiveGroup = (group: ReviewResultGroup) => {
-    if (activeGroupProp == null) {
-      setInternalActiveGroup(group);
-    }
-    onGroupChange?.(group);
-  };
-
   const issueByFindingId = useMemo(() => {
     const map = new Map<string, DebateIssue>();
     for (const issue of issues) {
@@ -130,8 +116,6 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
       title="审核发现清单"
       extra={<Tag color="default">这里展示本次审核产出的全部 findings，包含已升级为正式议题和保留为 finding 的证据项</Tag>}
       rows={rows}
-      activeGroup={activeGroup}
-      onGroupChange={setActiveGroup}
       selectedRowId={selectedFindingId}
       onSelectRow={onSelectFinding}
       emptyText="当前还没有审核发现。"

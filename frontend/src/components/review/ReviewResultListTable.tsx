@@ -1,19 +1,7 @@
-import React from "react";
-import { Button, Card, Space, Table, Tag, Tooltip } from "antd";
+import React, { useMemo, useState } from "react";
+import { Card, Input, Select, Space, Table, Tag, Tooltip } from "antd";
 
 import type { IssueFilterDecision } from "@/services/api";
-
-export type ReviewResultGroup =
-  | "all"
-  | "blocking"
-  | "should_fix"
-  | "non_blocking"
-  | "verified"
-  | "design_misaligned"
-  | "direct_defect"
-  | "risk_hypothesis"
-  | "test_gap"
-  | "design_concern";
 
 export type ReviewResultListRow = {
   id: string;
@@ -23,6 +11,7 @@ export type ReviewResultListRow = {
   summary: string;
   metaSummary?: string;
   finding_type: string;
+  finding_types?: string[];
   severity: string;
   confidence: number;
   expert_labels: string[];
@@ -45,8 +34,6 @@ type ReviewResultListTableProps = {
   extra?: React.ReactNode;
   toolbarExtra?: React.ReactNode;
   rows: ReviewResultListRow[];
-  activeGroup: ReviewResultGroup;
-  onGroupChange: (group: ReviewResultGroup) => void;
   selectedRowId?: string;
   onSelectRow?: (rowId: string) => void;
   selectedRowIds?: string[];
@@ -60,6 +47,9 @@ const findingTypeMeta = (value: string): { label: string; color: string } => {
   if (value === "design_concern") return { label: "设计关注", color: "blue" };
   return { label: "待验证风险", color: "processing" };
 };
+
+const getRowFindingTypes = (row: ReviewResultListRow): string[] =>
+  row.finding_types && row.finding_types.length > 0 ? row.finding_types : [row.finding_type];
 
 const getSeverityColor = (value: string): string => {
   if (value === "blocker" || value === "critical") return "red";
@@ -81,106 +71,105 @@ const getDesignAlignmentLabel = (value: string): string => {
   return "设计待核对";
 };
 
-const filterRowsByGroup = (rows: ReviewResultListRow[], activeGroup: ReviewResultGroup): ReviewResultListRow[] => {
-  if (activeGroup === "blocking") {
-    return rows.filter((item) => item.mergeImpact === "Blocking");
-  }
-  if (activeGroup === "should_fix") {
-    return rows.filter((item) => item.mergeImpact === "Should fix before merge");
-  }
-  if (activeGroup === "non_blocking") {
-    return rows.filter((item) => item.mergeImpact === "Non-blocking");
-  }
-  if (activeGroup === "verified") {
-    return rows.filter((item) => item.verified);
-  }
-  if (activeGroup === "design_misaligned") {
-    return rows.filter((item) => hasDesignMisalignment(item));
-  }
-  if (["direct_defect", "risk_hypothesis", "test_gap", "design_concern"].includes(activeGroup)) {
-    return rows.filter((item) => item.finding_type === activeGroup);
-  }
-  return rows;
-};
-
 const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
   cardClassName,
   title,
   extra,
   toolbarExtra,
   rows,
-  activeGroup,
-  onGroupChange,
   selectedRowId,
   onSelectRow,
   selectedRowIds,
   onSelectedRowIdsChange,
   emptyText,
 }) => {
-  const groupedRows = filterRowsByGroup(rows, activeGroup);
-  const blockingCount = rows.filter((item) => item.mergeImpact === "Blocking").length;
-  const shouldFixCount = rows.filter((item) => item.mergeImpact === "Should fix before merge").length;
-  const nonBlockingCount = rows.filter((item) => item.mergeImpact === "Non-blocking").length;
-  const verifiedCount = rows.filter((item) => item.verified).length;
-  const designMisalignedCount = rows.filter((item) => hasDesignMisalignment(item)).length;
-  const directDefectCount = rows.filter((item) => item.finding_type === "direct_defect").length;
-  const riskHypothesisCount = rows.filter((item) => item.finding_type === "risk_hypothesis").length;
-  const testGapCount = rows.filter((item) => item.finding_type === "test_gap").length;
-  const designConcernCount = rows.filter((item) => item.finding_type === "design_concern").length;
+  const [fileKeyword, setFileKeyword] = useState("");
+  const [findingTypeFilter, setFindingTypeFilter] = useState<string | undefined>(undefined);
+  const [severityFilter, setSeverityFilter] = useState<string | undefined>(undefined);
+  const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
+
+  const findingTypeOptions = useMemo(
+    () =>
+      Array.from(new Set(rows.flatMap((item) => getRowFindingTypes(item)).filter(Boolean))).map((value) => {
+        const meta = findingTypeMeta(value);
+        return { label: meta.label, value };
+      }),
+    [rows],
+  );
+
+  const severityOptions = useMemo(
+    () =>
+      Array.from(new Set(rows.map((item) => item.severity).filter(Boolean))).map((value) => ({
+        label: value,
+        value,
+      })),
+    [rows],
+  );
+
+  const priorityOptions = useMemo(
+    () =>
+      Array.from(new Set(rows.map((item) => item.priority).filter(Boolean))).map((value) => ({
+        label: value,
+        value,
+      })),
+    [rows],
+  );
+
+  const filteredRows = useMemo(() => {
+    const normalizedKeyword = fileKeyword.trim().toLowerCase();
+    return rows.filter((item) => {
+      if (normalizedKeyword && !String(item.file_path || "").toLowerCase().includes(normalizedKeyword)) {
+        return false;
+      }
+      if (findingTypeFilter && !getRowFindingTypes(item).includes(findingTypeFilter)) {
+        return false;
+      }
+      if (severityFilter && item.severity !== severityFilter) {
+        return false;
+      }
+      if (priorityFilter && item.priority !== priorityFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [fileKeyword, findingTypeFilter, priorityFilter, rows, severityFilter]);
 
   return (
     <Card className={`module-card ${cardClassName}`} title={title} extra={extra}>
       <Space wrap style={{ marginBottom: 6, width: "100%", justifyContent: "space-between" }}>
         <Space wrap>
-        <Button type={activeGroup === "all" ? "primary" : "default"} onClick={() => onGroupChange("all")}>
-          全部 {rows.length}
-        </Button>
-        <Button
-          danger={activeGroup === "blocking"}
-          type={activeGroup === "blocking" ? "primary" : "default"}
-          onClick={() => onGroupChange("blocking")}
-        >
-          Blocking {blockingCount}
-        </Button>
-        <Button type={activeGroup === "should_fix" ? "primary" : "default"} onClick={() => onGroupChange("should_fix")}>
-          Should Fix {shouldFixCount}
-        </Button>
-        <Button
-          type={activeGroup === "non_blocking" ? "primary" : "default"}
-          onClick={() => onGroupChange("non_blocking")}
-        >
-          Non-blocking {nonBlockingCount}
-        </Button>
-        <Button type={activeGroup === "verified" ? "primary" : "default"} onClick={() => onGroupChange("verified")}>
-          已核验 {verifiedCount}
-        </Button>
-        <Button
-          type={activeGroup === "design_misaligned" ? "primary" : "default"}
-          onClick={() => onGroupChange("design_misaligned")}
-        >
-          设计不一致 {designMisalignedCount}
-        </Button>
-        <Button
-          type={activeGroup === "direct_defect" ? "primary" : "default"}
-          onClick={() => onGroupChange("direct_defect")}
-        >
-          直接缺陷 {directDefectCount}
-        </Button>
-        <Button
-          type={activeGroup === "risk_hypothesis" ? "primary" : "default"}
-          onClick={() => onGroupChange("risk_hypothesis")}
-        >
-          待验证风险 {riskHypothesisCount}
-        </Button>
-        <Button type={activeGroup === "test_gap" ? "primary" : "default"} onClick={() => onGroupChange("test_gap")}>
-          测试缺口 {testGapCount}
-        </Button>
-        <Button
-          type={activeGroup === "design_concern" ? "primary" : "default"}
-          onClick={() => onGroupChange("design_concern")}
-        >
-          设计关注 {designConcernCount}
-        </Button>
+          <Input
+            allowClear
+            value={fileKeyword}
+            onChange={(event) => setFileKeyword(event.target.value)}
+            placeholder="输入文件名筛选"
+            style={{ width: 240 }}
+          />
+          <Select
+            allowClear
+            value={findingTypeFilter}
+            onChange={(value) => setFindingTypeFilter(value)}
+            placeholder="问题类型"
+            style={{ width: 160 }}
+            options={findingTypeOptions}
+          />
+          <Select
+            allowClear
+            value={severityFilter}
+            onChange={(value) => setSeverityFilter(value)}
+            placeholder="级别"
+            style={{ width: 140 }}
+            options={severityOptions}
+          />
+          <Select
+            allowClear
+            value={priorityFilter}
+            onChange={(value) => setPriorityFilter(value)}
+            placeholder="优先级"
+            style={{ width: 140 }}
+            options={priorityOptions}
+          />
+          <Tag color="default">筛选后 {filteredRows.length} / 全部 {rows.length}</Tag>
         </Space>
         {toolbarExtra}
       </Space>
@@ -189,7 +178,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         size="middle"
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
         scroll={{ x: 1520 }}
-        dataSource={groupedRows}
+        dataSource={filteredRows}
         rowClassName={(record) => (record.id === selectedRowId ? "thread-selected" : "")}
         rowSelection={
           onSelectedRowIdsChange
@@ -313,10 +302,21 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             title: "问题类型",
             dataIndex: "finding_type",
             key: "finding_type",
-            width: 130,
-            render: (value: string) => {
-              const meta = findingTypeMeta(value);
-              return <Tag color={meta.color}>{meta.label}</Tag>;
+            width: 180,
+            render: (value: string, item: ReviewResultListRow) => {
+              const types = getRowFindingTypes(item);
+              if (types.length <= 1) {
+                const meta = findingTypeMeta(value);
+                return <Tag color={meta.color}>{meta.label}</Tag>;
+              }
+              return (
+                <Tooltip
+                  placement="topLeft"
+                  title={types.map((type) => findingTypeMeta(type).label).join(" / ")}
+                >
+                  <Tag color="purple">混合问题 {types.length}</Tag>
+                </Tooltip>
+              );
             },
           },
           {

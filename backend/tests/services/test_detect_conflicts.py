@@ -558,6 +558,8 @@ def test_detect_conflicts_groups_same_line_different_problems_into_one_issue():
     assert conflict["finding_ids"] == ["fdg_line_1", "fdg_line_2"]
     assert len(conflict["aggregated_titles"]) == 2
     assert "SQL 查询语义被放宽为模糊匹配" in conflict["aggregated_titles"]
+    assert conflict["finding_type"] == "direct_defect"
+    assert conflict["aggregated_finding_types"] == ["direct_defect", "design_concern"]
     assert "临时变量命名不符合约定" in conflict["aggregated_titles"]
     assert "恢复精确匹配语义" in conflict["aggregated_remediation_strategies"]
     assert "把临时变量改成表达语义的名称" in conflict["aggregated_remediation_strategies"]
