@@ -420,6 +420,8 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [submittingDecision, setSubmittingDecision] = useState(false);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [findingModalOpen, setFindingModalOpen] = useState(false);
+  const [resultFindingDetailsLoading, setResultFindingDetailsLoading] = useState(false);
+  const [resultFindingDetailsError, setResultFindingDetailsError] = useState("");
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
   const workspaceLoadRef = useRef<{ key: string; promise: Promise<void> | null }>({ key: "", promise: null });
@@ -530,6 +532,19 @@ const ReviewWorkbenchPage: React.FC = () => {
     setIssues(nextReport.issues || []);
     setFindings(nextReport.findings || []);
     setArtifacts(artifactBundle);
+    setResultFindingDetailsLoading(true);
+    setResultFindingDetailsError("");
+    void reviewApi
+      .listFindings(targetReviewId)
+      .then((fullFindings) => {
+        setFindings(fullFindings);
+      })
+      .catch((error: any) => {
+        setResultFindingDetailsError(error?.message || "完整问题详情加载失败");
+      })
+      .finally(() => {
+        setResultFindingDetailsLoading(false);
+      });
     return { report: nextReport, artifacts: artifactBundle };
   };
 
@@ -565,6 +580,8 @@ const ReviewWorkbenchPage: React.FC = () => {
             ? await loadReviewBase(targetReviewId)
             : await loadReviewSnapshot(targetReviewId);
         if (activeStep === "process") {
+          setResultFindingDetailsLoading(false);
+          setResultFindingDetailsError("");
           const processBundle = await loadProcessBundle(targetReviewId);
           if (processMainTab === "replay") {
             await loadReplayBundle(targetReviewId);
@@ -583,6 +600,8 @@ const ReviewWorkbenchPage: React.FC = () => {
           syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
           return;
         }
+        setResultFindingDetailsLoading(false);
+        setResultFindingDetailsError("");
         setReplay(null);
         setReport(null);
         setArtifacts(null);
@@ -1251,7 +1270,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                               </Suspense>
                             </div>
                             <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
-                              <IssueDetailPanel issue={selectedIssue} finding={selectedIssueFinding} />
+                            <IssueDetailPanel issue={selectedIssue} finding={selectedIssueFinding} />
                             </Suspense>
                             <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
                               <ToolAuditPanel issue={selectedIssue} />
@@ -1476,6 +1495,8 @@ const ReviewWorkbenchPage: React.FC = () => {
                   issue={selectedFindingIssue}
                   governanceDecision={selectedFindingGovernanceDecision}
                   ruleScreening={selectedFindingRuleScreening}
+                  findingDetailsLoading={resultFindingDetailsLoading}
+                  findingDetailsError={resultFindingDetailsError}
                   onJumpToProcess={() => {
                     setFindingModalOpen(false);
                     setActiveStep("process");

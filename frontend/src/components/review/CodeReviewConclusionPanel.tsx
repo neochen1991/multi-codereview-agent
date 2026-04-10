@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typography } from "antd";
 
 import type {
   DebateIssue,
@@ -16,6 +16,8 @@ type Props = {
   issue: DebateIssue | null;
   governanceDecision?: IssueFilterDecision | null;
   ruleScreening?: RuleScreeningMetadata | null;
+  findingDetailsLoading?: boolean;
+  findingDetailsError?: string;
   onJumpToProcess?: () => void;
 };
 
@@ -144,6 +146,8 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   issue,
   governanceDecision,
   ruleScreening,
+  findingDetailsLoading = false,
+  findingDetailsError = "",
   onJumpToProcess,
 }) => {
   const lineRefs = React.useRef<Record<number, HTMLDivElement | null>>({});
@@ -190,9 +194,32 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   ]);
   const inputCompleteness = codeContext?.input_completeness;
   const reviewInputs = codeContext?.review_inputs;
+  const hasFullDetails = Boolean(
+    finding.code_excerpt ||
+      finding.suggested_code ||
+      (finding.code_context && Object.keys(finding.code_context).length > 0),
+  );
 
   return (
     <Card className="module-card" title="问题详情">
+      {findingDetailsLoading && !hasFullDetails ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="完整代码上下文加载中"
+          description="首屏先展示轻量结果，完整代码片段、源码上下文和建议代码会在后台补全后自动出现。"
+        />
+      ) : null}
+      {!findingDetailsLoading && findingDetailsError && !hasFullDetails ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="完整代码上下文暂未加载成功"
+          description={`${findingDetailsError}。当前先展示问题结论，不影响已完成任务的审核结果。`}
+        />
+      ) : null}
       <Descriptions
         column={1}
         size="small"

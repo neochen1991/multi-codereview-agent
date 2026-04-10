@@ -1,5 +1,5 @@
 import React from "react";
-import { Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
+import { Alert, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
 
@@ -10,10 +10,17 @@ const uniqueList = (values?: string[]) => Array.from(new Set((values || []).map(
 type IssueDetailPanelProps = {
   issue: DebateIssue | null;
   finding?: ReviewFinding | null;
+  findingDetailsLoading?: boolean;
+  findingDetailsError?: string;
 };
 
 // 议题详情卡主要展示当前选中 issue 的摘要和参与专家。
-const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) => {
+const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
+  issue,
+  finding,
+  findingDetailsLoading = false,
+  findingDetailsError = "",
+}) => {
   const confidenceBreakdown = issue?.confidence_breakdown || {};
   const codeContext = finding?.code_context;
   const contextFiles = codeContext?.context_files || finding?.context_files || [];
@@ -24,6 +31,11 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
   const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
   const aggregatedSuggestions = uniqueList(issue?.aggregated_remediation_suggestions);
   const aggregatedSteps = uniqueList(issue?.aggregated_remediation_steps);
+  const hasFullFindingDetails = Boolean(
+    finding?.code_excerpt ||
+      finding?.suggested_code ||
+      (finding?.code_context && Object.keys(finding.code_context).length > 0),
+  );
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
@@ -32,6 +44,24 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({ issue, finding }) =
           <Empty description="选择一个议题后，这里会展示裁决信息、证据和参与专家。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
+            {findingDetailsLoading && finding && !hasFullFindingDetails ? (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="完整关联上下文加载中"
+                description="当前先展示议题摘要，完整的代码上下文会在后台补全后自动更新。"
+              />
+            ) : null}
+            {!findingDetailsLoading && findingDetailsError && finding && !hasFullFindingDetails ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="完整关联上下文暂未加载成功"
+                description={`${findingDetailsError}。这不会影响当前议题结论本身。`}
+              />
+            ) : null}
             <Descriptions column={1} size="small">
               <Descriptions.Item label="状态">
                 <Tag color={issue.status === "needs_human" ? "error" : issue.status === "resolved" ? "success" : "processing"}>

@@ -932,6 +932,7 @@ class ReviewService:
         if review is None:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
+        light_findings = [self._build_light_report_finding(item) for item in findings]
         issues = self.list_issues(review_id)
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         issue_count = len(issues)
@@ -946,8 +947,8 @@ class ReviewService:
             status=review.status,
             phase=review.phase,
             summary=summary,
-            review=review,
-            findings=findings,
+            review=ReviewTask.model_validate(self._build_light_review_payload(review)),
+            findings=light_findings,
             issues=issues,
             issue_count=issue_count,
             human_review_status=review.human_review_status,
@@ -968,6 +969,22 @@ class ReviewService:
                 "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
             },
         )
+
+    def _build_light_report_finding(self, finding: ReviewFinding) -> ReviewFinding:
+        """结果页首屏只返回轻量 finding，避免 report 载荷过大。"""
+
+        payload = finding.model_dump(mode="json")
+        payload["evidence"] = list(payload.get("evidence") or [])[:4]
+        payload["cross_file_evidence"] = []
+        payload["assumptions"] = list(payload.get("assumptions") or [])[:4]
+        payload["context_files"] = list(payload.get("context_files") or [])[:8]
+        payload["matched_rules"] = list(payload.get("matched_rules") or [])[:8]
+        payload["violated_guidelines"] = list(payload.get("violated_guidelines") or [])[:8]
+        payload["remediation_steps"] = list(payload.get("remediation_steps") or [])[:6]
+        payload["code_excerpt"] = ""
+        payload["code_context"] = {}
+        payload["suggested_code"] = ""
+        return ReviewFinding.model_validate(payload)
 
     def _build_issue_filter_decisions(self, review_id: str) -> list[dict[str, object]]:
         """提炼结果页需要的阈值过滤决策，避免结果页拉取全量消息。"""
