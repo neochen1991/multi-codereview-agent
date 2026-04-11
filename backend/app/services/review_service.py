@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import threading
 import os
-import sys
 import multiprocessing as mp
 import logging
 import re
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -87,6 +87,8 @@ class ReviewService:
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
         self._active_reviews_lock = threading.Lock()
+        self._active_review_processes: dict[str, mp.Process] = {}
+        self._active_review_processes_lock = threading.Lock()
         self._db_compaction_running = False
         self._db_compaction_lock = threading.Lock()
 
@@ -249,7 +251,8 @@ class ReviewService:
             return True
         if flag in {"0", "false", "off", "no"}:
             return False
-        return sys.platform == "win32"
+        # Windows 默认开启子进程隔离，避免单任务异常影响主服务。
+        return os.name == "nt"
 
     def _start_review_subprocess(self, review_id: str) -> None:
         """在子进程执行审核，避免主进程被长时间阻塞。"""
@@ -257,14 +260,28 @@ class ReviewService:
             target=_run_review_in_subprocess,
             args=(str(self.storage_root), review_id),
             name=f"review-worker-{review_id}",
-            daemon=True,
+            daemon=False,
         )
         process.start()
+        with self._active_review_processes_lock:
+            self._active_review_processes[review_id] = process
         logger.info("review subprocess started review_id=%s pid=%s", review_id, process.pid)
 
         def _watch_process() -> None:
+            max_seconds = self._subprocess_max_runtime_seconds()
+            started_at = time.monotonic()
             try:
-                process.join()
+                while process.is_alive():
+                    process.join(timeout=1.0)
+                    if max_seconds > 0 and time.monotonic() - started_at > float(max_seconds):
+                        logger.error(
+                            "review subprocess timeout exceeded review_id=%s pid=%s timeout_seconds=%s",
+                            review_id,
+                            process.pid,
+                            max_seconds,
+                        )
+                        self._terminate_process(process, review_id=review_id, reason="timeout_exceeded")
+                        break
                 exit_code = int(process.exitcode or 0)
                 if exit_code != 0:
                     latest = self.get_review(review_id)
@@ -272,12 +289,48 @@ class ReviewService:
                         self._mark_failed(review_id, f"review subprocess exited unexpectedly: code={exit_code}")
                     logger.error("review subprocess exited abnormally review_id=%s exit_code=%s", review_id, exit_code)
             finally:
+                with self._active_review_processes_lock:
+                    self._active_review_processes.pop(review_id, None)
                 self.runner.clear_runtime_caches()
                 with self._active_reviews_lock:
                     self._active_reviews.discard(review_id)
                 logger.info("review subprocess finished review_id=%s", review_id)
 
         threading.Thread(target=_watch_process, daemon=True).start()
+
+    def _subprocess_max_runtime_seconds(self) -> int:
+        raw = str(os.getenv("REVIEW_SUBPROCESS_MAX_RUNTIME_SECONDS", "")).strip()
+        if raw:
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                return 0
+        # 默认 2 小时兜底超时，防止子进程无限挂起占住任务位。
+        return 7200
+
+    def _terminate_process(self, process: mp.Process, *, review_id: str, reason: str) -> None:
+        try:
+            if not process.is_alive():
+                return
+            process.terminate()
+            process.join(timeout=5.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=2.0)
+            logger.warning(
+                "review subprocess terminated review_id=%s pid=%s reason=%s",
+                review_id,
+                process.pid,
+                reason,
+            )
+        except Exception as exc:
+            logger.exception(
+                "failed to terminate review subprocess review_id=%s pid=%s reason=%s error=%s",
+                review_id,
+                process.pid,
+                reason,
+                exc,
+            )
 
     def _resolve_git_access_token(self, review_url: str, runtime_settings: RuntimeSettings) -> str:
         """按平台优先级选择最合适的代码平台 token。"""
@@ -606,6 +659,10 @@ class ReviewService:
                 message="代码审核任务已被用户手动关闭",
             )
         )
+        with self._active_review_processes_lock:
+            process = self._active_review_processes.get(review_id)
+        if process is not None:
+            self._terminate_process(process, review_id=review_id, reason="closed_by_user")
         logger.warning("review closed by user review_id=%s", review.review_id)
         return review
 

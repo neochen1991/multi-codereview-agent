@@ -21,7 +21,7 @@ class SqliteDatabase:
         connection.row_factory = sqlite3.Row
         # `journal_mode` is a database-level setting; changing it on every connect
         # can introduce lock contention under concurrent writes (especially on Windows).
-        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms()}")
         return connection
 
     def initialize(self) -> None:
@@ -65,3 +65,13 @@ class SqliteDatabase:
             except ValueError:
                 return 15.0
         return 15.0
+
+    def _busy_timeout_ms(self) -> int:
+        raw = os.getenv("SQLITE_BUSY_TIMEOUT_MS", "").strip()
+        if raw:
+            try:
+                return max(500, min(60_000, int(raw)))
+            except ValueError:
+                return 8_000
+        # 默认缩短锁等待，避免高并发轮询时线程池被长时间阻塞。
+        return 8_000
