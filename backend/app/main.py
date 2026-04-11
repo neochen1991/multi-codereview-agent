@@ -21,22 +21,27 @@ def configure_logging() -> None:
     logs_root.mkdir(parents=True, exist_ok=True)
     backend_log = logs_root / "backend.log"
     root_logger = logging.getLogger()
-    if any(
+
+    # 不提前 return，避免重复启动/热重载后 root level 被外部改写成 WARNING，
+    # 导致 llm info 日志静默。
+    root_logger.setLevel(logging.INFO)
+
+    has_backend_file_handler = any(
         isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == str(backend_log)
         for handler in root_logger.handlers
-    ):
-        return
+    )
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    file_handler = logging.FileHandler(backend_log, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(file_handler)
+    if not has_backend_file_handler:
+        file_handler = logging.FileHandler(backend_log, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
     if not any(
         isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
         for handler in root_logger.handlers
     ):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
         root_logger.addHandler(stream_handler)
 
 
