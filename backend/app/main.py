@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import faulthandler
 from fastapi import FastAPI
@@ -9,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import experts, governance, issues, knowledge, reviews, settings as settings_routes, streams, triggers
 from app.config import settings
+from app.logging_config import configure_logging as configure_app_logging
 import app.services.review_service as review_service_module
 from app.services.auto_review_scheduler import AutoReviewScheduler
 from app.services.memory_probe import MemoryProbe
@@ -16,33 +16,7 @@ from app.services.memory_probe import MemoryProbe
 
 def configure_logging() -> None:
     """配置后端日志文件和控制台输出。"""
-
-    logs_root = settings.LOGS_ROOT
-    logs_root.mkdir(parents=True, exist_ok=True)
-    backend_log = logs_root / "backend.log"
-    root_logger = logging.getLogger()
-
-    # 不提前 return，避免重复启动/热重载后 root level 被外部改写成 WARNING，
-    # 导致 llm info 日志静默。
-    root_logger.setLevel(logging.INFO)
-
-    has_backend_file_handler = any(
-        isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == str(backend_log)
-        for handler in root_logger.handlers
-    )
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    if not has_backend_file_handler:
-        file_handler = logging.FileHandler(backend_log, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
-
-    if not any(
-        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
-        for handler in root_logger.handlers
-    ):
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        root_logger.addHandler(stream_handler)
+    configure_app_logging(settings.LOGS_ROOT)
 
 
 def create_application() -> FastAPI:

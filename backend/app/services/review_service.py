@@ -25,6 +25,7 @@ from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.domain.models.review_tool_plugin import ReviewToolPlugin
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.logging_config import configure_logging as configure_app_logging
 from app.repositories.sqlite_event_repository import SqliteEventRepository
 from app.repositories.sqlite_feedback_repository import SqliteFeedbackRepository
 from app.repositories.sqlite_finding_repository import SqliteFindingRepository
@@ -48,6 +49,7 @@ def _run_review_in_subprocess(storage_root: str, review_id: str) -> None:
     """子进程执行审核主流程，隔离潜在的阻塞/死锁风险。"""
     from app.services.review_runner import ReviewRunner, ReviewClosedError
 
+    configure_app_logging(settings.LOGS_ROOT)
     runner = ReviewRunner(Path(storage_root))
     try:
         runner.run_once(review_id)
