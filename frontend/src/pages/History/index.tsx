@@ -208,10 +208,10 @@ const HistoryPage: React.FC = () => {
               </Button>
             </Popconfirm>
           ) : null}
-          {record.status === "failed" ? (
+          {["failed", "closed"].includes(record.status) ? (
             <Popconfirm
-              title="确认重跑这个失败任务吗？"
-              description="系统会清理上一轮失败时生成的过程数据，并重新发起审核。"
+              title="确认重跑这个任务吗？"
+              description="系统会清理上一轮运行产生的过程数据，并重新发起审核。"
               okText="确认重跑"
               cancelText="取消"
               onConfirm={async () => {

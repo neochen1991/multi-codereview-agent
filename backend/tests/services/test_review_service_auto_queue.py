@@ -218,6 +218,57 @@ def test_rerun_failed_review_clears_previous_runtime_outputs_before_restart(tmp_
     assert service.get_artifacts(review.review_id) == {}
 
 
+def test_rerun_closed_review_clears_previous_runtime_outputs_before_restart(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_closed",
+            "project_id": "proj_closed",
+            "source_ref": "feature/closed",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/22",
+            "title": "closed review",
+        }
+    )
+    review.status = "closed"
+    review.phase = "closed"
+    review.report_summary = "任务已关闭"
+    service.review_repo.save(review)
+    service.event_repo.append(
+        ReviewEvent(review_id=review.review_id, event_type="review_closed", phase="closed", message="任务关闭")
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="",
+            expert_id="security_compliance",
+            message_type="expert_analysis",
+            content="旧消息",
+        )
+    )
+
+    def fake_queue_start(review_id: str) -> tuple[ReviewTask, str]:
+        rerun = service.get_review(review_id)
+        assert rerun is not None
+        rerun.status = "running"
+        rerun.phase = "queued"
+        service.review_repo.save(rerun)
+        return rerun, "任务已立即启动。"
+
+    service.queue_start_review = fake_queue_start  # type: ignore[method-assign]
+
+    updated, message = service.rerun_failed_review(review.review_id)
+
+    assert updated.status == "running"
+    assert updated.phase == "queued"
+    assert message == "任务已立即启动。"
+    refreshed = service.get_review(review.review_id)
+    assert refreshed is not None
+    assert refreshed.subject.metadata["last_rerun_source"] == "history_closed_rerun"
+    assert service.list_all_messages(review.review_id) == []
+
+
 def test_build_report_aggregates_llm_calls_and_tokens_without_double_counting(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     review = service.create_review(

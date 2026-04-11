@@ -200,6 +200,46 @@ def test_rerun_failed_review_resets_task_and_starts_again(client, monkeypatch):
     assert payload["message"] == "任务已立即启动。"
 
 
+def test_rerun_closed_review_resets_task_and_starts_again(client, monkeypatch):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_closed",
+            "project_id": "proj_closed",
+            "source_ref": "feature/closed",
+            "target_ref": "main",
+            "title": "closed review",
+        },
+    ).json()
+
+    service = client.app.state.auto_review_scheduler._review_service  # type: ignore[attr-defined]
+    review = service.get_review(created["review_id"])
+    assert review is not None
+    review.status = "closed"
+    review.phase = "closed"
+    review.report_summary = "任务已关闭"
+    service.review_repo.save(review)
+
+    def fake_rerun(review_id: str):
+        task = service.get_review(review_id)
+        assert task is not None
+        task.status = "running"
+        task.phase = "queued"
+        task.report_summary = ""
+        service.review_repo.save(task)
+        return task, "任务已立即启动。"
+
+    monkeypatch.setattr("app.api.routes.reviews.review_service_module.review_service.rerun_failed_review", fake_rerun)
+
+    response = client.post(f"/api/reviews/{created['review_id']}/rerun")
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["phase"] == "queued"
+    assert payload["message"] == "任务已立即启动。"
+
+
 def test_rerun_non_failed_review_returns_conflict(client):
     created = client.post(
         "/api/reviews",
@@ -215,7 +255,7 @@ def test_rerun_non_failed_review_returns_conflict(client):
 
     response = client.post(f"/api/reviews/{created['review_id']}/rerun")
     assert response.status_code == 409
-    assert response.json()["detail"] == "only failed review can rerun"
+    assert response.json()["detail"] == "only failed or closed review can rerun"
 
 
 def test_delete_terminal_review_removes_history_record(client, storage_root: Path):

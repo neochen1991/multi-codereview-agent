@@ -554,13 +554,14 @@ class ReviewService:
         return review
 
     def rerun_failed_review(self, review_id: str) -> tuple[ReviewTask, str]:
-        """重跑 failed 任务，清理上一轮运行产物后重新入队或立即启动。"""
+        """重跑 failed/closed 任务，清理上一轮运行产物后重新入队或立即启动。"""
 
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)
-        if review.status != "failed":
-            raise ValueError("only_failed_review_can_rerun")
+        if review.status not in {"failed", "closed"}:
+            raise ValueError("only_failed_or_closed_review_can_rerun")
+        source_status = review.status
 
         self._clear_review_runtime_outputs(review_id)
 
@@ -574,7 +575,7 @@ class ReviewService:
             metadata.pop(transient_key, None)
         metadata["rerun_count"] = int(metadata.get("rerun_count") or 0) + 1
         metadata["last_rerun_at"] = datetime.now(UTC).isoformat()
-        metadata["last_rerun_source"] = "history_failed_rerun"
+        metadata["last_rerun_source"] = f"history_{source_status}_rerun"
         review.subject.metadata = metadata
         review.status = "pending"
         review.phase = "pending"
@@ -596,7 +597,12 @@ class ReviewService:
                 payload={"rerun_count": metadata["rerun_count"]},
             )
         )
-        logger.info("failed review rerun requested review_id=%s rerun_count=%s", review.review_id, metadata["rerun_count"])
+        logger.info(
+            "review rerun requested review_id=%s from_status=%s rerun_count=%s",
+            review.review_id,
+            source_status,
+            metadata["rerun_count"],
+        )
         return self.queue_start_review(review.review_id)
 
     def delete_review(self, review_id: str) -> None:
