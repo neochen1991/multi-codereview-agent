@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import faulthandler
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,17 +64,24 @@ def create_application() -> FastAPI:
     scheduler = AutoReviewScheduler(review_service_module.review_service)
     app.state.auto_review_scheduler = scheduler
 
-    @app.middleware("http")
-    async def memory_probe_http_middleware(request: Request, call_next):
-        path = str(request.url.path or "")
-        MemoryProbe.log("http.request.start", method=request.method, path=path)
-        response = await call_next(request)
-        MemoryProbe.log("http.request.finish", method=request.method, path=path, status_code=response.status_code)
-        return response
+    http_probe_enabled = str(os.getenv("REVIEW_HTTP_MEMORY_PROBE", "")).strip().lower() in {"1", "true", "on", "yes"}
+    if http_probe_enabled:
+        @app.middleware("http")
+        async def memory_probe_http_middleware(request: Request, call_next):
+            path = str(request.url.path or "")
+            MemoryProbe.log("http.request.start", method=request.method, path=path)
+            response = await call_next(request)
+            MemoryProbe.log("http.request.finish", method=request.method, path=path, status_code=response.status_code)
+            return response
+
+    watchdog_dump_seconds = max(0, int(os.getenv("REVIEW_WATCHDOG_DUMP_SECONDS", "0") or 0))
 
     @app.on_event("startup")
     def startup_scheduler() -> None:
         MemoryProbe.log("app.startup.begin")
+        if watchdog_dump_seconds > 0:
+            faulthandler.enable()
+            faulthandler.dump_traceback_later(watchdog_dump_seconds, repeat=True)
         scheduler.start()
         MemoryProbe.log("app.startup.after_scheduler")
 
@@ -80,6 +89,8 @@ def create_application() -> FastAPI:
     def shutdown_scheduler() -> None:
         MemoryProbe.log("app.shutdown.begin")
         scheduler.stop()
+        if watchdog_dump_seconds > 0:
+            faulthandler.cancel_dump_traceback_later()
         MemoryProbe.log("app.shutdown.after_scheduler")
 
     @app.get("/health")

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import threading
 import os
+import sys
+import multiprocessing as mp
 import logging
 import re
 import shutil
@@ -40,6 +42,19 @@ from app.services.review_runner import ReviewClosedError, ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = logging.getLogger(__name__)
+
+
+def _run_review_in_subprocess(storage_root: str, review_id: str) -> None:
+    """子进程执行审核主流程，隔离潜在的阻塞/死锁风险。"""
+    from app.services.review_runner import ReviewRunner, ReviewClosedError
+
+    runner = ReviewRunner(Path(storage_root))
+    try:
+        runner.run_once(review_id)
+    except ReviewClosedError:
+        return
+    finally:
+        runner.clear_runtime_caches()
 
 
 class ReviewService:
@@ -220,8 +235,47 @@ class ReviewService:
                     self._active_reviews.discard(review_id)
                 logger.info("review background execution finished review_id=%s", review_id)
 
-        threading.Thread(target=_run_in_background, daemon=True).start()
+        if self._use_subprocess_runner():
+            self._start_review_subprocess(review_id)
+        else:
+            threading.Thread(target=_run_in_background, daemon=True).start()
         return review
+
+    def _use_subprocess_runner(self) -> bool:
+        flag = str(os.getenv("REVIEW_RUNNER_SUBPROCESS", "")).strip().lower()
+        if flag in {"1", "true", "on", "yes"}:
+            return True
+        if flag in {"0", "false", "off", "no"}:
+            return False
+        return sys.platform == "win32"
+
+    def _start_review_subprocess(self, review_id: str) -> None:
+        """在子进程执行审核，避免主进程被长时间阻塞。"""
+        process = mp.Process(
+            target=_run_review_in_subprocess,
+            args=(str(self.storage_root), review_id),
+            name=f"review-worker-{review_id}",
+            daemon=True,
+        )
+        process.start()
+        logger.info("review subprocess started review_id=%s pid=%s", review_id, process.pid)
+
+        def _watch_process() -> None:
+            try:
+                process.join()
+                exit_code = int(process.exitcode or 0)
+                if exit_code != 0:
+                    latest = self.get_review(review_id)
+                    if latest is not None and latest.status == "running":
+                        self._mark_failed(review_id, f"review subprocess exited unexpectedly: code={exit_code}")
+                    logger.error("review subprocess exited abnormally review_id=%s exit_code=%s", review_id, exit_code)
+            finally:
+                self.runner.clear_runtime_caches()
+                with self._active_reviews_lock:
+                    self._active_reviews.discard(review_id)
+                logger.info("review subprocess finished review_id=%s", review_id)
+
+        threading.Thread(target=_watch_process, daemon=True).start()
 
     def _resolve_git_access_token(self, review_url: str, runtime_settings: RuntimeSettings) -> str:
         """按平台优先级选择最合适的代码平台 token。"""
