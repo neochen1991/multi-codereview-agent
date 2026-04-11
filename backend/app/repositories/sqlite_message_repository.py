@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from app.db.sqlite import SqliteDatabase
@@ -13,9 +14,11 @@ class SqliteMessageRepository:
     def __init__(self, db_path: Path) -> None:
         self._db = SqliteDatabase(db_path)
         self._db.initialize()
+        self._storage_root = Path(db_path).resolve().parent
 
     def append(self, message: ConversationMessage) -> ConversationMessage:
-        payload = message.model_dump(mode="json")
+        normalized_message = self._normalize_message_payload(message)
+        payload = normalized_message.model_dump(mode="json")
         with self._db.connect() as connection:
             connection.execute(
                 """
@@ -31,18 +34,18 @@ class SqliteMessageRepository:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    message.message_id,
-                    message.review_id,
-                    message.issue_id,
-                    message.expert_id,
-                    message.message_type,
-                    message.content,
+                    normalized_message.message_id,
+                    normalized_message.review_id,
+                    normalized_message.issue_id,
+                    normalized_message.expert_id,
+                    normalized_message.message_type,
+                    normalized_message.content,
                     json.dumps(payload["metadata"], ensure_ascii=False),
                     payload["created_at"],
                 ),
             )
             connection.commit()
-        return message
+        return normalized_message
 
     def list(self, review_id: str) -> list[ConversationMessage]:
         with self._db.connect() as connection:
@@ -125,3 +128,41 @@ class SqliteMessageRepository:
             return int(value or 0)
         except Exception:
             return 0
+
+    def _normalize_message_payload(self, message: ConversationMessage) -> ConversationMessage:
+        content = str(message.content or "")
+        max_inline_chars = self._max_inline_message_chars()
+        if len(content) <= max_inline_chars:
+            return message
+
+        offload_path = self._offload_message_content(
+            review_id=message.review_id,
+            message_id=message.message_id,
+            content=content,
+        )
+        preview = content[:max_inline_chars].rstrip()
+        compact_content = (
+            f"{preview}\n\n[内容过长已截断，完整内容已落盘: {offload_path.relative_to(self._storage_root)}]"
+        )
+        metadata = dict(message.metadata or {})
+        metadata["content_truncated"] = True
+        metadata["original_content_chars"] = len(content)
+        metadata["offloaded_content_path"] = str(offload_path.relative_to(self._storage_root))
+        metadata["inline_content_chars"] = len(preview)
+        return message.model_copy(update={"content": compact_content, "metadata": metadata})
+
+    def _offload_message_content(self, *, review_id: str, message_id: str, content: str) -> Path:
+        payload_dir = self._storage_root / "reviews" / review_id / "payloads" / "messages"
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        payload_path = payload_dir / f"{message_id}.txt"
+        payload_path.write_text(content, encoding="utf-8")
+        return payload_path
+
+    def _max_inline_message_chars(self) -> int:
+        raw = os.getenv("MESSAGE_INLINE_MAX_CHARS", "").strip()
+        if raw:
+            try:
+                return max(1000, min(200_000, int(raw)))
+            except ValueError:
+                return 12_000
+        return 12_000

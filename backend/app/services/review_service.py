@@ -239,8 +239,12 @@ class ReviewService:
                     self._active_reviews.discard(review_id)
                 logger.info("review background execution finished review_id=%s", review_id)
 
-        if self._use_subprocess_runner():
-            self._start_review_subprocess(review_id)
+        use_subprocess = self._use_subprocess_runner()
+        if use_subprocess:
+            started = self._start_review_subprocess(review_id)
+            if not started:
+                logger.warning("review subprocess start failed, fallback to background thread review_id=%s", review_id)
+                threading.Thread(target=_run_in_background, daemon=True).start()
         else:
             threading.Thread(target=_run_in_background, daemon=True).start()
         return review
@@ -251,21 +255,38 @@ class ReviewService:
             return True
         if flag in {"0", "false", "off", "no"}:
             return False
-        # Windows 默认开启子进程隔离，避免单任务异常影响主服务。
-        return os.name == "nt"
+        # 默认开启子进程隔离，避免单任务异常影响主服务。
+        return True
 
-    def _start_review_subprocess(self, review_id: str) -> None:
+    def _start_review_subprocess(self, review_id: str) -> bool:
         """在子进程执行审核，避免主进程被长时间阻塞。"""
-        process = mp.Process(
-            target=_run_review_in_subprocess,
-            args=(str(self.storage_root), review_id),
-            name=f"review-worker-{review_id}",
-            daemon=False,
-        )
-        process.start()
+        try:
+            process_ctx = mp.get_context("spawn")
+            process = process_ctx.Process(
+                target=_run_review_in_subprocess,
+                args=(str(self.storage_root), review_id),
+                name=f"review-worker-{review_id}",
+                daemon=False,
+            )
+            process.start()
+        except Exception as exc:
+            logger.exception("failed to start review subprocess review_id=%s error=%s", review_id, exc)
+            return False
         with self._active_review_processes_lock:
             self._active_review_processes[review_id] = process
         logger.info("review subprocess started review_id=%s pid=%s", review_id, process.pid)
+        try:
+            review = self.get_review(review_id)
+            if review is not None:
+                metadata = dict(review.subject.metadata or {})
+                metadata["execution_mode"] = "subprocess"
+                metadata["worker_pid"] = int(process.pid or 0)
+                metadata["worker_started_at"] = datetime.now(UTC).isoformat()
+                review.subject.metadata = metadata
+                review.updated_at = datetime.now(UTC)
+                self.review_repo.save(review)
+        except Exception as exc:
+            logger.warning("failed to persist subprocess metadata review_id=%s error=%s", review_id, exc)
 
         def _watch_process() -> None:
             max_seconds = self._subprocess_max_runtime_seconds()
@@ -297,6 +318,7 @@ class ReviewService:
                 logger.info("review subprocess finished review_id=%s", review_id)
 
         threading.Thread(target=_watch_process, daemon=True).start()
+        return True
 
     def _subprocess_max_runtime_seconds(self) -> int:
         raw = str(os.getenv("REVIEW_SUBPROCESS_MAX_RUNTIME_SECONDS", "")).strip()
@@ -1253,16 +1275,33 @@ class ReviewService:
             for key in allowed_metadata_keys
             if metadata.get(key) is not None
         }
+        content = self._clip_process_message_content(message.content)
         return {
             "message_id": message.message_id,
             "review_id": message.review_id,
             "issue_id": message.issue_id,
             "expert_id": message.expert_id,
             "message_type": message.message_type,
-            "content": message.content,
+            "content": content,
             "created_at": message.created_at,
             "metadata": compact_metadata,
         }
+
+    def _clip_process_message_content(self, content: str) -> str:
+        text = str(content or "")
+        max_chars = self._process_message_max_chars()
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars].rstrip()}\n\n[过程消息过长，前端已截断展示]"
+
+    def _process_message_max_chars(self) -> int:
+        raw = str(os.getenv("PROCESS_MESSAGE_MAX_CHARS", "")).strip()
+        if raw:
+            try:
+                return max(1000, min(200_000, int(raw)))
+            except ValueError:
+                return 20_000
+        return 20_000
 
     def _existing_auto_queue_keys(self) -> set[str]:
         keys: set[str] = set()

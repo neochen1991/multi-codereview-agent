@@ -33,3 +33,9 @@ def configure_logging(logs_root: Path) -> None:
         stream_handler.setFormatter(formatter)
         root_logger.addHandler(stream_handler)
 
+    # 统一 uvicorn 系列 logger 到 root，确保 API 请求日志也带 asctime。
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.handlers = []
+        uvicorn_logger.propagate = True
+        uvicorn_logger.setLevel(logging.INFO)
