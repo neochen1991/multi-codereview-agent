@@ -1173,14 +1173,74 @@ class LLMChatService:
         if not cleaned:
             raise ValueError("empty_response_body")
         lower_content_type = content_type.lower()
-        if "text/event-stream" in lower_content_type or cleaned.startswith("data:"):
+        sse_hint = "text/event-stream" in lower_content_type or cleaned.startswith("data:")
+        if sse_hint:
             logger.info("llm response parser selected parser=sse")
-            return self._decode_sse_payload(cleaned)
+            try:
+                return self._decode_sse_payload(cleaned)
+            except ValueError as exc:
+                logger.warning("llm response sse decode failed, fallback to json parser error=%s", exc)
         logger.info("llm response parser selected parser=json")
-        payload = json.loads(cleaned)
-        if not isinstance(payload, dict):
-            raise ValueError("json_payload_not_object")
-        return payload
+        return self._decode_json_payload(cleaned)
+
+    def _decode_json_payload(self, cleaned: str) -> dict[str, object]:
+        candidates: list[str] = [cleaned]
+        stripped_fence = self._strip_markdown_json_fence(cleaned)
+        if stripped_fence and stripped_fence != cleaned:
+            candidates.append(stripped_fence)
+        extracted = self._extract_first_json_object(cleaned)
+        if extracted and extracted not in candidates:
+            candidates.append(extracted)
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        raise ValueError("json_payload_not_object")
+
+    def _strip_markdown_json_fence(self, text: str) -> str:
+        stripped = str(text or "").strip()
+        if not stripped.startswith("```"):
+            return stripped
+        match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", stripped, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            return stripped
+        return str(match.group(1) or "").strip()
+
+    def _extract_first_json_object(self, text: str) -> str:
+        source = str(text or "")
+        start = source.find("{")
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(source)):
+            char = source[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                    continue
+                if char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+                continue
+            if char == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start : index + 1]
+        return ""
 
     def _decode_sse_payload(self, response_text: str) -> dict[str, object]:
         chunks: list[dict[str, object]] = []
