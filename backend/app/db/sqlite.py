@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 from pathlib import Path
 
 
@@ -15,12 +16,12 @@ class SqliteDatabase:
         """Open a SQLite connection with row access by column name."""
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path, timeout=30.0)
+        timeout_seconds = self._connect_timeout_seconds()
+        connection = sqlite3.connect(self.db_path, timeout=timeout_seconds)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        # `journal_mode` is a database-level setting; changing it on every connect
+        # can introduce lock contention under concurrent writes (especially on Windows).
         connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA temp_store = MEMORY")
         return connection
 
     def initialize(self) -> None:
@@ -29,6 +30,9 @@ class SqliteDatabase:
         schema_sql = self.schema_path.read_text(encoding="utf-8")
         with self.connect() as connection:
             connection.executescript(schema_sql)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA temp_store = MEMORY")
             connection.commit()
 
     def list_tables(self) -> list[str]:
@@ -52,3 +56,12 @@ class SqliteDatabase:
         with self.connect() as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             connection.execute("VACUUM")
+
+    def _connect_timeout_seconds(self) -> float:
+        raw = os.getenv("SQLITE_CONNECT_TIMEOUT_SECONDS", "").strip()
+        if raw:
+            try:
+                return max(1.0, min(60.0, float(raw)))
+            except ValueError:
+                return 15.0
+        return 15.0

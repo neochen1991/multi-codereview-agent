@@ -88,6 +88,8 @@ class ReviewRunner:
         self._target_diff_cache: dict[tuple[object, str], str] = {}
         self._related_diff_cache: dict[tuple[object, str], str] = {}
         self._problem_context_cache: dict[tuple[object, str, int, int, int, tuple[int, ...]], dict[str, object]] = {}
+        self._last_gc_at = 0.0
+        self._gc_interval_seconds = max(30.0, float(os.getenv("REVIEW_GC_INTERVAL_SECONDS", "60") or 60))
 
     def _resolve_db_path(self, root: Path) -> Path:
         """Resolve SQLite path from storage root, honoring global default when unchanged."""
@@ -1627,8 +1629,19 @@ class ReviewRunner:
             "batch_items",
         ):
             job.pop(key, None)
-        if sys.platform == "win32":
-            gc.collect()
+        self._maybe_collect_garbage()
+
+    def _maybe_collect_garbage(self) -> None:
+        """避免每个任务都触发全量 GC，减少 Windows 场景的长时间停顿。"""
+        if sys.platform != "win32":
+            return
+        if os.getenv("REVIEW_FORCE_GC_WINDOWS", "0").strip() not in {"1", "true", "TRUE", "True"}:
+            return
+        now = time.monotonic()
+        if now - float(self._last_gc_at or 0.0) < self._gc_interval_seconds:
+            return
+        self._last_gc_at = now
+        gc.collect()
 
     def _max_files_per_expert_call(
         self,
