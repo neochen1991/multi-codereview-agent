@@ -18,19 +18,25 @@ class _RetryingSqliteConnection(sqlite3.Connection):
     _retry_max_sleep_seconds: float = 0.5
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
-        return self._run_with_lock_retry(lambda: super().execute(sql, parameters), op="execute")
+        return self._run_with_lock_retry(
+            lambda: sqlite3.Connection.execute(self, sql, parameters),
+            op="execute",
+        )
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> sqlite3.Cursor:
         return self._run_with_lock_retry(
-            lambda: super().executemany(sql, seq_of_parameters),
+            lambda: sqlite3.Connection.executemany(self, sql, seq_of_parameters),
             op="executemany",
         )
 
     def executescript(self, sql_script: str, /) -> sqlite3.Cursor:
-        return self._run_with_lock_retry(lambda: super().executescript(sql_script), op="executescript")
+        return self._run_with_lock_retry(
+            lambda: sqlite3.Connection.executescript(self, sql_script),
+            op="executescript",
+        )
 
     def commit(self) -> None:
-        self._run_with_lock_retry(lambda: super().commit(), op="commit")
+        self._run_with_lock_retry(lambda: sqlite3.Connection.commit(self), op="commit")
 
     def _run_with_lock_retry(self, fn, *, op: str):
         attempts = max(1, int(getattr(self, "_retry_attempts", 3) or 3))
