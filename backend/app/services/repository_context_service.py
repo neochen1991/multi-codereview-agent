@@ -496,7 +496,8 @@ class RepositoryContextService:
         if completed.returncode not in {0, 1}:
             return []
         matches: list[dict[str, Any]] = []
-        for raw_line in completed.stdout.splitlines():
+        stdout_text = completed.stdout or ""
+        for raw_line in stdout_text.splitlines():
             parts = raw_line.split(":", 2)
             if len(parts) != 3:
                 continue
