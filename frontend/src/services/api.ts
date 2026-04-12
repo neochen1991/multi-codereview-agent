@@ -660,20 +660,35 @@ export const reviewApi = {
     const { data } = await api.post("/reviews/batch-delete", { review_ids: reviewIds });
     return data;
   },
-  async listEvents(reviewId: string): Promise<ReviewEvent[]> {
-    const { data } = await api.get(`/reviews/${reviewId}/events`);
+  async listEvents(
+    reviewId: string,
+    options?: { since?: string; limit?: number },
+  ): Promise<ReviewEvent[]> {
+    const { data } = await api.get(`/reviews/${reviewId}/events`, {
+      params: options || {},
+    });
     return data;
   },
-  async listFindings(reviewId: string): Promise<ReviewFinding[]> {
-    const { data } = await api.get(`/reviews/${reviewId}/findings`);
+  async listFindings(
+    reviewId: string,
+    options?: { since?: string; limit?: number },
+  ): Promise<ReviewFinding[]> {
+    const { data } = await api.get(`/reviews/${reviewId}/findings`, {
+      params: options || {},
+    });
     return data;
   },
   async getFinding(reviewId: string, findingId: string): Promise<ReviewFinding> {
     const { data } = await api.get(`/reviews/${reviewId}/findings/${findingId}`);
     return data;
   },
-  async listMessages(reviewId: string): Promise<ConversationMessage[]> {
-    const { data } = await api.get(`/reviews/${reviewId}/messages`);
+  async listMessages(
+    reviewId: string,
+    options?: { since?: string; limit?: number },
+  ): Promise<ConversationMessage[]> {
+    const { data } = await api.get(`/reviews/${reviewId}/messages`, {
+      params: options || {},
+    });
     return data;
   },
   async listIssues(reviewId: string): Promise<DebateIssue[]> {
@@ -684,8 +699,18 @@ export const reviewApi = {
     const { data } = await api.get(`/reviews/${reviewId}/issues/${issueId}/messages`);
     return data;
   },
-  async getReport(reviewId: string): Promise<ReviewReport> {
-    const { data } = await api.get(`/reviews/${reviewId}/report`);
+  async getReport(
+    reviewId: string,
+    options?: {
+      findings_limit?: number;
+      findings_offset?: number;
+      issues_limit?: number;
+      issues_offset?: number;
+    },
+  ): Promise<ReviewReport> {
+    const { data } = await api.get(`/reviews/${reviewId}/report`, {
+      params: options || {},
+    });
     return data;
   },
   async getReplay(reviewId: string): Promise<ReviewReplayBundle> {

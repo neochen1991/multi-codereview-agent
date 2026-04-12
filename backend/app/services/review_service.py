@@ -90,6 +90,7 @@ class ReviewService:
         self._active_review_processes: dict[str, mp.Process] = {}
         self._active_review_processes_lock = threading.Lock()
         self._db_compaction_running = False
+        self._db_compaction_pending = False
         self._db_compaction_lock = threading.Lock()
 
     def _resolve_db_path(self, root: Path) -> Path:
@@ -237,6 +238,7 @@ class ReviewService:
                 self.runner.clear_runtime_caches()
                 with self._active_reviews_lock:
                     self._active_reviews.discard(review_id)
+                self._try_schedule_deferred_compaction()
                 logger.info("review background execution finished review_id=%s", review_id)
 
         use_subprocess = self._use_subprocess_runner()
@@ -315,6 +317,7 @@ class ReviewService:
                 self.runner.clear_runtime_caches()
                 with self._active_reviews_lock:
                     self._active_reviews.discard(review_id)
+                self._try_schedule_deferred_compaction()
                 logger.info("review subprocess finished review_id=%s", review_id)
 
         threading.Thread(target=_watch_process, daemon=True).start()
@@ -789,10 +792,17 @@ class ReviewService:
         if os.getenv("PYTEST_CURRENT_TEST"):
             self.review_repo.compact()
             return True
+        if self._has_running_reviews():
+            with self._db_compaction_lock:
+                self._db_compaction_pending = True
+            logger.info("sqlite compaction deferred because reviews are running")
+            return True
         with self._db_compaction_lock:
             if self._db_compaction_running:
+                self._db_compaction_pending = True
                 return False
             self._db_compaction_running = True
+            self._db_compaction_pending = False
 
         def _run_compaction() -> None:
             try:
@@ -806,6 +816,23 @@ class ReviewService:
 
         threading.Thread(target=_run_compaction, daemon=True).start()
         return True
+
+    def _has_running_reviews(self) -> bool:
+        return any(item.status == "running" for item in self.review_repo.list_light())
+
+    def _try_schedule_deferred_compaction(self) -> None:
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            return
+        with self._db_compaction_lock:
+            pending = self._db_compaction_pending
+            running = self._db_compaction_running
+        if not pending or running:
+            return
+        if self._has_running_reviews():
+            return
+        with self._db_compaction_lock:
+            self._db_compaction_pending = False
+        self._schedule_review_repo_compaction()
 
     def _clear_review_runtime_outputs(self, review_id: str) -> None:
         """清理某次审核上一轮运行产生的临时输出，避免重跑时混入旧结果。"""
@@ -845,10 +872,16 @@ class ReviewService:
             recovered.append(review)
         return recovered
 
-    def list_events(self, review_id: str) -> list[ReviewEvent]:
+    def list_events(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ReviewEvent]:
+        since_text = str(since or "").strip()
+        if since_text:
+            return self.event_repo.list_since(review_id, since=since_text, limit=(limit or 500))
         return self.event_repo.list(review_id)
 
-    def list_findings(self, review_id: str) -> list[ReviewFinding]:
+    def list_findings(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ReviewFinding]:
+        since_text = str(since or "").strip()
+        if since_text:
+            return self.finding_repo.list_since(review_id, since=since_text, limit=(limit or 500))
         return self.finding_repo.list(review_id)
 
     def get_finding(self, review_id: str, finding_id: str) -> ReviewFinding | None:
@@ -860,7 +893,10 @@ class ReviewService:
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return self.message_repo.list_by_issue(review_id, issue_id)
 
-    def list_all_messages(self, review_id: str) -> list[ConversationMessage]:
+    def list_all_messages(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ConversationMessage]:
+        since_text = str(since or "").strip()
+        if since_text:
+            return self.message_repo.list_since(review_id, since=since_text, limit=(limit or 500))
         return self.message_repo.list(review_id)
 
     def list_experts(self) -> list[ExpertProfile]:
@@ -1071,18 +1107,31 @@ class ReviewService:
     ) -> list[KnowledgeDocument]:
         return self.knowledge_service.retrieve_for_expert(expert_id, review_context)
 
-    def build_report(self, review_id: str) -> ReviewReport:
+    def build_report(
+        self,
+        review_id: str,
+        *,
+        findings_limit: int | None = None,
+        findings_offset: int = 0,
+        issues_limit: int | None = None,
+        issues_offset: int = 0,
+    ) -> ReviewReport:
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
-        light_findings = [self._build_light_report_finding(item) for item in findings]
+        findings_total_count = len(findings)
+        paged_findings = self._slice_items(findings, offset=findings_offset, limit=findings_limit)
+        light_findings = [self._build_light_report_finding(item) for item in paged_findings]
         issues = self.list_issues(review_id)
+        issues_total_count = len(issues)
+        paged_issues = self._slice_items(issues, offset=issues_offset, limit=issues_limit)
+        light_issues = [self._build_light_report_issue(item) for item in paged_issues]
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
-        issue_count = len(issues)
+        issue_count = issues_total_count
         summary = (
-            f"本次代码审核共收敛 {len(findings)} 条发现，"
-            f"形成 {len(issues)} 个争议/裁决议题，"
+            f"本次代码审核共收敛 {findings_total_count} 条发现，"
+            f"形成 {issues_total_count} 个争议/裁决议题，"
             f"覆盖 {len(review.selected_experts)} 个专家视角，"
             f"当前状态为 {review.status}。"
         )
@@ -1093,7 +1142,7 @@ class ReviewService:
             summary=summary,
             review=ReviewTask.model_validate(self._build_light_review_payload(review)),
             findings=light_findings,
-            issues=issues,
+            issues=light_issues,
             issue_count=issue_count,
             human_review_status=review.human_review_status,
             llm_usage_summary=self.message_repo.summarize_llm_usage(review_id),
@@ -1129,6 +1178,33 @@ class ReviewService:
         payload["code_context"] = {}
         payload["suggested_code"] = ""
         return ReviewFinding.model_validate(payload)
+
+    def _build_light_report_issue(self, issue: DebateIssue) -> DebateIssue:
+        payload = issue.model_dump(mode="json")
+        payload["evidence"] = list(payload.get("evidence") or [])[:6]
+        payload["cross_file_evidence"] = list(payload.get("cross_file_evidence") or [])[:6]
+        payload["assumptions"] = list(payload.get("assumptions") or [])[:6]
+        payload["context_files"] = list(payload.get("context_files") or [])[:10]
+        payload["aggregated_titles"] = list(payload.get("aggregated_titles") or [])[:10]
+        payload["aggregated_summaries"] = list(payload.get("aggregated_summaries") or [])[:10]
+        payload["aggregated_remediation_strategies"] = list(payload.get("aggregated_remediation_strategies") or [])[:10]
+        payload["aggregated_remediation_suggestions"] = list(payload.get("aggregated_remediation_suggestions") or [])[:10]
+        payload["aggregated_remediation_steps"] = list(payload.get("aggregated_remediation_steps") or [])[:12]
+        payload["summary"] = self._clip_text(payload.get("summary"), max_chars=1200)
+        return DebateIssue.model_validate(payload)
+
+    def _slice_items(self, values: list[object], *, offset: int = 0, limit: int | None = None) -> list[object]:
+        safe_offset = max(0, int(offset or 0))
+        if limit is None:
+            return list(values[safe_offset:])
+        safe_limit = max(1, min(2000, int(limit)))
+        return list(values[safe_offset : safe_offset + safe_limit])
+
+    def _clip_text(self, value: object, *, max_chars: int) -> str:
+        text = str(value or "")
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars].rstrip()}..."
 
     def _build_issue_filter_decisions(self, review_id: str) -> list[dict[str, object]]:
         """提炼结果页需要的阈值过滤决策，避免结果页拉取全量消息。"""
@@ -1175,8 +1251,8 @@ class ReviewService:
             "messages": [self._build_replay_message(item) for item in self.list_all_messages(review_id)],
         }
 
-    def build_process_messages(self, review_id: str) -> list[dict[str, object]]:
-        return [self._build_process_message(item) for item in self.list_all_messages(review_id)]
+    def build_process_messages(self, review_id: str, *, since: str = "", limit: int = 0) -> list[dict[str, object]]:
+        return [self._build_process_message(item) for item in self.list_all_messages(review_id, since=since, limit=limit)]
 
     def _build_light_review_payload(self, review: ReviewTask) -> dict[str, object]:
         payload = review.model_dump(mode="json")

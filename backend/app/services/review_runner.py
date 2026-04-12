@@ -1677,77 +1677,357 @@ class ReviewRunner:
         if max_files <= 1:
             return jobs
 
+        token_budget = self._resolve_expert_call_token_budget(runtime_settings, analysis_mode)
         batched_jobs: list[dict[str, object]] = []
-        for start in range(0, len(jobs), max_files):
-            chunk = jobs[start : start + max_files]
-            if len(chunk) == 1:
-                batched_jobs.append(chunk[0])
+        current_chunk: list[dict[str, object]] = []
+        current_chunk_tokens = 0
+        for item in jobs:
+            estimate = self._estimate_expert_job_tokens(item)
+            if estimate > token_budget:
+                if current_chunk:
+                    batched_jobs.append(
+                        self._merge_expert_job_chunk(
+                            current_chunk,
+                            estimated_tokens_sum=current_chunk_tokens,
+                        )
+                    )
+                    current_chunk = []
+                    current_chunk_tokens = 0
+                oversized_splits = self._split_oversized_expert_job(item, token_budget=token_budget)
+                for split in oversized_splits:
+                    batched_jobs.append(
+                        self._merge_expert_job_chunk(
+                            [split],
+                            estimated_tokens_sum=self._estimate_expert_job_tokens(split),
+                        )
+                    )
                 continue
+            should_flush = bool(
+                current_chunk
+                and (
+                    len(current_chunk) >= max_files
+                    or current_chunk_tokens + estimate > token_budget
+                )
+            )
+            if should_flush:
+                batched_jobs.append(
+                    self._merge_expert_job_chunk(
+                        current_chunk,
+                        estimated_tokens_sum=current_chunk_tokens,
+                    )
+                )
+                current_chunk = []
+                current_chunk_tokens = 0
 
-            primary = dict(chunk[0])
-            batch_items: list[dict[str, object]] = []
-            merged_related_files: list[str] = []
-            merged_target_hunks: list[dict[str, object]] = []
-            merged_repository_context: dict[str, object] = {}
-            merged_bound_documents: list[object] = []
-            merged_knowledge_context: dict[str, object] = {}
-            merged_rule_screening: dict[str, object] = {}
+            current_chunk.append(item)
+            current_chunk_tokens += estimate
 
-            for item in chunk:
-                file_path = str(item.get("file_path") or "").strip()
-                line_start = int(item.get("line_start") or 1)
-                repo_context = dict(item.get("repository_context") or {})
-                target_hunk = dict(item.get("target_hunk") or {})
-                target_hunks = [
-                    dict(hunk)
-                    for hunk in list(item.get("target_hunks") or [])
-                    if isinstance(hunk, dict)
-                ] or ([dict(target_hunk)] if target_hunk else [])
-                related_files = [str(value).strip() for value in list(item.get("related_files") or []) if str(value).strip()]
-                for path in related_files + ([file_path] if file_path else []):
-                    if path and path not in merged_related_files:
-                        merged_related_files.append(path)
-                merged_target_hunks.extend(target_hunks)
-                merged_repository_context = self._merge_repository_context_for_batch(merged_repository_context, repo_context)
-                merged_bound_documents = self._merge_bound_documents_for_batch(
-                    merged_bound_documents,
-                    list(item.get("bound_documents") or []),
+        if current_chunk:
+            batched_jobs.append(
+                self._merge_expert_job_chunk(
+                    current_chunk,
+                    estimated_tokens_sum=current_chunk_tokens,
                 )
-                merged_knowledge_context = self._merge_knowledge_context_for_batch(
-                    merged_knowledge_context,
-                    dict(item.get("knowledge_context") or {}),
-                )
-                merged_rule_screening = self._merge_rule_screening_for_batch(
-                    merged_rule_screening,
-                    dict(item.get("rule_screening") or {}),
-                )
-                batch_items.append(
-                    {
-                        "file_path": file_path,
-                        "line_start": line_start,
-                        "repository_context": repo_context,
-                        "target_hunk": target_hunk,
-                        "target_hunks": target_hunks,
-                        "related_files": related_files,
-                    }
-                )
-
-            primary["batch_items"] = batch_items
-            primary["file_path"] = str(batch_items[0].get("file_path") or primary.get("file_path") or "")
-            primary["line_start"] = int(batch_items[0].get("line_start") or primary.get("line_start") or 1)
-            primary["target_hunk"] = dict(batch_items[0].get("target_hunk") or primary.get("target_hunk") or {})
-            primary["target_hunks"] = merged_target_hunks[:48]
-            primary["related_files"] = merged_related_files
-            primary["repository_context"] = merged_repository_context
-            primary["bound_documents"] = merged_bound_documents
-            primary["knowledge_context"] = merged_knowledge_context
-            primary["rule_screening"] = merged_rule_screening
-            routing_reason = str(primary.get("routing_reason") or "").strip()
-            if routing_reason:
-                primary["routing_reason"] = f"{routing_reason}；本次批量覆盖 {len(batch_items)} 个文件。"
-            batched_jobs.append(primary)
+            )
 
         return batched_jobs
+
+    def _merge_expert_job_chunk(
+        self,
+        chunk: list[dict[str, object]],
+        *,
+        estimated_tokens_sum: int,
+    ) -> dict[str, object]:
+        if len(chunk) == 1:
+            single = dict(chunk[0])
+            single["batch_file_count"] = 1
+            single["batch_hunk_count"] = len([item for item in list(single.get("target_hunks") or []) if isinstance(item, dict)])
+            single["batch_token_estimate"] = int(estimated_tokens_sum or self._estimate_expert_job_tokens(single))
+            return single
+
+        primary = dict(chunk[0])
+        batch_items: list[dict[str, object]] = []
+        merged_related_files: list[str] = []
+        merged_target_hunks: list[dict[str, object]] = []
+        merged_repository_context: dict[str, object] = {}
+        merged_bound_documents: list[object] = []
+        merged_knowledge_context: dict[str, object] = {}
+        merged_rule_screening: dict[str, object] = {}
+
+        for item in chunk:
+            file_path = str(item.get("file_path") or "").strip()
+            line_start = int(item.get("line_start") or 1)
+            repo_context = dict(item.get("repository_context") or {})
+            target_hunk = dict(item.get("target_hunk") or {})
+            target_hunks = [
+                dict(hunk)
+                for hunk in list(item.get("target_hunks") or [])
+                if isinstance(hunk, dict)
+            ] or ([dict(target_hunk)] if target_hunk else [])
+            related_files = [str(value).strip() for value in list(item.get("related_files") or []) if str(value).strip()]
+            for path in related_files + ([file_path] if file_path else []):
+                if path and path not in merged_related_files:
+                    merged_related_files.append(path)
+            merged_target_hunks.extend(target_hunks)
+            merged_repository_context = self._merge_repository_context_for_batch(merged_repository_context, repo_context)
+            merged_bound_documents = self._merge_bound_documents_for_batch(
+                merged_bound_documents,
+                list(item.get("bound_documents") or []),
+            )
+            merged_knowledge_context = self._merge_knowledge_context_for_batch(
+                merged_knowledge_context,
+                dict(item.get("knowledge_context") or {}),
+            )
+            merged_rule_screening = self._merge_rule_screening_for_batch(
+                merged_rule_screening,
+                dict(item.get("rule_screening") or {}),
+            )
+            batch_items.append(
+                {
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "repository_context": repo_context,
+                    "target_hunk": target_hunk,
+                    "target_hunks": target_hunks,
+                    "related_files": related_files,
+                }
+            )
+
+        primary["batch_items"] = batch_items
+        primary["file_path"] = str(batch_items[0].get("file_path") or primary.get("file_path") or "")
+        primary["line_start"] = int(batch_items[0].get("line_start") or primary.get("line_start") or 1)
+        primary["target_hunk"] = dict(batch_items[0].get("target_hunk") or primary.get("target_hunk") or {})
+        primary["target_hunks"] = merged_target_hunks
+        primary["related_files"] = merged_related_files
+        primary["repository_context"] = merged_repository_context
+        primary["bound_documents"] = merged_bound_documents
+        primary["knowledge_context"] = merged_knowledge_context
+        primary["rule_screening"] = merged_rule_screening
+        primary["batch_file_count"] = len(batch_items)
+        primary["batch_hunk_count"] = len(merged_target_hunks)
+        primary["batch_token_estimate"] = int(max(0, estimated_tokens_sum))
+        routing_reason = str(primary.get("routing_reason") or "").strip()
+        if routing_reason:
+            primary["routing_reason"] = f"{routing_reason}；本次批量覆盖 {len(batch_items)} 个文件。"
+        return primary
+
+    def _resolve_expert_call_token_budget(
+        self,
+        runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+    ) -> int:
+        reserve_raw = str(os.getenv("REVIEW_EXPERT_PROMPT_TOKEN_RESERVE", "")).strip()
+        if reserve_raw:
+            try:
+                reserve_tokens = max(2_000, min(40_000, int(reserve_raw)))
+            except ValueError:
+                reserve_tokens = 18_000
+        else:
+            reserve_tokens = 18_000
+        if analysis_mode == "light":
+            configured = int(getattr(runtime_settings, "light_llm_max_input_tokens", 0) or 0)
+            base_limit = configured if configured > 0 else 110_000
+        else:
+            raw = str(os.getenv("REVIEW_STANDARD_MAX_INPUT_TOKENS", "")).strip()
+            if raw:
+                try:
+                    base_limit = max(32_000, min(200_000, int(raw)))
+                except ValueError:
+                    base_limit = 131_072
+            else:
+                base_limit = 131_072
+        return max(12_000, base_limit - reserve_tokens)
+
+    def _estimate_expert_job_tokens(self, job: dict[str, object]) -> int:
+        parts = [
+            str(job.get("file_path") or ""),
+            str(job.get("line_start") or ""),
+            self._serialize_for_token_estimate(job.get("repository_context"), max_chars=24_000),
+            self._serialize_for_token_estimate(job.get("target_hunks"), max_chars=28_000),
+            self._serialize_for_token_estimate(job.get("rule_screening"), max_chars=20_000),
+            self._serialize_for_token_estimate(job.get("knowledge_context"), max_chars=8_000),
+            self._serialize_for_token_estimate(job.get("bound_documents"), max_chars=18_000),
+            self._serialize_for_token_estimate(job.get("expected_checks"), max_chars=4_000),
+            self._serialize_for_token_estimate(job.get("disallowed_inference"), max_chars=4_000),
+        ]
+        total_chars = sum(len(part) for part in parts if part)
+        return max(600, int(total_chars / 3.8) + 600)
+
+    def _serialize_for_token_estimate(self, value: object, *, max_chars: int) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
+
+    def _split_oversized_expert_job(
+        self,
+        job: dict[str, object],
+        *,
+        token_budget: int,
+    ) -> list[dict[str, object]]:
+        base_job = dict(job or {})
+        file_path = str(base_job.get("file_path") or "").strip()
+        target_hunks = [
+            dict(item)
+            for item in list(base_job.get("target_hunks") or [])
+            if isinstance(item, dict)
+        ]
+        if len(target_hunks) <= 1:
+            return [base_job]
+
+        max_hunks_raw = str(os.getenv("REVIEW_EXPERT_MAX_HUNKS_PER_CALL", "")).strip()
+        if max_hunks_raw:
+            try:
+                max_hunks_per_call = max(1, min(80, int(max_hunks_raw)))
+            except ValueError:
+                max_hunks_per_call = 12
+        else:
+            max_hunks_per_call = 12
+
+        chunks: list[list[dict[str, object]]] = []
+        current: list[dict[str, object]] = []
+        for hunk in target_hunks:
+            probe = current + [hunk]
+            probe_job = self._build_split_job(base_job, file_path=file_path, split_hunks=probe)
+            probe_tokens = self._estimate_expert_job_tokens(probe_job)
+            if current and (probe_tokens > token_budget or len(probe) > max_hunks_per_call):
+                chunks.append(list(current))
+                current = [hunk]
+            else:
+                current = probe
+        if current:
+            chunks.append(list(current))
+
+        split_jobs = [
+            self._build_split_job(base_job, file_path=file_path, split_hunks=chunk_hunks)
+            for chunk_hunks in chunks
+            if chunk_hunks
+        ]
+        return split_jobs or [base_job]
+
+    def _build_split_job(
+        self,
+        base_job: dict[str, object],
+        *,
+        file_path: str,
+        split_hunks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        split_job = dict(base_job)
+        first_hunk = dict(split_hunks[0] or {})
+        split_line_start = int(first_hunk.get("start_line") or first_hunk.get("line_start") or base_job.get("line_start") or 1)
+        compact_repo_context = self._slice_repository_context_for_hunks(
+            dict(base_job.get("repository_context") or {}),
+            split_hunks=split_hunks,
+            file_path=file_path,
+        )
+        split_job["line_start"] = split_line_start
+        split_job["target_hunk"] = first_hunk
+        split_job["target_hunks"] = [dict(item) for item in split_hunks]
+        split_job["repository_context"] = compact_repo_context
+        split_job["batch_items"] = [
+            {
+                "file_path": file_path,
+                "line_start": split_line_start,
+                "repository_context": compact_repo_context,
+                "target_hunk": first_hunk,
+                "target_hunks": [dict(item) for item in split_hunks],
+                "related_files": [str(value).strip() for value in list(base_job.get("related_files") or []) if str(value).strip()],
+            }
+        ]
+        split_job["batch_file_count"] = 1
+        split_job["batch_hunk_count"] = len(split_hunks)
+        split_job["routing_reason"] = (
+            f"{str(base_job.get('routing_reason') or '').strip()}；"
+            f"因上下文预算限制，本文件已拆分为分批审查（当前批 {len(split_hunks)} 个 hunk）。"
+        ).strip("；")
+        return split_job
+
+    def _slice_repository_context_for_hunks(
+        self,
+        repository_context: dict[str, object],
+        *,
+        split_hunks: list[dict[str, object]],
+        file_path: str,
+    ) -> dict[str, object]:
+        if not repository_context:
+            return {}
+        anchor_lines = []
+        for hunk in split_hunks:
+            value = int(hunk.get("start_line") or hunk.get("line_start") or 0)
+            if value > 0:
+                anchor_lines.append(value)
+        line_anchor = min(anchor_lines) if anchor_lines else 0
+
+        compact = dict(repository_context)
+        compact["context_files"] = self._compact_context_files(
+            list(repository_context.get("context_files") or []),
+            file_path=file_path,
+        )
+        for key in (
+            "related_contexts",
+            "related_source_snippets",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "persistence_contexts",
+            "symbol_contexts",
+            "related_code_snippets",
+        ):
+            compact[key] = self._compact_context_entries(
+                list(repository_context.get(key) or []),
+                file_path=file_path,
+                line_anchor=line_anchor,
+            )
+        return compact
+
+    def _compact_context_files(self, values: list[object], *, file_path: str) -> list[str]:
+        normalized: list[str] = []
+        for item in values:
+            value = str(item or "").strip()
+            if value and value not in normalized:
+                normalized.append(value)
+        if file_path:
+            normalized = [file_path] + [item for item in normalized if item != file_path]
+        return normalized[:10]
+
+    def _compact_context_entries(
+        self,
+        values: list[object],
+        *,
+        file_path: str,
+        line_anchor: int,
+    ) -> list[dict[str, object]]:
+        entries = [dict(item) for item in values if isinstance(item, dict)]
+        if not entries:
+            return []
+        same_file: list[dict[str, object]] = []
+        others: list[dict[str, object]] = []
+        for entry in entries:
+            entry_path = str(
+                entry.get("path")
+                or entry.get("file_path")
+                or entry.get("relative_path")
+                or ""
+            ).strip()
+            if file_path and entry_path and entry_path == file_path:
+                same_file.append(entry)
+            else:
+                others.append(entry)
+
+        def _distance(entry: dict[str, object]) -> int:
+            line_value = int(entry.get("line_start") or entry.get("line") or 0)
+            if line_anchor <= 0 or line_value <= 0:
+                return 10**9
+            return abs(line_value - line_anchor)
+
+        same_file_sorted = sorted(same_file, key=_distance)
+        merged = same_file_sorted[:5] + others[:3]
+        return merged[:8]
 
     def _merge_repository_context_for_batch(
         self,
@@ -2227,9 +2507,11 @@ class ReviewRunner:
                 payload={"expert_id": expert.expert_id, "file_path": file_path, "line_start": line_start},
             )
         )
+        tool_messages: list[ConversationMessage] = []
+        tool_events: list[ReviewEvent] = []
         for tool_result in runtime_tool_results:
             tool_name = str(tool_result.get("tool_name") or "")
-            self.message_repo.append(
+            tool_messages.append(
                 ConversationMessage(
                     review_id=review.review_id,
                     issue_id="review_orchestration",
@@ -2248,7 +2530,7 @@ class ReviewRunner:
                     },
                 )
             )
-            self.event_repo.append(
+            tool_events.append(
                 ReviewEvent(
                     review_id=review.review_id,
                     event_type="expert_tool_invoked",
@@ -2257,6 +2539,10 @@ class ReviewRunner:
                     payload={"expert_id": expert.expert_id, "tool_name": tool_name, "tool_category": "runtime"},
                 )
             )
+        if tool_messages:
+            self.message_repo.append_many(tool_messages)
+        if tool_events:
+            self.event_repo.append_many(tool_events)
         self._emit_skill_summary_messages(
             review=review,
             expert=expert,
@@ -2295,13 +2581,17 @@ class ReviewRunner:
             list(expected_checks or []),
             active_skills,
             rule_screening,
+            include_target_file_full_diff=not multi_file_batch,
+            include_related_diff_summary=not multi_file_batch,
         )
+        batch_hunk_count = self._count_batch_hunks(normalized_batch_items, fallback_target_hunks=target_hunks)
+        max_findings_cap = min(80, max(8, len(normalized_batch_items) * 6, batch_hunk_count * 2))
         if multi_file_batch:
             user_prompt = (
                 f"{user_prompt}\n\n"
                 f"{self._build_multi_file_prompt_appendix(review.subject, expert, normalized_batch_items)}\n"
                 "输出补充要求：\n"
-                f"1. 本次允许输出最多 {min(20, max(6, len(normalized_batch_items) * 4))} 条 findings；\n"
+                f"1. 本次允许输出最多 {max_findings_cap} 条 findings；\n"
                 "2. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
                 "3. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条。\n"
             )
@@ -2338,10 +2628,12 @@ class ReviewRunner:
             expert,
             file_path,
             line_start,
-            max_findings=min(20, max(5, len(normalized_batch_items) * 4)),
+            max_findings=max_findings_cap,
         )
         design_alignment = self._extract_design_alignment(runtime_tool_results)
         saved_count = 0
+        pending_findings: list[ReviewFinding] = []
+        pending_analysis_messages: list[ConversationMessage] = []
         dedupe_keys: set[tuple[str, int, str, str]] = set()
         candidate_count = len(parsed_candidates)
         for index, raw_parsed in enumerate(parsed_candidates, start=1):
@@ -2495,19 +2787,13 @@ class ReviewRunner:
                 )
                 continue
             self._abort_if_closed(review.review_id)
-            self.finding_repo.save(review.review_id, finding)
-            MemoryProbe.log(
-                "expert.after_finding_save",
-                review_id=review.review_id,
-                expert_id=expert.expert_id,
-                finding_id=finding.finding_id,
-            )
+            pending_findings.append(finding)
             message_content = (
                 llm_result.text.strip()
                 if index == 1
                 else f"[multi-finding {index}/{candidate_count}] {finding.title}\n{finding.summary}"
             )
-            self.message_repo.append(
+            pending_analysis_messages.append(
                 ConversationMessage(
                     review_id=review.review_id,
                     issue_id=finding.finding_id,
@@ -2562,13 +2848,27 @@ class ReviewRunner:
             saved_count += 1
         if saved_count <= 0:
             return
+        self.finding_repo.save_many(review.review_id, pending_findings)
+        for item in pending_findings:
+            MemoryProbe.log(
+                "expert.after_finding_save",
+                review_id=review.review_id,
+                expert_id=expert.expert_id,
+                finding_id=item.finding_id,
+            )
+        if pending_analysis_messages:
+            self.message_repo.append_many(pending_analysis_messages)
         self.event_repo.append(
             ReviewEvent(
                 review_id=review.review_id,
                 event_type="finding_created",
                 phase="expert_review",
                 message=f"{expert.name_zh} 生成审核发现",
-                payload={"finding_id": finding.finding_id, "expert_id": expert.expert_id},
+                payload={
+                    "expert_id": expert.expert_id,
+                    "finding_count": len(pending_findings),
+                    "finding_ids": [item.finding_id for item in pending_findings[:12]],
+                },
             )
         )
 
@@ -3568,6 +3868,9 @@ class ReviewRunner:
         expected_checks: list[str],
         active_skills: list[object],
         rule_screening: dict[str, object] | None = None,
+        *,
+        include_target_file_full_diff: bool = True,
+        include_related_diff_summary: bool = True,
     ) -> str:
         """构造专家最终输入给 LLM 的用户提示词。
 
@@ -3576,8 +3879,16 @@ class ReviewRunner:
         """
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
-        target_file_full_diff = self._build_target_file_full_diff(subject, file_path)
-        related_diff_summary = self._build_related_diff_summary(subject, file_path)
+        target_file_full_diff = (
+            self._build_target_file_full_diff(subject, file_path)
+            if include_target_file_full_diff
+            else "本轮为多文件批量模式，目标文件完整 diff 已在批次附录中按文件展开，请结合附录逐文件审查。"
+        )
+        related_diff_summary = (
+            self._build_related_diff_summary(subject, file_path)
+            if include_related_diff_summary
+            else "本轮为多文件批量模式，其他变更文件摘要已由“本轮批量文件清单”提供，不再重复展开。"
+        )
         java_quality = self.java_quality_signal_extractor.extract(
             file_path=file_path,
             target_hunk=target_hunk,
@@ -3657,7 +3968,7 @@ class ReviewRunner:
             f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
-            f"请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。\n"
+            f"{'请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。' if include_target_file_full_diff else '本轮为多文件批量模式，请优先基于“本轮批量文件清单”和每个文件的 hunk 说明逐文件审查，再回到代码仓上下文交叉验证，不要遗漏任何文件。'}\n"
             f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
             f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
@@ -3700,6 +4011,25 @@ class ReviewRunner:
                 "related_files": [str(item).strip() for item in list(fallback_related_files or []) if str(item).strip()],
             }
         ]
+
+    def _count_batch_hunks(
+        self,
+        batch_items: list[dict[str, object]],
+        *,
+        fallback_target_hunks: list[dict[str, object]] | None = None,
+    ) -> int:
+        count = 0
+        for item in batch_items:
+            count += len(
+                [
+                    hunk
+                    for hunk in list(item.get("target_hunks") or [])
+                    if isinstance(hunk, dict)
+                ]
+            )
+        if count > 0:
+            return count
+        return len([item for item in list(fallback_target_hunks or []) if isinstance(item, dict)])
 
     def _find_batch_item_for_file(
         self,

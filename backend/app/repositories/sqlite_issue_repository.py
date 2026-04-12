@@ -17,9 +17,24 @@ class SqliteIssueRepository:
     def save_all(self, review_id: str, issues: list[DebateIssue]) -> list[DebateIssue]:
         with self._db.connect() as connection:
             connection.execute("DELETE FROM issues WHERE review_id = ?", (review_id,))
+            rows = []
             for issue in issues:
                 payload = issue.model_dump(mode="json")
-                connection.execute(
+                rows.append(
+                    (
+                        issue.issue_id,
+                        review_id,
+                        issue.title,
+                        issue.status,
+                        issue.severity,
+                        issue.confidence,
+                        json.dumps(payload, ensure_ascii=False),
+                        payload["created_at"],
+                        payload["updated_at"],
+                    )
+                )
+            if rows:
+                connection.executemany(
                     """
                     INSERT INTO issues (
                         issue_id,
@@ -33,17 +48,7 @@ class SqliteIssueRepository:
                         updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        issue.issue_id,
-                        review_id,
-                        issue.title,
-                        issue.status,
-                        issue.severity,
-                        issue.confidence,
-                        json.dumps(payload, ensure_ascii=False),
-                        payload["created_at"],
-                        payload["updated_at"],
-                    ),
+                    rows,
                 )
             connection.commit()
         return issues

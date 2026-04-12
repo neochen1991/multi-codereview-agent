@@ -47,6 +47,44 @@ class SqliteMessageRepository:
             connection.commit()
         return normalized_message
 
+    def append_many(self, messages: list[ConversationMessage]) -> list[ConversationMessage]:
+        normalized = [self._normalize_message_payload(item) for item in list(messages or []) if isinstance(item, ConversationMessage)]
+        if not normalized:
+            return []
+        rows = []
+        for message in normalized:
+            payload = message.model_dump(mode="json")
+            rows.append(
+                (
+                    message.message_id,
+                    message.review_id,
+                    message.issue_id,
+                    message.expert_id,
+                    message.message_type,
+                    message.content,
+                    json.dumps(payload["metadata"], ensure_ascii=False),
+                    payload["created_at"],
+                )
+            )
+        with self._db.connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO messages (
+                    message_id,
+                    review_id,
+                    issue_id,
+                    expert_id,
+                    message_type,
+                    content,
+                    metadata_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
+        return normalized
+
     def list(self, review_id: str) -> list[ConversationMessage]:
         with self._db.connect() as connection:
             rows = connection.execute(
@@ -58,6 +96,23 @@ class SqliteMessageRepository:
                 """,
                 (review_id,),
             ).fetchall()
+        return self._deserialize_rows(rows)
+
+    def list_since(self, review_id: str, *, since: str, limit: int = 500) -> list[ConversationMessage]:
+        with self._db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM messages
+                WHERE review_id = ? AND created_at >= ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (review_id, since, max(1, min(5000, int(limit or 500)))),
+            ).fetchall()
+        return self._deserialize_rows(rows)
+
+    def _deserialize_rows(self, rows: list[object]) -> list[ConversationMessage]:
         return [
             ConversationMessage.model_validate(
                 {

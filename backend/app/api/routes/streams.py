@@ -7,18 +7,22 @@ from fastapi.responses import StreamingResponse
 
 from app.domain.models.event import ReviewEvent
 import app.services.review_service as review_service_module
-from app.services.stream_hub import encode_sse, encode_sse_event
+from app.services.stream_hub import encode_sse_event
 
 router = APIRouter()
 
 
 @router.get("/reviews/{review_id}/events")
-def list_events(review_id: str) -> list[dict[str, object]]:
+def list_events(
+    review_id: str,
+    since: str = "",
+    limit: int = 0,
+) -> list[dict[str, object]]:
     """返回某次审核当前已落盘的事件列表。"""
 
     return [
         item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_events(review_id)
+        for item in review_service_module.review_service.list_events(review_id, since=since, limit=limit)
     ]
 
 
@@ -33,10 +37,12 @@ async def stream_events(review_id: str, request: Request) -> StreamingResponse:
     async def event_generator():
         """循环监听新增事件和消息，并按 SSE 协议输出。"""
 
-        previous_event_count = len(review_service_module.review_service.list_events(review_id))
-        previous_message_count = len(
-            review_service_module.review_service.list_all_messages(review_id)
-        )
+        seed_events = review_service_module.review_service.list_events(review_id)
+        seed_messages = review_service_module.review_service.list_all_messages(review_id)
+        event_since = str(seed_events[-1].created_at) if seed_events else ""
+        message_since = str(seed_messages[-1].created_at) if seed_messages else ""
+        seen_event_ids: set[str] = set()
+        seen_message_ids: set[str] = set()
         idle_rounds_after_finish = 0
 
         while True:
@@ -47,18 +53,32 @@ async def stream_events(review_id: str, request: Request) -> StreamingResponse:
             if current_review is None:
                 break
 
-            events = review_service_module.review_service.list_events(review_id)
-            messages = review_service_module.review_service.list_all_messages(review_id)
+            events = review_service_module.review_service.list_events(
+                review_id,
+                since=event_since,
+                limit=500,
+            )
+            messages = review_service_module.review_service.list_all_messages(
+                review_id,
+                since=message_since,
+                limit=500,
+            )
             emitted = False
 
-            if len(events) > previous_event_count:
-                for event in events[previous_event_count:]:
+            new_events = [event for event in events if event.event_id not in seen_event_ids]
+            if new_events:
+                for event in new_events:
+                    seen_event_ids.add(event.event_id)
                     yield encode_sse_event(event)
-                previous_event_count = len(events)
+                event_since = str(new_events[-1].created_at)
                 emitted = True
 
-            if len(messages) > previous_message_count:
-                latest = messages[-1]
+            new_messages = [message for message in messages if message.message_id not in seen_message_ids]
+            if new_messages:
+                latest = new_messages[-1]
+                for message in new_messages:
+                    seen_message_ids.add(message.message_id)
+                message_since = str(latest.created_at)
                 yield encode_sse_event(
                     ReviewEvent(
                         review_id=review_id,
@@ -66,14 +86,13 @@ async def stream_events(review_id: str, request: Request) -> StreamingResponse:
                         phase=current_review.phase,
                         message="对话流已更新",
                         payload={
-                            "message_count": len(messages),
+                            "message_delta_count": len(new_messages),
                             "latest_message_id": latest.message_id,
                             "latest_message_type": latest.message_type,
                             "latest_expert_id": latest.expert_id,
                         },
                     )
                 )
-                previous_message_count = len(messages)
                 emitted = True
 
             if not emitted:

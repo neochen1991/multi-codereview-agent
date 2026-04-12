@@ -175,12 +175,16 @@ def batch_delete_reviews(payload: BatchDeleteReviewsRequest) -> dict[str, object
 
 
 @router.get("/reviews/{review_id}/findings")
-def list_findings(review_id: str) -> list[dict[str, object]]:
+def list_findings(
+    review_id: str,
+    since: str = "",
+    limit: int = 0,
+) -> list[dict[str, object]]:
     """返回某次审核产出的 finding 列表。"""
 
     return [
         item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_findings(review_id)
+        for item in review_service_module.review_service.list_findings(review_id, since=since, limit=limit)
     ]
 
 
@@ -195,18 +199,34 @@ def get_finding(review_id: str, finding_id: str) -> dict[str, object]:
 
 
 @router.get("/reviews/{review_id}/messages")
-def list_messages(review_id: str) -> list[dict[str, object]]:
+def list_messages(
+    review_id: str,
+    since: str = "",
+    limit: int = 0,
+) -> list[dict[str, object]]:
     """返回某次审核的全部消息，供过程页按需加载。"""
 
-    return review_service_module.review_service.build_process_messages(review_id)
+    return review_service_module.review_service.build_process_messages(review_id, since=since, limit=limit)
 
 
 @router.get("/reviews/{review_id}/report")
-def get_report(review_id: str) -> dict[str, object]:
+def get_report(
+    review_id: str,
+    findings_limit: int | None = None,
+    findings_offset: int = 0,
+    issues_limit: int | None = None,
+    issues_offset: int = 0,
+) -> dict[str, object]:
     """返回用于结果页展示的完整审核报告。"""
 
     try:
-        report = review_service_module.review_service.build_report(review_id)
+        report = review_service_module.review_service.build_report(
+            review_id,
+            findings_limit=findings_limit,
+            findings_offset=findings_offset,
+            issues_limit=issues_limit,
+            issues_offset=issues_offset,
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="review not found") from error
     return report.model_dump(mode="json")

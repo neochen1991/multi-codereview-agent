@@ -94,6 +94,8 @@ const defaultFormState: ReviewFormState = {
 };
 
 const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result"];
+const PROCESS_INCREMENTAL_LIMIT = 500;
+const PROCESS_CLIENT_CACHE_LIMIT = 4000;
 
 const WorkbenchPanelFallback: React.FC<{ description?: string }> = ({ description = "模块加载中..." }) => (
   <Card className="module-card">
@@ -423,6 +425,17 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
   const workspaceLoadRef = useRef<{ key: string; promise: Promise<void> | null }>({ key: "", promise: null });
+  const processCursorRef = useRef<{
+    reviewId: string;
+    eventSince: string;
+    messageSince: string;
+    findingSince: string;
+  }>({
+    reviewId: "",
+    eventSince: "",
+    messageSince: "",
+    findingSince: "",
+  });
   const processDialogueRef = useRef<HTMLDivElement | null>(null);
   const processIssuesRef = useRef<HTMLDivElement | null>(null);
   const resultSummaryRef = useRef<HTMLDivElement | null>(null);
@@ -508,22 +521,74 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   const loadProcessBundle = async (targetReviewId: string) => {
+    const isIncremental = processCursorRef.current.reviewId === targetReviewId;
+    const sinceEvent = isIncremental ? processCursorRef.current.eventSince : "";
+    const sinceMessage = isIncremental ? processCursorRef.current.messageSince : "";
+    const sinceFinding = isIncremental ? processCursorRef.current.findingSince : "";
     const [nextIssues, nextEvents, nextMessages, nextFindings] = await Promise.all([
       reviewApi.listIssues(targetReviewId),
-      reviewApi.listEvents(targetReviewId),
-      reviewApi.listMessages(targetReviewId),
-      reviewApi.listFindings(targetReviewId),
+      reviewApi.listEvents(targetReviewId, {
+        since: sinceEvent || undefined,
+        limit: PROCESS_INCREMENTAL_LIMIT,
+      }),
+      reviewApi.listMessages(targetReviewId, {
+        since: sinceMessage || undefined,
+        limit: PROCESS_INCREMENTAL_LIMIT,
+      }),
+      reviewApi.listFindings(targetReviewId, {
+        since: sinceFinding || undefined,
+        limit: PROCESS_INCREMENTAL_LIMIT,
+      }),
     ]);
+    const mergeById = <T extends { created_at?: string }>(
+      base: T[],
+      incoming: T[],
+      getId: (item: T) => string,
+    ): T[] => {
+      const map = new Map<string, T>();
+      for (const item of base) {
+        map.set(getId(item), item);
+      }
+      for (const item of incoming) {
+        map.set(getId(item), item);
+      }
+      return Array.from(map.values())
+        .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+        .slice(-PROCESS_CLIENT_CACHE_LIMIT);
+    };
+
+    const mergedEvents = isIncremental
+      ? mergeById(events, nextEvents, (item) => item.event_id)
+      : nextEvents;
+    const mergedMessages = isIncremental
+      ? mergeById(messages, nextMessages, (item) => item.message_id)
+      : nextMessages;
+    const mergedFindings = isIncremental
+      ? mergeById(findings, nextFindings, (item) => item.finding_id)
+      : nextFindings;
+
     setIssues(nextIssues);
-    setEvents(nextEvents);
-    setMessages(nextMessages);
-    setFindings(nextFindings);
-    return { issues: nextIssues, events: nextEvents, messages: nextMessages, findings: nextFindings };
+    setEvents(mergedEvents);
+    setMessages(mergedMessages);
+    setFindings(mergedFindings);
+
+    processCursorRef.current = {
+      reviewId: targetReviewId,
+      eventSince: mergedEvents.length ? String(mergedEvents[mergedEvents.length - 1]?.created_at || "") : "",
+      messageSince: mergedMessages.length ? String(mergedMessages[mergedMessages.length - 1]?.created_at || "") : "",
+      findingSince: mergedFindings.length ? String(mergedFindings[mergedFindings.length - 1]?.created_at || "") : "",
+    };
+    return { issues: nextIssues, events: mergedEvents, messages: mergedMessages, findings: mergedFindings };
   };
 
   const loadResultBundle = async (targetReviewId: string) => {
     const [nextReport, artifactBundle] = await Promise.all([
-      reviewApi.getReport(targetReviewId),
+      reviewApi.getReport(targetReviewId, {
+        findings_limit: 800,
+        findings_offset: 0,
+        issues_limit: 800,
+        issues_offset: 0,
+      }),
       reviewApi.getArtifacts(targetReviewId).catch(() => null),
     ]);
     setReport(nextReport);
@@ -584,6 +649,7 @@ const ReviewWorkbenchPage: React.FC = () => {
           const resultBundle = await loadResultBundle(targetReviewId);
           setEvents([]);
           setMessages([]);
+          processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
           setReplay(null);
           syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
           return;
@@ -597,6 +663,7 @@ const ReviewWorkbenchPage: React.FC = () => {
         setEvents([]);
         setMessages([]);
         setFindings([]);
+        processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
         setResultFindingDetailCache({});
         syncSelectionFromData([], []);
         applyReviewDetail(detail);
@@ -648,6 +715,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       setEvents([]);
       setMessages([]);
       setFindings([]);
+      processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
       setResultFindingDetailCache({});
       setForm({
         ...defaultFormState,

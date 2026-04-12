@@ -42,6 +42,42 @@ class SqliteEventRepository:
             connection.commit()
         return event
 
+    def append_many(self, events: list[ReviewEvent]) -> list[ReviewEvent]:
+        normalized = [item for item in list(events or []) if isinstance(item, ReviewEvent)]
+        if not normalized:
+            return []
+        rows = []
+        for event in normalized:
+            payload = event.model_dump(mode="json")
+            rows.append(
+                (
+                    event.event_id,
+                    event.review_id,
+                    event.event_type,
+                    event.phase,
+                    event.message,
+                    json.dumps(payload["payload"], ensure_ascii=False),
+                    payload["created_at"],
+                )
+            )
+        with self._db.connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO review_events (
+                    event_id,
+                    review_id,
+                    event_type,
+                    phase,
+                    message,
+                    payload_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
+        return normalized
+
     def list(self, review_id: str) -> list[ReviewEvent]:
         with self._db.connect() as connection:
             rows = connection.execute(
@@ -53,6 +89,23 @@ class SqliteEventRepository:
                 """,
                 (review_id,),
             ).fetchall()
+        return self._deserialize_rows(rows)
+
+    def list_since(self, review_id: str, *, since: str, limit: int = 500) -> list[ReviewEvent]:
+        with self._db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM review_events
+                WHERE review_id = ? AND created_at >= ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (review_id, since, max(1, min(5000, int(limit or 500)))),
+            ).fetchall()
+        return self._deserialize_rows(rows)
+
+    def _deserialize_rows(self, rows: list[object]) -> list[ReviewEvent]:
         return [
             ReviewEvent.model_validate(
                 {
