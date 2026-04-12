@@ -9,6 +9,7 @@ const api = axios.create({
 export interface ReviewSummary {
   review_id: string;
   status: string;
+  issue_count?: number;
   phase?: string;
   analysis_mode?: "standard" | "light";
   queue_position?: number;
@@ -402,6 +403,12 @@ export interface RuntimeSettings {
   config_path?: string;
   default_target_branch: string;
   default_analysis_mode: "standard" | "light";
+  storage_backend: "sqlite" | "postgres";
+  storage_pg_url: string;
+  storage_pg_schema: string;
+  storage_pg_user: string;
+  storage_pg_password?: string;
+  storage_pg_password_configured?: boolean;
   code_repo_clone_url: string;
   code_repo_local_path: string;
   code_repo_default_branch: string;

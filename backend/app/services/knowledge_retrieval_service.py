@@ -5,8 +5,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
-from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
-from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 
 
 class KnowledgeRetrievalService:
@@ -18,9 +17,9 @@ class KnowledgeRetrievalService:
         """初始化知识仓储和检索缓存。"""
 
         self._root = Path(root)
-        db_path = Path(root) / "app.db"
-        self._repository = SqliteKnowledgeRepository(db_path)
-        self._node_repository = SqliteKnowledgeNodeRepository(db_path)
+        repository_factory = StorageRepositoryFactory(self._root)
+        self._repository = repository_factory.create_knowledge_repository()
+        self._node_repository = repository_factory.create_knowledge_node_repository()
         self._cache: OrderedDict[
             tuple[str, tuple[str, ...], tuple[str, ...]],
             list[KnowledgeDocument],

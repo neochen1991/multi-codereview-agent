@@ -16,6 +16,11 @@ class RuntimeSettingsRequest(BaseModel):
 
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
+    storage_backend: Literal["sqlite", "postgres"] = "sqlite"
+    storage_pg_url: str = ""
+    storage_pg_schema: str = "public"
+    storage_pg_user: str = ""
+    storage_pg_password: str | None = None
     code_repo_clone_url: str = ""
     code_repo_local_path: str = ""
     code_repo_default_branch: str = "main"
@@ -113,12 +118,14 @@ def get_runtime_settings() -> dict[str, object]:
         mode="json",
         exclude={
             "default_llm_api_key",
+            "storage_pg_password",
             "code_repo_access_token",
             "github_access_token",
             "gitlab_access_token",
             "codehub_access_token",
         },
     )
+    payload["storage_pg_password_configured"] = bool((runtime.storage_pg_password or "").strip())
     payload["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     payload["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
     payload["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())
@@ -134,6 +141,8 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     """更新运行时配置并返回脱敏后的最新值。"""
 
     update_payload = payload.model_dump()
+    if update_payload.get("storage_pg_password") in (None, ""):
+        update_payload = {key: value for key, value in update_payload.items() if key != "storage_pg_password"}
     if str(update_payload.get("code_repo_clone_url") or "").strip():
         update_payload["auto_review_repo_url"] = str(update_payload.get("code_repo_clone_url") or "").strip()
     runtime = review_service_module.review_service.update_runtime_settings(update_payload)
@@ -141,12 +150,14 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
         mode="json",
         exclude={
             "default_llm_api_key",
+            "storage_pg_password",
             "code_repo_access_token",
             "github_access_token",
             "gitlab_access_token",
             "codehub_access_token",
         },
     )
+    response["storage_pg_password_configured"] = bool((runtime.storage_pg_password or "").strip())
     response["default_llm_api_key_configured"] = bool((runtime.default_llm_api_key or "").strip())
     response["code_repo_access_token_configured"] = bool((runtime.code_repo_access_token or "").strip())
     response["github_access_token_configured"] = bool((runtime.github_access_token or "").strip())

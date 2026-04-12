@@ -184,7 +184,7 @@ const SettingsPage: React.FC = () => {
             这里统一管理代码仓、模型、自动审核、Issue 治理和扩展能力。系统启动必需的配置会写入项目根目录
             {" "}
             <code>config.json</code>
-            ，设置页治理项会持久化到 SQLite，并在运行时与系统配置合并生效。
+            ，设置页治理项会持久化到当前存储后端，并在运行时与系统配置合并生效。
           </Paragraph>
           <Form.Item noStyle shouldUpdate>
             {() =>
@@ -222,6 +222,11 @@ const SettingsPage: React.FC = () => {
               await settingsApi.updateRuntime({
                 default_target_branch: values.default_target_branch,
                 default_analysis_mode: values.default_analysis_mode || "standard",
+                storage_backend: values.storage_backend || "sqlite",
+                storage_pg_url: values.storage_pg_url || "",
+                storage_pg_schema: values.storage_pg_schema || "public",
+                storage_pg_user: values.storage_pg_user || "",
+                storage_pg_password: String(values.storage_pg_password || "").trim() || undefined,
                 code_repo_clone_url: values.code_repo_clone_url || "",
                 code_repo_local_path: values.code_repo_local_path || "",
                 code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
@@ -275,6 +280,7 @@ const SettingsPage: React.FC = () => {
               });
               message.success("运行时设置已更新");
               form.setFieldValue("default_llm_api_key", "");
+              form.setFieldValue("storage_pg_password", "");
               form.setFieldValue("code_repo_access_token", "");
               form.setFieldValue("github_access_token", "");
               form.setFieldValue("gitlab_access_token", "");
@@ -315,6 +321,41 @@ const SettingsPage: React.FC = () => {
                             ]}
                           />
                         </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_backend" label="底层存储后端">
+                          <Select
+                            options={[
+                              { label: "SQLite（默认）", value: "sqlite" },
+                              { label: "PostgreSQL", value: "postgres" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_pg_url" label="PG 连接 URL">
+                          <Input placeholder="postgresql://127.0.0.1:5432/review_db" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="storage_pg_schema" label="PG Schema">
+                          <Input placeholder="public" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="storage_pg_user" label="PG 用户">
+                          <Input placeholder="review_user" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_pg_password" label="PG 密码">
+                          <Input.Password placeholder="留空则保持当前已配置的 PG 密码" />
+                        </Form.Item>
+                        {renderConfiguredNotice(
+                          "storage_pg_password_configured",
+                          "PG 密码已配置",
+                          "未填写新密码时，系统会继续使用当前已保存的 PG 密码。",
+                        )}
                       </Col>
                       <Col xs={24}>
                         <Form.Item name="code_repo_clone_url" label="代码仓 Git 地址">

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.config import settings
 from app.domain.models.app_config import AppConfig
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.file_app_config_repository import FileAppConfigRepository
-from app.repositories.sqlite_runtime_settings_repository import SqliteRuntimeSettingsRepository
+from app.repositories.storage_factory import StorageRepositoryFactory, resolve_config_path
 
 
 class RuntimeSettingsService:
@@ -14,6 +13,11 @@ class RuntimeSettingsService:
 
     CONFIG_MANAGED_FIELDS = frozenset(
         {
+            "storage_backend",
+            "storage_pg_url",
+            "storage_pg_schema",
+            "storage_pg_user",
+            "storage_pg_password",
             "code_repo_clone_url",
             "code_repo_local_path",
             "code_repo_default_branch",
@@ -77,18 +81,19 @@ class RuntimeSettingsService:
         """根据当前 storage root 解析 config.json 路径。"""
 
         self._storage_root = Path(root)
-        self._sqlite_repository = SqliteRuntimeSettingsRepository(self._storage_root / "app.db")
-        self._config_repository = FileAppConfigRepository(self._resolve_config_path(self._storage_root), self._storage_root)
+        self._config_repository = FileAppConfigRepository(resolve_config_path(self._storage_root), self._storage_root)
+        self._storage_repository = StorageRepositoryFactory(self._storage_root).create_runtime_settings_repository()
 
     def get(self) -> RuntimeSettings:
         """读取当前运行时设置。"""
 
+        self._refresh_storage_repository()
         config_settings = self._config_repository.get_runtime_settings()
-        sqlite_payload = self._sqlite_repository.get_payload() or {}
-        sqlite_overrides = self._filter_sqlite_fields(sqlite_payload)
-        if sqlite_payload and sqlite_overrides != sqlite_payload:
+        storage_payload = self._storage_repository.get_payload() or {}
+        sqlite_overrides = self._filter_sqlite_fields(storage_payload)
+        if storage_payload and sqlite_overrides != storage_payload:
             # 清理旧版本误写入 SQLite 的系统级配置，只保留设置页治理项。
-            self._sqlite_repository.save_payload(sqlite_overrides)
+            self._storage_repository.save_payload(sqlite_overrides)
         if not sqlite_overrides:
             return config_settings
         merged_payload = config_settings.model_dump(mode="json")
@@ -99,6 +104,8 @@ class RuntimeSettingsService:
         """更新运行时设置，并保留未提交的敏感字段。"""
 
         current = self.get()
+        if payload.get("storage_pg_password") in (None, ""):
+            payload = {key: value for key, value in payload.items() if key != "storage_pg_password"}
         if payload.get("default_llm_api_key") in (None, ""):
             payload = {key: value for key, value in payload.items() if key != "default_llm_api_key"}
         if payload.get("code_repo_access_token") in (None, ""):
@@ -113,7 +120,8 @@ class RuntimeSettingsService:
         merged_payload.update(payload)
         updated = RuntimeSettings.model_validate(merged_payload)
         self._save_config_managed_fields(updated)
-        self._sqlite_repository.save_payload(self._filter_sqlite_fields(updated.model_dump(mode="json")))
+        self._refresh_storage_repository()
+        self._storage_repository.save_payload(self._filter_sqlite_fields(updated.model_dump(mode="json")))
         return self.get()
 
     def _filter_sqlite_fields(self, payload: dict[str, object]) -> dict[str, object]:
@@ -133,15 +141,18 @@ class RuntimeSettingsService:
                 "code_repo": next_config.code_repo,
                 "database_sources": next_config.database_sources,
                 "network": next_config.network,
+                "runtime": current_config.runtime.model_copy(
+                    update={
+                        "storage_backend": next_config.runtime.storage_backend,
+                        "storage_pg_url": next_config.runtime.storage_pg_url,
+                        "storage_pg_schema": next_config.runtime.storage_pg_schema,
+                        "storage_pg_user": next_config.runtime.storage_pg_user,
+                        "storage_pg_password": next_config.runtime.storage_pg_password,
+                    }
+                ),
             }
         )
         self._config_repository.save(merged_config)
 
-    def _resolve_config_path(self, root: Path) -> Path:
-        """为默认环境和测试环境分别解析统一配置文件位置。"""
-
-        resolved_root = Path(root).resolve()
-        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
-        if resolved_root == default_storage_root:
-            return Path(settings.CONFIG_PATH)
-        return resolved_root.parent / "config.json"
+    def _refresh_storage_repository(self) -> None:
+        self._storage_repository = StorageRepositoryFactory(self._storage_root).create_runtime_settings_repository()

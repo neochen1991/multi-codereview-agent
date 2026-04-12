@@ -26,12 +26,7 @@ from app.domain.models.review_skill import ReviewSkillProfile
 from app.domain.models.review_tool_plugin import ReviewToolPlugin
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.logging_config import configure_logging as configure_app_logging
-from app.repositories.sqlite_event_repository import SqliteEventRepository
-from app.repositories.sqlite_feedback_repository import SqliteFeedbackRepository
-from app.repositories.sqlite_finding_repository import SqliteFindingRepository
-from app.repositories.sqlite_issue_repository import SqliteIssueRepository
-from app.repositories.sqlite_message_repository import SqliteMessageRepository
-from app.repositories.sqlite_review_repository import SqliteReviewRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.expert_registry import ExpertRegistry
 from app.services.extension_editor_service import ExtensionEditorService
@@ -69,19 +64,17 @@ class ReviewService:
 
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
-        db_path = self._resolve_db_path(self.storage_root)
-        self.review_repo = SqliteReviewRepository(db_path)
-        self.event_repo = SqliteEventRepository(db_path)
-        self.feedback_repo = SqliteFeedbackRepository(db_path)
-        self.finding_repo = SqliteFindingRepository(db_path)
-        self.issue_repo = SqliteIssueRepository(db_path)
-        self.message_repo = SqliteMessageRepository(db_path)
-        self.runner = ReviewRunner(self.storage_root)
+        self.review_repo = None
+        self.event_repo = None
+        self.feedback_repo = None
+        self.finding_repo = None
+        self.issue_repo = None
+        self.message_repo = None
+        self.runner = None
         self.artifact_service = ArtifactService(self.storage_root)
         self.expert_registry = ExpertRegistry(self.storage_root / "experts")
-        self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
-        self.knowledge_service = KnowledgeService(self.storage_root)
-        self.knowledge_service.bootstrap_builtin_documents()
+        self.feedback_learner_service = None
+        self.knowledge_service = None
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
@@ -92,15 +85,20 @@ class ReviewService:
         self._db_compaction_running = False
         self._db_compaction_pending = False
         self._db_compaction_lock = threading.Lock()
+        self._reload_storage_services()
 
-    def _resolve_db_path(self, root: Path) -> Path:
-        """Resolve SQLite path from storage root, honoring global default when unchanged."""
-
-        resolved_root = Path(root).resolve()
-        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
-        if resolved_root == default_storage_root:
-            return Path(settings.SQLITE_DB_PATH)
-        return resolved_root / "app.db"
+    def _reload_storage_services(self) -> None:
+        repository_factory = StorageRepositoryFactory(self.storage_root)
+        self.review_repo = repository_factory.create_review_repository()
+        self.event_repo = repository_factory.create_event_repository()
+        self.feedback_repo = repository_factory.create_feedback_repository()
+        self.finding_repo = repository_factory.create_finding_repository()
+        self.issue_repo = repository_factory.create_issue_repository()
+        self.message_repo = repository_factory.create_message_repository()
+        self.runner = ReviewRunner(self.storage_root)
+        self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
+        self.knowledge_service = KnowledgeService(self.storage_root)
+        self.knowledge_service.bootstrap_builtin_documents()
 
     def create_review(self, payload: dict[str, object]) -> ReviewTask:
         """创建审核任务并落盘为 pending。
@@ -818,7 +816,7 @@ class ReviewService:
         return True
 
     def _has_running_reviews(self) -> bool:
-        return any(item.status == "running" for item in self.review_repo.list_light())
+        return any(str(item.get("status") or "").strip().lower() == "running" for item in self.review_repo.list_light())
 
     def _try_schedule_deferred_compaction(self) -> None:
         if os.getenv("PYTEST_CURRENT_TEST"):
@@ -921,7 +919,9 @@ class ReviewService:
         return self.runtime_settings_service.get()
 
     def update_runtime_settings(self, payload: dict[str, object]) -> RuntimeSettings:
-        return self.runtime_settings_service.update(payload)
+        runtime = self.runtime_settings_service.update(payload)
+        self._reload_storage_services()
+        return runtime
 
     def list_extension_skills(self) -> list[ReviewSkillProfile]:
         return self.extension_editor_service.list_skills()

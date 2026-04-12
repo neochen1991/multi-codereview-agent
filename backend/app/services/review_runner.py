@@ -20,11 +20,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
-from app.repositories.sqlite_event_repository import SqliteEventRepository
-from app.repositories.sqlite_finding_repository import SqliteFindingRepository
-from app.repositories.sqlite_issue_repository import SqliteIssueRepository
-from app.repositories.sqlite_message_repository import SqliteMessageRepository
-from app.repositories.sqlite_review_repository import SqliteReviewRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
@@ -63,12 +59,12 @@ class ReviewRunner:
 
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
-        db_path = self._resolve_db_path(self.storage_root)
-        self.review_repo = SqliteReviewRepository(db_path)
-        self.event_repo = SqliteEventRepository(db_path)
-        self.finding_repo = SqliteFindingRepository(db_path)
-        self.issue_repo = SqliteIssueRepository(db_path)
-        self.message_repo = SqliteMessageRepository(db_path)
+        repository_factory = StorageRepositoryFactory(self.storage_root)
+        self.review_repo = repository_factory.create_review_repository()
+        self.event_repo = repository_factory.create_event_repository()
+        self.finding_repo = repository_factory.create_finding_repository()
+        self.issue_repo = repository_factory.create_issue_repository()
+        self.message_repo = repository_factory.create_message_repository()
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.artifact_service = ArtifactService(self.storage_root)
@@ -90,15 +86,6 @@ class ReviewRunner:
         self._problem_context_cache: dict[tuple[object, str, int, int, int, tuple[int, ...]], dict[str, object]] = {}
         self._last_gc_at = 0.0
         self._gc_interval_seconds = max(30.0, float(os.getenv("REVIEW_GC_INTERVAL_SECONDS", "60") or 60))
-
-    def _resolve_db_path(self, root: Path) -> Path:
-        """Resolve SQLite path from storage root, honoring global default when unchanged."""
-
-        resolved_root = Path(root).resolve()
-        default_storage_root = Path(settings.STORAGE_ROOT).resolve()
-        if resolved_root == default_storage_root:
-            return Path(settings.SQLITE_DB_PATH)
-        return resolved_root / "app.db"
 
     def bootstrap_demo_review(self) -> str:
         review_id = f"rev_{uuid4().hex[:8]}"

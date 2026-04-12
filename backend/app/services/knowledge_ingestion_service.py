@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeDocument
-from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
-from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.knowledge_page_index_service import KnowledgePageIndexService
 from app.services.knowledge_rule_index_service import KnowledgeRuleIndexService
-from app.repositories.sqlite_knowledge_rule_repository import SqliteKnowledgeRuleRepository
 
 
 class KnowledgeIngestionService:
@@ -16,10 +14,10 @@ class KnowledgeIngestionService:
     def __init__(self, root: Path) -> None:
         """初始化知识库仓储。"""
 
-        db_path = Path(root) / "app.db"
-        self._repository = SqliteKnowledgeRepository(db_path)
-        self._node_repository = SqliteKnowledgeNodeRepository(db_path)
-        self._rule_repository = SqliteKnowledgeRuleRepository(db_path)
+        repository_factory = StorageRepositoryFactory(Path(root))
+        self._repository = repository_factory.create_knowledge_repository()
+        self._node_repository = repository_factory.create_knowledge_node_repository()
+        self._rule_repository = repository_factory.create_knowledge_rule_repository()
         self._page_index = KnowledgePageIndexService()
         self._rule_index = KnowledgeRuleIndexService()
 

@@ -147,6 +147,13 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
+      title: "检视议题数",
+      dataIndex: "issue_count",
+      key: "issue_count",
+      width: 120,
+      render: (value?: number) => Number(value || 0),
+    },
+    {
       title: "人工裁决",
       dataIndex: "human_review_status",
       key: "human_review_status",
@@ -307,7 +314,7 @@ const HistoryPage: React.FC = () => {
         columns={columns}
         dataSource={reviews}
         loading={loading}
-        scroll={{ x: 1520 }}
+        scroll={{ x: 1640 }}
       />
     </Card>
   );

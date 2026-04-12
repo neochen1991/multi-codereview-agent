@@ -5,8 +5,7 @@ import re
 
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.repositories.sqlite_knowledge_node_repository import SqliteKnowledgeNodeRepository
-from app.repositories.sqlite_knowledge_repository import SqliteKnowledgeRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
 from app.services.knowledge_rule_screening_service import KnowledgeRuleScreeningService
@@ -18,8 +17,9 @@ class KnowledgeService:
     def __init__(self, root: Path) -> None:
         """初始化知识库仓储、写入服务和检索服务。"""
 
-        self._repository = SqliteKnowledgeRepository(Path(root) / "app.db")
-        self._node_repository = SqliteKnowledgeNodeRepository(Path(root) / "app.db")
+        repository_factory = StorageRepositoryFactory(Path(root))
+        self._repository = repository_factory.create_knowledge_repository()
+        self._node_repository = repository_factory.create_knowledge_node_repository()
         self._ingestion = KnowledgeIngestionService(root)
         self._retrieval = KnowledgeRetrievalService(root)
         self._rule_screening = KnowledgeRuleScreeningService(root)

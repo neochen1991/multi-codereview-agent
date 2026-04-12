@@ -69,6 +69,11 @@ class RuntimeConfig(BaseModel):
 
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
+    storage_backend: Literal["sqlite", "postgres"] = "sqlite"
+    storage_pg_url: str = ""
+    storage_pg_schema: str = "public"
+    storage_pg_user: str = ""
+    storage_pg_password: str = ""
     allow_llm_fallback: bool = False
     allow_human_gate: bool = True
     default_max_debate_rounds: int = 2
@@ -167,6 +172,11 @@ class AppConfig(BaseModel):
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
                 default_analysis_mode=runtime.default_analysis_mode,
+                storage_backend=runtime.storage_backend,
+                storage_pg_url=runtime.storage_pg_url,
+                storage_pg_schema=runtime.storage_pg_schema,
+                storage_pg_user=runtime.storage_pg_user,
+                storage_pg_password=runtime.storage_pg_password,
                 allow_llm_fallback=runtime.allow_llm_fallback,
                 allow_human_gate=runtime.allow_human_gate,
                 default_max_debate_rounds=runtime.default_max_debate_rounds,
@@ -208,6 +218,11 @@ class AppConfig(BaseModel):
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
             default_analysis_mode=self.runtime.default_analysis_mode,
+            storage_backend=self.runtime.storage_backend,
+            storage_pg_url=self.runtime.storage_pg_url,
+            storage_pg_schema=self.runtime.storage_pg_schema,
+            storage_pg_user=self.runtime.storage_pg_user,
+            storage_pg_password=self.runtime.storage_pg_password,
             code_repo_clone_url=self.code_repo.clone_url,
             code_repo_local_path=self.code_repo.local_path,
             code_repo_default_branch=self.code_repo.default_branch,

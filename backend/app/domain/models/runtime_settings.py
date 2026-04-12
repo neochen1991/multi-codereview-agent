@@ -29,6 +29,11 @@ class RuntimeSettings(BaseModel):
 
     default_target_branch: str = "main"
     default_analysis_mode: Literal["standard", "light"] = "standard"
+    storage_backend: Literal["sqlite", "postgres"] = "sqlite"
+    storage_pg_url: str = ""
+    storage_pg_schema: str = "public"
+    storage_pg_user: str = ""
+    storage_pg_password: str = ""
     code_repo_clone_url: str = ""
     code_repo_local_path: str = ""
     code_repo_default_branch: str = "main"

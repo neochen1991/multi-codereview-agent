@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeReviewRule
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.repositories.sqlite_knowledge_rule_repository import SqliteKnowledgeRuleRepository
+from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 
@@ -18,7 +18,7 @@ class KnowledgeRuleScreeningService:
     """对专家绑定的全部规则做预筛查，决定哪些规则需要进入本轮审查。"""
 
     def __init__(self, root: Path) -> None:
-        self._repository = SqliteKnowledgeRuleRepository(Path(root) / "app.db")
+        self._repository = StorageRepositoryFactory(Path(root)).create_knowledge_rule_repository()
         self._llm = LLMChatService()
         self._java_quality_signal_extractor = JavaQualitySignalExtractor()
 

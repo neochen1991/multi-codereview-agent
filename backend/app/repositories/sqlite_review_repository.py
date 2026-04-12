@@ -116,7 +116,12 @@ class SqliteReviewRepository:
                 json_extract(subject_json, '$.title') AS title,
                 json_extract(subject_json, '$.mr_url') AS mr_url,
                 json_extract(subject_json, '$.changed_files') AS changed_files_json,
-                json_extract(subject_json, '$.metadata.trigger_source') AS trigger_source
+                json_extract(subject_json, '$.metadata.trigger_source') AS trigger_source,
+                (
+                    SELECT COUNT(1)
+                    FROM issues i
+                    WHERE i.review_id = reviews.review_id
+                ) AS issue_count
             FROM reviews
             ORDER BY updated_at DESC
         """
@@ -175,6 +180,7 @@ class SqliteReviewRepository:
             "completed_at": row["completed_at"],
             "duration_seconds": row["duration_seconds"],
             "updated_at": row["updated_at"],
+            "issue_count": int(row["issue_count"] or 0),
             "subject": {
                 "subject_type": row["subject_type"] or "",
                 "repo_id": row["repo_id"] or "",
