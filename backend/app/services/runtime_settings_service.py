@@ -167,20 +167,13 @@ class RuntimeSettingsService:
         next_config = AppConfig.from_runtime_settings(runtime)
         merged_config = current_config.model_copy(
             update={
+                "runtime": next_config.runtime,
                 "llm": next_config.llm,
                 "git": next_config.git,
                 "code_repo": next_config.code_repo,
                 "database_sources": next_config.database_sources,
                 "network": next_config.network,
-                "runtime": current_config.runtime.model_copy(
-                    update={
-                        "storage_backend": next_config.runtime.storage_backend,
-                        "storage_pg_url": next_config.runtime.storage_pg_url,
-                        "storage_pg_schema": next_config.runtime.storage_pg_schema,
-                        "storage_pg_user": next_config.runtime.storage_pg_user,
-                        "storage_pg_password": next_config.runtime.storage_pg_password,
-                    }
-                ),
+                "allowlist": next_config.allowlist,
             }
         )
         self._config_repository.save(merged_config)
