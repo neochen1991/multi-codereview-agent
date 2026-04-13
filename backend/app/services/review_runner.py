@@ -2384,6 +2384,13 @@ class ReviewRunner:
             fallback_line_start=line_start,
             fallback_target_hunk=target_hunk,
         )
+        if target_hunk:
+            repository_context["target_hunk"] = dict(target_hunk)
+            hunk_excerpt = str(target_hunk.get("excerpt") or "").strip()
+            if hunk_excerpt and not str(repository_context.get("target_hunk_excerpt") or "").strip():
+                repository_context["target_hunk_excerpt"] = hunk_excerpt
+        if target_hunks and not list(repository_context.get("target_hunks") or []):
+            repository_context["target_hunks"] = [dict(item) for item in target_hunks if isinstance(item, dict)]
         multi_file_batch = len(normalized_batch_items) > 1
         if multi_file_batch:
             file_labels = [str(item.get("file_path") or "").strip() for item in normalized_batch_items if str(item.get("file_path") or "").strip()]
@@ -2562,6 +2569,18 @@ class ReviewRunner:
             language=self._infer_code_language(file_path),
         )
         missing_required_context = self._extract_missing_required_context_sections(input_completeness)
+        if missing_required_context:
+            logger.info(
+                "expert input completeness degraded review_id=%s expert_id=%s file_path=%s line_start=%s missing=%s source_context_present=%s related_context_count=%s target_diff_present=%s",
+                review.review_id,
+                expert.expert_id,
+                file_path,
+                line_start,
+                missing_required_context,
+                bool(input_completeness.get("source_context_present")),
+                int(input_completeness.get("related_context_count") or 0),
+                bool(input_completeness.get("target_file_diff_present")),
+            )
         if missing_required_context:
             skip_message = (
                 f"{expert.name_zh} 本轮上下文不完整：缺失 {' / '.join(missing_required_context[:4])}。"
@@ -3511,6 +3530,9 @@ class ReviewRunner:
         if isinstance(primary_context, dict):
             primary_snippet = str(primary_context.get("snippet") or "").strip()
         target_hunk = dict(fallback_target_hunk or {})
+        hunk_excerpt = str(target_hunk.get("excerpt") or "").strip()
+        if hunk_excerpt and not str(merged.get("target_hunk_excerpt") or "").strip():
+            merged["target_hunk_excerpt"] = hunk_excerpt
         if not primary_snippet:
             problem_context = self._load_repository_problem_context(
                 review.subject,
@@ -3534,6 +3556,19 @@ class ReviewRunner:
                     "snippet": source_excerpt,
                     "line_start": int(fallback_line_start or 1),
                 }
+                primary_snippet = source_excerpt
+
+        if not primary_snippet and hunk_excerpt:
+            merged["primary_context"] = {
+                "path": fallback_file_path,
+                "snippet": hunk_excerpt,
+                "line_start": int(
+                    self._normalize_optional_line_value(target_hunk.get("start_line"))
+                    or fallback_line_start
+                    or 1
+                ),
+            }
+            primary_snippet = hunk_excerpt
 
         if not isinstance(merged.get("current_class_context"), dict):
             merged["current_class_context"] = {}
@@ -3585,7 +3620,17 @@ class ReviewRunner:
                 context_files.append(path)
         if context_files:
             merged["context_files"] = context_files[:16]
+        if target_hunk and not isinstance(merged.get("target_hunk"), dict):
+            merged["target_hunk"] = dict(target_hunk)
         return merged
+
+    def _context_item_has_snippet(self, item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        for key in ("snippet", "excerpt", "content"):
+            if str(item.get(key) or "").strip():
+                return True
+        return False
 
     def _extract_missing_required_context_sections(self, input_completeness: dict[str, object]) -> list[str]:
         missing_sections = [
@@ -3976,14 +4021,14 @@ class ReviewRunner:
                 "- 关注输入校验、空值处理、异常边界、日志脱敏、权限/租户隔离，以及 @Transactional 范围内的副作用。\n"
                 "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写、EAGER/级联加载风险。\n"
                 "- 检查条件分支、状态码、重试次数、批量阈值、字符串标识等是否以魔法值形式直接散落在业务逻辑中，是否应提取为常量、枚举或配置。\n"
-                "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据，证据不足时只能输出 risk_hypothesis。"
+                "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据；证据不足的条目不要输出。"
             )
         if normalized in {"javascript", "jsx", "typescript", "tsx"}:
             return (
                 "- 遵循 JavaScript / TypeScript 通用代码规范：命名清晰，避免隐藏副作用，保持函数职责单一，异步流程要显式处理错误和资源释放。\n"
                 "- 关注输入校验、鉴权边界、日志与敏感信息暴露、空值/undefined 处理、Promise/await 错误传播和并发竞态。\n"
                 "- 检查数据库/HTTP/缓存调用是否存在无边界重试、批量串行、未分页查询、未取消请求或阻塞主路径的问题。\n"
-                "- 若结论依赖运行时分支、类型收窄或框架约定，必须引用已提供代码证据；证据不足时只能输出 risk_hypothesis。"
+                "- 若结论依赖运行时分支、类型收窄或框架约定，必须引用已提供代码证据；证据不足的条目不要输出。"
             )
         return ""
 
@@ -4263,7 +4308,7 @@ class ReviewRunner:
         missing_sections = list(payload.get("missing_sections") or [])
         if missing_sections:
             lines.append(f"- 缺失项: {' / '.join(missing_sections[:6])}")
-            lines.append("- 若结论依赖缺失项，只能输出 risk_hypothesis，并写清 verification_plan。")
+            lines.append("- 若结论依赖缺失项，不要输出不确定结论；仅输出可由当前证据直接证明的问题。")
         else:
             lines.append("- 当前未缺失关键输入，可基于规范、规则、变更代码和关联上下文直接审查。")
         return "\n".join(lines)
@@ -4282,10 +4327,22 @@ class ReviewRunner:
     ) -> dict[str, object]:
         target_file_diff_present = bool(self._build_target_file_full_diff(subject, file_path).strip())
         language_guidance_present = bool(self._build_language_general_guidance(language).strip())
+        primary_context = repository_context.get("primary_context")
+        current_class_context = repository_context.get("current_class_context")
+        target_hunk_context = repository_context.get("target_hunk")
+        target_hunks_context = [
+            item
+            for item in list(repository_context.get("target_hunks") or [])[:6]
+            if isinstance(item, dict)
+        ]
         source_context_present = bool(
             self._load_repository_problem_context(subject, file_path, line_start, {}).get("snippet")
             or self._load_repository_source_excerpt(subject, file_path, line_start).strip()
-            or str((repository_context.get("primary_context") or {}).get("snippet") or "").strip()
+            or (self._context_item_has_snippet(primary_context))
+            or (self._context_item_has_snippet(current_class_context))
+            or str(repository_context.get("target_hunk_excerpt") or "").strip()
+            or (self._context_item_has_snippet(target_hunk_context))
+            or any(self._context_item_has_snippet(item) for item in target_hunks_context)
         )
         related_context_count = sum(
             1
@@ -4298,7 +4355,7 @@ class ReviewRunner:
                 list(repository_context.get("persistence_contexts") or []),
             ]
             for item in collection[:6]
-            if isinstance(item, dict) and str(item.get("snippet") or "").strip()
+            if self._context_item_has_snippet(item)
         )
         enabled_rule_count = int(rule_screening.get("enabled_rules") or 0)
         matched_rule_count = len(list(rule_screening.get("matched_rules_for_llm") or []))
@@ -4424,7 +4481,7 @@ class ReviewRunner:
                 [
                     "- 重点检查 Controller/ApplicationService 入口是否完成参数校验、权限校验、租户隔离和敏感字段脱敏。",
                     "- 重点检查 Repository/SQL/Mapper 是否存在拼接查询、越权查询、批量更新越边界、日志泄漏敏感信息。",
-                    "- 若结论依赖未展示的鉴权实现，只能输出 risk_hypothesis，并明确 verification_plan。",
+                    "- 若结论依赖未展示的鉴权实现，不要输出该条；只保留可被当前代码证据直接证明的问题。",
                 ]
             )
         elif expert_id == "performance_reliability":
@@ -4796,22 +4853,23 @@ class ReviewRunner:
         if not missing_required:
             return result
 
-        result["finding_type"] = "risk_hypothesis"
-        result["verification_needed"] = True
-        result["direct_evidence"] = False
-        result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35 if len(missing_required) >= 2 else 0.4)
+        # 不再因输入缺失把问题自动降级为 risk_hypothesis，否则会被后续“去不确定结论”策略整体过滤为 0。
+        # 这里仅下调置信度/严重级别，并补充假设说明，保证“只输出确定性问题”与“不漏检”兼顾。
+        result["verification_needed"] = False
+        result["direct_evidence"] = bool(result.get("evidence") or result.get("cross_file_evidence"))
+        result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4 if len(missing_required) >= 2 else 0.45)
         if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
             result["severity"] = "medium"
 
         assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
-        assumption = f"当前审查输入缺失: {' / '.join(missing_required[:5])}，结论已自动降级为待验证风险。"
+        assumption = f"当前审查输入缺失: {' / '.join(missing_required[:5])}，结论仅基于已提供代码证据。"
         if assumption not in assumptions:
             assumptions.append(assumption)
         result["assumptions"] = assumptions
 
         existing_plan = str(result.get("verification_plan") or "").strip()
-        gate_plan = f"先补齐 {' / '.join(missing_required[:5])}，再重新审查并确认当前风险是否成立。"
-        result["verification_plan"] = existing_plan or gate_plan
+        if existing_plan:
+            result["verification_plan"] = existing_plan
         return result
 
     def _enrich_java_domain_finding_language(

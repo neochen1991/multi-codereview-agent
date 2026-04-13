@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import shutil
 import subprocess
@@ -592,6 +593,10 @@ class RepositoryContextService:
         if self._search_root_prefixes is not None:
             return self._search_root_prefixes
         if not self.is_ready():
+            self._search_root_prefixes = ()
+            return self._search_root_prefixes
+        if str(os.getenv("REPO_CONTEXT_SRC_ROOT_ONLY", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+            # 默认不做 src-only 限制，避免丢失 resources/sql/mapper/config 等关联上下文。
             self._search_root_prefixes = ()
             return self._search_root_prefixes
 
