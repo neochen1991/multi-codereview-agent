@@ -5,7 +5,7 @@
   },
   "llm": {
     "default_provider": "dashscope-openai-compatible",
-    "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
     "default_model": "kimi-k2.5",
     "default_api_key_env": null,
     "default_api_key": "7b446c97-7172-4c90-a4ef-3f3ff5a8f894"
@@ -38,7 +38,11 @@
     "light_llm_timeout_seconds": 180,
     "light_llm_retry_count": 2,
     "light_max_parallel_experts": 1,
-    "light_max_debate_rounds": 1
+    "light_max_debate_rounds": 1,
+    "light_llm_max_prompt_chars": 95000,
+    "light_llm_max_input_tokens": 110000,
+    "llm_log_truncate_enabled": true,
+    "llm_log_preview_limit": 1600
   },
   "network": {
     "verify_ssl": false,
