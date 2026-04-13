@@ -76,6 +76,7 @@ class RuntimeSettingsService:
             "allow_llm_fallback",
         }
     )
+    _DEFAULT_RUNTIME_PAYLOAD = RuntimeSettings().model_dump(mode="json")
 
     def __init__(self, root: Path) -> None:
         """根据当前 storage root 解析 config.json 路径。"""
@@ -96,8 +97,7 @@ class RuntimeSettingsService:
             self._storage_repository.save_payload(sqlite_overrides)
         if not sqlite_overrides:
             return config_settings
-        merged_payload = config_settings.model_dump(mode="json")
-        merged_payload.update(sqlite_overrides)
+        merged_payload = self._merge_runtime_payload(config_settings.model_dump(mode="json"), sqlite_overrides)
         return RuntimeSettings.model_validate(merged_payload)
 
     def update(self, payload: dict[str, object]) -> RuntimeSettings:
@@ -128,6 +128,37 @@ class RuntimeSettingsService:
         """只保留允许写入 SQLite 的设置页治理字段。"""
 
         return {key: value for key, value in payload.items() if key in self.SQLITE_MANAGED_FIELDS}
+
+    def _merge_runtime_payload(
+        self,
+        config_payload: dict[str, object],
+        storage_payload: dict[str, object],
+    ) -> dict[str, object]:
+        """合并 config 与存储层覆盖项，尽量避免旧默认值反向覆盖已保存配置。"""
+
+        merged = dict(config_payload)
+        defaults = self._DEFAULT_RUNTIME_PAYLOAD
+        for key, storage_value in storage_payload.items():
+            if key not in self.SQLITE_MANAGED_FIELDS:
+                continue
+            if storage_value is None:
+                continue
+            if isinstance(storage_value, str) and not storage_value.strip():
+                continue
+            config_value = config_payload.get(key)
+            default_value = defaults.get(key)
+            # 兼容历史遗留：存储层保留了旧默认值时，不覆盖 config.json 中已配置的非默认值。
+            if storage_value == default_value and config_value != default_value:
+                if isinstance(config_value, list) and config_value:
+                    continue
+                if isinstance(config_value, str) and config_value.strip():
+                    continue
+                if isinstance(config_value, (int, float, bool)):
+                    continue
+            if isinstance(storage_value, list) and not storage_value and isinstance(config_value, list) and config_value:
+                continue
+            merged[key] = storage_value
+        return merged
 
     def _save_config_managed_fields(self, runtime: RuntimeSettings) -> None:
         """把系统启动必需的配置持久化到 config.json。"""
