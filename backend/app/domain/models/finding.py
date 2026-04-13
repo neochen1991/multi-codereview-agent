@@ -38,7 +38,7 @@ class ReviewFinding(BaseModel):
     matched_rules: list[str] = Field(default_factory=list)
     violated_guidelines: list[str] = Field(default_factory=list)
     rule_based_reasoning: str = ""
-    verification_needed: bool = True
+    verification_needed: bool = False
     verification_plan: str = ""
     design_alignment_status: str = ""
     design_doc_titles: list[str] = Field(default_factory=list)

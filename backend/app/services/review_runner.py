@@ -2376,6 +2376,14 @@ class ReviewRunner:
             fallback_target_hunks=target_hunks,
             fallback_related_files=list(related_files or []),
         )
+        repository_context = self._ensure_repository_context_minimum(
+            review=review,
+            repository_context=repository_context,
+            batch_items=normalized_batch_items,
+            fallback_file_path=file_path,
+            fallback_line_start=line_start,
+            fallback_target_hunk=target_hunk,
+        )
         multi_file_batch = len(normalized_batch_items) > 1
         if multi_file_batch:
             file_labels = [str(item.get("file_path") or "").strip() for item in normalized_batch_items if str(item.get("file_path") or "").strip()]
@@ -2553,6 +2561,43 @@ class ReviewRunner:
             rule_screening=rule_screening or {},
             language=self._infer_code_language(file_path),
         )
+        missing_required_context = self._extract_missing_required_context_sections(input_completeness)
+        if missing_required_context:
+            skip_message = (
+                f"{expert.name_zh} 本轮上下文不完整：缺失 {' / '.join(missing_required_context[:4])}。"
+                "系统将继续审查，但只允许输出基于当前证据可直接成立的问题。"
+            )
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_context_warning",
+                    content=skip_message,
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "missing_required_context": missing_required_context,
+                        "input_completeness": input_completeness,
+                        **self._expert_llm_metadata(expert, runtime_settings),
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_context_warning",
+                    phase="expert_review",
+                    message=skip_message,
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "missing_required_context": missing_required_context,
+                    },
+                )
+            )
         user_prompt = self._build_expert_prompt(
             review.subject,
             expert,
@@ -2700,7 +2745,7 @@ class ReviewRunner:
                 matched_rules=self._normalize_text_list(parsed.get("matched_rules"), []),
                 violated_guidelines=self._normalize_text_list(parsed.get("violated_guidelines"), []),
                 rule_based_reasoning=str(parsed.get("rule_based_reasoning") or "").strip(),
-                verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", True))),
+                verification_needed=bool(parsed.get("verification_needed", parsed.get("needs_verification", False))),
                 verification_plan=str(parsed.get("verification_plan") or "").strip(),
                 design_alignment_status=str(parsed.get("design_alignment_status") or design_alignment.get("design_alignment_status") or "").strip(),
                 design_doc_titles=self._normalize_text_list(
@@ -3448,6 +3493,109 @@ class ReviewRunner:
             merged[key] = value
         return merged
 
+    def _ensure_repository_context_minimum(
+        self,
+        *,
+        review: ReviewTask,
+        repository_context: dict[str, object],
+        batch_items: list[dict[str, object]],
+        fallback_file_path: str,
+        fallback_line_start: int,
+        fallback_target_hunk: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """为专家执行兜底补齐最小可审查上下文，降低“让用户自行核对”的不确定输出。"""
+
+        merged = dict(repository_context or {})
+        primary_context = merged.get("primary_context")
+        primary_snippet = ""
+        if isinstance(primary_context, dict):
+            primary_snippet = str(primary_context.get("snippet") or "").strip()
+        target_hunk = dict(fallback_target_hunk or {})
+        if not primary_snippet:
+            problem_context = self._load_repository_problem_context(
+                review.subject,
+                fallback_file_path,
+                fallback_line_start,
+                target_hunk,
+            )
+            snippet = str(problem_context.get("snippet") or "").strip()
+            if snippet:
+                merged["primary_context"] = dict(problem_context)
+                primary_snippet = snippet
+        if not primary_snippet:
+            source_excerpt = self._load_repository_source_excerpt(
+                review.subject,
+                fallback_file_path,
+                fallback_line_start,
+            ).strip()
+            if source_excerpt:
+                merged["primary_context"] = {
+                    "path": fallback_file_path,
+                    "snippet": source_excerpt,
+                    "line_start": int(fallback_line_start or 1),
+                }
+
+        if not isinstance(merged.get("current_class_context"), dict):
+            merged["current_class_context"] = {}
+        current_class_context = dict(merged.get("current_class_context") or {})
+        if not str(current_class_context.get("snippet") or "").strip():
+            primary = dict(merged.get("primary_context") or {})
+            if str(primary.get("snippet") or "").strip():
+                merged["current_class_context"] = {
+                    "path": str(primary.get("path") or fallback_file_path),
+                    "snippet": str(primary.get("snippet") or "").strip(),
+                    "line_start": int(primary.get("line_start") or fallback_line_start or 1),
+                }
+
+        related_contexts = [
+            dict(item)
+            for item in list(merged.get("related_contexts") or [])
+            if isinstance(item, dict) and str(item.get("snippet") or "").strip()
+        ]
+        if not related_contexts:
+            for item in batch_items:
+                item_file_path = str(item.get("file_path") or "").strip()
+                if not item_file_path or item_file_path == fallback_file_path:
+                    continue
+                item_target_hunk = dict(item.get("target_hunk") or {})
+                item_line_start = int(item.get("line_start") or 1)
+                context = self._load_repository_problem_context(
+                    review.subject,
+                    item_file_path,
+                    item_line_start,
+                    item_target_hunk,
+                )
+                if str(context.get("snippet") or "").strip():
+                    related_contexts.append(dict(context))
+                if len(related_contexts) >= 3:
+                    break
+        if related_contexts:
+            merged["related_contexts"] = related_contexts
+
+        context_files = [
+            str(item).strip()
+            for item in list(merged.get("context_files") or [])
+            if str(item).strip()
+        ]
+        for item in [merged.get("primary_context"), *related_contexts]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if path and path not in context_files:
+                context_files.append(path)
+        if context_files:
+            merged["context_files"] = context_files[:16]
+        return merged
+
+    def _extract_missing_required_context_sections(self, input_completeness: dict[str, object]) -> list[str]:
+        missing_sections = [
+            str(item).strip()
+            for item in list(input_completeness.get("missing_sections") or [])
+            if str(item).strip()
+        ]
+        required = {"变更代码原文", "当前源码上下文", "关联源码上下文"}
+        return [item for item in missing_sections if item in required]
+
     def _build_finding_code_context(
         self,
         subject: ReviewSubject,
@@ -3953,17 +4101,17 @@ class ReviewRunner:
             f"当前代码片段:\n{code_excerpt}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
-            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时只能输出待验证风险'}\n"
+            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
             f"{'请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。' if include_target_file_full_diff else '本轮为多文件批量模式，请优先基于“本轮批量文件清单”和每个文件的 hunk 说明逐文件审查，再回到代码仓上下文交叉验证，不要遗漏任何文件。'}\n"
             f"{design_instruction}"
-            f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”，"
-            f"你必须把它标记为 risk_hypothesis，并写入 assumptions 和 verification_plan，不能输出 direct_defect。\n"
+            f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”这类推断，"
+            f"请直接不输出该条 finding；严禁把“需要用户再去核对上下文”的不确定意见输出为审查结果。\n"
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|risk_hypothesis|test_gap|design_concern","claim":"必须落在当前文件/行号的风险结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":["若有推断必须写明"],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":true,"verification_plan":"需要如何继续验证"}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _normalize_expert_batch_items(
@@ -6266,6 +6414,16 @@ class ReviewRunner:
         return not normalized.endswith(banned_suffixes)
 
     def _should_skip_finding(self, expert_id: str, finding: ReviewFinding) -> bool:
+        if self._looks_like_uncertain_finding(finding):
+            logger.info(
+                "suppressing uncertain finding review_id=%s expert_id=%s file=%s line=%s title=%s",
+                finding.review_id,
+                expert_id,
+                finding.file_path,
+                finding.line_start,
+                finding.title,
+            )
+            return True
         if self._looks_like_non_issue_finding(finding):
             logger.info(
                 "suppressing non-issue finding review_id=%s expert_id=%s file=%s line=%s title=%s",
@@ -6360,6 +6518,48 @@ class ReviewRunner:
         if finding.severity not in {"low", "medium"}:
             return False
         return True
+
+    def _looks_like_uncertain_finding(self, finding: ReviewFinding) -> bool:
+        if bool(finding.verification_needed):
+            return True
+        if str(finding.finding_type or "").strip().lower() == "risk_hypothesis":
+            return True
+        uncertain_tokens = {
+            "需要核对",
+            "请核对",
+            "建议核对",
+            "需核对",
+            "建议查看",
+            "需要查看",
+            "请查看",
+            "自行确认",
+            "自行核实",
+            "待确认",
+            "不确定",
+            "可能",
+            "推测",
+            "假设",
+            "如果",
+            "若",
+            "verify",
+            "double-check",
+            "need to check",
+            "need check",
+            "uncertain",
+            "assumption",
+        }
+        text_blob = "\n".join(
+            [
+                finding.title,
+                finding.summary,
+                finding.rule_based_reasoning,
+                finding.verification_plan,
+                finding.remediation_suggestion,
+                *finding.assumptions,
+                *finding.remediation_steps,
+            ]
+        ).lower()
+        return any(token in text_blob for token in uncertain_tokens)
 
     def _build_debate_prompt(
         self,
