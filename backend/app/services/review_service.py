@@ -64,6 +64,7 @@ class ReviewService:
 
     def __init__(self, storage_root: Path | None = None) -> None:
         self.storage_root = Path(storage_root or settings.STORAGE_ROOT)
+        self._logs_root = Path(settings.LOGS_ROOT)
         self.review_repo = None
         self.event_repo = None
         self.feedback_repo = None
@@ -129,6 +130,11 @@ class ReviewService:
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        subject.metadata = {
+            **dict(subject.metadata or {}),
+            # API 直接创建且缺少 diff/changed_files 时，允许走兜底派工，避免回放/报告页完全无数据。
+            "allow_empty_diff_fallback": bool(dict(subject.metadata or {}).get("allow_empty_diff_fallback", True)),
+        }
         if design_docs:
             subject.metadata = {
                 **subject.metadata,
@@ -402,7 +408,9 @@ class ReviewService:
     def _duration_seconds(self, started_at: datetime | None, completed_at: datetime | None) -> float | None:
         if started_at is None or completed_at is None:
             return None
-        return max(0.0, round((completed_at - started_at).total_seconds(), 3))
+        safe_started = started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=UTC)
+        safe_completed = completed_at if completed_at.tzinfo is not None else completed_at.replace(tzinfo=UTC)
+        return max(0.0, round((safe_completed - safe_started).total_seconds(), 3))
 
     def get_review(self, review_id: str) -> ReviewTask | None:
         return self.review_repo.get(review_id)
@@ -995,7 +1003,7 @@ class ReviewService:
     def build_llm_timeout_metrics(self, *, tail_lines: int = 4000) -> dict[str, object]:
         """从后端日志中聚合最近一段时间的 LLM timeout 与耗时概览。"""
 
-        log_path = settings.LOGS_ROOT / "backend.log"
+        log_path = self._logs_root / "backend.log"
         empty_payload = {
             "timeout_count": 0,
             "connect_timeout_count": 0,
@@ -1011,9 +1019,11 @@ class ReviewService:
         if not log_path.exists():
             return empty_payload
         try:
-            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max(100, tail_lines) :]
+            raw_text = log_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             return empty_payload
+        entries = self._split_log_entries(raw_text)
+        lines = entries[-max(100, tail_lines) :]
 
         timeout_counters = {
             "connect_timeout": 0,
@@ -1025,8 +1035,8 @@ class ReviewService:
         recent_timeouts: list[dict[str, object]] = []
         success_elapsed: list[float] = []
         for line in lines:
-            if "llm request timeout " in line:
-                timeout_kind = self._extract_log_field(line, "timeout_kind") or "timeout"
+            if "llm request timeout" in line.lower():
+                timeout_kind = self._extract_timeout_kind(line)
                 counter_key = timeout_kind if timeout_kind in timeout_counters else "timeout"
                 timeout_counters[counter_key] += 1
                 recent_timeouts.append(
@@ -1064,6 +1074,22 @@ class ReviewService:
             "recent_timeouts": recent_timeouts[-10:],
         }
 
+    def _split_log_entries(self, text: str) -> list[str]:
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        timestamp_pattern = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}"
+        positions = [match.start() for match in re.finditer(timestamp_pattern, normalized)]
+        if not positions:
+            return [line for line in normalized.split("\n") if line.strip()]
+        positions.append(len(normalized))
+        entries: list[str] = []
+        for index in range(len(positions) - 1):
+            start = positions[index]
+            end = positions[index + 1]
+            chunk = normalized[start:end].strip()
+            if chunk:
+                entries.append(chunk)
+        return entries
+
     def _extract_log_timestamp(self, line: str) -> str:
         match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})", line)
         return match.group(1) if match else ""
@@ -1078,6 +1104,26 @@ class ReviewService:
             return float(raw)
         except Exception:
             return 0.0
+
+    def _extract_timeout_kind(self, line: str) -> str:
+        lowered = line.lower()
+        if "timeout_kind=connect_timeout" in lowered:
+            return "connect_timeout"
+        if "timeout_kind=read_timeout" in lowered:
+            return "read_timeout"
+        if "timeout_kind=write_timeout" in lowered:
+            return "write_timeout"
+        if "timeout_kind=pool_timeout" in lowered:
+            return "pool_timeout"
+        if "connect timed out" in lowered or "connection timed out" in lowered:
+            return "connect_timeout"
+        if "read timed out" in lowered or "read timeout" in lowered or "stream stalled" in lowered:
+            return "read_timeout"
+        if "write timed out" in lowered or "write timeout" in lowered:
+            return "write_timeout"
+        if "pool timeout" in lowered:
+            return "pool_timeout"
+        return self._extract_log_field(line, "timeout_kind") or "timeout"
 
     def _safe_int(self, value: object) -> int:
         try:
@@ -1174,9 +1220,9 @@ class ReviewService:
         payload["matched_rules"] = list(payload.get("matched_rules") or [])[:8]
         payload["violated_guidelines"] = list(payload.get("violated_guidelines") or [])[:8]
         payload["remediation_steps"] = list(payload.get("remediation_steps") or [])[:6]
-        payload["code_excerpt"] = ""
+        payload["code_excerpt"] = self._clip_text(payload.get("code_excerpt"), max_chars=600)
         payload["code_context"] = {}
-        payload["suggested_code"] = ""
+        payload["suggested_code"] = self._clip_text(payload.get("suggested_code"), max_chars=800)
         return ReviewFinding.model_validate(payload)
 
     def _build_light_report_issue(self, issue: DebateIssue) -> DebateIssue:
@@ -1249,6 +1295,10 @@ class ReviewService:
             "review": self._build_light_review_payload(review),
             "events": [item.model_dump(mode="json") for item in self.list_events(review_id)],
             "messages": [self._build_replay_message(item) for item in self.list_all_messages(review_id)],
+            "issues": [item.model_dump(mode="json") for item in self.list_issues(review_id)],
+            "findings": [item.model_dump(mode="json") for item in self.list_findings(review_id)],
+            "feedback_labels": [item.model_dump(mode="json") for item in self.list_feedback_labels(review_id)],
+            "report": self.build_report(review_id).model_dump(mode="json"),
         }
 
     def build_process_messages(self, review_id: str, *, since: str = "", limit: int = 0) -> list[dict[str, object]]:

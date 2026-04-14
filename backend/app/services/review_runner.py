@@ -119,6 +119,15 @@ class ReviewRunner:
     def list_events(self, review_id: str) -> list[ReviewEvent]:
         return self.event_repo.list(review_id)
 
+    def _safe_duration_seconds(self, started_at: datetime | None, completed_at: datetime | None) -> float | None:
+        """Return duration while tolerating mixed naive/aware datetimes from legacy rows."""
+
+        if started_at is None or completed_at is None:
+            return None
+        safe_started = started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=UTC)
+        safe_completed = completed_at if completed_at.tzinfo is not None else completed_at.replace(tzinfo=UTC)
+        return max(0.0, round((safe_completed - safe_started).total_seconds(), 3))
+
     def run_once(self, review_id: str) -> ReviewTask:
         """完整执行一次审核主链。"""
         self._knowledge_runtime_cache.clear()
@@ -157,6 +166,31 @@ class ReviewRunner:
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
         effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
+        subject_metadata = dict(review.subject.metadata or {})
+        if (
+            not list(review.subject.changed_files or [])
+            and not str(review.subject.unified_diff or "").strip()
+            and not bool(subject_metadata.get("allow_empty_diff_fallback"))
+        ):
+            reason = "无法继续审核：当前未获取到任何变更文件或 diff 片段。"
+            review.status = "failed"
+            review.phase = "failed"
+            review.failure_reason = reason
+            review.report_summary = reason
+            review.completed_at = datetime.now(UTC)
+            review.duration_seconds = self._safe_duration_seconds(review.started_at or review.created_at, review.completed_at)
+            review.updated_at = datetime.now(UTC)
+            self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review_id,
+                    event_type="review_failed",
+                    phase="failed",
+                    message=reason,
+                    payload={"changed_files": list(review.subject.changed_files or [])},
+                )
+            )
+            return review
         requested_selected_ids = [
             item for item in review.selected_experts if isinstance(item, str) and item.strip()
         ]
@@ -271,9 +305,9 @@ class ReviewRunner:
             review.failure_reason = reason
             review.report_summary = reason
             review.completed_at = datetime.now(UTC)
-            review.duration_seconds = max(
-                0.0,
-                round((review.completed_at - (review.started_at or review.created_at)).total_seconds(), 3),
+            review.duration_seconds = self._safe_duration_seconds(
+                review.started_at or review.created_at,
+                review.completed_at,
             )
             review.updated_at = datetime.now(UTC)
             self.review_repo.save(review)
@@ -745,9 +779,9 @@ class ReviewRunner:
             review.failure_reason = reason
             review.report_summary = reason
             review.completed_at = datetime.now(UTC)
-            review.duration_seconds = max(
-                0.0,
-                round((review.completed_at - (review.started_at or review.created_at)).total_seconds(), 3),
+            review.duration_seconds = self._safe_duration_seconds(
+                review.started_at or review.created_at,
+                review.completed_at,
             )
             review.updated_at = datetime.now(UTC)
             self.review_repo.save(review)
@@ -778,25 +812,25 @@ class ReviewRunner:
                 "issue_filter_config": {
                     "issue_filter_enabled": bool(getattr(runtime_settings, "issue_filter_enabled", True)),
                     "issue_min_priority_level": str(
-                        getattr(runtime_settings, "issue_min_priority_level", "P2") or "P2"
+                        getattr(runtime_settings, "issue_min_priority_level", "P3") or "P3"
                     ).upper(),
                     "issue_confidence_threshold_p0": float(
-                        getattr(runtime_settings, "issue_confidence_threshold_p0", 0.95) or 0.95
+                        getattr(runtime_settings, "issue_confidence_threshold_p0", 0.9) or 0.9
                     ),
                     "issue_confidence_threshold_p1": float(
-                        getattr(runtime_settings, "issue_confidence_threshold_p1", 0.85) or 0.85
+                        getattr(runtime_settings, "issue_confidence_threshold_p1", 0.75) or 0.75
                     ),
                     "issue_confidence_threshold_p2": float(
-                        getattr(runtime_settings, "issue_confidence_threshold_p2", 0.8) or 0.8
+                        getattr(runtime_settings, "issue_confidence_threshold_p2", 0.55) or 0.55
                     ),
                     "issue_confidence_threshold_p3": float(
-                        getattr(runtime_settings, "issue_confidence_threshold_p3", 0.7) or 0.7
+                        getattr(runtime_settings, "issue_confidence_threshold_p3", 0.45) or 0.45
                     ),
                     "suppress_low_risk_hint_issues": bool(
-                        getattr(runtime_settings, "suppress_low_risk_hint_issues", True)
+                        getattr(runtime_settings, "suppress_low_risk_hint_issues", False)
                     ),
                     "hint_issue_confidence_threshold": float(
-                        getattr(runtime_settings, "hint_issue_confidence_threshold", 0.85) or 0.85
+                        getattr(runtime_settings, "hint_issue_confidence_threshold", 0.7) or 0.7
                     ),
                     "hint_issue_evidence_cap": max(
                         0,
@@ -848,6 +882,90 @@ class ReviewRunner:
             )
             for item in graph_result.get("issues", [])
         ]
+        if not issues and finding_payloads:
+            fallback_source = sorted(
+                finding_payloads,
+                key=lambda item: (
+                    {"blocker": 4, "critical": 3, "high": 3, "medium": 2, "low": 1}.get(
+                        str(item.get("severity") or "medium").lower(),
+                        2,
+                    ),
+                    float(item.get("confidence") or 0.0),
+                ),
+                reverse=True,
+            )[0]
+            fallback_file = str(fallback_source.get("file_path") or "").strip()
+            fallback_severity = str(fallback_source.get("severity") or "medium").strip().lower() or "medium"
+            changed_files_lower = [str(item).lower() for item in list(review.subject.changed_files or [])]
+            has_security_surface = any("security" in item or "auth" in item for item in changed_files_lower)
+            needs_human = has_security_surface
+            fallback_status = "needs_human" if needs_human else "needs_verification"
+            fallback_resolution = "needs_human_review" if needs_human else "needs_verification"
+            fallback_issue_id = f"iss_fallback_{uuid4().hex[:10]}"
+            fallback_title = str(fallback_source.get("title") or "").strip() or "待核验议题"
+            fallback_summary = str(fallback_source.get("summary") or "").strip() or str(
+                fallback_source.get("claim") or ""
+            ).strip()
+            fallback_finding_id = str(fallback_source.get("finding_id") or f"fd_{uuid4().hex[:12]}")
+            fallback_expert = str(fallback_source.get("expert_id") or "").strip()
+            issues = [
+                DebateIssue(
+                    review_id=review_id,
+                    issue_id=fallback_issue_id,
+                    title=fallback_title,
+                    summary=fallback_summary,
+                    finding_type=str(fallback_source.get("finding_type") or "risk_hypothesis"),
+                    file_path=fallback_file,
+                    line_start=int(fallback_source.get("line_start") or 1),
+                    status=fallback_status,
+                    severity=fallback_severity,
+                    confidence=min(0.85, max(0.55, float(fallback_source.get("confidence") or 0.0))),
+                    confidence_breakdown={"source": "fallback_when_no_issue"},
+                    finding_ids=[fallback_finding_id],
+                    participant_expert_ids=[fallback_expert] if fallback_expert else [],
+                    aggregated_titles=[fallback_title],
+                    aggregated_summaries=[fallback_summary] if fallback_summary else [],
+                    aggregated_remediation_strategies=[],
+                    aggregated_remediation_suggestions=[],
+                    aggregated_remediation_steps=[],
+                    evidence=[str(v) for v in list(fallback_source.get("evidence") or []) if str(v).strip()],
+                    cross_file_evidence=[
+                        str(v) for v in list(fallback_source.get("cross_file_evidence") or []) if str(v).strip()
+                    ],
+                    assumptions=[str(v) for v in list(fallback_source.get("assumptions") or []) if str(v).strip()],
+                    context_files=[str(v) for v in list(fallback_source.get("context_files") or []) if str(v).strip()],
+                    direct_evidence=bool(fallback_source.get("direct_evidence")),
+                    needs_human=needs_human,
+                    verified=False,
+                    needs_debate=False,
+                    verifier_name="builtin_verifier",
+                    tool_name="local_diff",
+                    tool_verified=False,
+                    resolution=fallback_resolution,
+                )
+            ]
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review_id,
+                    issue_id=fallback_issue_id,
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type="debate_message",
+                    content="自动降级为兜底议题：issues 为空但存在 findings，已保留为可核验议题。",
+                    metadata={
+                        "phase": "debate",
+                        "fallback_issue": True,
+                        "needs_human": needs_human,
+                        "file_path": fallback_file,
+                    },
+                )
+            )
+            logger.info(
+                "issue fallback activated review_id=%s finding_count=%s selected_finding=%s needs_human=%s",
+                review_id,
+                len(finding_payloads),
+                fallback_finding_id,
+                needs_human,
+            )
         issue_filter_decisions = [
             item
             for item in list(graph_result.get("issue_filter_decisions", []))
@@ -915,9 +1033,9 @@ class ReviewRunner:
             review.human_review_status = "not_required"
             review.pending_human_issue_ids = []
             review.completed_at = datetime.now(UTC)
-            review.duration_seconds = max(
-                0.0,
-                round((review.completed_at - (review.started_at or review.created_at)).total_seconds(), 3),
+            review.duration_seconds = self._safe_duration_seconds(
+                review.started_at or review.created_at,
+                review.completed_at,
             )
             self.event_repo.append(
                 ReviewEvent(
@@ -1220,12 +1338,19 @@ class ReviewRunner:
         finding_payloads: list[dict[str, object]],
     ) -> dict[str, object] | None:
         """当用户选择的专家全部不匹配时，补入架构专家做兜底审查。"""
-        if existing_jobs or not skipped_experts or not review.subject.changed_files:
+        metadata = dict(review.subject.metadata or {})
+        allow_empty_diff_fallback = bool(metadata.get("allow_empty_diff_fallback"))
+        if existing_jobs or not skipped_experts:
+            return None
+        if not review.subject.changed_files and not allow_empty_diff_fallback:
             return None
         fallback_expert = next((item for item in enabled_experts if item.expert_id == FALLBACK_EXPERT_ID), None)
         if fallback_expert is None or not fallback_expert.enabled:
             return None
-        fallback_file = review.subject.changed_files[0]
+        fallback_file = review.subject.changed_files[0] if review.subject.changed_files else self._pick_file_path(
+            review.subject,
+            fallback_expert.expert_id,
+        )
         fallback_line = self.diff_excerpt_service.find_nearest_line(
             review.subject.unified_diff,
             fallback_file,
@@ -1574,7 +1699,8 @@ class ReviewRunner:
 
         primary_item = ordered_items[0]
         primary_file_path = str(primary_route.get("file_path") or primary_item.get("file_path") or "").strip()
-        primary_line_start = int(primary_route.get("line_start") or primary_item.get("line_start") or 1)
+        route_line_start = int(primary_route.get("line_start") or 1)
+        primary_line_start = route_line_start if route_line_start > 1 else int(primary_item.get("line_start") or 1)
         base_confidence = float(primary_route.get("confidence") or 0.31)
         base_reason = str(primary_route.get("routing_reason") or "").strip()
         target_hunks = [
@@ -2730,6 +2856,7 @@ class ReviewRunner:
         pending_findings: list[ReviewFinding] = []
         pending_analysis_messages: list[ConversationMessage] = []
         dedupe_keys: set[tuple[str, int, str, str]] = set()
+        used_hunk_lines_by_file: dict[str, set[int]] = {}
         candidate_count = len(parsed_candidates)
         for index, raw_parsed in enumerate(parsed_candidates, start=1):
             finding_file_path = self._resolve_finding_file_path(
@@ -2752,6 +2879,7 @@ class ReviewRunner:
                     for item in target_hunks
                     if str(item.get("file_path") or finding_file_path).strip() == finding_file_path
                 ] or list(target_hunks)
+            file_used_lines = used_hunk_lines_by_file.setdefault(finding_file_path, set())
             per_file_repository_context = dict(
                 (per_file_batch_item or {}).get("repository_context") or repository_context or {}
             )
@@ -2760,11 +2888,13 @@ class ReviewRunner:
                 fallback_line_start=line_start,
                 target_hunk=per_file_target_hunk,
                 target_hunks=per_file_target_hunks,
+                used_hunk_line_starts=file_used_lines,
             )
             matched_hunk_line_start = (
                 self._normalize_optional_line_value(matched_target_hunk.get("start_line"))
                 or int((per_file_batch_item or {}).get("line_start") or line_start)
             )
+            file_used_lines.add(int(matched_hunk_line_start or line_start or 1))
             parsed = self._stabilize_expert_analysis(
                 raw_parsed,
                 expert.expert_id,
@@ -2777,6 +2907,8 @@ class ReviewRunner:
             severity = self._normalize_severity(parsed.get("severity"), base_severity)
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
             parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
+            if not self._line_in_target_hunks(parsed_line_start, per_file_target_hunks):
+                parsed_line_start = int(matched_hunk_line_start or parsed_line_start or 1)
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -4199,6 +4331,7 @@ class ReviewRunner:
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
+            f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
@@ -4316,6 +4449,8 @@ class ReviewRunner:
                 f"   当前代码片段:\n{self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)}"
             )
         lines.append("JSON 字段补充：每条 finding 都必须包含 file_path（来自上述清单），并给出该文件对应的 line_start/line_end。")
+        lines.append("多 hunk 强约束：每条 finding 的 line_start/line_end 必须落在该文件某个 hunk 的 changed_lines/start_line/end_line 范围。")
+        lines.append("无法定位到明确 hunk 行号的结论，不要输出。")
         return "\n".join(lines)
 
     def _build_review_input_completeness_summary(
@@ -4788,7 +4923,8 @@ class ReviewRunner:
         import_inference_tokens = ["constructor", "注入", "依赖缺失", "未注入", "Cannot resolve dependency"]
         has_speculative_language = any(token in text_blob for token in speculative_tokens)
         has_import_inference = any(token in text_blob for token in import_inference_tokens)
-        if has_speculative_language:
+        strong_rule_signal = bool(list(result.get("matched_rules") or []) or list(result.get("violated_guidelines") or []))
+        if has_speculative_language and not strong_rule_signal:
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
             result["direct_evidence"] = False
@@ -4832,6 +4968,13 @@ class ReviewRunner:
                 "热点",
                 "退化",
                 "并发",
+                "sql",
+                "query",
+                "limit",
+                "分页",
+                "扫描",
+                "索引",
+                "n+1",
                 "cpu",
                 "内存",
                 "network",
@@ -4897,13 +5040,26 @@ class ReviewRunner:
         if not missing_required:
             return result
 
-        # 不再因输入缺失把问题自动降级为 risk_hypothesis，否则会被后续“去不确定结论”策略整体过滤为 0。
-        # 这里仅下调置信度/严重级别，并补充假设说明，保证“只输出确定性问题”与“不漏检”兼顾。
-        result["verification_needed"] = False
-        result["direct_evidence"] = bool(result.get("evidence") or result.get("cross_file_evidence"))
-        result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4 if len(missing_required) >= 2 else 0.45)
-        if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
-            result["severity"] = "medium"
+        strong_missing = {"专家规范", "语言通用规范提示", "变更代码原文"}
+        has_strong_missing = any(item in strong_missing for item in missing_required)
+
+        if has_strong_missing:
+            # 缺失规范/变更原文时执行强降级，避免在关键输入缺失时给出“确定性结论”。
+            result["finding_type"] = "risk_hypothesis"
+            result["verification_needed"] = True
+            result["direct_evidence"] = False
+            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
+            if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
+                result["severity"] = "medium"
+        else:
+            # 仅缺失源码上下文时保留原始 finding 类型/置信度，避免把有效问题整体降为“提示性”导致 issue 为空。
+            has_evidence = bool(result.get("evidence") or result.get("cross_file_evidence"))
+            result["finding_type"] = str(result.get("finding_type") or "risk_hypothesis")
+            result["verification_needed"] = bool(result.get("verification_needed", False))
+            result["direct_evidence"] = bool(has_evidence)
+            result["confidence"] = float(result.get("confidence") or 0.0)
+            if (not has_evidence) and str(result.get("severity") or "").lower() in {"blocker", "critical"}:
+                result["severity"] = "high"
 
         assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
         assumption = f"当前审查输入缺失: {' / '.join(missing_required[:5])}，结论仅基于已提供代码证据。"
@@ -4914,6 +5070,8 @@ class ReviewRunner:
         existing_plan = str(result.get("verification_plan") or "").strip()
         if existing_plan:
             result["verification_plan"] = existing_plan
+        else:
+            result["verification_plan"] = f"先补齐 {' / '.join(missing_required[:5])}，再确认该问题是否成立。"
         return result
 
     def _enrich_java_domain_finding_language(
@@ -6096,6 +6254,26 @@ class ReviewRunner:
             sections.append(f"... 其余 {len(normalized) - 8} 个 hunk 未展开，但仍属于本次同文件联合审查范围。")
         return "\n".join(sections)
 
+    def _line_in_target_hunks(self, line_start: int, target_hunks: list[dict[str, object]] | None) -> bool:
+        normalized_line = int(line_start or 0)
+        if normalized_line <= 0:
+            return False
+        normalized_hunks = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
+        if not normalized_hunks:
+            return True
+        for hunk in normalized_hunks:
+            changed_lines = self._normalize_changed_line_values(hunk.get("changed_lines"))
+            if changed_lines and normalized_line in changed_lines:
+                return True
+            start_line = (
+                self._normalize_optional_line_value(hunk.get("start_line"))
+                or self._normalize_optional_line_value(hunk.get("line_start"))
+            )
+            end_line = self._normalize_optional_line_value(hunk.get("end_line")) or start_line
+            if start_line is not None and end_line is not None and start_line <= normalized_line <= end_line:
+                return True
+        return False
+
     def _match_target_hunk_for_line(
         self,
         line_start: int,
@@ -6122,6 +6300,7 @@ class ReviewRunner:
         fallback_line_start: int,
         target_hunk: dict[str, object],
         target_hunks: list[dict[str, object]] | None = None,
+        used_hunk_line_starts: set[int] | None = None,
     ) -> dict[str, object]:
         normalized_hunks = [dict(item) for item in list(target_hunks or []) if isinstance(item, dict)]
         if not normalized_hunks:
@@ -6134,6 +6313,15 @@ class ReviewRunner:
         semantic_hunk = self._match_target_hunk_by_semantics(parsed, normalized_hunks)
         if semantic_hunk is not None:
             return semantic_hunk
+        if used_hunk_line_starts is not None and len(normalized_hunks) > 1:
+            for item in normalized_hunks:
+                start_line = (
+                    self._normalize_optional_line_value(item.get("start_line"))
+                    or self._normalize_optional_line_value(item.get("line_start"))
+                    or 0
+                )
+                if start_line > 0 and start_line not in used_hunk_line_starts:
+                    return dict(item)
         if explicit_line_start is not None:
             return self._match_target_hunk_for_line(explicit_line_start, target_hunk, normalized_hunks)
         return dict(target_hunk or normalized_hunks[0])
@@ -6622,10 +6810,8 @@ class ReviewRunner:
         return True
 
     def _looks_like_uncertain_finding(self, finding: ReviewFinding) -> bool:
-        if bool(finding.verification_needed):
-            return True
-        if str(finding.finding_type or "").strip().lower() == "risk_hypothesis":
-            return True
+        # risk_hypothesis/verification_needed 仅表示“待核验风险”，不等价于“无效结论”。
+        # 只有在“缺证据 + 明确不确定措辞”时才抑制，避免误杀有效问题。
         uncertain_tokens = {
             "需要核对",
             "请核对",
@@ -6637,18 +6823,13 @@ class ReviewRunner:
             "自行确认",
             "自行核实",
             "待确认",
-            "不确定",
-            "可能",
-            "推测",
-            "假设",
-            "如果",
-            "若",
+            "无法确认",
+            "证据不足",
             "verify",
             "double-check",
             "need to check",
             "need check",
             "uncertain",
-            "assumption",
         }
         text_blob = "\n".join(
             [
@@ -6661,7 +6842,17 @@ class ReviewRunner:
                 *finding.remediation_steps,
             ]
         ).lower()
-        return any(token in text_blob for token in uncertain_tokens)
+        has_uncertain_phrase = any(token in text_blob for token in uncertain_tokens)
+        has_evidence = bool(
+            finding.evidence
+            or finding.cross_file_evidence
+            or finding.matched_rules
+            or finding.violated_guidelines
+            or finding.context_files
+        )
+        if bool(finding.verification_needed) and not has_evidence:
+            return True
+        return has_uncertain_phrase and not has_evidence
 
     def _build_debate_prompt(
         self,

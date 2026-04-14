@@ -188,6 +188,29 @@ const normalizeIssueFilterDecisions = (messages: { message_type: string; metadat
         }));
     });
 
+const pickRepresentativeFindingForIssue = (
+  issue: DebateIssue,
+  findingById: Map<string, ReviewFinding>,
+): ReviewFinding | null => {
+  const candidates = (issue.finding_ids || [])
+    .map((id) => findingById.get(id))
+    .filter((item): item is ReviewFinding => Boolean(item));
+  if (!candidates.length) return null;
+  const issuePath = String(issue.file_path || "").trim();
+  const issueLine = Number(issue.line_start || 0);
+  const scored = candidates.map((finding) => {
+    const samePath = issuePath && finding.file_path === issuePath ? 1 : 0;
+    const lineDistance = issueLine > 0 ? Math.abs(Number(finding.line_start || 0) - issueLine) : 999999;
+    return { finding, samePath, lineDistance };
+  });
+  scored.sort((a, b) => {
+    if (a.samePath !== b.samePath) return b.samePath - a.samePath;
+    if (a.lineDistance !== b.lineDistance) return a.lineDistance - b.lineDistance;
+    return (b.finding.confidence || 0) - (a.finding.confidence || 0);
+  });
+  return scored[0]?.finding || candidates[0];
+};
+
 const normalizeRuleScreeningMetadata = (value: unknown): RuleScreeningMetadata | null => {
   if (!value || typeof value !== "object") return null;
   const payload = value as Record<string, unknown>;
@@ -842,23 +865,12 @@ const ReviewWorkbenchPage: React.FC = () => {
   );
   const selectedIssueFinding = useMemo(() => {
     if (!selectedIssue) return null;
-    for (const findingId of selectedIssue.finding_ids || []) {
-      const finding = findingById.get(findingId);
-      if (finding) return finding;
-    }
-    return null;
+    return pickRepresentativeFindingForIssue(selectedIssue, findingById);
   }, [findingById, selectedIssue]);
   const issueFindingMap = useMemo(() => {
     const map: Record<string, typeof findings[number] | null> = {};
     for (const issue of issues) {
-      map[issue.issue_id] = null;
-      for (const findingId of issue.finding_ids || []) {
-        const finding = findingById.get(findingId);
-        if (finding) {
-          map[issue.issue_id] = finding;
-          break;
-        }
-      }
+      map[issue.issue_id] = pickRepresentativeFindingForIssue(issue, findingById);
     }
     return map;
   }, [findingById, issues]);
@@ -1512,7 +1524,8 @@ const ReviewWorkbenchPage: React.FC = () => {
                 onSelectIssue={(issueId) => {
                   setSelectedIssueId(issueId);
                   const issue = issues.find((item) => item.issue_id === issueId);
-                  const findingId = issue?.finding_ids.find((id) => findingById.has(id));
+                  const representativeFinding = issue ? pickRepresentativeFindingForIssue(issue, findingById) : null;
+                  const findingId = representativeFinding?.finding_id;
                   if (findingId) {
                     setSelectedFindingId(findingId);
                     setFindingModalOpen(true);

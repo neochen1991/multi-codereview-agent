@@ -164,18 +164,40 @@ class RuntimeSettingsService:
         """把系统启动必需的配置持久化到 config.json。"""
 
         current_config = self._config_repository.get()
+        merged_config = current_config.model_copy(deep=True)
+
+        merged_config.runtime.storage_backend = runtime.storage_backend
+        merged_config.runtime.storage_pg_url = runtime.storage_pg_url
+        merged_config.runtime.storage_pg_schema = runtime.storage_pg_schema
+        merged_config.runtime.storage_pg_user = runtime.storage_pg_user
+        merged_config.runtime.storage_pg_password = runtime.storage_pg_password
+
+        merged_config.llm.default_provider = runtime.default_llm_provider
+        merged_config.llm.default_base_url = runtime.default_llm_base_url
+        merged_config.llm.default_model = runtime.default_llm_model
+        merged_config.llm.default_api_key_env = runtime.default_llm_api_key_env
+        merged_config.llm.default_api_key = runtime.default_llm_api_key
+
+        merged_config.git.repo_access_token = runtime.code_repo_access_token
+        merged_config.git.github_access_token = runtime.github_access_token
+        merged_config.git.gitlab_access_token = runtime.gitlab_access_token
+        merged_config.git.codehub_access_token = runtime.codehub_access_token
+
+        merged_config.code_repo.clone_url = runtime.code_repo_clone_url
+        merged_config.code_repo.local_path = runtime.code_repo_local_path
+        merged_config.code_repo.default_branch = runtime.code_repo_default_branch
+        merged_config.code_repo.auto_sync = runtime.code_repo_auto_sync
+        merged_config.code_repo.auto_review_enabled = runtime.auto_review_enabled
+        merged_config.code_repo.auto_review_repo_url = runtime.auto_review_repo_url
+        merged_config.code_repo.auto_review_poll_interval_seconds = runtime.auto_review_poll_interval_seconds
+
         next_config = AppConfig.from_runtime_settings(runtime)
-        merged_config = current_config.model_copy(
-            update={
-                "runtime": next_config.runtime,
-                "llm": next_config.llm,
-                "git": next_config.git,
-                "code_repo": next_config.code_repo,
-                "database_sources": next_config.database_sources,
-                "network": next_config.network,
-                "allowlist": next_config.allowlist,
-            }
-        )
+        merged_config.database_sources = next_config.database_sources
+
+        merged_config.network.verify_ssl = runtime.verify_ssl
+        merged_config.network.use_system_trust_store = runtime.use_system_trust_store
+        merged_config.network.ca_bundle_path = runtime.ca_bundle_path
+
         self._config_repository.save(merged_config)
 
     def _refresh_storage_repository(self) -> None:

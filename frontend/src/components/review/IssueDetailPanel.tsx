@@ -36,6 +36,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       finding?.suggested_code ||
       (finding?.code_context && Object.keys(finding.code_context).length > 0),
   );
+  const issueDescription = finding?.summary || issue?.summary || "-";
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
@@ -69,7 +70,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题描述">
                 <div>
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                    {issue.summary || "-"}
+                    {issueDescription}
                   </Paragraph>
                 </div>
               </Descriptions.Item>
@@ -152,7 +153,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                     <Descriptions.Item label="问题说明">
                       <div>
                         {aggregatedSummaries
-                          .filter((summary) => summary !== issue.summary)
+                          .filter((summary) => summary !== issueDescription)
                           .map((summary) => (
                           <Paragraph key={summary} style={{ marginBottom: 8 }}>
                             {summary}

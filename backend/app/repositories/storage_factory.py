@@ -41,11 +41,16 @@ def resolve_sqlite_db_path(root: Path) -> Path:
 
 
 def resolve_config_path(root: Path) -> Path:
-    resolved_root = Path(root).resolve()
+    root_path = Path(root).expanduser()
+    resolved_root = root_path.resolve()
     default_storage_root = Path(settings.STORAGE_ROOT).resolve()
     if resolved_root == default_storage_root:
         return Path(settings.CONFIG_PATH)
-    return resolved_root.parent / "config.json"
+    # 约定 storage 子目录使用同级 config.json；其他路径直接使用当前目录下 config.json，
+    # 避免 /tmp 这类根路径在 macOS 下 resolve 成 /private 后写入受限目录。
+    if root_path.name == "storage":
+        return root_path.parent / "config.json"
+    return root_path / "config.json"
 
 
 @dataclass(frozen=True)

@@ -147,10 +147,11 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
   const codeContext = finding.code_context;
   const currentCode =
+    finding.code_excerpt ||
+    codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
     codeContext?.source_file_context ||
-    codeContext?.primary_context?.snippet ||
-    finding.code_excerpt;
+    codeContext?.primary_context?.snippet;
   const hasFullDetails = Boolean(
     finding.code_excerpt ||
       finding.suggested_code ||

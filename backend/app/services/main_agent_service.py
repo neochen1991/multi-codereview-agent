@@ -1031,7 +1031,11 @@ class MainAgentService:
             return True
         return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
 
-    def _build_repository_service(self, runtime_settings: RuntimeSettings, subject: ReviewSubject) -> RepositoryContextService:
+    def _build_repository_service(
+        self,
+        runtime_settings: RuntimeSettings,
+        subject: ReviewSubject | None = None,
+    ) -> RepositoryContextService:
         return RepositoryContextService.from_review_context(
             clone_url=runtime_settings.code_repo_clone_url,
             local_path=runtime_settings.code_repo_local_path,

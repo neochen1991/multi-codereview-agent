@@ -595,8 +595,8 @@ class RepositoryContextService:
         if not self.is_ready():
             self._search_root_prefixes = ()
             return self._search_root_prefixes
-        if str(os.getenv("REPO_CONTEXT_SRC_ROOT_ONLY", "")).strip().lower() not in {"1", "true", "yes", "on"}:
-            # 默认不做 src-only 限制，避免丢失 resources/sql/mapper/config 等关联上下文。
+        src_only_flag = str(os.getenv("REPO_CONTEXT_SRC_ROOT_ONLY", "1")).strip().lower()
+        if src_only_flag in {"0", "false", "no", "off"}:
             self._search_root_prefixes = ()
             return self._search_root_prefixes
 
