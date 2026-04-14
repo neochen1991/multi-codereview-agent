@@ -52,6 +52,8 @@ def record_human_decision(review_id: str, payload: HumanDecisionRequest) -> dict
         )
     except KeyError as error:
         raise HTTPException(status_code=404, detail="review or issue not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="issue is not pending human decision") from error
     return {
         "review_id": updated.review_id,
         "status": updated.status,

@@ -960,11 +960,12 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => issues.filter((item) => item.needs_human && item.status !== "resolved"),
     [issues],
   );
-  const preferredHumanIssue = selectedFindingIssue?.needs_human
-    ? selectedFindingIssue
-    : selectedIssue?.needs_human
-      ? selectedIssue
-      : null;
+  const preferredHumanIssue =
+    selectedFindingIssue?.needs_human && selectedFindingIssue.status !== "resolved"
+      ? selectedFindingIssue
+      : selectedIssue?.needs_human && selectedIssue.status !== "resolved"
+        ? selectedIssue
+        : null;
   const activeHumanIssue = preferredHumanIssue || pendingHumanIssues[0] || null;
   const humanGateUsingFallbackIssue = Boolean(activeHumanIssue && activeHumanIssue !== preferredHumanIssue);
 

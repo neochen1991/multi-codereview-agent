@@ -1456,6 +1456,11 @@ class ReviewService:
         if review is None:
             raise KeyError(review_id)
         issues = self.issue_repo.list(review_id)
+        target_issue = next((item for item in issues if item.issue_id == issue_id), None)
+        if target_issue is None:
+            raise KeyError(issue_id)
+        if not target_issue.needs_human or target_issue.status == "resolved":
+            raise ValueError("issue is not pending human decision")
         updated_issues: list[DebateIssue] = []
         touched = False
         for issue in issues:

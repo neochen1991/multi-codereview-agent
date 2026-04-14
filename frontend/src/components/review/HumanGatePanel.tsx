@@ -30,6 +30,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   className,
 }) => {
   const humanStatus = review?.human_review_status || "not_required";
+  const canSubmitDecision = Boolean(selectedIssue?.needs_human && selectedIssue?.status !== "resolved");
 
   return (
     <Card className={`module-card ${className || ""}`.trim()} title="人工裁决">
@@ -71,7 +72,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
               <Button
                 type="primary"
                 danger
-                disabled={!selectedIssue.needs_human}
+                disabled={!canSubmitDecision}
                 loading={submitting}
                 onClick={onReject}
               >
@@ -79,7 +80,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
               </Button>
               <Button
                 type="primary"
-                disabled={!selectedIssue.needs_human}
+                disabled={!canSubmitDecision}
                 loading={submitting}
                 onClick={onApprove}
               >
