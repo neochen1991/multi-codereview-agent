@@ -5022,6 +5022,7 @@ class ReviewRunner:
             repository_context or {},
         )
         result = self._apply_input_quality_gate(result, input_completeness or {})
+        result = self._sanitize_user_confirmation_language(result)
         return result
 
     def _apply_input_quality_gate(
@@ -5071,7 +5072,62 @@ class ReviewRunner:
         if existing_plan:
             result["verification_plan"] = existing_plan
         else:
-            result["verification_plan"] = f"先补齐 {' / '.join(missing_required[:5])}，再确认该问题是否成立。"
+            result["verification_plan"] = f"系统先补齐 {' / '.join(missing_required[:5])}，再自动复核该问题是否成立。"
+        return result
+
+    def _sanitize_user_confirmation_language(self, parsed: dict[str, object]) -> dict[str, object]:
+        result = dict(parsed)
+        text_fields = [
+            "claim",
+            "rule_based_reasoning",
+            "why_it_matters",
+            "fix_strategy",
+            "suggested_fix",
+            "verification_plan",
+        ]
+        step_fields = ["change_steps", "assumptions"]
+        user_confirm_patterns = [
+            r"请(?:先)?(?:你|用户|人工)?[^。；\n]*(?:确认|核查|查看|排查)[^。；\n]*",
+            r"建议(?:你|用户|人工)?[^。；\n]*(?:确认|核查|查看|排查)[^。；\n]*",
+            r"需要(?:你|用户|人工)[^。；\n]*(?:确认|核查|查看|排查)[^。；\n]*",
+            r"需(?:你|用户|人工)[^。；\n]*(?:确认|核查|查看|排查)[^。；\n]*",
+        ]
+
+        hit_user_confirmation = False
+
+        def _rewrite_text(value: str) -> str:
+            nonlocal hit_user_confirmation
+            text = str(value or "").strip()
+            if not text:
+                return text
+            rewritten = text
+            for pattern in user_confirm_patterns:
+                if re.search(pattern, rewritten):
+                    hit_user_confirmation = True
+                    rewritten = re.sub(pattern, "系统将自动补齐上下文并复核", rewritten)
+            rewritten = re.sub(r"(系统将自动补齐上下文并复核)([\s，、；]*)\1+", r"\1", rewritten).strip(" ，、；")
+            return rewritten
+
+        for field in text_fields:
+            result[field] = _rewrite_text(str(result.get(field) or ""))
+
+        for field in step_fields:
+            values = [str(item).strip() for item in list(result.get(field) or []) if str(item).strip()]
+            rewritten_values: list[str] = []
+            for item in values:
+                rewritten_item = _rewrite_text(item)
+                if rewritten_item:
+                    rewritten_values.append(rewritten_item)
+            result[field] = rewritten_values
+
+        if hit_user_confirmation:
+            result["verification_needed"] = True
+            result["verification_plan"] = "系统将自动补齐关联上下文并复核，无需额外手工核查。"
+            assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+            marker = "该结论由系统自动补齐上下文后复核，无需额外手工确认。"
+            if marker not in assumptions:
+                assumptions.append(marker)
+            result["assumptions"] = assumptions
         return result
 
     def _enrich_java_domain_finding_language(
@@ -6812,6 +6868,19 @@ class ReviewRunner:
     def _looks_like_uncertain_finding(self, finding: ReviewFinding) -> bool:
         # risk_hypothesis/verification_needed 仅表示“待核验风险”，不等价于“无效结论”。
         # 只有在“缺证据 + 明确不确定措辞”时才抑制，避免误杀有效问题。
+        user_confirmation_tokens = {
+            "请用户",
+            "用户确认",
+            "用户核查",
+            "用户查看",
+            "人工确认",
+            "人工核查",
+            "人工查看",
+            "自行确认",
+            "自行核实",
+            "need user",
+            "ask user",
+        }
         uncertain_tokens = {
             "需要核对",
             "请核对",
@@ -6842,6 +6911,9 @@ class ReviewRunner:
                 *finding.remediation_steps,
             ]
         ).lower()
+        has_user_confirmation_phrase = any(token in text_blob for token in user_confirmation_tokens)
+        if has_user_confirmation_phrase:
+            return True
         has_uncertain_phrase = any(token in text_blob for token in uncertain_tokens)
         has_evidence = bool(
             finding.evidence

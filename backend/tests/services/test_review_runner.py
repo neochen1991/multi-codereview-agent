@@ -1947,7 +1947,42 @@ def test_review_runner_downgrades_finding_when_required_inputs_are_missing(stora
     assert stabilized["severity"] == "medium"
     assert float(stabilized["confidence"]) <= 0.35
     assert any("语言通用规范提示" in item for item in stabilized["assumptions"])
-    assert "先补齐 语言通用规范提示 / 关联源码上下文" in str(stabilized["verification_plan"])
+    assert "系统先补齐 语言通用规范提示 / 关联源码上下文" in str(stabilized["verification_plan"])
+
+
+def test_review_runner_rewrites_user_confirmation_language(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "缓存失效策略存在遗漏",
+            "claim": "建议用户先查看完整调用链再确认是否存在缓存穿透风险。",
+            "finding_type": "design_concern",
+            "severity": "medium",
+            "confidence": 0.71,
+            "evidence": ["本次改动移除了缓存键前缀"],
+            "assumptions": ["需要人工确认是否有兜底缓存策略"],
+            "change_steps": ["请用户核查 Redis 配置与应用参数是否一致"],
+            "verification_plan": "请用户确认上下游接口实现后再决定是否修复",
+            "verification_needed": True,
+        },
+        "performance_reliability",
+        "src/main/java/com/example/CacheService.java",
+        42,
+        {"excerpt": "42 | -cache.put(prefix + id, value)\n43 | +cache.put(id, value)"},
+    )
+
+    blob = "\n".join(
+        [
+            str(stabilized.get("claim") or ""),
+            str(stabilized.get("verification_plan") or ""),
+            *[str(item) for item in list(stabilized.get("assumptions") or [])],
+            *[str(item) for item in list(stabilized.get("change_steps") or [])],
+        ]
+    )
+    assert "用户" not in blob
+    assert "人工" not in blob
+    assert "系统将自动补齐关联上下文并复核" in str(stabilized.get("verification_plan") or "")
 
 
 def test_review_runner_builds_fallback_finding_when_expert_fails_with_matched_rules(storage_root: Path):
