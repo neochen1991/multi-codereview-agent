@@ -578,6 +578,11 @@ class ReviewRunner:
                         "bound_documents": bound_documents,
                         "knowledge_context": knowledge_context,
                         "rule_screening": rule_screening,
+                        "batch_items": [
+                            dict(item)
+                            for item in list(command.get("batch_items") or route_hint.get("batch_items") or [])
+                            if isinstance(item, dict)
+                        ],
                         "finding_payloads": finding_payloads,
                     }
                 )
@@ -1547,7 +1552,7 @@ class ReviewRunner:
         *,
         primary_route: dict[str, object],
     ) -> list[dict[str, object]]:
-        """让单个专家覆盖当前审核任务中的全部候选 hunk，并按文件聚合为少量批次任务。"""
+        """让单个专家一次性拿到全量候选 hunk（跨文件），由专家侧再做批量审查。"""
 
         if not candidate_hunks:
             return [dict(primary_route or {})]
@@ -1558,46 +1563,85 @@ class ReviewRunner:
             if not file_path:
                 continue
             grouped_hunks.setdefault(file_path, []).append(item)
+        if not grouped_hunks:
+            return [dict(primary_route or {})]
 
-        route_hints: list[dict[str, object]] = []
+        ordered_items: list[dict[str, object]] = []
+        for _, grouped_items in sorted(grouped_hunks.items(), key=lambda pair: pair[0]):
+            ordered_items.extend(sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1)))
+        if not ordered_items:
+            return [dict(primary_route or {})]
+
+        primary_item = ordered_items[0]
+        primary_file_path = str(primary_route.get("file_path") or primary_item.get("file_path") or "").strip()
+        primary_line_start = int(primary_route.get("line_start") or primary_item.get("line_start") or 1)
         base_confidence = float(primary_route.get("confidence") or 0.31)
         base_reason = str(primary_route.get("routing_reason") or "").strip()
-        for file_path, grouped_items in grouped_hunks.items():
-            primary_item = sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))[0]
-            line_start = int(primary_item.get("line_start") or 1)
-            target_hunks = [
+        target_hunks = [
+            {
+                "file_path": str(item.get("file_path") or "").strip(),
+                "hunk_header": str(item.get("hunk_header") or ""),
+                "start_line": int(item.get("line_start") or 1),
+                "end_line": int(item.get("line_start") or 1),
+                "changed_lines": [int(item.get("line_start") or 1)],
+                "excerpt": str(item.get("excerpt") or ""),
+            }
+            for item in ordered_items
+        ]
+        batch_items: list[dict[str, object]] = []
+        for file_path, grouped_items in sorted(grouped_hunks.items(), key=lambda pair: pair[0]):
+            file_hunks = [
                 {
-                    "file_path": file_path,
+                    "file_path": str(item.get("file_path") or "").strip(),
                     "hunk_header": str(item.get("hunk_header") or ""),
                     "start_line": int(item.get("line_start") or 1),
                     "end_line": int(item.get("line_start") or 1),
                     "changed_lines": [int(item.get("line_start") or 1)],
                     "excerpt": str(item.get("excerpt") or ""),
                 }
-                for item in sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))
+                for item in sorted(grouped_items, key=lambda value: int(value.get("line_start") or 1))
             ]
-            merged_repo_hits: dict[str, object] = {}
-            for item in grouped_items:
-                for key, value in dict(item.get("repo_hits") or {}).items():
-                    if key not in merged_repo_hits and value not in (None, "", [], {}):
-                        merged_repo_hits[key] = value
-            route_hints.append(
+            if not file_hunks:
+                continue
+            merged_file_repo_hits: dict[str, object] = {}
+            for value in grouped_items:
+                for key, hit in dict(value.get("repo_hits") or {}).items():
+                    if key not in merged_file_repo_hits and hit not in (None, "", [], {}):
+                        merged_file_repo_hits[key] = hit
+            batch_items.append(
                 {
-                    "expert_id": expert.expert_id,
                     "file_path": file_path,
-                    "line_start": line_start,
-                    "target_hunk": dict(target_hunks[0]),
-                    "target_hunks": target_hunks,
-                    "repo_hits": merged_repo_hits,
-                    "routeable": True,
-                    "skip_reason": "",
-                    "confidence": base_confidence,
-                    "routing_reason": base_reason
-                    or f"{expert.name_zh} 需要覆盖文件 {file_path} 内的 {len(target_hunks)} 个变更 hunk，并从其专业视角统一审查。",
-                    "routing_source": "all_hunks",
+                    "line_start": int(file_hunks[0].get("start_line") or 1),
+                    "target_hunk": dict(file_hunks[0]),
+                    "target_hunks": file_hunks,
+                    "repo_hits": merged_file_repo_hits,
                 }
             )
-        return route_hints
+        merged_repo_hits: dict[str, object] = {}
+        for item in ordered_items:
+            for key, value in dict(item.get("repo_hits") or {}).items():
+                if key not in merged_repo_hits and value not in (None, "", [], {}):
+                    merged_repo_hits[key] = value
+
+        file_count = len(grouped_hunks)
+        hunk_count = len(target_hunks)
+        return [
+            {
+                "expert_id": expert.expert_id,
+                "file_path": primary_file_path,
+                "line_start": primary_line_start,
+                "target_hunk": dict(target_hunks[0]),
+                "target_hunks": target_hunks,
+                "repo_hits": merged_repo_hits,
+                "batch_items": batch_items,
+                "routeable": True,
+                "skip_reason": "",
+                "confidence": base_confidence,
+                "routing_reason": base_reason
+                or f"{expert.name_zh} 需要一次性覆盖 {file_count} 个文件、{hunk_count} 个变更 hunk，并从其专业视角统一审查。",
+                "routing_source": "all_hunks_single_dispatch",
+            }
+        ]
 
     def _release_expert_job_payload(self, job: dict[str, object]) -> None:
         """专家任务完成后尽快丢弃大对象，降低批次执行期间的峰值内存。"""
