@@ -74,38 +74,6 @@ class MainAgentService:
             related_files,
             dict(target_focus.get("repo_hits") or {}),
         )
-        batch_items_payload: list[dict[str, object]] = []
-        for item in [dict(value) for value in list(target_focus.get("batch_items") or []) if isinstance(value, dict)]:
-            item_file_path = str(item.get("file_path") or "").strip()
-            if not item_file_path:
-                continue
-            item_line_start = int(item.get("line_start") or self._pick_line_start(subject, expert.expert_id, item_file_path))
-            item_target_hunk = dict(item.get("target_hunk") or {})
-            item_target_hunks = [dict(value) for value in list(item.get("target_hunks") or []) if isinstance(value, dict)]
-            item_repo_hits = dict(item.get("repo_hits") or {})
-            item_related_files = self._build_expert_related_files(
-                subject,
-                expert,
-                item_file_path,
-                change_chain["related_files"],
-            )
-            item_repo_context = self._build_repository_context(
-                repository_service,
-                item_file_path,
-                item_line_start,
-                item_related_files,
-                item_repo_hits,
-            )
-            batch_items_payload.append(
-                {
-                    "file_path": item_file_path,
-                    "line_start": item_line_start,
-                    "target_hunk": item_target_hunk,
-                    "target_hunks": item_target_hunks,
-                    "related_files": item_related_files,
-                    "repository_context": item_repo_context,
-                }
-            )
         if route_hint is not None:
             routeable = bool(target_focus.get("routeable", True))
             skip_reason = "" if routeable else str(target_focus.get("skip_reason") or "")
@@ -132,7 +100,6 @@ class MainAgentService:
             "target_hunk": target_hunk,
             "target_hunks": target_hunks,
             "repository_context": repo_context,
-            "batch_items": batch_items_payload,
             "expected_checks": expected_checks,
             "disallowed_inference": disallowed_inference,
             "routeable": routeable,
