@@ -4623,6 +4623,14 @@ class ReviewRunner:
                     "- 重点检查事务边界内是否包含远程调用、消息发送、循环写库、多仓储写入和大对象装载。",
                     "- 重点检查 ORM/Mapper 是否引入 N+1、全表扫描、隐式 EAGER 加载、批量场景逐条写入。",
                     "- 必须判断当前聚合/仓储调用链是否会放大锁竞争、超时重试或资源占用。",
+                    "- 如果批量更新、回填脚本、事务范围或并发路径可能拉长锁持有时间，可以保留为需要验证的高价值风险，不要因为还要补上下文就直接丢弃。",
+                ]
+            )
+        elif expert_id == "correctness_business":
+            base.extend(
+                [
+                    "- 重点检查注释、方法名、接口说明或 TODO 明确承诺了某个行为，但实现缺失或与承诺不一致的情况。",
+                    "- 如果当前改动只保留了说明、占位或半截逻辑，必须明确指出“承诺与实现不一致”这一点。",
                 ]
             )
         elif expert_id == "architecture_design":
@@ -4881,18 +4889,56 @@ class ReviewRunner:
         if has_speculative_language and not strong_rule_signal:
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
-            result["direct_evidence"] = False
-            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4)
-            if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
-                result["severity"] = "medium"
+            text_blob_lower = text_blob.lower()
+            excerpt_lower = excerpt.lower()
+            high_value_runtime_tokens = [
+                "锁",
+                "死锁",
+                "事务",
+                "回滚",
+                "并发",
+                "竞争",
+                "批量",
+                "回填",
+                "全表",
+                "超时",
+                "重试",
+            ]
+            contract_source_tokens = ["注释", "todo", "方法名", "接口说明", "说明", "文档"]
+            contract_mismatch_tokens = ["未实现", "未生效", "未落地", "不一致", "缺失", "没有实现"]
+            has_high_value_runtime_risk = any(token in text_blob_lower or token in excerpt_lower for token in high_value_runtime_tokens)
+            has_contract_mismatch_risk = (
+                any(token in text_blob_lower or token in excerpt_lower for token in contract_source_tokens)
+                and any(token in text_blob_lower for token in contract_mismatch_tokens)
+            )
+            preserve_verifiable_risk = has_high_value_runtime_risk or has_contract_mismatch_risk
+            if preserve_verifiable_risk:
+                result["direct_evidence"] = bool(
+                    list(result.get("evidence") or [])
+                    or list(result.get("cross_file_evidence") or [])
+                    or list(result.get("context_files") or [])
+                )
+            else:
+                result["direct_evidence"] = False
+                result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4)
+                if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
+                    result["severity"] = "medium"
             assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
-            assumption = "当前结论依赖 diff 片段外信息或未展示的实现细节，需要查看完整方法/类定义后再确认。"
+            assumption = (
+                "当前问题已有直接代码证据，但仍需补充完整调用链或上下文来确认影响范围。"
+                if preserve_verifiable_risk
+                else "当前结论依赖 diff 片段外信息或未展示的实现细节，需要查看完整方法/类定义后再确认。"
+            )
             if assumption not in assumptions:
                 assumptions.append(assumption)
             result["assumptions"] = assumptions
             result["verification_plan"] = (
                 str(result.get("verification_plan") or "").strip()
-                or "需要回看完整 diff、相关方法实现和调用链，确认推断是否成立。"
+                or (
+                    "需要补充完整事务边界、调用链或实现上下文，确认该高价值风险是否会在真实路径上触发。"
+                    if preserve_verifiable_risk
+                    else "需要回看完整 diff、相关方法实现和调用链，确认推断是否成立。"
+                )
             )
         if import_only_excerpt and has_import_inference:
             result["verification_plan"] = (

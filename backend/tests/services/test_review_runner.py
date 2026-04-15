@@ -1861,6 +1861,45 @@ def test_review_runner_downgrades_speculative_high_severity_claim(storage_root: 
     assert any("完整方法/类定义" in item for item in stabilized["assumptions"])
 
 
+def test_review_runner_keeps_lock_risk_as_high_value_verifiable_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "批量回填事务范围过大可能放大锁竞争",
+            "claim": "当前脚本如果在一次事务内回填 orders 并同步更新状态，可能导致锁持有时间过长。",
+            "finding_type": "direct_defect",
+            "severity": "high",
+            "confidence": 0.86,
+            "evidence": [
+                "回填 SQL 未见分批提交",
+                "同一事务内更新 orders 与 order_items",
+            ],
+            "cross_file_evidence": ["迁移脚本与 repository 调用链都指向批量更新"],
+            "assumptions": [],
+            "context_files": ["sql/migration/V42__backfill_orders.sql"],
+            "verification_needed": False,
+        },
+        "performance_reliability",
+        "sql/migration/V42__backfill_orders.sql",
+        12,
+        {
+            "excerpt": (
+                "12 | BEGIN;\n"
+                "13 | UPDATE orders SET status = 'DONE' WHERE status = 'PENDING';\n"
+                "14 | UPDATE order_items SET status = 'DONE' WHERE status = 'PENDING';\n"
+                "15 | COMMIT;\n"
+            )
+        },
+    )
+
+    assert stabilized["finding_type"] == "risk_hypothesis"
+    assert stabilized["verification_needed"] is True
+    assert stabilized["severity"] == "high"
+    assert float(stabilized["confidence"]) >= 0.75
+    assert any("锁" in item or "事务" in item for item in stabilized["evidence"])
+
+
 def test_review_runner_merge_context_files_filters_noise(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -3686,6 +3725,59 @@ def test_review_runner_prompt_includes_input_completeness_summary(storage_root: 
     assert "绑定规则: 1 条命中 / 2 条启用" in prompt
     assert "关联源码上下文: 1 段" in prompt
     assert "遵循 Java / Spring 通用代码规范" in prompt
+
+
+def test_review_runner_build_expert_prompt_requests_comment_and_implementation_consistency_check(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/comment-contract",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -20,1 +20,2 @@\n"
+            "- // 创建订单后自动扣减库存\n"
+            "+ // 创建订单后自动扣减库存\n"
+            "+ return orderRepository.save(order);\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性", "边界条件"],
+        system_prompt="prompt",
+        review_spec="关注业务行为与实现是否一致",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/example/OrderService.java",
+        20,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={"routing_reason": "注释承诺了库存扣减行为，需要核对是否真正落地"},
+        target_hunk={
+            "hunk_header": "@@ -20,1 +20,2 @@",
+            "excerpt": "+ // 创建订单后自动扣减库存\n+ return orderRepository.save(order);",
+        },
+        target_hunks=[],
+        bound_documents=[],
+        disallowed_inference=["证据不足时不要假定隐藏调用链已经实现"],
+        expected_checks=["核对注释、方法意图与真实实现是否一致"],
+        active_skills=[],
+    )
+
+    assert "注释、方法名、接口说明或 TODO 明确承诺了某个行为" in prompt
+    assert "实现缺失或与承诺不一致" in prompt
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):
