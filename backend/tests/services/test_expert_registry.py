@@ -18,6 +18,9 @@ def test_expert_registry_loads_builtin_experts(storage_root: Path):
     assert "架构与设计审视规范" in architecture.review_spec
     assert security.preferred_artifacts
     assert "auth" in security.activation_hints or "security" in security.activation_hints
+    correctness = next(expert for expert in experts if expert.expert_id == "correctness_business")
+    assert "todo" in correctness.activation_hints
+    assert any("行为是否真正落地" in item for item in correctness.required_checks)
 
 
 def test_file_expert_repository_preserves_builtin_review_spec_when_user_override_has_no_spec(storage_root: Path):

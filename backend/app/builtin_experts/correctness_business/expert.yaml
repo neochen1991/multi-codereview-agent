@@ -14,11 +14,16 @@ activation_hints:
   - usecase
   - command
   - workflow
+  - todo
+  - comment
+  - 注释
+  - 未实现
 required_checks:
   - 业务状态流转是否被改坏
   - 空值、异常和边界输入是否被正确处理
   - 返回值、持久化结果和副作用是否一致
   - 是否引入需求语义偏差
+  - 注释、方法名和接口承诺的行为是否真正落地
 out_of_scope:
   - 不要代替数据库专家判断索引和事务细节
   - 不要代替性能专家判断压测级性能问题
