@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>生产问题根因分析系统 - 技术委员会介绍</title>
+    <link
+      rel="stylesheet"
+      href="https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@500,700,800&f[]=general-sans@400,500,600&display=swap"
+    />
+    <style>
+      /* ===========================================
+         主题变量
+         采用白色主画布与评审材料风格，强调书面化表达与图示优先
+         =========================================== */
+      :root {
+        --bg-primary: #f5f7fb;
+        --bg-secondary: #ffffff;
+        --bg-tertiary: #eef3f9;
+        --bg-accent: #fdf1e7;
+        --text-primary: #162033;
+        --text-secondary: #536179;
+        --text-soft: #6f7d94;
+        --accent: #d97706;
+        --accent-2: #0f766e;
+        --accent-3: #2563eb;
+        --accent-4: #7c3aed;
+        --border: rgba(22, 32, 51, 0.1);
+        --shadow: 0 22px 54px rgba(15, 23, 42, 0.08);
+        --font-display: "Cabinet Grotesk", sans-serif;
+        --font-body: "General Sans", sans-serif;
+        --title-size: clamp(1.5rem, 5vw, 4rem);
+        --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+        --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+        --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+        --small-size: clamp(0.65rem, 1vw, 0.875rem);
+        --slide-padding: clamp(1rem, 4vw, 4rem);
+        --content-gap: clamp(0.5rem, 2vw, 2rem);
+        --element-gap: clamp(0.25rem, 1vw, 1rem);
+        --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+        --duration-normal: 0.7s;
+      }
+
+      /* ===========================================
+         基础重置
+         =========================================== */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      /* ===========================================
+         VIEWPORT FITTING: MANDATORY BASE STYLES
+         Include this ENTIRE file in every presentation.
+         These styles ensure slides fit exactly in the viewport.
+         =========================================== */
+
+      html,
+      body {
+        height: 100%;
+        overflow-x: hidden;
+      }
+
+      html {
+        scroll-snap-type: y mandatory;
+        scroll-behavior: smooth;
+      }
+
+      .slide {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        scroll-snap-align: start;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+
+      .slide-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        max-height: 100%;
+        overflow: hidden;
+        padding: var(--slide-padding);
+      }
+
+      :root {
+        --title-size: clamp(1.5rem, 5vw, 4rem);
+        --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+        --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+        --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+        --small-size: clamp(0.65rem, 1vw, 0.875rem);
+        --slide-padding: clamp(1rem, 4vw, 4rem);
+        --content-gap: clamp(0.5rem, 2vw, 2rem);
+        --element-gap: clamp(0.25rem, 1vw, 1rem);
+      }
+
+      .card,
+      .container,
+      .content-box {
+        max-width: min(90vw, 1000px);
+        max-height: min(80vh, 700px);
+      }
+
+      .feature-list,
+      .bullet-list {
+        gap: clamp(0.4rem, 1vh, 1rem);
+      }
+
+      .feature-list li,
+      .bullet-list li {
+        font-size: var(--body-size);
+        line-height: 1.4;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+        gap: clamp(0.5rem, 1.5vw, 1rem);
+      }
+
+      img,
+      .image-container {
+        max-width: 100%;
+        max-height: min(50vh, 400px);
+        object-fit: contain;
+      }
+
+      @media (max-height: 700px) {
+        :root {
+          --slide-padding: clamp(0.75rem, 3vw, 2rem);
+          --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+          --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+          --h2-size: clamp(1rem, 3vw, 1.75rem);
+        }
+      }
+
+      @media (max-height: 600px) {
+        :root {
+          --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+          --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+          --title-size: clamp(1.1rem, 4vw, 2rem);
+          --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+        }
+
+        .nav-dots,
+        .keyboard-hint,
+        .decorative {
+          display: none;
+        }
+      }
+
+      @media (max-height: 500px) {
+        :root {
+          --slide-padding: clamp(0.4rem, 2vw, 1rem);
+          --title-size: clamp(1rem, 3.5vw, 1.5rem);
+          --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+          --body-size: clamp(0.65rem, 1vw, 0.85rem);
+        }
+      }
+
+      @media (max-width: 600px) {
+        :root {
+          --title-size: clamp(1.25rem, 7vw, 2.5rem);
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.2s !important;
+        }
+
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      /* ===========================================
+         整体视觉
+         以白色画布为主，辅以浅色网格与暖色高亮
+         =========================================== */
+      body {
+        font-family: var(--font-body);
+        color: var(--text-primary);
+        background:
+          radial-gradient(circle at 14% 16%, rgba(217, 119, 6, 0.1), transparent 18%),
+          radial-gradient(circle at 86% 14%, rgba(37, 99, 235, 0.08), transparent 20%),
+          linear-gradient(180deg, #f8fafc 0%, #f3f6fb 100%);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(22, 32, 51, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(22, 32, 51, 0.04) 1px, transparent 1px);
+        background-size: 72px 72px;
+        mask-image: radial-gradient(circle at center, black 52%, transparent 92%);
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .progress-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--accent-3));
+        z-index: 200;
+        transition: width 0.25s ease-out;
+      }
+
+      .nav-dots {
+        position: fixed;
+        right: clamp(0.5rem, 1.8vw, 1.2rem);
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+        z-index: 120;
+      }
+
+      .nav-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(22, 32, 51, 0.18);
+        background: rgba(22, 32, 51, 0.12);
+        cursor: pointer;
+        transition:
+          transform 0.25s ease,
+          background 0.25s ease,
+          border-color 0.25s ease;
+      }
+
+      .nav-dot.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        transform: scale(1.35);
+      }
+
+      .slide::after {
+        content: attr(data-slide);
+        position: absolute;
+        top: clamp(1rem, 2vw, 1.5rem);
+        right: clamp(1.5rem, 4vw, 3rem);
+        font-family: var(--font-display);
+        font-size: clamp(0.8rem, 1vw, 1rem);
+        color: rgba(22, 32, 51, 0.24);
+        letter-spacing: 0.2em;
+      }
+
+      .slide-inner {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        gap: var(--content-gap);
+        height: 100%;
+      }
+
+      .eyebrow {
+        font-size: var(--small-size);
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .hero-title,
+      .section-title {
+        font-family: var(--font-display);
+        line-height: 0.95;
+        letter-spacing: -0.04em;
+      }
+
+      .hero-title {
+        font-size: clamp(2.2rem, 7vw, 5.4rem);
+        max-width: 11ch;
+      }
+
+      .section-title {
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        max-width: 14ch;
+      }
+
+      .lead,
+      .metric-label,
+      .list-item p,
+      .source-note,
+      .timeline-card p,
+      .flow-card p,
+      .arch-card p,
+      .quote-card p {
+        color: var(--text-secondary);
+      }
+
+      .lead {
+        max-width: 62ch;
+        font-size: clamp(0.95rem, 1.55vw, 1.14rem);
+        line-height: 1.72;
+      }
+
+      .hero-grid,
+      .two-col,
+      .impact-grid,
+      .ops-grid,
+      .govern-grid,
+      .final-grid {
+        display: grid;
+        gap: clamp(0.8rem, 1.5vw, 1.2rem);
+      }
+
+      .hero-grid,
+      .two-col,
+      .final-grid {
+        grid-template-columns: 1.08fr 0.92fr;
+        align-items: stretch;
+      }
+
+      .impact-grid,
+      .ops-grid,
+      .govern-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .panel,
+      .arch-card,
+      .timeline-card,
+      .flow-card,
+      .ops-card,
+      .quote-card {
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid var(--border);
+        border-radius: 26px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(8px);
+      }
+
+      .panel.pad,
+      .arch-card,
+      .timeline-card,
+      .flow-card,
+      .ops-card,
+      .quote-card {
+        padding: clamp(1rem, 2vw, 1.5rem);
+      }
+
+      .hero-panel {
+        background:
+          linear-gradient(140deg, rgba(255, 255, 255, 0.92) 0%, rgba(255, 248, 241, 0.98) 100%);
+      }
+
+      .quote-panel {
+        background:
+          linear-gradient(160deg, rgba(255, 255, 255, 0.95) 0%, rgba(240, 247, 255, 0.94) 100%);
+      }
+
+      .badge-row,
+      .metric-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+      }
+
+      .badge {
+        padding: 0.52rem 0.82rem;
+        border-radius: 999px;
+        font-size: var(--small-size);
+        background: rgba(217, 119, 6, 0.08);
+        border: 1px solid rgba(217, 119, 6, 0.1);
+        color: var(--text-primary);
+      }
+
+      .metric {
+        flex: 1;
+        min-width: 120px;
+        padding: 1rem 1.05rem;
+        border-radius: 20px;
+        background: var(--bg-tertiary);
+        border: 1px solid rgba(22, 32, 51, 0.06);
+      }
+
+      .metric-value {
+        display: block;
+        margin-top: 0.28rem;
+        font-family: var(--font-display);
+        font-size: clamp(1.45rem, 2.8vw, 2.35rem);
+        color: var(--text-primary);
+      }
+
+      .list-block {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .list-item {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.85rem;
+        align-items: start;
+        padding: 0.95rem 1rem;
+        border-radius: 18px;
+        background: rgba(245, 247, 251, 0.96);
+        border: 1px solid rgba(22, 32, 51, 0.06);
+      }
+
+      .list-index {
+        width: 2rem;
+        height: 2rem;
+        border-radius: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--font-display);
+        color: #ffffff;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      }
+
+      .list-item h3,
+      .timeline-card h3,
+      .ops-card h3,
+      .flow-card h3,
+      .arch-card h3,
+      .quote-card h3 {
+        font-size: clamp(1rem, 1.5vw, 1.18rem);
+        margin-bottom: 0.26rem;
+      }
+
+      .list-item p,
+      .ops-card ul,
+      .flow-card ul,
+      .timeline-card p,
+      .arch-card p {
+        font-size: clamp(0.8rem, 1.08vw, 0.96rem);
+        line-height: 1.56;
+      }
+
+      .architecture-svg,
+      .flow-svg {
+        width: 100%;
+        height: auto;
+        max-height: 56vh;
+      }
+
+      .arch-legend {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      .legend-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.42rem 0.7rem;
+        border-radius: 999px;
+        background: var(--bg-tertiary);
+        border: 1px solid rgba(22, 32, 51, 0.06);
+        font-size: var(--small-size);
+      }
+
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.8rem;
+      }
+
+      .timeline-card {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .timeline-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 4px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-3));
+      }
+
+      .timeline-card span,
+      .ops-card span,
+      .flow-card span {
+        display: inline-block;
+        margin-bottom: 0.75rem;
+        font-size: var(--small-size);
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+        font-weight: 600;
+      }
+
+      .ops-card ul,
+      .flow-card ul {
+        display: grid;
+        gap: 0.42rem;
+        color: var(--text-secondary);
+        padding-left: 1rem;
+      }
+
+      .quote-card blockquote {
+        font-family: var(--font-display);
+        font-size: clamp(1.4rem, 3vw, 2.35rem);
+        line-height: 1.08;
+        max-width: 14ch;
+      }
+
+      .source-note {
+        margin-top: auto;
+        font-size: var(--small-size);
+        letter-spacing: 0.02em;
+      }
+
+      .reveal {
+        opacity: 0;
+        transform: translateY(30px);
+        transition:
+          opacity var(--duration-normal) var(--ease-out-expo),
+          transform var(--duration-normal) var(--ease-out-expo);
+      }
+
+      .slide.visible .reveal {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .reveal:nth-child(1) {
+        transition-delay: 0.08s;
+      }
+      .reveal:nth-child(2) {
+        transition-delay: 0.16s;
+      }
+      .reveal:nth-child(3) {
+        transition-delay: 0.24s;
+      }
+      .reveal:nth-child(4) {
+        transition-delay: 0.32s;
+      }
+      .reveal:nth-child(5) {
+        transition-delay: 0.4s;
+      }
+
+      .keyboard-hint {
+        position: fixed;
+        left: clamp(1rem, 2vw, 1.5rem);
+        bottom: clamp(0.8rem, 1.6vw, 1.2rem);
+        z-index: 120;
+        color: rgba(22, 32, 51, 0.42);
+        font-size: var(--small-size);
+      }
+
+      @media (max-width: 980px) {
+        .hero-grid,
+        .two-col,
+        .impact-grid,
+        .ops-grid,
+        .govern-grid,
+        .timeline,
+        .final-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .architecture-svg,
+        .flow-svg {
+          max-height: min(42vh, 360px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="progress-bar" id="progressBar"></div>
+    <nav class="nav-dots" id="navDots"></nav>
+    <div class="keyboard-hint">Arrow / Space / PgDn</div>
+
+    <!-- ===========================================
+         Slide 1: 封面
+         =========================================== -->
+    <section class="slide visible" data-slide="01">
+      <div class="slide-content">
+        <div class="slide-inner hero-grid">
+          <div class="panel pad hero-panel reveal">
+            <div class="eyebrow">Technical Committee Briefing</div>
+            <h1 class="hero-title">生产问题根因分析系统</h1>
+            <p class="lead">
+              本系统面向生产故障定位场景，目标是将“页面感知、证据汇聚、专家分析、结论收敛、审计回放”组织为统一的工程闭环，
+              以降低排障过程对个体经验的依赖，并提升分析结果的可解释性与可治理性。
+            </p>
+            <div class="badge-row" style="margin-top: 1rem;">
+              <span class="badge">LangGraph Runtime</span>
+              <span class="badge">Multi-Agent</span>
+              <span class="badge">Tool / Skill / MCP</span>
+              <span class="badge">Monitoring to RCA</span>
+            </div>
+            <p class="source-note">Source: README.md / docs/wiki/code-wiki.md / AGENTS.md</p>
+          </div>
+          <div class="quote-card quote-panel reveal">
+            <h3>评审焦点</h3>
+            <blockquote>面向真实生产问题的可控排障系统</blockquote>
+            <p>
+              本次介绍重点不在模型能力宣传，而在系统分层、证据链构造、治理约束以及后续平台化演进的可行性。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 2: 结论页
+         =========================================== -->
+    <section class="slide" data-slide="02">
+      <div class="slide-content">
+        <div class="slide-inner">
+          <div class="eyebrow reveal">Executive Summary</div>
+          <h2 class="section-title reveal">核心判断</h2>
+          <div class="impact-grid reveal">
+            <div class="arch-card">
+              <h3>系统定位</h3>
+              <p>项目已从单点 RCA 工具演进为“自动感知 + 自动分析 + 治理审计”的运维系统雏形。</p>
+            </div>
+            <div class="arch-card">
+              <h3>技术骨架</h3>
+              <p>LangGraph 负责编排状态机，专家 Agent 负责推理，Tool / Skill / MCP 负责证据注入与能力扩展。</p>
+            </div>
+            <div class="arch-card">
+              <h3>工程价值</h3>
+              <p>故障定位过程已被结构化为可追踪、可回放、可度量的执行轨迹，具备继续深化的平台基础。</p>
+            </div>
+          </div>
+          <div class="metric-row reveal">
+            <div class="metric">
+              <span class="metric-label">闭环链路</span>
+              <strong class="metric-value">感知 → RCA</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">架构层次</span>
+              <strong class="metric-value">四层</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">治理原则</span>
+              <strong class="metric-value">可控可审计</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">演进方向</span>
+              <strong class="metric-value">自动化运维</strong>
+            </div>
+          </div>
+          <p class="source-note reveal">Source: AGENTS.md 第 1、3、4 节</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 3: 总体架构
+         =========================================== -->
+    <section class="slide" data-slide="03">
+      <div class="slide-content">
+        <div class="slide-inner two-col">
+          <div class="panel pad reveal">
+            <div class="eyebrow">Architecture</div>
+            <h2 class="section-title">总体架构</h2>
+            <p class="lead">
+              架构设计遵循“入口、编排、执行、证据”四层拆分。其目标不是提升模型自由度，而是使监控入口、执行策略、
+              专家角色与外部依赖之间形成明确边界，从而为稳定性治理和能力扩展提供支撑。
+            </p>
+            <div class="arch-legend" style="margin-top: 1rem;">
+              <span class="legend-pill"><i class="legend-dot" style="background:#d97706;"></i>工作台与运维入口</span>
+              <span class="legend-pill"><i class="legend-dot" style="background:#0f766e;"></i>LangGraph 编排层</span>
+              <span class="legend-pill"><i class="legend-dot" style="background:#2563eb;"></i>专家执行层</span>
+              <span class="legend-pill"><i class="legend-dot" style="background:#7c3aed;"></i>外部证据层</span>
+            </div>
+            <p class="source-note">Source: README.md 架构图 / docs/wiki/code-wiki.md</p>
+          </div>
+          <div class="panel pad reveal">
+            <svg class="architecture-svg" viewBox="0 0 820 520" role="img" aria-label="系统总体架构图">
+              <rect x="24" y="36" width="180" height="112" rx="24" fill="#fff4eb" stroke="#d97706" />
+              <text x="48" y="76" fill="#162033" font-size="22" font-family="General Sans">Frontend Workbench</text>
+              <text x="48" y="108" fill="#536179" font-size="16" font-family="General Sans">故障分析 / 历史记录</text>
+              <text x="48" y="132" fill="#536179" font-size="16" font-family="General Sans">红蓝对抗感知 / MCP 中心</text>
+
+              <rect x="24" y="194" width="180" height="102" rx="24" fill="#fff7ef" stroke="#f59e0b" />
+              <text x="48" y="236" fill="#162033" font-size="22" font-family="General Sans">Page Monitoring</text>
+              <text x="48" y="264" fill="#536179" font-size="16" font-family="General Sans">Playwright / HTTP 巡检</text>
+
+              <rect x="252" y="72" width="290" height="236" rx="28" fill="#eefaf8" stroke="#0f766e" />
+              <text x="284" y="112" fill="#162033" font-size="28" font-family="Cabinet Grotesk">LANGGRAPH RUNTIME</text>
+              <text x="284" y="148" fill="#536179" font-size="17" font-family="General Sans">Supervisor 路由 / 预算控制 / 状态机 / 收口裁决</text>
+              <rect x="284" y="180" width="226" height="46" rx="16" fill="#ffffff" stroke="rgba(22,32,51,0.08)" />
+              <text x="304" y="210" fill="#162033" font-size="18" font-family="General Sans">Command Gate + Tool Context</text>
+              <rect x="284" y="242" width="226" height="46" rx="16" fill="#ffffff" stroke="rgba(22,32,51,0.08)" />
+              <text x="304" y="272" fill="#162033" font-size="18" font-family="General Sans">Checkpoint / Resume / Audit</text>
+
+              <rect x="588" y="32" width="190" height="122" rx="24" fill="#eef4ff" stroke="#2563eb" />
+              <text x="616" y="74" fill="#162033" font-size="22" font-family="General Sans">Expert Agents</text>
+              <text x="616" y="104" fill="#536179" font-size="16" font-family="General Sans">Log / DB / API / Judge</text>
+              <text x="616" y="126" fill="#536179" font-size="16" font-family="General Sans">Impact / Frontend / Infra</text>
+
+              <rect x="588" y="194" width="190" height="114" rx="24" fill="#f4f0ff" stroke="#7c3aed" />
+              <text x="616" y="236" fill="#162033" font-size="22" font-family="General Sans">Evidence Layer</text>
+              <text x="616" y="264" fill="#536179" font-size="16" font-family="General Sans">Skill / Tool / MCP</text>
+              <text x="616" y="286" fill="#536179" font-size="16" font-family="General Sans">Logs / Metrics / Alerts / Traces</text>
+
+              <line x1="204" y1="94" x2="252" y2="94" stroke="#d97706" stroke-width="4" />
+              <line x1="204" y1="244" x2="252" y2="244" stroke="#d97706" stroke-width="4" />
+              <line x1="542" y1="130" x2="588" y2="94" stroke="#0f766e" stroke-width="4" />
+              <line x1="542" y1="244" x2="588" y2="244" stroke="#2563eb" stroke-width="4" />
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 4: 多 Agent 与执行链
+         =========================================== -->
+    <section class="slide" data-slide="04">
+      <div class="slide-content">
+        <div class="slide-inner two-col">
+          <div class="panel pad reveal">
+            <div class="eyebrow">Execution Discipline</div>
+            <h2 class="section-title">专家执行链路</h2>
+            <p class="lead">
+              当前实现并未将专家执行视为开放式对话，而是以“命令先行、上下文受控、输出结构化、结果可审计”为基本约束。
+              这使系统能够将多 Agent 协作纳入统一的治理框架。
+            </p>
+            <div class="list-block" style="margin-top: 0.95rem;">
+              <div class="list-item">
+                <span class="list-index">1</span>
+                <div>
+                  <h3>命令先行</h3>
+                  <p>先由主 Agent 发出可审计命令，再由专家执行，防止执行链路失控。</p>
+                </div>
+              </div>
+              <div class="list-item">
+                <span class="list-index">2</span>
+                <div>
+                  <h3>上下文受控</h3>
+                  <p>Tool、Skill、MCP 仅在命令门禁允许时注入，避免上下文无边界膨胀。</p>
+                </div>
+              </div>
+              <div class="list-item">
+                <span class="list-index">3</span>
+                <div>
+                  <h3>输出结构化</h3>
+                  <p>关键专家输出需可解析、可回写、可进入最终裁决，而非停留在自然语言散文层面。</p>
+                </div>
+              </div>
+            </div>
+            <p class="source-note">Source: AGENTS.md 第 3 节 / docs/wiki/code-wiki.md 第 7-8 章</p>
+          </div>
+          <div class="panel pad reveal">
+            <svg class="flow-svg" viewBox="0 0 780 470" role="img" aria-label="专家执行链路图">
+              <rect x="38" y="66" width="126" height="72" rx="18" fill="#fff4eb" stroke="#d97706" />
+              <text x="66" y="108" fill="#162033" font-size="20" font-family="General Sans">Supervisor</text>
+              <rect x="202" y="66" width="126" height="72" rx="18" fill="#eefaf8" stroke="#0f766e" />
+              <text x="236" y="108" fill="#162033" font-size="20" font-family="General Sans">Command</text>
+              <rect x="366" y="66" width="126" height="72" rx="18" fill="#eefaf8" stroke="#0f766e" />
+              <text x="392" y="108" fill="#162033" font-size="20" font-family="General Sans">Tool Gate</text>
+              <rect x="530" y="66" width="198" height="72" rx="18" fill="#f4f0ff" stroke="#7c3aed" />
+              <text x="560" y="100" fill="#162033" font-size="20" font-family="General Sans">Tool / Skill / MCP</text>
+              <text x="560" y="124" fill="#536179" font-size="14" font-family="General Sans">构建受控上下文</text>
+
+              <rect x="138" y="244" width="158" height="82" rx="20" fill="#eef4ff" stroke="#2563eb" />
+              <text x="170" y="286" fill="#162033" font-size="22" font-family="General Sans">Expert Agent</text>
+              <text x="170" y="308" fill="#536179" font-size="14" font-family="General Sans">角色化分析</text>
+              <rect x="338" y="244" width="126" height="82" rx="20" fill="#eef4ff" stroke="#2563eb" />
+              <text x="381" y="286" fill="#162033" font-size="22" font-family="General Sans">LLM</text>
+              <text x="356" y="308" fill="#536179" font-size="14" font-family="General Sans">推理与生成</text>
+              <rect x="506" y="244" width="182" height="82" rx="20" fill="#ffffff" stroke="rgba(22,32,51,0.1)" />
+              <text x="532" y="282" fill="#162033" font-size="22" font-family="General Sans">Structured Output</text>
+              <text x="532" y="306" fill="#536179" font-size="14" font-family="General Sans">evidence / judgement / action</text>
+
+              <rect x="262" y="380" width="288" height="58" rx="18" fill="#eef3f9" stroke="rgba(22,32,51,0.12)" />
+              <text x="304" y="416" fill="#162033" font-size="20" font-family="General Sans">Audit Log / Timeline / Checkpoint</text>
+
+              <line x1="164" y1="102" x2="202" y2="102" stroke="#d97706" stroke-width="4" />
+              <line x1="328" y1="102" x2="366" y2="102" stroke="#0f766e" stroke-width="4" />
+              <line x1="492" y1="102" x2="530" y2="102" stroke="#0f766e" stroke-width="4" />
+              <line x1="628" y1="138" x2="628" y2="188" stroke="#7c3aed" stroke-width="4" />
+              <line x1="628" y1="188" x2="218" y2="188" stroke="#7c3aed" stroke-width="4" />
+              <line x1="218" y1="188" x2="218" y2="244" stroke="#7c3aed" stroke-width="4" />
+              <line x1="296" y1="286" x2="338" y2="286" stroke="#2563eb" stroke-width="4" />
+              <line x1="464" y1="286" x2="506" y2="286" stroke="#2563eb" stroke-width="4" />
+              <line x1="598" y1="326" x2="598" y2="380" stroke="rgba(22,32,51,0.26)" stroke-width="4" />
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 5: 自动巡检闭环
+         =========================================== -->
+    <section class="slide" data-slide="05">
+      <div class="slide-content">
+        <div class="slide-inner">
+          <div class="eyebrow reveal">Operational Loop</div>
+          <h2 class="section-title reveal">从页面巡检到自动 RCA</h2>
+          <div class="timeline reveal">
+            <div class="timeline-card">
+              <span>Step 01</span>
+              <h3>巡检配置</h3>
+              <p>在“红蓝对抗感知”页面配置目标页面、Cookie、巡检周期与感知策略。</p>
+            </div>
+            <div class="timeline-card">
+              <span>Step 02</span>
+              <h3>异常捕获</h3>
+              <p>通过 Playwright 访问页面，识别控制台错误、接口失败和关键交互异常，必要时降级为 HTTP 巡检。</p>
+            </div>
+            <div class="timeline-card">
+              <span>Step 03</span>
+              <h3>事件入库</h3>
+              <p>监控事件与异常上下文写入历史记录，并自动生成 incident 与调查任务。</p>
+            </div>
+            <div class="timeline-card">
+              <span>Step 04</span>
+              <h3>分析收口</h3>
+              <p>系统按模式和预算调度专家轮次，由 Judge 汇总证据并形成最终报告。</p>
+            </div>
+          </div>
+          <p class="source-note reveal">Source: README.md 第 66-67、153-154、344 行</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 6: Tool Skill MCP
+         =========================================== -->
+    <section class="slide" data-slide="06">
+      <div class="slide-content">
+        <div class="slide-inner two-col">
+          <div class="panel pad reveal">
+            <div class="eyebrow">Capability Surface</div>
+            <h2 class="section-title">能力装配方式</h2>
+            <div class="ops-grid" style="margin-top: 0.9rem;">
+              <div class="ops-card">
+                <span>Tool</span>
+                <h3>基础执行能力</h3>
+                <ul>
+                  <li>受命令门禁控制</li>
+                  <li>统一记录请求、响应、耗时与状态</li>
+                  <li>为所有专家提供底层动作接口</li>
+                </ul>
+              </div>
+              <div class="ops-card">
+                <span>Skill</span>
+                <h3>分析方法模板</h3>
+                <ul>
+                  <li>按 Agent 角色匹配</li>
+                  <li>约束排查步骤与输出格式</li>
+                  <li>命中与注入过程可审计</li>
+                </ul>
+              </div>
+              <div class="ops-card">
+                <span>MCP</span>
+                <h3>外部证据入口</h3>
+                <ul>
+                  <li>支持 http / sse / stdio 配置</li>
+                  <li>可按 Agent 绑定日志、监控、告警能力</li>
+                  <li>结果汇入统一工具上下文</li>
+                </ul>
+              </div>
+            </div>
+            <p class="source-note">Source: README.md 第 62-65、223-245 行</p>
+          </div>
+          <div class="quote-card reveal">
+            <h3>设计意义</h3>
+            <blockquote>将分析建立在可验证证据之上</blockquote>
+            <p>
+              当前体系已将“能力扩展”与“证据采集”从 Prompt 中抽离，转化为可配置、可绑定、可审计的工程能力面，
+              这为后续接入更多生产系统奠定了基础。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 7: 治理与风险
+         =========================================== -->
+    <section class="slide" data-slide="07">
+      <div class="slide-content">
+        <div class="slide-inner two-col">
+          <div class="panel pad reveal">
+            <div class="eyebrow">Governance</div>
+            <h2 class="section-title">治理约束</h2>
+            <div class="govern-grid" style="margin-top: 0.9rem;">
+              <div class="flow-card">
+                <span>01</span>
+                <h3>命令先行</h3>
+                <p>主 Agent 必须先下发命令，专家执行不得绕过主控链路。</p>
+              </div>
+              <div class="flow-card">
+                <span>02</span>
+                <h3>有效结论门禁</h3>
+                <p>在严格模式下，最终结论不得以“继续分析”替代根因判断。</p>
+              </div>
+              <div class="flow-card">
+                <span>03</span>
+                <h3>会话终态保障</h3>
+                <p>任何异常任务均需进入终态并记录原因，避免长期悬挂。</p>
+              </div>
+              <div class="flow-card">
+                <span>04</span>
+                <h3>断点续写</h3>
+                <p>中断后优先依赖 checkpoint 恢复，降低长流程重跑成本。</p>
+              </div>
+              <div class="flow-card">
+                <span>05</span>
+                <h3>轨迹优先</h3>
+                <p>命令、工具、证据、反驳与裁决均需可回放，而非仅保留最终结论。</p>
+              </div>
+              <div class="flow-card">
+                <span>06</span>
+                <h3>系统与模型分层</h3>
+                <p>模型负责推理，系统负责状态机、超时、重试、审计与降级。</p>
+              </div>
+            </div>
+            <p class="source-note">Source: AGENTS.md 第 3-4 节</p>
+          </div>
+          <div class="quote-card reveal">
+            <h3>当前风险</h3>
+            <blockquote>下一阶段的关键在于稳定性，而非能力展示</blockquote>
+            <p>
+              模型超时管理、quick 与 standard 模式分层、专家完成率、证据置信度计算以及自动化处置闭环，
+              是后续工程深化的主要关注点。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         Slide 8: 收尾建议
+         =========================================== -->
+    <section class="slide" data-slide="08">
+      <div class="slide-content">
+        <div class="slide-inner final-grid">
+          <div class="panel pad reveal">
+            <div class="eyebrow">Recommendation</div>
+            <h2 class="section-title">建议的后续投入方向</h2>
+            <div class="list-block" style="margin-top: 0.9rem;">
+              <div class="list-item">
+                <span class="list-index">1</span>
+                <div>
+                  <h3>继续强化运行稳定性</h3>
+                  <p>围绕弱并发模型优化超时、降级与裁决策略，并进一步稳定 quick / standard 模式的边界。</p>
+                </div>
+              </div>
+              <div class="list-item">
+                <span class="list-index">2</span>
+                <div>
+                  <h3>扩展自动化运维闭环</h3>
+                  <p>从自动感知与自动分析延伸至案例检索、处置建议生成和受控动作执行。</p>
+                </div>
+              </div>
+              <div class="list-item">
+                <span class="list-index">3</span>
+                <div>
+                  <h3>建立标准评测体系</h3>
+                  <p>通过真实故障案例评测专家完成率、证据准确率和报告可用性，形成持续演进的量化基线。</p>
+                </div>
+              </div>
+            </div>
+            <p class="source-note">Prepared on 2026-04-15</p>
+          </div>
+          <div class="quote-card reveal">
+            <h3>结论</h3>
+            <blockquote>本项目已经具备进一步平台化建设的基础条件</blockquote>
+            <p>
+              从技术委员会视角看，当前最值得持续投入的方向是稳态能力建设与场景扩展，而不是继续放大单次演示效果。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      /* ===========================================
+         幻灯片控制器
+         提供滚动、键盘、触控、进度条与导航点能力
+         =========================================== */
+      class SlidePresentation {
+        constructor() {
+          this.slides = Array.from(document.querySelectorAll(".slide"));
+          this.progressBar = document.getElementById("progressBar");
+          this.navDotsContainer = document.getElementById("navDots");
+          this.currentSlide = 0;
+          this.touchStartY = 0;
+          this.touchEndY = 0;
+          this.buildNavDots();
+          this.setupIntersectionObserver();
+          this.setupKeyboardNav();
+          this.setupTouchNav();
+          this.setupWheelNav();
+          this.updateProgressBar();
+        }
+
+        buildNavDots() {
+          this.navDotsContainer.innerHTML = "";
+          this.slides.forEach((slide, index) => {
+            const dot = document.createElement("button");
+            dot.className = "nav-dot";
+            dot.type = "button";
+            dot.title = `Slide ${index + 1}`;
+            dot.addEventListener("click", () => this.goToSlide(index));
+            this.navDotsContainer.appendChild(dot);
+          });
+          this.updateNavDots();
+        }
+
+        setupIntersectionObserver() {
+          const observer = new IntersectionObserver(
+            (entries) => {
+              entries.forEach((entry) => {
+                if (!entry.isIntersecting) return;
+                entry.target.classList.add("visible");
+                this.currentSlide = this.slides.indexOf(entry.target);
+                this.updateProgressBar();
+                this.updateNavDots();
+              });
+            },
+            { threshold: 0.55 }
+          );
+
+          this.slides.forEach((slide) => observer.observe(slide));
+        }
+
+        setupKeyboardNav() {
+          window.addEventListener("keydown", (event) => {
+            if (["ArrowDown", "PageDown", " "].includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+            }
+            if (["ArrowUp", "PageUp"].includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(Math.max(this.currentSlide - 1, 0));
+            }
+            if (event.key === "Home") {
+              event.preventDefault();
+              this.goToSlide(0);
+            }
+            if (event.key === "End") {
+              event.preventDefault();
+              this.goToSlide(this.slides.length - 1);
+            }
+          });
+        }
+
+        setupTouchNav() {
+          window.addEventListener(
+            "touchstart",
+            (event) => {
+              this.touchStartY = event.changedTouches[0].screenY;
+            },
+            { passive: true }
+          );
+
+          window.addEventListener(
+            "touchend",
+            (event) => {
+              this.touchEndY = event.changedTouches[0].screenY;
+              const delta = this.touchStartY - this.touchEndY;
+              if (Math.abs(delta) < 50) return;
+              if (delta > 0) {
+                this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+              } else {
+                this.goToSlide(Math.max(this.currentSlide - 1, 0));
+              }
+            },
+            { passive: true }
+          );
+        }
+
+        setupWheelNav() {
+          let wheelLocked = false;
+          window.addEventListener(
+            "wheel",
+            (event) => {
+              if (wheelLocked) return;
+              if (Math.abs(event.deltaY) < 25) return;
+              wheelLocked = true;
+              if (event.deltaY > 0) {
+                this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+              } else {
+                this.goToSlide(Math.max(this.currentSlide - 1, 0));
+              }
+              window.setTimeout(() => {
+                wheelLocked = false;
+              }, 700);
+            },
+            { passive: true }
+          );
+        }
+
+        goToSlide(index) {
+          this.slides[index].scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        updateProgressBar() {
+          const progress = ((this.currentSlide + 1) / this.slides.length) * 100;
+          this.progressBar.style.width = `${progress}%`;
+        }
+
+        updateNavDots() {
+          const dots = this.navDotsContainer.querySelectorAll(".nav-dot");
+          dots.forEach((dot, index) => {
+            dot.classList.toggle("active", index === this.currentSlide);
+          });
+        }
+      }
+
+      window.addEventListener("DOMContentLoaded", () => {
+        new SlidePresentation();
+      });
+    </script>
+  </body>
+</html>

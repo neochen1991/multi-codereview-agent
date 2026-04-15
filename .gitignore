@@ -34,3 +34,5 @@ output/project-intro-slides/package.json
 output/project-intro-slides/notes.md
 output/project-intro-slides/pptxgenjs_helpers/
 scripts/generate_project_intro_ppt.py
+.playwright-cli
+output/playwright/

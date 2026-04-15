@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find /Users/neochen/multi-codereview-agent -type f -name CLAUDE.md -o -name README.md -o -name *.json -name pyproject.toml -o -name Makefile -o -name Dockerfile)"
+      "Bash(find /Users/neochen/multi-codereview-agent -type f -name CLAUDE.md -o -name README.md -o -name *.json -name pyproject.toml -o -name Makefile -o -name Dockerfile)",
+      "Bash(curl -s https://api.github.com/repos/zarazhangrui/frontend-slides/contents/)",
+      "Bash(cp /tmp/frontend-slides/SKILL.md /tmp/frontend-slides/STYLE_PRESETS.md /tmp/frontend-slides/viewport-base.css /tmp/frontend-slides/html-template.md /tmp/frontend-slides/animation-patterns.md /Users/neochen/.agents/skills/frontend-slides/)",
+      "Bash(cp -r /tmp/frontend-slides/scripts/* /Users/neochen/.agents/skills/frontend-slides/scripts/)",
+      "Bash(ln -sf /Users/neochen/.agents/skills/frontend-slides /Users/neochen/.claude/skills/frontend-slides)"
     ]
   }
 }

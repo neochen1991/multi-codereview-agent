@@ -48,3 +48,46 @@ def test_human_review_decision_updates_issue_and_review(client):
     )
     messages = messages_response.json()
     assert any(item["message_type"] == "human_comment" for item in messages)
+
+
+def test_human_review_decision_rejects_repeat_submit_on_resolved_issue(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/migration-guard",
+            "target_ref": "main",
+            "title": "security migration review",
+            "changed_files": [
+                "backend/db/migrations/20260312_add_payment_table.sql",
+                "backend/app/security/authz.py",
+            ],
+        },
+    ).json()
+
+    client.post(f"/api/reviews/{created['review_id']}/start")
+    issues = client.get(f"/api/reviews/{created['review_id']}/issues").json()
+    target_issue = next(item for item in issues if item["needs_human"])
+
+    first_submit = client.post(
+        f"/api/reviews/{created['review_id']}/human-decisions",
+        json={
+            "issue_id": target_issue["issue_id"],
+            "decision": "approved",
+            "comment": "第一次裁决",
+        },
+    )
+    assert first_submit.status_code == 202
+
+    second_submit = client.post(
+        f"/api/reviews/{created['review_id']}/human-decisions",
+        json={
+            "issue_id": target_issue["issue_id"],
+            "decision": "approved",
+            "comment": "重复提交",
+        },
+    )
+    assert second_submit.status_code == 409
+    assert second_submit.json()["detail"] == "issue is not pending human decision"

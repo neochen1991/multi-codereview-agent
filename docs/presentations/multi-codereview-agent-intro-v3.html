@@ -1,0 +1,2208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多专家代码审核系统简介</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Instrument+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700;900&display=swap"
+    />
+    <style>
+      /* ===========================================
+         CSS CUSTOM PROPERTIES (THEME)
+         =========================================== */
+      :root {
+        --bg-primary: #f6f8fc;
+        --bg-secondary: #ffffff;
+        --bg-tertiary: #eef4ff;
+        --panel-dark: rgba(26, 48, 84, 0.96);
+        --panel-light: rgba(255, 255, 255, 0.96);
+        --line-soft: rgba(93, 122, 173, 0.14);
+        --line-strong: rgba(39, 103, 255, 0.2);
+        --text-primary: #162033;
+        --text-secondary: rgba(22, 32, 51, 0.7);
+        --text-dark: #162033;
+        --text-muted: #64748b;
+        --accent: #0f9d92;
+        --accent-blue: #2f6df6;
+        --accent-gold: #ffb84d;
+        --accent-coral: #ef6b57;
+        --accent-violet: #7d6df2;
+        --shadow-soft: 0 24px 56px rgba(39, 73, 137, 0.12);
+        --shadow-card: 0 10px 26px rgba(39, 73, 137, 0.08);
+        --radius-xl: 28px;
+        --radius-lg: 22px;
+        --radius-md: 16px;
+        --font-display: "Fraunces", "Noto Sans SC", serif;
+        --font-body: "Instrument Sans", "Noto Sans SC", sans-serif;
+        --title-size: clamp(2rem, 5.8vw, 4.8rem);
+        --h2-size: clamp(1.45rem, 3vw, 2.8rem);
+        --h3-size: clamp(1rem, 2vw, 1.4rem);
+        --body-size: clamp(0.84rem, 1.24vw, 1.02rem);
+        --small-size: clamp(0.7rem, 0.94vw, 0.88rem);
+        --slide-padding: clamp(1rem, 3.4vw, 3rem);
+        --content-gap: clamp(0.8rem, 1.8vw, 1.6rem);
+        --element-gap: clamp(0.45rem, 1vw, 0.9rem);
+        --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+        --duration-normal: 0.7s;
+      }
+
+      /* ===========================================
+         VIEWPORT FITTING: MANDATORY BASE STYLES
+         Include this ENTIRE file in every presentation.
+         These styles ensure slides fit exactly in the viewport.
+         =========================================== */
+
+      /* 1. Lock html/body to viewport */
+      html,
+      body {
+        height: 100%;
+        overflow-x: hidden;
+      }
+
+      html {
+        scroll-snap-type: y mandatory;
+        scroll-behavior: smooth;
+      }
+
+      /* 2. Each slide = exact viewport height */
+      .slide {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh; /* Dynamic viewport height for mobile browsers */
+        overflow: hidden; /* CRITICAL: Prevent ANY overflow */
+        scroll-snap-align: start;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+
+      /* 3. Content container with flex for centering */
+      .slide-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        max-height: 100%;
+        overflow: hidden; /* Double-protection against overflow */
+        padding: var(--slide-padding);
+      }
+
+      /* 4. ALL typography uses clamp() for responsive scaling */
+      :root {
+        /* Titles scale from mobile to desktop */
+        --title-size: clamp(1.5rem, 5vw, 4rem);
+        --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+        --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+
+        /* Body text */
+        --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+        --small-size: clamp(0.65rem, 1vw, 0.875rem);
+
+        /* Spacing scales with viewport */
+        --slide-padding: clamp(1rem, 4vw, 4rem);
+        --content-gap: clamp(0.5rem, 2vw, 2rem);
+        --element-gap: clamp(0.25rem, 1vw, 1rem);
+      }
+
+      /* 5. Cards/containers use viewport-relative max sizes */
+      .card,
+      .container,
+      .content-box {
+        max-width: min(90vw, 1000px);
+        max-height: min(80vh, 700px);
+      }
+
+      /* 6. Lists auto-scale with viewport */
+      .feature-list,
+      .bullet-list {
+        gap: clamp(0.4rem, 1vh, 1rem);
+      }
+
+      .feature-list li,
+      .bullet-list li {
+        font-size: var(--body-size);
+        line-height: 1.4;
+      }
+
+      /* 7. Grids adapt to available space */
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+        gap: clamp(0.5rem, 1.5vw, 1rem);
+      }
+
+      /* 8. Images constrained to viewport */
+      img,
+      .image-container {
+        max-width: 100%;
+        max-height: min(50vh, 400px);
+        object-fit: contain;
+      }
+
+      /* ===========================================
+         RESPONSIVE BREAKPOINTS
+         Aggressive scaling for smaller viewports
+         =========================================== */
+
+      /* Short viewports (< 700px height) */
+      @media (max-height: 700px) {
+        :root {
+          --slide-padding: clamp(0.75rem, 3vw, 2rem);
+          --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+          --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+          --h2-size: clamp(1rem, 3vw, 1.75rem);
+        }
+      }
+
+      /* Very short viewports (< 600px height) */
+      @media (max-height: 600px) {
+        :root {
+          --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+          --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+          --title-size: clamp(1.1rem, 4vw, 2rem);
+          --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+        }
+
+        /* Hide non-essential elements */
+        .nav-dots,
+        .keyboard-hint,
+        .decorative {
+          display: none;
+        }
+      }
+
+      /* Extremely short (landscape phones, < 500px height) */
+      @media (max-height: 500px) {
+        :root {
+          --slide-padding: clamp(0.4rem, 2vw, 1rem);
+          --title-size: clamp(1rem, 3.5vw, 1.5rem);
+          --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+          --body-size: clamp(0.65rem, 1vw, 0.85rem);
+        }
+      }
+
+      /* Narrow viewports (< 600px width) */
+      @media (max-width: 600px) {
+        :root {
+          --title-size: clamp(1.25rem, 7vw, 2.5rem);
+        }
+
+        /* Stack grids vertically */
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ===========================================
+         REDUCED MOTION
+         Respect user preferences
+         =========================================== */
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.2s !important;
+        }
+
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      /* ===========================================
+         BASE STYLES
+         =========================================== */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: var(--font-body);
+        background:
+          radial-gradient(circle at 16% 18%, rgba(47, 109, 246, 0.1), transparent 28%),
+          radial-gradient(circle at 84% 14%, rgba(15, 157, 146, 0.08), transparent 24%),
+          linear-gradient(180deg, #fbfcff 0%, #f6f8fc 52%, #eef3fb 100%);
+        color: var(--text-dark);
+      }
+
+      .slide {
+        background:
+          linear-gradient(145deg, rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.18)),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.04));
+      }
+
+      .slide::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(47, 109, 246, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(47, 109, 246, 0.035) 1px, transparent 1px);
+        background-size: 72px 72px;
+        opacity: 0.35;
+        pointer-events: none;
+      }
+
+      .slide::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 10% 16%, rgba(255, 184, 77, 0.12), transparent 18%),
+          radial-gradient(circle at 88% 84%, rgba(125, 109, 242, 0.08), transparent 22%);
+        pointer-events: none;
+      }
+
+      .progress-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 4px;
+        width: 0;
+        background: linear-gradient(90deg, var(--accent), var(--accent-blue), var(--accent-gold));
+        z-index: 9999;
+        box-shadow: 0 0 18px rgba(80, 227, 194, 0.5);
+      }
+
+      .nav-dots {
+        position: fixed;
+        top: 50%;
+        right: clamp(0.8rem, 1.6vw, 1.3rem);
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        transform: translateY(-50%);
+        z-index: 999;
+      }
+
+      .nav-dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.36);
+        background: rgba(255, 255, 255, 0.12);
+        cursor: pointer;
+        transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+      }
+
+      .nav-dot.active {
+        transform: scale(1.16);
+        background: var(--accent);
+        border-color: rgba(255, 255, 255, 0.7);
+      }
+
+      .slide-frame {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        gap: var(--content-gap);
+        height: 100%;
+        width: min(96vw, 1460px);
+        margin: 0 auto;
+      }
+
+      .slide-shell {
+        display: grid;
+        gap: var(--content-gap);
+        height: 100%;
+      }
+
+      .slide-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .slide-kicker {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: var(--small-size);
+        font-weight: 700;
+      }
+
+      .slide-kicker::before {
+        content: "";
+        width: 18px;
+        height: 2px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent), transparent);
+      }
+
+      .slide-counter {
+        font-size: clamp(0.8rem, 1vw, 0.95rem);
+        color: var(--text-secondary);
+      }
+
+      .hero-title,
+      .section-title {
+        font-family: var(--font-display);
+        line-height: 0.96;
+        letter-spacing: -0.04em;
+      }
+
+      .hero-title {
+        font-size: clamp(2.2rem, 7vw, 5.7rem);
+        max-width: 10ch;
+      }
+
+      .section-title {
+        font-size: var(--h2-size);
+        max-width: 16ch;
+      }
+
+      .hero-subtitle,
+      .section-intro,
+      .body-copy {
+        font-size: var(--body-size);
+        line-height: 1.58;
+        color: var(--text-secondary);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: clamp(1rem, 2vw, 2rem);
+        align-items: stretch;
+        min-height: 0;
+      }
+
+      .hero-left,
+      .hero-right,
+      .light-panel,
+      .dark-panel,
+      .metric-card,
+      .feature-card,
+      .architecture-layer,
+      .flow-step,
+      .scenario-card,
+      .roadmap-card {
+        min-height: 0;
+      }
+
+      .hero-left {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: var(--content-gap);
+      }
+
+      .hero-right {
+        position: relative;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 1rem;
+        padding: clamp(1rem, 2vw, 1.6rem);
+        border-radius: var(--radius-xl);
+        border: 1px solid var(--line-soft);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 249, 255, 0.98));
+        box-shadow: var(--shadow-soft);
+        overflow: hidden;
+      }
+
+      .hero-right > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .hero-right::before {
+        content: "";
+        position: absolute;
+        inset: auto -40px -50px auto;
+        width: 220px;
+        height: 220px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(47, 109, 246, 0.14), transparent 68%);
+      }
+
+      .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.45rem 0.8rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        color: var(--text-dark);
+        font-size: var(--small-size);
+        box-shadow: var(--shadow-card);
+      }
+
+      .hero-stat-grid,
+      .metrics-grid,
+      .feature-grid,
+      .roadmap-grid {
+        display: grid;
+        gap: 0.85rem;
+      }
+
+      .hero-stat-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .metrics-grid,
+      .feature-grid,
+      .roadmap-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .metric-card,
+      .feature-card,
+      .roadmap-card {
+        padding: 1rem;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.82);
+        border: 1px solid rgba(93, 122, 173, 0.12);
+        box-shadow: var(--shadow-card);
+      }
+
+      .expert-group-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .expert-card-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .metric-card strong,
+      .feature-card strong,
+      .roadmap-card strong {
+        display: block;
+        font-family: var(--font-display);
+        font-size: clamp(1rem, 1.4vw, 1.2rem);
+        margin-bottom: 0.45rem;
+      }
+
+      .metric-card span,
+      .feature-card p,
+      .roadmap-card p {
+        display: block;
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .card-note {
+        display: grid;
+        gap: 0.22rem;
+        margin-top: 0.48rem;
+        padding-top: 0.48rem;
+        border-top: 1px dashed rgba(93, 122, 173, 0.18);
+      }
+
+      .card-note span {
+        font-size: calc(var(--small-size) * 0.98);
+        line-height: 1.42;
+        color: var(--text-muted);
+      }
+
+      .card-note b {
+        color: var(--text-dark);
+        font-weight: 700;
+      }
+
+      .light-slide {
+        background:
+          radial-gradient(circle at 12% 14%, rgba(47, 109, 246, 0.07), transparent 18%),
+          linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+        color: var(--text-dark);
+      }
+
+      .light-slide::before {
+        background-image:
+          linear-gradient(rgba(77, 125, 255, 0.07) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(77, 125, 255, 0.07) 1px, transparent 1px);
+        opacity: 0.35;
+      }
+
+      .light-slide .slide-kicker,
+      .light-slide .slide-counter {
+        color: var(--accent-blue);
+      }
+
+      .light-slide .section-intro,
+      .light-slide .body-copy,
+      .light-slide .feature-card p,
+      .light-slide .roadmap-card p {
+        color: var(--text-muted);
+      }
+
+      .light-panel {
+        padding: clamp(1rem, 2vw, 1.6rem);
+        border-radius: var(--radius-xl);
+        background: var(--panel-light);
+        border: 1px solid rgba(120, 137, 162, 0.18);
+        box-shadow: var(--shadow-card);
+      }
+
+      .light-panel.tinted {
+        background: linear-gradient(180deg, rgba(246, 250, 255, 0.98), rgba(255, 255, 255, 0.98));
+      }
+
+      .architecture-house {
+        display: grid;
+        gap: 0.55rem;
+        align-self: stretch;
+      }
+
+      .house-roof {
+        position: relative;
+        height: clamp(56px, 9vh, 86px);
+        clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+        background: linear-gradient(135deg, #2f6df6, #2658c9);
+        border-radius: 16px 16px 0 0;
+        box-shadow: var(--shadow-card);
+      }
+
+      .house-roof-label {
+        position: absolute;
+        left: 50%;
+        top: 58%;
+        transform: translate(-50%, -50%);
+        color: #f8fbff;
+        font-weight: 800;
+        font-size: clamp(0.78rem, 1.2vw, 1rem);
+        letter-spacing: 0.08em;
+      }
+
+      .house-body {
+        display: grid;
+        grid-template-columns: 0.8fr 1fr 1fr 0.8fr;
+        gap: 0.55rem;
+        align-items: stretch;
+      }
+
+      .house-wall,
+      .house-core {
+        border-radius: var(--radius-lg);
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(125, 152, 192, 0.24);
+        box-shadow: var(--shadow-card);
+        padding: 0.8rem;
+      }
+
+      .house-wall {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.6rem;
+      }
+
+      .house-wall h4,
+      .house-core h4,
+      .foundation-card h4 {
+        font-size: var(--small-size);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--accent-blue);
+      }
+
+      .house-wall ul,
+      .house-core ul,
+      .foundation-card ul,
+      .check-list,
+      .flow-list {
+        list-style: none;
+        display: grid;
+        gap: 0.45rem;
+      }
+
+      .house-wall li,
+      .house-core li,
+      .foundation-card li,
+      .check-list li,
+      .flow-list li {
+        font-size: var(--small-size);
+        line-height: 1.4;
+        color: var(--text-muted);
+      }
+
+      .house-core {
+        display: grid;
+        align-content: start;
+        gap: 0.6rem;
+      }
+
+      .architecture-layer {
+        padding: 0.72rem 0.8rem;
+        border-radius: 14px;
+        background: linear-gradient(180deg, #ffffff, #f5f9ff);
+        border: 1px solid rgba(135, 163, 212, 0.28);
+      }
+
+      .architecture-layer strong {
+        display: block;
+        margin-bottom: 0.35rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .architecture-layer span {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.4;
+      }
+
+      .foundation-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.55rem;
+      }
+
+      .foundation-card {
+        padding: 0.78rem;
+        border-radius: var(--radius-md);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(243, 248, 255, 0.98));
+        color: var(--text-dark);
+        border: 1px solid rgba(135, 163, 212, 0.22);
+        box-shadow: var(--shadow-card);
+      }
+
+      .foundation-card li {
+        color: var(--text-muted);
+      }
+
+      .flow-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.8rem;
+        align-items: stretch;
+      }
+
+      .flow-step {
+        position: relative;
+        padding: 1rem 0.95rem;
+        border-radius: var(--radius-md);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(243, 248, 255, 0.98));
+        border: 1px solid rgba(135, 165, 255, 0.18);
+        box-shadow: var(--shadow-card);
+      }
+
+      .flow-step::after {
+        content: "→";
+        position: absolute;
+        top: 50%;
+        right: -0.55rem;
+        transform: translateY(-50%);
+        color: rgba(255, 255, 255, 0.34);
+        font-size: 1.25rem;
+      }
+
+      .flow-step:last-child::after {
+        display: none;
+      }
+
+      .flow-step strong {
+        display: block;
+        color: var(--text-dark);
+        margin-bottom: 0.45rem;
+        font-size: var(--body-size);
+      }
+
+      .flow-step p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.5;
+      }
+
+      .two-column {
+        display: grid;
+        grid-template-columns: 1.02fr 0.98fr;
+        gap: 1rem;
+        align-items: stretch;
+      }
+
+      .scenario-stack {
+        display: grid;
+        grid-template-rows: repeat(3, minmax(0, 1fr));
+        gap: 0.8rem;
+      }
+
+      .scenario-card {
+        padding: 1rem;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid rgba(93, 122, 173, 0.12);
+        box-shadow: var(--shadow-card);
+      }
+
+      .scenario-card strong {
+        display: block;
+        margin-bottom: 0.45rem;
+        font-size: var(--body-size);
+      }
+
+      .scenario-card p,
+      .scenario-card li {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .timeline {
+        display: grid;
+        gap: 0.7rem;
+      }
+
+      .timeline-row {
+        display: grid;
+        grid-template-columns: 110px 1fr;
+        gap: 0.8rem;
+        align-items: start;
+      }
+
+      .timeline-label {
+        padding: 0.6rem 0.75rem;
+        border-radius: 999px;
+        background: rgba(77, 125, 255, 0.12);
+        color: var(--accent-blue);
+        font-weight: 700;
+        font-size: var(--small-size);
+        text-align: center;
+      }
+
+      .timeline-card {
+        padding: 0.85rem 1rem;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.86);
+        border: 1px solid rgba(135, 163, 212, 0.22);
+      }
+
+      .timeline-card strong {
+        display: block;
+        margin-bottom: 0.35rem;
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .timeline-card p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .mechanism-layout {
+        display: grid;
+        grid-template-columns: 0.98fr 1.02fr;
+        gap: 1rem;
+        align-items: stretch;
+      }
+
+      .mechanism-panel {
+        padding: 1rem;
+        border-radius: var(--radius-xl);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(135, 163, 212, 0.2);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.8rem;
+      }
+
+      .mechanism-panel h3 {
+        font-size: var(--h3-size);
+        color: var(--text-dark);
+      }
+
+      .mechanism-panel p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.5;
+      }
+
+      .binding-stack {
+        display: grid;
+        gap: 0.65rem;
+      }
+
+      .binding-card {
+        padding: 0.9rem 1rem;
+        border-radius: 18px;
+        background: linear-gradient(180deg, #ffffff, #f6faff);
+        border: 1px solid rgba(135, 163, 212, 0.2);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      }
+
+      .binding-card strong {
+        display: block;
+        margin-bottom: 0.35rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .binding-card span {
+        display: block;
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .binding-arrow {
+        justify-self: center;
+        font-size: 1.3rem;
+        color: var(--accent-blue);
+        opacity: 0.7;
+      }
+
+      .context-assembly {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.7rem;
+      }
+
+      .context-chip {
+        padding: 0.85rem 0.9rem;
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(47, 109, 246, 0.08), rgba(15, 157, 146, 0.06));
+        border: 1px solid rgba(93, 122, 173, 0.14);
+      }
+
+      .context-chip strong {
+        display: block;
+        margin-bottom: 0.28rem;
+        font-size: var(--small-size);
+        color: var(--accent-blue);
+      }
+
+      .context-chip span {
+        display: block;
+        font-size: var(--small-size);
+        line-height: 1.45;
+        color: var(--text-muted);
+      }
+
+      .assembly-result {
+        padding: 0.95rem 1rem;
+        border-radius: 18px;
+        background: linear-gradient(180deg, rgba(255, 184, 77, 0.16), rgba(255, 255, 255, 0.94));
+        border: 1px solid rgba(255, 184, 77, 0.26);
+      }
+
+      .assembly-result strong {
+        display: block;
+        margin-bottom: 0.35rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .assembly-result p {
+        font-size: var(--small-size);
+      }
+
+      .compare-board {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+      }
+
+      .compare-column {
+        padding: 1rem;
+        border-radius: var(--radius-xl);
+        border: 1px solid rgba(135, 163, 212, 0.2);
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.8rem;
+      }
+
+      .compare-column.bad {
+        background: linear-gradient(180deg, rgba(255, 248, 247, 0.96), rgba(255, 255, 255, 0.96));
+        border-color: rgba(239, 107, 87, 0.18);
+      }
+
+      .compare-column.good {
+        background: linear-gradient(180deg, rgba(244, 252, 250, 0.98), rgba(255, 255, 255, 0.96));
+        border-color: rgba(15, 157, 146, 0.2);
+      }
+
+      .compare-column h3 {
+        font-size: var(--h3-size);
+        color: var(--text-dark);
+      }
+
+      .compare-column ul {
+        list-style: none;
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .compare-column li {
+        font-size: var(--small-size);
+        color: var(--text-muted);
+        line-height: 1.45;
+      }
+
+      .decision-strip {
+        padding: 0.95rem 1rem;
+        border-radius: 18px;
+        background: linear-gradient(90deg, rgba(47, 109, 246, 0.12), rgba(15, 157, 146, 0.12));
+        border: 1px solid rgba(47, 109, 246, 0.16);
+        color: var(--text-dark);
+        font-size: var(--body-size);
+        line-height: 1.5;
+      }
+
+      .evidence-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.85rem;
+      }
+
+      .evidence-card {
+        padding: 1rem;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .evidence-card strong {
+        display: block;
+        margin-bottom: 0.4rem;
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .evidence-card p,
+      .evidence-card li {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .evidence-card ul {
+        list-style: none;
+        display: grid;
+        gap: 0.38rem;
+      }
+
+      .selection-grid {
+        display: grid;
+        gap: 0.7rem;
+      }
+
+      .selection-row {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr 1fr;
+        gap: 0.75rem;
+        align-items: stretch;
+      }
+
+      .selection-cell {
+        padding: 0.95rem 1rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .selection-cell strong {
+        display: block;
+        margin-bottom: 0.32rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .selection-cell p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .selection-cell.highlight {
+        background: linear-gradient(180deg, rgba(240, 249, 255, 0.96), rgba(234, 250, 247, 0.96));
+        border-color: rgba(15, 157, 146, 0.22);
+      }
+
+      .section-closing {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.55rem 0.82rem;
+        border-radius: 999px;
+        background: rgba(47, 109, 246, 0.08);
+        color: var(--accent-blue);
+        font-size: var(--small-size);
+        font-weight: 700;
+      }
+
+      .selection-summary {
+        padding: 1rem 1.05rem;
+        border-radius: 20px;
+        background: linear-gradient(90deg, rgba(47, 109, 246, 0.12), rgba(15, 157, 146, 0.11));
+        border: 1px solid rgba(47, 109, 246, 0.16);
+        color: var(--text-dark);
+        font-size: var(--body-size);
+        line-height: 1.5;
+      }
+
+      .selection-summary strong {
+        display: block;
+        margin-bottom: 0.28rem;
+        font-family: var(--font-display);
+        font-size: clamp(1rem, 1.45vw, 1.22rem);
+      }
+
+      .next-path {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.85rem;
+      }
+
+      .next-step {
+        position: relative;
+        padding: 1rem 1rem 1rem 1.1rem;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .next-step::before {
+        content: attr(data-step);
+        position: absolute;
+        top: 0.9rem;
+        right: 0.95rem;
+        font-family: var(--font-display);
+        font-size: clamp(1.3rem, 2vw, 1.9rem);
+        color: rgba(47, 109, 246, 0.22);
+      }
+
+      .next-step strong {
+        display: block;
+        margin-bottom: 0.35rem;
+        padding-right: 2.2rem;
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .next-step p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.48;
+      }
+
+      .visual-triptych {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.85rem;
+      }
+
+      .visual-card {
+        padding: 1rem;
+        border-radius: 22px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 255, 0.98));
+        border: 1px solid rgba(135, 163, 212, 0.2);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .visual-badge {
+        width: 2.2rem;
+        height: 2.2rem;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, rgba(47, 109, 246, 0.14), rgba(15, 157, 146, 0.14));
+        color: var(--accent-blue);
+        font-weight: 800;
+        font-size: 0.95rem;
+      }
+
+      .visual-card strong {
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .visual-card p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .process-ribbon {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.7rem;
+        align-items: stretch;
+      }
+
+      .process-node {
+        position: relative;
+        padding: 0.95rem 0.9rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .process-node::after {
+        content: "→";
+        position: absolute;
+        right: -0.48rem;
+        top: 50%;
+        transform: translateY(-50%);
+        color: rgba(47, 109, 246, 0.35);
+        font-size: 1.2rem;
+      }
+
+      .process-node:last-child::after {
+        display: none;
+      }
+
+      .process-node strong {
+        display: block;
+        margin-bottom: 0.32rem;
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .process-node p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .expert-columns {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.9rem;
+      }
+
+      .expert-column {
+        padding: 1rem;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(135, 163, 212, 0.18);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.8rem;
+      }
+
+      .expert-column h3 {
+        font-size: var(--h3-size);
+        color: var(--text-dark);
+      }
+
+      .expert-column p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .expert-chip-list {
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .expert-chip {
+        padding: 0.72rem 0.8rem;
+        border-radius: 16px;
+        background: linear-gradient(180deg, #ffffff, #f7faff);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+      }
+
+      .expert-chip strong {
+        display: block;
+        margin-bottom: 0.18rem;
+        font-size: var(--small-size);
+        color: var(--text-dark);
+      }
+
+      .expert-chip span {
+        display: block;
+        color: var(--text-muted);
+        font-size: calc(var(--small-size) * 0.96);
+        line-height: 1.4;
+      }
+
+      .framework-matrix {
+        display: grid;
+        gap: 0.7rem;
+      }
+
+      .framework-row {
+        display: grid;
+        grid-template-columns: 0.9fr 1fr 1fr 1fr;
+        gap: 0.7rem;
+      }
+
+      .framework-cell {
+        padding: 0.9rem 0.95rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .framework-cell strong {
+        display: block;
+        margin-bottom: 0.24rem;
+        font-size: var(--small-size);
+        color: var(--text-dark);
+      }
+
+      .framework-cell p {
+        color: var(--text-muted);
+        font-size: calc(var(--small-size) * 0.98);
+        line-height: 1.42;
+      }
+
+      .framework-cell.highlight {
+        background: linear-gradient(180deg, rgba(240, 249, 255, 0.96), rgba(234, 250, 247, 0.96));
+        border-color: rgba(15, 157, 146, 0.22);
+      }
+
+      .case-flow {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.8rem;
+      }
+
+      .case-step {
+        padding: 0.95rem 0.95rem;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.38rem;
+      }
+
+      .case-step strong {
+        font-size: var(--body-size);
+        color: var(--text-dark);
+      }
+
+      .case-step p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.45;
+      }
+
+      .diagram-board {
+        padding: 1rem;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.8rem;
+      }
+
+      .diagram-title {
+        font-size: var(--body-size);
+        font-weight: 700;
+        color: var(--text-dark);
+      }
+
+      .layer-diagram {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.7rem;
+        align-items: stretch;
+      }
+
+      .layer-box {
+        padding: 0.9rem 0.9rem;
+        border-radius: 18px;
+        background: linear-gradient(180deg, #ffffff, #f6faff);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        display: grid;
+        gap: 0.32rem;
+      }
+
+      .layer-box strong {
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .layer-box span {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.42;
+      }
+
+      .assembly-diagram {
+        display: grid;
+        grid-template-columns: 1.15fr 0.15fr 1fr;
+        gap: 0.7rem;
+        align-items: center;
+      }
+
+      .assembly-left,
+      .assembly-right {
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .assembly-item {
+        padding: 0.75rem 0.82rem;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        color: var(--text-dark);
+        font-size: var(--small-size);
+      }
+
+      .diagram-arrow {
+        text-align: center;
+        font-size: 1.5rem;
+        color: rgba(47, 109, 246, 0.48);
+      }
+
+      .hub-diagram {
+        display: grid;
+        grid-template-columns: 1fr 0.9fr 1fr;
+        gap: 0.8rem;
+        align-items: center;
+      }
+
+      .hub-column {
+        display: grid;
+        gap: 0.55rem;
+      }
+
+      .hub-card,
+      .hub-center {
+        padding: 0.9rem 0.88rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .hub-center {
+        background: linear-gradient(180deg, rgba(240, 249, 255, 0.96), rgba(234, 250, 247, 0.96));
+        border-color: rgba(15, 157, 146, 0.22);
+        text-align: center;
+      }
+
+      .hub-card strong,
+      .hub-center strong {
+        display: block;
+        margin-bottom: 0.2rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .hub-card span,
+      .hub-center span {
+        display: block;
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.4;
+      }
+
+      .graph-diagram {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.6rem;
+        align-items: stretch;
+      }
+
+      .graph-node {
+        position: relative;
+        padding: 0.85rem 0.75rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.22rem;
+      }
+
+      .graph-node::after {
+        content: "→";
+        position: absolute;
+        right: -0.42rem;
+        top: 50%;
+        transform: translateY(-50%);
+        color: rgba(47, 109, 246, 0.4);
+        font-size: 1.1rem;
+      }
+
+      .graph-node:last-child::after {
+        display: none;
+      }
+
+      .graph-node strong {
+        color: var(--text-dark);
+        font-size: var(--small-size);
+      }
+
+      .graph-node span {
+        color: var(--text-muted);
+        font-size: calc(var(--small-size) * 0.95);
+        line-height: 1.38;
+      }
+
+      .pain-value-flow {
+        display: grid;
+        grid-template-columns: 1fr 0.12fr 1fr;
+        gap: 0.8rem;
+        align-items: center;
+      }
+
+      .pain-stack,
+      .value-stack {
+        display: grid;
+        gap: 0.65rem;
+      }
+
+      .pain-item,
+      .value-item {
+        padding: 0.9rem 0.92rem;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+      }
+
+      .pain-item strong,
+      .value-item strong {
+        display: block;
+        margin-bottom: 0.22rem;
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .pain-item p,
+      .value-item p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.42;
+      }
+
+      .flow-connector {
+        text-align: center;
+        font-size: 1.8rem;
+        color: rgba(47, 109, 246, 0.42);
+      }
+
+      .roadmap-line {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.75rem;
+        align-items: stretch;
+      }
+
+      .roadmap-stage {
+        position: relative;
+        padding: 0.95rem 0.92rem;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(93, 122, 173, 0.14);
+        box-shadow: var(--shadow-card);
+        display: grid;
+        gap: 0.28rem;
+      }
+
+      .roadmap-stage::after {
+        content: "→";
+        position: absolute;
+        right: -0.45rem;
+        top: 50%;
+        transform: translateY(-50%);
+        color: rgba(47, 109, 246, 0.4);
+        font-size: 1.1rem;
+      }
+
+      .roadmap-stage:last-child::after {
+        display: none;
+      }
+
+      .roadmap-stage strong {
+        color: var(--text-dark);
+        font-size: var(--body-size);
+      }
+
+      .roadmap-stage p {
+        color: var(--text-muted);
+        font-size: var(--small-size);
+        line-height: 1.42;
+      }
+
+      .reveal {
+        opacity: 0;
+        transform: translateY(30px);
+        transition:
+          opacity var(--duration-normal) var(--ease-out-expo),
+          transform var(--duration-normal) var(--ease-out-expo);
+      }
+
+      .slide.visible .reveal {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .reveal:nth-child(1) {
+        transition-delay: 0.08s;
+      }
+      .reveal:nth-child(2) {
+        transition-delay: 0.16s;
+      }
+      .reveal:nth-child(3) {
+        transition-delay: 0.24s;
+      }
+      .reveal:nth-child(4) {
+        transition-delay: 0.32s;
+      }
+      .reveal:nth-child(5) {
+        transition-delay: 0.4s;
+      }
+
+      @media (max-width: 960px) {
+        .hero-grid,
+        .two-column,
+        .mechanism-layout,
+        .house-body,
+        .flow-grid,
+        .metrics-grid,
+        .feature-grid,
+        .roadmap-grid,
+        .foundation-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .flow-step::after {
+          display: none;
+        }
+
+        .context-assembly {
+          grid-template-columns: 1fr;
+        }
+
+        .compare-board,
+        .evidence-grid,
+        .selection-row,
+        .next-path {
+          grid-template-columns: 1fr;
+        }
+
+        .nav-dots {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="progress-bar" id="progressBar"></div>
+    <nav class="nav-dots" id="navDots"></nav>
+
+    <!-- ===========================================
+         SLIDE 1 — COVER / VALUE POSITIONING
+         =========================================== -->
+    <section class="slide">
+      <div class="slide-content">
+        <div class="slide-frame hero-grid">
+          <div class="hero-left">
+            <div class="slide-kicker reveal">Multi-agent Code Review</div>
+            <h1 class="hero-title reveal">多专家代码审查系统<br />让复杂 MR 审查从“凭经验”走向“有章法”</h1>
+            <p class="hero-subtitle reveal">
+              这套工具不是替代人工 Review，而是把资深同学在复杂 MR 审查里的判断方法，逐步沉淀成团队可复用的能力。
+            </p>
+            <div class="section-closing reveal">当前定位：研发团队内部的复杂 MR 审查辅助系统</div>
+            <div class="badge-row reveal">
+              <div class="badge">复杂场景更容易看全</div>
+              <div class="badge">审查意见更容易讲清楚</div>
+              <div class="badge">结论可直接回到 CodeHub</div>
+            </div>
+            <div class="diagram-board reveal">
+              <div class="diagram-title">这件事为什么值得做</div>
+              <div class="pain-value-flow">
+                <div class="pain-stack">
+                  <div class="pain-item">
+                    <strong>复杂 MR 容易漏看重点</strong>
+                    <p>业务、架构、数据库问题常常叠在一起。</p>
+                  </div>
+                  <div class="pain-item">
+                    <strong>高价值问题依赖资深经验</strong>
+                    <p>很多判断过去只能靠少数同学临场兜底。</p>
+                  </div>
+                </div>
+                <div class="flow-connector">→</div>
+                <div class="value-stack">
+                  <div class="value-item">
+                    <strong>先拆成多个专业视角</strong>
+                    <p>让不同专家分别看业务、设计、数据库和性能。</p>
+                  </div>
+                  <div class="value-item">
+                    <strong>最后收敛成可处理结论</strong>
+                    <p>把真正值得优先处理的问题整理出来，直接回到 CodeHub。</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="scenario-card reveal">
+              <strong>当前代码审查的典型难点</strong>
+              <p>
+                一个 Java MR 同时改了聚合创建、事件发布顺序和批量读取逻辑。人工 Review 往往先看到代码规范、空指针和命名问题，而真正危险的点通常藏在业务规则、设计边界和数据库访问策略的叠加影响里。
+              </p>
+            </div>
+          </div>
+          <div class="hero-right reveal">
+            <div class="slide-header">
+              <span class="slide-kicker">项目简介</span>
+              <span class="slide-counter">01 / 06</span>
+            </div>
+            <div class="hero-stat-grid">
+              <div class="metric-card">
+                <strong>复杂问题不再只靠个人经验兜底</strong>
+                <span>系统会先拆出这次 MR 涉及的领域，再分别交给对应专家去看。</span>
+              </div>
+              <div class="metric-card">
+                <strong>资深同学的审查方法可以沉淀下来</strong>
+                <span>规则、规范、经验和取证能力，会逐步沉淀在专家侧。</span>
+              </div>
+              <div class="metric-card">
+                <strong>审查不是泛泛提醒，而是补证据后再判断</strong>
+                <span>每个专家会按职责拿到自己的代码上下文、规则和证据，再给出判断。</span>
+              </div>
+              <div class="metric-card">
+                <strong>最后留下的是研发可以处理的问题清单</strong>
+                <span>系统会做去重、收敛和阈值过滤，把真正值得优先处理的问题整理出来。</span>
+              </div>
+            </div>
+            <div class="body-copy">
+              这份材料重点回答 6 个问题：为什么值得做、怎么扩、专家怎么分工、为什么要多 Agent、为什么选 LangGraph，以及现在做到什么程度。
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         SLIDE 2 — EXTENSION MECHANISM
+         =========================================== -->
+    <section class="slide light-slide">
+      <div class="slide-content">
+        <div class="slide-frame">
+          <div class="slide-header reveal">
+            <span class="slide-kicker">Extensibility</span>
+            <span class="slide-counter">02 / 06</span>
+          </div>
+          <h2 class="section-title reveal">三种扩展方式，让新能力接入不用反复改主流程</h2>
+          <p class="section-intro reveal">
+            这一页只讲两件事：平时怎么扩，运行时怎么用。系统把能力放在专家侧，所以后面加能力时不用总回头改主流程。
+          </p>
+          <div class="diagram-board reveal">
+            <div class="diagram-title">扩展结构图</div>
+            <div class="layer-diagram">
+              <div class="layer-box">
+                <strong>规范文档</strong>
+                <span>定义专家按什么规则看</span>
+              </div>
+              <div class="layer-box">
+                <strong>Skill</strong>
+                <span>定义什么场景启额外能力</span>
+              </div>
+              <div class="layer-box">
+                <strong>Tool</strong>
+                <span>定义去哪里拿证据</span>
+              </div>
+            </div>
+          </div>
+          <div class="visual-triptych reveal">
+            <div class="visual-card">
+              <div class="visual-badge">1</div>
+              <strong>规范文档</strong>
+              <p>回答“这个专家按什么规则看”。命中后再带给专家。</p>
+            </div>
+            <div class="visual-card">
+              <div class="visual-badge">2</div>
+              <strong>Skill</strong>
+              <p>回答“什么场景下要启额外能力”。更像专家插件。</p>
+            </div>
+            <div class="visual-card">
+              <div class="visual-badge">3</div>
+              <strong>Tool</strong>
+              <p>回答“去哪里拿证据”。比如代码仓、设计文档、PG 表结构。</p>
+            </div>
+          </div>
+          <div class="decision-strip reveal">
+            这三层可以用一句话记住：文档管规则，skill 管触发，tool 管取证。
+          </div>
+          <div class="mechanism-panel reveal">
+            <h3>运行时怎么组装上下文</h3>
+            <p>到了具体 MR，系统不会把这些能力全塞给模型，而是按这次改动临时组装。</p>
+            <div class="assembly-diagram">
+              <div class="assembly-left">
+                <div class="assembly-item">变更文件 / diff</div>
+                <div class="assembly-item">命中的规则卡</div>
+                <div class="assembly-item">工具结果 / 外部证据</div>
+              </div>
+              <div class="diagram-arrow">→</div>
+              <div class="assembly-right">
+                <div class="assembly-item"><strong>专家专属上下文</strong></div>
+                <div class="assembly-item">只给这轮真正相关的信息</div>
+              </div>
+            </div>
+          </div>
+          <div class="assembly-result reveal">
+            <strong>这套设计的价值</strong>
+            <p>扩展时更好控，运行时也更聚焦，所以既好扩，也更容易做准。</p>
+          </div>
+          <div class="section-closing reveal">本质上：主链路负责组织流程，专家侧负责沉淀能力。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         SLIDE 3 — EXPERT LANDSCAPE
+         =========================================== -->
+    <section class="slide">
+      <div class="slide-content">
+        <div class="slide-frame">
+          <div class="slide-header reveal">
+            <span class="slide-kicker">Experts</span>
+            <span class="slide-counter">03 / 06</span>
+          </div>
+          <h2 class="section-title reveal">10+ 个领域专家，按问题责任边界分工</h2>
+          <p class="section-intro reveal">
+            这里不是为了把角色堆多，而是让不同类型的问题由对应领域来负责。复杂 MR 里的问题，本来就不该用同一种视角去看。
+          </p>
+          <div class="section-closing reveal">专家划分的原则，不是按技术名词分，而是按“什么问题该由谁负责”来分。</div>
+          <div class="diagram-board reveal">
+            <div class="diagram-title">专家协作图</div>
+            <div class="hub-diagram">
+              <div class="hub-column">
+                <div class="hub-card">
+                  <strong>业务与架构</strong>
+                  <span>业务正确性 / 架构设计 / 可维护性</span>
+                </div>
+                <div class="hub-card">
+                  <strong>质量保障</strong>
+                  <span>测试覆盖 / 安全合规 / 前端体验</span>
+                </div>
+              </div>
+              <div class="hub-center">
+                <strong>主 Agent</strong>
+                <span>先选专家，再做结果收敛</span>
+              </div>
+              <div class="hub-column">
+                <div class="hub-card">
+                  <strong>基础设施</strong>
+                  <span>数据库 / 缓存 / MQ / 性能</span>
+                </div>
+                <div class="hub-card">
+                  <strong>最终输出</strong>
+                  <span>统一去重、分层、形成问题清单</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="expert-columns reveal">
+            <div class="expert-column">
+              <h3>业务与架构</h3>
+              <p>主要回答：逻辑对不对，设计有没有退化。</p>
+              <div class="expert-chip-list">
+                <div class="expert-chip">
+                  <strong>业务正确性专家</strong>
+                  <span>看状态流转、边界条件、副作用。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>架构与设计专家</strong>
+                  <span>看聚合边界、依赖方向、职责划分。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>可维护性专家</strong>
+                  <span>看复杂度、重复逻辑、表达清晰度。</span>
+                </div>
+              </div>
+            </div>
+            <div class="expert-column">
+              <h3>基础设施</h3>
+              <p>主要回答：技术实现稳不稳、扛不扛得住。</p>
+              <div class="expert-chip-list">
+                <div class="expert-chip">
+                  <strong>数据库专家</strong>
+                  <span>看事务、索引、查询性能、批量操作。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>缓存 / Redis 专家</strong>
+                  <span>看缓存一致性、热点放大、失效策略。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>MQ / 性能专家</strong>
+                  <span>看消息可靠性、容量风险、资源使用。</span>
+                </div>
+              </div>
+            </div>
+            <div class="expert-column">
+              <h3>质量保障</h3>
+              <p>主要回答：风险有没有被验证住、兜住。</p>
+              <div class="expert-chip-list">
+                <div class="expert-chip">
+                  <strong>测试覆盖专家</strong>
+                  <span>看关键路径有没有测试保护。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>安全合规专家</strong>
+                  <span>看权限边界、注入风险、敏感信息。</span>
+                </div>
+                <div class="expert-chip">
+                  <strong>前端体验专家</strong>
+                  <span>看可访问性、交互一致性和页面风险。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="decision-strip reveal">
+            一个典型复杂 MR，往往会同时拉起业务正确性、架构、数据库和性能几个专家分别审查，最后再统一去重和收敛。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         SLIDE 4 — MULTI VS SINGLE
+         =========================================== -->
+    <section class="slide light-slide">
+      <div class="slide-content">
+        <div class="slide-frame">
+          <div class="slide-header reveal">
+            <span class="slide-kicker">Multi Agent</span>
+            <span class="slide-counter">04 / 06</span>
+          </div>
+          <h2 class="section-title reveal">为什么复杂代码审查需要多 Agent 协作？</h2>
+          <p class="section-intro reveal">
+            多 Agent 的核心价值，不只是管理上下文窗口，而是把复杂代码审查从“一个模型泛泛地看”变成“多领域分工协作地看”。
+          </p>
+          <div class="compare-board reveal">
+            <div class="compare-column bad">
+              <h3>单 Agent 的问题</h3>
+              <ul>
+                <li><b>所有问题混在一个上下文里</b>：业务、架构、数据库、性能问题会互相稀释，容易什么都提一点、但都不够深。</li>
+                <li><b>不同领域互相干扰</b>：模型容易用同一套判断方式去看完全不同类型的问题。</li>
+                <li><b>输出难以收敛</b>：重复、噪音和真正重要的问题容易混在一起。</li>
+                <li><b>上下文窗口不是唯一问题</b>：即使窗口足够大，专业分工不清的问题依然存在。</li>
+              </ul>
+            </div>
+            <div class="compare-column good">
+              <h3>多 Agent 的优势</h3>
+              <ul>
+                <li><b>专业分工</b>：每个 Agent 只负责一个领域，在自己的职责边界内深看。</li>
+                <li><b>证据聚焦</b>：每个专家只拿相关文档、规则、代码和外部证据。</li>
+                <li><b>并行执行</b>：一个专家慢一点，不会拖住所有领域一起停下来。</li>
+                <li><b>结果收敛</b>：最后通过 judge、阈值和治理逻辑，留下真正值得优先处理的问题。</li>
+              </ul>
+            </div>
+          </div>
+          <div class="decision-strip reveal">
+            多 Agent 的核心价值，不是“把大任务拆小来适应上下文窗口”，而是让复杂代码审查变成一条有专业分工、证据隔离和结果收敛的可控链路。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         SLIDE 5 — FRAMEWORK SELECTION
+         =========================================== -->
+    <section class="slide">
+      <div class="slide-content">
+        <div class="slide-frame">
+          <div class="slide-header reveal">
+            <span class="slide-kicker">Framework</span>
+            <span class="slide-counter">05 / 06</span>
+          </div>
+          <h2 class="section-title reveal">为什么选择 LangGraph 作为流程编排框架？</h2>
+          <p class="section-intro reveal">
+            我们面对的不是简单对话，而是一条需要状态管理、流程编排和治理能力的复杂审查链路。选型时，我们关心的不是“谁更容易起步”，而是“谁更适合把这条链路做成工程系统”。
+          </p>
+          <div class="diagram-board reveal">
+            <div class="diagram-title">我们真正要跑的是这样一条链</div>
+            <div class="graph-diagram">
+              <div class="graph-node">
+                <strong>选专家</strong>
+                <span>决定谁参与</span>
+              </div>
+              <div class="graph-node">
+                <strong>补证据</strong>
+                <span>拉规则、代码、外部信息</span>
+              </div>
+              <div class="graph-node">
+                <strong>并行审查</strong>
+                <span>多个专家分别判断</span>
+              </div>
+              <div class="graph-node">
+                <strong>结果收敛</strong>
+                <span>去重、过滤、排序</span>
+              </div>
+              <div class="graph-node">
+                <strong>人工介入</strong>
+                <span>必要时暂停和确认</span>
+              </div>
+            </div>
+          </div>
+          <div class="framework-matrix reveal">
+            <div class="framework-row">
+              <div class="framework-cell">
+                <strong>我们真正需要什么</strong>
+                <p>把专家选择、补证据、并行审查、结果收敛放进一条可执行链路里。</p>
+              </div>
+              <div class="framework-cell">
+                <strong>直接调模型 API</strong>
+                <p>适合起步快，但流程和状态都要自己在外面补。</p>
+              </div>
+              <div class="framework-cell">
+                <strong>AutoGen / CrewAI</strong>
+                <p>更适合多角色协作对话，但流程治理和状态管理需要额外建设。</p>
+              </div>
+              <div class="framework-cell highlight">
+                <strong>LangGraph</strong>
+                <p>天然适合多节点、多状态、多阶段的流程编排。</p>
+              </div>
+            </div>
+            <div class="framework-row">
+              <div class="framework-cell">
+                <strong>我们特别看重什么</strong>
+                <p>状态管理、失败恢复、人工门禁、过程回放和治理能力。</p>
+              </div>
+              <div class="framework-cell">
+                <strong>直接调模型 API 的问题</strong>
+                <p>流程一复杂，脚本会越来越重，后面很难治理。</p>
+              </div>
+              <div class="framework-cell">
+                <strong>多 Agent 对话框架的问题</strong>
+                <p>适合“大家一起聊”，不一定适合“把流程图跑稳”。</p>
+              </div>
+              <div class="framework-cell highlight">
+                <strong>LangGraph 的优势</strong>
+                <p>图就是流程，状态就是核心，后面做治理和回放都更顺。</p>
+              </div>
+            </div>
+          </div>
+          <div class="selection-summary reveal">
+            <strong>一句话总结</strong>
+            选择 LangGraph，不是因为它更热，而是因为它最适合把这条复杂流程链组织清楚、管理清楚、回放清楚。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===========================================
+         SLIDE 6 — QUALITY & CASE
+         =========================================== -->
+    <section class="slide light-slide">
+      <div class="slide-content">
+        <div class="slide-frame">
+          <div class="slide-header reveal">
+            <span class="slide-kicker">Quality</span>
+            <span class="slide-counter">06 / 06</span>
+          </div>
+          <h2 class="section-title reveal">当前质量水平：已能在真实 MR 上发现高价值问题，但稳定性仍需提升</h2>
+          <p class="section-intro reveal">
+            这套工具仍处于开发期，所以这里不强调效果数字，更重要的是看两件事：方向有没有成立、当前短板是不是已经看清楚。
+          </p>
+          <div class="case-flow reveal">
+            <div class="case-step">
+              <strong>真实 PR 场景</strong>
+              <p>一个 MR 同时改了领域逻辑、事件顺序和批量读取策略。</p>
+            </div>
+            <div class="case-step">
+              <strong>系统命中问题</strong>
+              <p>抓到了事件发布顺序和批量边界这类高价值问题。</p>
+            </div>
+            <div class="case-step">
+              <strong>为什么值钱</strong>
+              <p>这些不是代码味道，而是可能带来数据不一致和数据库压力放大的风险。</p>
+            </div>
+            <div class="case-step">
+              <strong>当前短板</strong>
+              <p>误报、稳定性和部分专家输出一致性，还要继续补。</p>
+            </div>
+          </div>
+          <div class="mechanism-panel reveal">
+            <h3>下一阶段重点</h3>
+            <div class="next-path">
+                <div class="next-step" data-step="01">
+                  <strong>先补稳定性</strong>
+                  <p>先解决大任务、内网调用、Windows 运行和长流程问题。</p>
+                </div>
+                <div class="next-step" data-step="02">
+                  <strong>再压低误报</strong>
+                  <p>继续优化规则筛选、阈值治理和上下文组装。</p>
+                </div>
+                <div class="next-step" data-step="03">
+                  <strong>把关键专家做深</strong>
+                  <p>围绕架构、业务正确性、数据库和性能这几类高价值问题继续做深。</p>
+                </div>
+              </div>
+            <div class="decision-strip">
+              这套系统已经证明方向成立。下一阶段的重点，不是继续堆功能，而是把这份价值更稳定、更可信地交付出来。
+            </div>
+          </div>
+          <div class="diagram-board reveal">
+            <div class="diagram-title">下一步推进路线</div>
+            <div class="roadmap-line">
+              <div class="roadmap-stage">
+                <strong>先把流程跑稳</strong>
+                <p>先解决大任务、内网调用和 Windows 环境问题。</p>
+              </div>
+              <div class="roadmap-stage">
+                <strong>再把误报压下来</strong>
+                <p>继续优化规则筛选、阈值治理和上下文组装。</p>
+              </div>
+              <div class="roadmap-stage">
+                <strong>把关键专家做深</strong>
+                <p>重点增强架构、业务正确性、数据库和性能专家。</p>
+              </div>
+              <div class="roadmap-stage">
+                <strong>逐步形成团队能力</strong>
+                <p>让这套能力从“可用”走向“可依赖”。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      /* ===========================================
+         SLIDE PRESENTATION CONTROLLER
+         =========================================== */
+      class SlidePresentation {
+        constructor() {
+          this.slides = [...document.querySelectorAll(".slide")];
+          this.progressBar = document.getElementById("progressBar");
+          this.navDotsContainer = document.getElementById("navDots");
+          this.currentSlide = 0;
+          this.touchStartY = 0;
+          this.touchEndY = 0;
+          this.isWheelLocked = false;
+          this.setupIntersectionObserver();
+          this.setupKeyboardNav();
+          this.setupTouchNav();
+          this.setupWheelNav();
+          this.setupNavDots();
+          this.updateProgressBar();
+        }
+
+        setupIntersectionObserver() {
+          const observer = new IntersectionObserver(
+            (entries) => {
+              entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                  entry.target.classList.add("visible");
+                  this.currentSlide = this.slides.indexOf(entry.target);
+                  this.updateProgressBar();
+                  this.updateNavDots();
+                }
+              });
+            },
+            { threshold: 0.55 }
+          );
+          this.slides.forEach((slide) => observer.observe(slide));
+        }
+
+        setupKeyboardNav() {
+          document.addEventListener("keydown", (event) => {
+            if (["ArrowDown", "ArrowRight", "PageDown", " "].includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(this.currentSlide + 1);
+            }
+            if (["ArrowUp", "ArrowLeft", "PageUp"].includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(this.currentSlide - 1);
+            }
+            if (event.key === "Home") {
+              event.preventDefault();
+              this.goToSlide(0);
+            }
+            if (event.key === "End") {
+              event.preventDefault();
+              this.goToSlide(this.slides.length - 1);
+            }
+          });
+        }
+
+        setupTouchNav() {
+          document.addEventListener(
+            "touchstart",
+            (event) => {
+              this.touchStartY = event.changedTouches[0].screenY;
+            },
+            { passive: true }
+          );
+          document.addEventListener(
+            "touchend",
+            (event) => {
+              this.touchEndY = event.changedTouches[0].screenY;
+              const delta = this.touchStartY - this.touchEndY;
+              if (Math.abs(delta) < 40) return;
+              if (delta > 0) this.goToSlide(this.currentSlide + 1);
+              if (delta < 0) this.goToSlide(this.currentSlide - 1);
+            },
+            { passive: true }
+          );
+        }
+
+        setupWheelNav() {
+          document.addEventListener(
+            "wheel",
+            (event) => {
+              if (this.isWheelLocked) return;
+              if (Math.abs(event.deltaY) < 28) return;
+              this.isWheelLocked = true;
+              if (event.deltaY > 0) this.goToSlide(this.currentSlide + 1);
+              if (event.deltaY < 0) this.goToSlide(this.currentSlide - 1);
+              window.setTimeout(() => {
+                this.isWheelLocked = false;
+              }, 700);
+            },
+            { passive: true }
+          );
+        }
+
+        setupNavDots() {
+          this.navDotsContainer.innerHTML = "";
+          this.slides.forEach((_, index) => {
+            const button = document.createElement("button");
+            button.className = "nav-dot";
+            button.type = "button";
+            button.setAttribute("aria-label", `跳转到第 ${index + 1} 页`);
+            button.addEventListener("click", () => this.goToSlide(index));
+            this.navDotsContainer.appendChild(button);
+          });
+          this.updateNavDots();
+        }
+
+        updateNavDots() {
+          [...this.navDotsContainer.children].forEach((dot, index) => {
+            dot.classList.toggle("active", index === this.currentSlide);
+          });
+        }
+
+        updateProgressBar() {
+          const progress = ((this.currentSlide + 1) / this.slides.length) * 100;
+          this.progressBar.style.width = `${progress}%`;
+        }
+
+        goToSlide(index) {
+          const safeIndex = Math.max(0, Math.min(index, this.slides.length - 1));
+          this.slides[safeIndex].scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+
+      new SlidePresentation();
+    </script>
+  </body>
+</html>
