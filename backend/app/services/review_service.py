@@ -1383,6 +1383,7 @@ class ReviewService:
             "rule_based_reasoning",
             "rule_screening",
             "rule_screening_batch",
+            "rule_screening_total_elapsed_ms",
             "selected_expert_ids",
             "selected_experts",
             "selection_elapsed_ms",

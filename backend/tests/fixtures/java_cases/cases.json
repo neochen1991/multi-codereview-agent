@@ -239,6 +239,32 @@
         "required_experts": ["ddd_specification", "architecture_design", "performance_reliability", "database_analysis", "correctness_business", "security_compliance"],
         "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002", "PERF-SQL-001", "SEC-JDDD-002"],
         "finding_keywords": ["aggregate", "factory", "domain event", "LIMIT", "like", "catch", "chunksTmp"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "keywords": ["aggregate", "factory"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "keywords": ["domain event"]
+          },
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "keywords": ["equal", "like"]
+          },
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "keywords": ["LIMIT"]
+          },
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "keywords": ["chunksTmp"]
+          },
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "keywords": ["catch"]
+          }
+        ],
         "min_findings": 4,
         "min_issues": 1
       }

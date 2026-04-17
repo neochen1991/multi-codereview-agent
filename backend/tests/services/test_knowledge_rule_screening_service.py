@@ -253,6 +253,8 @@ def test_knowledge_rule_screening_service_can_use_llm(storage_root: Path, monkey
     assert len(result["batch_summaries"]) == 1
     assert result["batch_summaries"][0]["batch_index"] == 1
     assert result["batch_summaries"][0]["input_rule_count"] == 2
+    assert result["total_elapsed_ms"] >= 0
+    assert result["batch_summaries"][0]["llm"]["elapsed_ms"] >= 0
 
 
 def test_knowledge_rule_screening_service_can_parse_llm_json_wrapped_in_text(storage_root: Path, monkeypatch) -> None:
@@ -424,6 +426,9 @@ def test_knowledge_rule_screening_service_records_llm_batches(storage_root: Path
     assert result["batch_summaries"][0]["batch_count"] == 2
     assert result["batch_summaries"][0]["decisions"][0]["rule_id"] == "PERF-POOL-001"
     assert result["batch_summaries"][1]["decisions"][0]["rule_id"] == "PERF-LOCK-001"
+    assert result["total_elapsed_ms"] >= 0
+    assert result["batch_summaries"][0]["llm"]["elapsed_ms"] >= 0
+    assert result["batch_summaries"][1]["llm"]["elapsed_ms"] >= 0
 
 
 def test_knowledge_rule_screening_service_falls_back_when_llm_result_invalid(storage_root: Path, monkeypatch) -> None:

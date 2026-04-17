@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+import time
 from pathlib import Path
 
 from app.domain.models.knowledge import KnowledgeReviewRule
@@ -199,6 +200,7 @@ class KnowledgeRuleScreeningService:
             15.0,
             float(runtime_settings.rule_screening_llm_timeout_seconds or runtime_settings.standard_llm_timeout_seconds or 90),
         )
+        screening_started_at = time.perf_counter()
         aggregated_rules: list[dict[str, object]] = []
         all_enabled = [rule for rule in rules if rule.enabled]
         total_batches = max(1, (len(all_enabled) + batch_size - 1) // batch_size)
@@ -206,6 +208,7 @@ class KnowledgeRuleScreeningService:
         for batch_index in range(0, len(all_enabled), batch_size):
             batch = all_enabled[batch_index : batch_index + batch_size]
             human_batch_index = batch_index // batch_size + 1
+            batch_started_at = time.perf_counter()
             llm_result = self._llm.complete_text(
                 system_prompt=self._build_llm_screening_system_prompt(),
                 user_prompt=self._build_llm_screening_user_prompt(expert_id, review_context, batch),
@@ -256,6 +259,7 @@ class KnowledgeRuleScreeningService:
                     batch_index=human_batch_index,
                     batch_count=total_batches,
                     llm_result=llm_result,
+                    elapsed_ms=round((time.perf_counter() - batch_started_at) * 1000, 2),
                 )
             )
         return self._finalize_llm_result(
@@ -265,6 +269,7 @@ class KnowledgeRuleScreeningService:
             aggregated_rules,
             review_id,
             batch_summaries=batch_summaries,
+            total_elapsed_ms=round((time.perf_counter() - screening_started_at) * 1000, 2),
         )
 
     def _finalize_llm_result(
@@ -275,6 +280,7 @@ class KnowledgeRuleScreeningService:
         llm_entries: list[dict[str, object]],
         review_id: str,
         batch_summaries: list[dict[str, object]] | None = None,
+        total_elapsed_ms: float | None = None,
     ) -> dict[str, object]:
         enabled_rules = [rule for rule in rules if rule.enabled]
         by_rule_id = {rule.rule_id: rule for rule in enabled_rules}
@@ -372,6 +378,7 @@ class KnowledgeRuleScreeningService:
             "screening_mode": "llm",
             "screening_fallback_used": False,
             "batch_summaries": list(batch_summaries or []),
+            "total_elapsed_ms": round(float(total_elapsed_ms or 0.0), 2),
         }
         logger.info(
             "knowledge rule llm screening expert_id=%s review_id=%s focus_file=%s changed_files=%s query_terms=%s total_rules=%s enabled_rules=%s must_review=%s possible_hit=%s no_hit=%s matched_rule_ids=%s matched_reasons=%s skipped_samples=%s",
@@ -405,6 +412,7 @@ class KnowledgeRuleScreeningService:
         batch_index: int,
         batch_count: int,
         llm_result: LLMTextResult,
+        elapsed_ms: float | None = None,
     ) -> dict[str, object]:
         decisions: list[dict[str, object]] = []
         parsed_by_rule_id = {
@@ -461,6 +469,7 @@ class KnowledgeRuleScreeningService:
                 "prompt_tokens": llm_result.prompt_tokens,
                 "completion_tokens": llm_result.completion_tokens,
                 "total_tokens": llm_result.total_tokens,
+                "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
             },
             "input_rule_count": len(batch),
             "input_rules": [

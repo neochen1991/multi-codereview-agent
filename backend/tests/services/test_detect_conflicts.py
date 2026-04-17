@@ -270,10 +270,8 @@ def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue()
     result = detect_conflicts(state)
 
     assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_high"]
-    assert len(result["issue_filter_decisions"]) == 1
-    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_group_low"]
-    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_low", "fdg_group_high"]
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_skips_non_code_review_scope_findings():
@@ -565,3 +563,57 @@ def test_detect_conflicts_groups_same_line_different_problems_into_one_issue():
     assert "把临时变量改成表达语义的名称" in conflict["aggregated_remediation_strategies"]
     assert "恢复 equal 条件" in conflict["aggregated_remediation_steps"]
     assert "统一变量命名" in conflict["aggregated_remediation_steps"]
+
+
+def test_detect_conflicts_keeps_same_line_secondary_problem_when_primary_problem_is_issue_worthy():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_combo_1",
+                "expert_id": "database_analysis",
+                "title": "SQL 查询语义被放宽为模糊匹配",
+                "summary": "equal 被改成 like，查询语义发生变化，可能扩大结果集。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": False,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["builder.equal -> builder.like"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询语义不能静默放宽"],
+            },
+            {
+                "finding_id": "fdg_combo_2",
+                "expert_id": "maintainability_code_health",
+                "title": "临时变量命名不符合约定",
+                "summary": "chunksTmp 这种命名会降低可读性，且与常量语义不一致。",
+                "finding_type": "design_concern",
+                "severity": "medium",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["命名与语义不一致"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["命名一致性"],
+                "violated_guidelines": ["变量命名需表达稳定语义"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["issue_filter_decisions"] == []
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_combo_1", "fdg_combo_2"]

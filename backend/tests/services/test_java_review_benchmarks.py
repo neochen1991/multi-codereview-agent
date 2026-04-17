@@ -52,6 +52,12 @@ def _write_manifest(tmp_path: Path, repo_path: Path) -> Path:
                     "required_experts": ["security_compliance", "correctness_business"],
                     "rule_ids_any_of": ["SEC-JDDD-001"],
                     "finding_keywords": ["@Valid", "validation"],
+                    "problem_markers": [
+                        {
+                            "file_path": "src/main/java/com/example/OwnerController.java",
+                            "keywords": ["@Valid", "validation"],
+                        }
+                    ],
                     "min_findings": 1,
                     "min_issues": 0,
                 },
@@ -153,6 +159,12 @@ def test_evaluate_case_result_scores_expected_hits() -> None:
             required_experts=("security_compliance", "correctness_business"),
             rule_ids_any_of=("SEC-JDDD-001",),
             finding_keywords=("@Valid", "validation"),
+            problem_markers=(
+                {
+                    "file_path": "src/main/java/com/example/OwnerController.java",
+                    "keywords": ("@Valid", "validation"),
+                },
+            ),
             min_findings=1,
             min_issues=0,
         ),
@@ -161,6 +173,7 @@ def test_evaluate_case_result_scores_expected_hits() -> None:
         "findings": [
             {
                 "expert_id": "security_compliance",
+                "file_path": "src/main/java/com/example/OwnerController.java",
                 "title": "移除 @Valid 导致 validation 失效",
                 "summary": "controller 入口失去 validation 保护",
                 "matched_rules": ["SEC-JDDD-001"],
@@ -208,6 +221,7 @@ def test_evaluate_case_result_scores_expected_hits() -> None:
     assert score.required_rule_hit is True
     assert score.required_expert_coverage == 1.0
     assert score.finding_keyword_coverage == 1.0
+    assert score.problem_marker_coverage == 1.0
     assert score.input_quality_coverage >= 0.8
 
 
@@ -225,6 +239,12 @@ def test_evaluate_case_result_flags_missing_inputs_and_keywords() -> None:
             required_experts=("performance_reliability",),
             rule_ids_any_of=("PERF-SQL-001",),
             finding_keywords=("分页", "全量"),
+            problem_markers=(
+                {
+                    "file_path": "src/main/java/com/example/OwnerRepository.java",
+                    "keywords": ("分页", "全量"),
+                },
+            ),
             min_findings=1,
             min_issues=0,
         ),
@@ -233,6 +253,7 @@ def test_evaluate_case_result_flags_missing_inputs_and_keywords() -> None:
         "findings": [
             {
                 "expert_id": "performance_reliability",
+                "file_path": "src/main/java/com/example/OwnerRepository.java",
                 "title": "查询存在风险",
                 "summary": "需要进一步确认",
                 "matched_rules": [],
@@ -258,6 +279,8 @@ def test_evaluate_case_result_flags_missing_inputs_and_keywords() -> None:
     assert score.passed is False
     assert score.required_rule_hit is False
     assert "分页" in score.missing_keywords
+    assert score.problem_marker_coverage == 0.0
+    assert score.missing_problem_markers == ("OwnerRepository.java:分页&全量",)
     assert "语言通用规范提示" in score.missing_input_sections
     assert score.input_quality_coverage < 0.8
 
@@ -271,9 +294,12 @@ def test_score_summary_includes_failure_reasons() -> None:
         required_rule_hit=False,
         finding_keyword_coverage=0.0,
         input_quality_coverage=0.4,
+        problem_marker_coverage=0.0,
+        invalid_finding_rate=0.2,
         missing_experts=("security_compliance",),
         matched_rule_ids=(),
         missing_keywords=("validation",),
+        missing_problem_markers=("OwnerController.java:@valid&validation",),
         missing_input_sections=("关联源码上下文",),
     )
 
@@ -282,6 +308,7 @@ def test_score_summary_includes_failure_reasons() -> None:
     assert "FAIL (0.200)" in summary
     assert "missing_experts=security_compliance" in summary
     assert "missing_keywords=validation" in summary
+    assert "missing_markers=OwnerController.java:@valid&validation" in summary
     assert "missing_inputs=关联源码上下文" in summary
 
 
@@ -299,6 +326,12 @@ def test_evaluate_case_result_ignores_stale_missing_sections_when_checks_pass() 
             required_experts=("architecture_design",),
             rule_ids_any_of=("ARCH-JDDD-002",),
             finding_keywords=("factory",),
+            problem_markers=(
+                {
+                    "file_path": "src/main/java/com/example/CourseCreator.java",
+                    "keywords": ("factory",),
+                },
+            ),
             min_findings=1,
             min_issues=0,
         ),
@@ -307,6 +340,7 @@ def test_evaluate_case_result_ignores_stale_missing_sections_when_checks_pass() 
         "findings": [
             {
                 "expert_id": "architecture_design",
+                "file_path": "src/main/java/com/example/CourseCreator.java",
                 "title": "factory bypass",
                 "summary": "aggregate factory bypass",
                 "matched_rules": ["ARCH-JDDD-002"],
@@ -330,4 +364,5 @@ def test_evaluate_case_result_ignores_stale_missing_sections_when_checks_pass() 
     score = module.evaluate_case_result(case, report, replay)
 
     assert score.input_quality_coverage == 1.0
+    assert score.problem_marker_coverage == 1.0
     assert score.missing_input_sections == ()

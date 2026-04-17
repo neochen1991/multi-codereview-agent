@@ -108,27 +108,30 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         grouped.setdefault(key, []).append(finding)
     conflicts: list[dict[str, object]] = []
     for key, items in grouped.items():
-        eligible_items: list[dict[str, object]] = []
-        for item in items:
-            skip_decision = _classify_issue_candidate([item], issue_filter_config)
-            if skip_decision is not None:
-                issue_filter_decisions.append(
-                    {
-                        "topic": key,
-                        "rule_code": skip_decision["rule_code"],
-                        "rule_label": skip_decision["rule_label"],
-                        "reason": skip_decision["reason"],
-                        "severity": skip_decision["severity"],
-                        "finding_ids": [item.get("finding_id")],
-                        "finding_titles": [str(item.get("title") or "").strip()] if str(item.get("title") or "").strip() else [],
-                        "expert_ids": [str(item.get("expert_id") or "").strip()] if str(item.get("expert_id") or "").strip() else [],
-                    }
-                )
-                continue
-            eligible_items.append(item)
-
-        if not eligible_items:
+        skip_decision = _classify_issue_candidate(items, issue_filter_config)
+        if skip_decision is not None:
+            issue_filter_decisions.append(
+                {
+                    "topic": key,
+                    "rule_code": skip_decision["rule_code"],
+                    "rule_label": skip_decision["rule_label"],
+                    "reason": skip_decision["reason"],
+                    "severity": skip_decision["severity"],
+                    "finding_ids": [item.get("finding_id") for item in items],
+                    "finding_titles": [
+                        str(item.get("title") or "").strip()
+                        for item in items
+                        if str(item.get("title") or "").strip()
+                    ],
+                    "expert_ids": [
+                        str(item.get("expert_id") or "").strip()
+                        for item in items
+                        if str(item.get("expert_id") or "").strip()
+                    ],
+                }
+            )
             continue
+        eligible_items = items
 
         first = eligible_items[0]
         highest_severity = "medium"
@@ -265,6 +268,9 @@ def _classify_issue_candidate(
         for item in items
     )
     average_confidence = sum(float(item.get("confidence") or 0.0) for item in items) / max(len(items), 1)
+    max_confidence = max(float(item.get("confidence") or 0.0) for item in items)
+    aggregate_confidence, _ = _score_issue_confidence(items)
+    effective_confidence = max(average_confidence, max_confidence, aggregate_confidence)
     all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
     text_blob = "\n".join(
         [
@@ -348,11 +354,11 @@ def _classify_issue_candidate(
 
     priority_label = _severity_to_priority_label(highest_severity)
     priority_confidence_threshold = _priority_confidence_threshold(config, priority_label)
-    if average_confidence < priority_confidence_threshold:
+    if effective_confidence < priority_confidence_threshold:
         return {
             "rule_code": "below_priority_confidence_threshold",
             "rule_label": "低于当前 P 级 issue 置信度阈值",
-            "reason": f"当前问题已达到 {priority_label}，但平均置信度仅为 {average_confidence:.2f}，低于该级别配置的 issue 置信度阈值 {priority_confidence_threshold:.2f}，因此仅保留为 finding。",
+            "reason": f"当前问题已达到 {priority_label}，但分组有效置信度仅为 {effective_confidence:.2f}，低于该级别配置的 issue 置信度阈值 {priority_confidence_threshold:.2f}，因此仅保留为 finding。",
             "severity": highest_severity,
         }
 

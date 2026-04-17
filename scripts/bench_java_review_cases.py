@@ -41,6 +41,7 @@ class ExpectedOutcome:
     required_experts: tuple[str, ...]
     rule_ids_any_of: tuple[str, ...]
     finding_keywords: tuple[str, ...]
+    problem_markers: tuple[dict[str, object], ...] = ()
     min_findings: int = 1
     min_issues: int = 0
 
@@ -99,9 +100,12 @@ class BenchmarkScore:
     required_rule_hit: bool
     finding_keyword_coverage: float
     input_quality_coverage: float
+    problem_marker_coverage: float
+    invalid_finding_rate: float
     missing_experts: tuple[str, ...]
     matched_rule_ids: tuple[str, ...]
     missing_keywords: tuple[str, ...]
+    missing_problem_markers: tuple[str, ...]
     missing_input_sections: tuple[str, ...]
 
 
@@ -110,11 +114,15 @@ def _build_score_summary(score: BenchmarkScore) -> str:
     parts.append(f"experts={score.required_expert_coverage:.2f}")
     parts.append(f"rules={'hit' if score.required_rule_hit else 'miss'}")
     parts.append(f"keywords={score.finding_keyword_coverage:.2f}")
+    parts.append(f"markers={score.problem_marker_coverage:.2f}")
     parts.append(f"inputs={score.input_quality_coverage:.2f}")
+    parts.append(f"invalid={score.invalid_finding_rate:.2f}")
     if score.missing_experts:
         parts.append(f"missing_experts={','.join(score.missing_experts)}")
     if score.missing_keywords:
         parts.append(f"missing_keywords={','.join(score.missing_keywords[:3])}")
+    if score.missing_problem_markers:
+        parts.append(f"missing_markers={','.join(score.missing_problem_markers[:2])}")
     if score.missing_input_sections:
         parts.append(f"missing_inputs={','.join(score.missing_input_sections[:3])}")
     return " | ".join(parts)
@@ -170,6 +178,14 @@ def load_cases(path: Path = DEFAULT_MANIFEST_PATH) -> list[JavaReviewCase]:
                     required_experts=tuple(str(value) for value in expected_raw.get("required_experts", [])),
                     rule_ids_any_of=tuple(str(value) for value in expected_raw.get("rule_ids_any_of", [])),
                     finding_keywords=tuple(str(value) for value in expected_raw.get("finding_keywords", [])),
+                    problem_markers=tuple(
+                        {
+                            "file_path": str(marker.get("file_path") or ""),
+                            "keywords": tuple(str(keyword) for keyword in marker.get("keywords", [])),
+                        }
+                        for marker in expected_raw.get("problem_markers", [])
+                        if str(marker.get("file_path") or "").strip()
+                    ),
                     min_findings=int(expected_raw.get("min_findings", 1)),
                     min_issues=int(expected_raw.get("min_issues", 0)),
                 ),
@@ -331,9 +347,12 @@ def submit_case(
             "required_rule_hit": score.required_rule_hit,
             "finding_keyword_coverage": score.finding_keyword_coverage,
             "input_quality_coverage": score.input_quality_coverage,
+            "problem_marker_coverage": score.problem_marker_coverage,
+            "invalid_finding_rate": score.invalid_finding_rate,
             "missing_experts": list(score.missing_experts),
             "matched_rule_ids": list(score.matched_rule_ids),
             "missing_keywords": list(score.missing_keywords),
+            "missing_problem_markers": list(score.missing_problem_markers),
             "missing_input_sections": list(score.missing_input_sections),
         },
         "score_summary": _build_score_summary(score),
@@ -429,6 +448,90 @@ def _collect_input_quality(findings: list[dict[str, object]], replay_messages: l
     return average, tuple(missing_sections)
 
 
+def _collect_invalid_finding_rate(findings: list[dict[str, object]], issues: list[dict[str, object]]) -> float:
+    invalid_tokens = {
+        "请用户",
+        "用户确认",
+        "用户核查",
+        "用户查看",
+        "人工确认",
+        "人工核查",
+        "人工查看",
+        "自行确认",
+        "自行核实",
+        "建议查看",
+        "需要查看",
+        "请查看",
+        "需要核对",
+        "建议核对",
+        "完整方法/类定义后再确认",
+        "回看完整 diff",
+    }
+    payloads = [*findings, *issues]
+    if not payloads:
+        return 0.0
+    invalid_count = 0
+    for item in payloads:
+        blob = "\n".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("summary") or ""),
+                str(item.get("rule_based_reasoning") or ""),
+                str(item.get("verification_plan") or ""),
+                str(item.get("remediation_suggestion") or ""),
+                *[str(value or "") for value in list(item.get("assumptions") or [])],
+                *[str(value or "") for value in list(item.get("change_steps") or [])],
+                *[str(value or "") for value in list(item.get("aggregated_summaries") or [])],
+            ]
+        )
+        if any(token in blob for token in invalid_tokens):
+            invalid_count += 1
+    return invalid_count / len(payloads)
+
+
+def _collect_problem_marker_coverage(
+    expected_markers: tuple[dict[str, object], ...],
+    findings: list[dict[str, object]],
+    issues: list[dict[str, object]],
+) -> tuple[float, tuple[str, ...]]:
+    if not expected_markers:
+        return 1.0, ()
+
+    payloads = [*findings, *issues]
+    missing_markers: list[str] = []
+
+    def _payload_blob(item: dict[str, object]) -> str:
+        return "\n".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("summary") or ""),
+                str(item.get("rule_based_reasoning") or ""),
+                str(item.get("verification_plan") or ""),
+                str(item.get("remediation_suggestion") or ""),
+                *[str(value or "") for value in list(item.get("aggregated_titles") or [])],
+                *[str(value or "") for value in list(item.get("aggregated_summaries") or [])],
+            ]
+        ).lower()
+
+    for marker in expected_markers:
+        file_path = str(marker.get("file_path") or "").strip()
+        keywords = tuple(str(keyword).strip().lower() for keyword in marker.get("keywords", []) if str(keyword).strip())
+        matched = False
+        for item in payloads:
+            if str(item.get("file_path") or "").strip() != file_path:
+                continue
+            if all(keyword in _payload_blob(item) for keyword in keywords):
+                matched = True
+                break
+        if not matched:
+            label = f"{Path(file_path).name}:{'&'.join(keywords[:3])}" if keywords else Path(file_path).name
+            if label not in missing_markers:
+                missing_markers.append(label)
+
+    coverage = (len(expected_markers) - len(missing_markers)) / len(expected_markers)
+    return coverage, tuple(missing_markers)
+
+
 def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay: dict[str, object]) -> BenchmarkScore:
     findings = [item for item in list(report.get("findings") or []) if isinstance(item, dict)]
     issues = [item for item in list(report.get("issues") or []) if isinstance(item, dict)]
@@ -437,6 +540,12 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
     executed_experts = _collect_executed_experts(findings, replay_messages)
     matched_rule_ids = _collect_matched_rule_ids(findings, replay_messages)
     input_quality_coverage, missing_input_sections = _collect_input_quality(findings, replay_messages)
+    invalid_finding_rate = _collect_invalid_finding_rate(findings, issues)
+    problem_marker_coverage, missing_problem_markers = _collect_problem_marker_coverage(
+        case.expected.problem_markers,
+        findings,
+        issues,
+    )
 
     required_experts = tuple(case.expected.required_experts)
     missing_experts = tuple(expert for expert in required_experts if expert not in executed_experts)
@@ -474,14 +583,18 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
         and required_expert_coverage >= 1.0
         and required_rule_hit
         and finding_keyword_coverage >= 0.5
+        and problem_marker_coverage >= 0.7
         and input_quality_coverage >= 0.8
+        and invalid_finding_rate <= 0.05
     )
     score = round(
         (
-            required_expert_coverage * 0.3
-            + (1.0 if required_rule_hit else 0.0) * 0.25
-            + finding_keyword_coverage * 0.25
-            + input_quality_coverage * 0.2
+            required_expert_coverage * 0.25
+            + (1.0 if required_rule_hit else 0.0) * 0.2
+            + finding_keyword_coverage * 0.2
+            + problem_marker_coverage * 0.15
+            + input_quality_coverage * 0.15
+            + max(0.0, 1.0 - invalid_finding_rate) * 0.05
         ),
         3,
     )
@@ -492,9 +605,12 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
         required_rule_hit=required_rule_hit,
         finding_keyword_coverage=round(finding_keyword_coverage, 3),
         input_quality_coverage=round(input_quality_coverage, 3),
+        problem_marker_coverage=round(problem_marker_coverage, 3),
+        invalid_finding_rate=round(invalid_finding_rate, 3),
         missing_experts=missing_experts,
         matched_rule_ids=matched_rule_ids,
         missing_keywords=missing_keywords,
+        missing_problem_markers=missing_problem_markers,
         missing_input_sections=missing_input_sections,
     )
 
@@ -508,6 +624,7 @@ def _serialise_case(case: JavaReviewCase) -> dict[str, object]:
         "tags": list(case.tags),
         "required_experts": list(case.expected.required_experts),
         "rule_ids_any_of": list(case.expected.rule_ids_any_of),
+        "problem_markers": list(case.expected.problem_markers),
     }
 
 
@@ -520,6 +637,7 @@ def _serialise_materialized(materialized: MaterializedCase) -> dict[str, object]
         "diff_line_count": len(materialized.unified_diff.splitlines()),
         "expected_required_experts": list(materialized.case.expected.required_experts),
         "expected_rule_ids_any_of": list(materialized.case.expected.rule_ids_any_of),
+        "expected_problem_markers": list(materialized.case.expected.problem_markers),
     }
 
 

@@ -567,29 +567,6 @@ class ReviewRunner:
                     dict(command.get("repository_context") or {}),
                     dict(command.get("target_hunk") or {}),
                 )
-                bound_documents, rule_screening = self._prepare_knowledge_runtime_inputs(
-                    review_id=review.review_id,
-                    expert_id=expert.expert_id,
-                    file_path=hunk_file_path,
-                    analysis_mode=analysis_mode,
-                    knowledge_context=knowledge_context,
-                    runtime_settings=effective_runtime_settings,
-                )
-                logger.info(
-                    "expert rule screening prepared review_id=%s expert_id=%s file_path=%s line_start=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
-                    review.review_id,
-                    expert.expert_id,
-                    hunk_file_path,
-                    hunk_line_start,
-                    int(rule_screening.get("total_rules") or 0),
-                    int(rule_screening.get("matched_rule_count") or 0),
-                    int(rule_screening.get("must_review_count") or 0),
-                    int(rule_screening.get("possible_hit_count") or 0),
-                    [
-                        str(item.get("rule_id") or "").strip()
-                        for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
-                    ],
-                )
                 expert_route_jobs.append(
                     {
                         "review": review,
@@ -609,12 +586,47 @@ class ReviewRunner:
                         "runtime_settings": effective_runtime_settings,
                         "analysis_mode": analysis_mode,
                         "llm_request_options": llm_request_options,
-                        "bound_documents": bound_documents,
+                        "bound_documents": [],
                         "knowledge_context": knowledge_context,
-                        "rule_screening": rule_screening,
+                        "rule_screening": {},
                         "finding_payloads": finding_payloads,
                     }
                 )
+            if expert_route_jobs:
+                bound_documents, rule_screening = self._prepare_expert_batch_knowledge_inputs(
+                    review_id=review.review_id,
+                    expert_id=expert.expert_id,
+                    analysis_mode=analysis_mode,
+                    route_jobs=expert_route_jobs,
+                    runtime_settings=effective_runtime_settings,
+                )
+                logger.info(
+                    "expert batch rule screening prepared review_id=%s expert_id=%s file_count=%s hunk_count=%s total_rules=%s matched_rule_count=%s must_review=%s possible_hit=%s matched_rule_ids=%s",
+                    review.review_id,
+                    expert.expert_id,
+                    len(
+                        {
+                            str(item.get("file_path") or "").strip()
+                            for item in expert_route_jobs
+                            if str(item.get("file_path") or "").strip()
+                        }
+                    ),
+                    sum(
+                        len([hunk for hunk in list(item.get("target_hunks") or []) if isinstance(hunk, dict)]) or 1
+                        for item in expert_route_jobs
+                    ),
+                    int(rule_screening.get("total_rules") or 0),
+                    int(rule_screening.get("matched_rule_count") or 0),
+                    int(rule_screening.get("must_review_count") or 0),
+                    int(rule_screening.get("possible_hit_count") or 0),
+                    [
+                        str(item.get("rule_id") or "").strip()
+                        for item in list(rule_screening.get("matched_rules_for_llm", []) or [])[:8]
+                    ],
+                )
+                for job in expert_route_jobs:
+                    job["bound_documents"] = list(bound_documents)
+                    job["rule_screening"] = dict(rule_screening or {})
             expert_jobs.extend(
                 self._batch_expert_jobs(
                     expert_route_jobs,
@@ -1289,7 +1301,7 @@ class ReviewRunner:
             violated_guidelines=matched_rules,
             rule_based_reasoning=rule_reason or f"命中规则 {rule_title}，需要补跑专家以确认具体违例证据。",
             verification_needed=True,
-            verification_plan="建议先重试失败专家；若仍失败，人工复核目标 hunk、关联源码和命中规则后再决定是否升级为 issue。",
+            verification_plan="系统会优先自动重试失败专家；若仍失败，再补齐关联源码与命中规则后自动复核是否升级为 issue。",
             remediation_strategy=self._build_remediation_strategy(review.subject, expert.expert_id, file_path),
             remediation_suggestion=self._build_remediation_suggestion(review.subject, expert.expert_id, file_path),
             remediation_steps=self._build_remediation_steps(review.subject, expert.expert_id, file_path),
@@ -2207,6 +2219,22 @@ class ReviewRunner:
                 changed_files.append(path)
         if changed_files:
             merged["changed_files"] = changed_files[:20]
+        query_terms = [str(item).strip() for item in list(merged.get("query_terms") or []) if str(item).strip()]
+        for item in list(candidate.get("query_terms") or []):
+            term = str(item).strip()
+            if term and term not in query_terms:
+                query_terms.append(term)
+        if query_terms:
+            merged["query_terms"] = query_terms[:64]
+        knowledge_sources = [
+            str(item).strip() for item in list(merged.get("knowledge_sources") or []) if str(item).strip()
+        ]
+        for item in list(candidate.get("knowledge_sources") or []):
+            source = str(item).strip()
+            if source and source not in knowledge_sources:
+                knowledge_sources.append(source)
+        if knowledge_sources:
+            merged["knowledge_sources"] = knowledge_sources[:16]
         for key in ("subject_title", "subject_type", "focus_file", "focus_line"):
             if key not in merged and key in candidate:
                 merged[key] = candidate.get(key)
@@ -2314,6 +2342,46 @@ class ReviewRunner:
             bound_documents=bound_documents,
             rule_screening=rule_screening,
         )
+        return list(bound_documents), dict(rule_screening or {})
+
+    def _prepare_expert_batch_knowledge_inputs(
+        self,
+        *,
+        review_id: str,
+        expert_id: str,
+        analysis_mode: str,
+        route_jobs: list[dict[str, object]],
+        runtime_settings,
+    ) -> tuple[list[object], dict[str, object]]:
+        merged_knowledge_context: dict[str, object] = {}
+        file_paths: list[str] = []
+        for job in route_jobs:
+            merged_knowledge_context = self._merge_knowledge_context_for_batch(
+                merged_knowledge_context,
+                dict(job.get("knowledge_context") or {}),
+            )
+            file_path = str(job.get("file_path") or "").strip()
+            if file_path and file_path not in file_paths:
+                file_paths.append(file_path)
+
+        bound_documents, rule_screening = self._prepare_knowledge_runtime_inputs(
+            review_id=review_id,
+            expert_id=expert_id,
+            file_path="__expert_batch__",
+            analysis_mode=analysis_mode,
+            knowledge_context=merged_knowledge_context,
+            runtime_settings=runtime_settings,
+        )
+        for file_path in file_paths:
+            self._set_cached_knowledge_payload(
+                review_id=review_id,
+                expert_id=expert_id,
+                file_path=file_path,
+                analysis_mode=analysis_mode,
+                knowledge_context=merged_knowledge_context,
+                bound_documents=bound_documents,
+                rule_screening=rule_screening,
+            )
         return list(bound_documents), dict(rule_screening or {})
 
     def _update_expert_review_progress(
@@ -4927,7 +4995,7 @@ class ReviewRunner:
             assumption = (
                 "当前问题已有直接代码证据，但仍需补充完整调用链或上下文来确认影响范围。"
                 if preserve_verifiable_risk
-                else "当前结论依赖 diff 片段外信息或未展示的实现细节，需要查看完整方法/类定义后再确认。"
+                else "当前结论依赖 diff 片段外信息或未展示的实现细节，系统需要补齐完整方法/类定义后再自动复核。"
             )
             if assumption not in assumptions:
                 assumptions.append(assumption)
@@ -4937,16 +5005,16 @@ class ReviewRunner:
                 or (
                     "需要补充完整事务边界、调用链或实现上下文，确认该高价值风险是否会在真实路径上触发。"
                     if preserve_verifiable_risk
-                    else "需要回看完整 diff、相关方法实现和调用链，确认推断是否成立。"
+                    else "系统将补齐完整 diff、相关方法实现和调用链后自动复核，确认推断是否成立。"
                 )
             )
         if import_only_excerpt and has_import_inference:
             result["verification_plan"] = (
                 str(result.get("verification_plan") or "").strip()
-                or "需要检查完整类定义和 constructor 注入，不能仅凭 import 变化下结论。"
+                or "系统需要补齐完整类定义和 constructor 注入信息，不能仅凭 import 变化下结论。"
             )
             assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
-            assumption = "当前结论基于 import 变化推断，尚未看到完整类定义与 constructor。"
+            assumption = "当前结论基于 import 变化推断，系统尚需补齐完整类定义与 constructor 信息后再自动复核。"
             if assumption not in assumptions:
                 assumptions.append(assumption)
             result["assumptions"] = assumptions
@@ -5985,6 +6053,7 @@ class ReviewRunner:
             "matched_rule_count": int(rule_screening.get("matched_rule_count") or 0),
             "screening_mode": str(rule_screening.get("screening_mode") or "").strip(),
             "screening_fallback_used": bool(rule_screening.get("screening_fallback_used")),
+            "total_elapsed_ms": round(float(rule_screening.get("total_elapsed_ms") or 0.0), 2),
             "batch_count": len(list(rule_screening.get("batch_summaries", []) or [])),
             "matched_rules_for_llm": [
                 {
@@ -6188,6 +6257,7 @@ class ReviewRunner:
                         "phase": "coordination",
                         "file_path": file_path,
                         "line_start": line_start,
+                        "rule_screening_total_elapsed_ms": round(float(rule_screening.get("total_elapsed_ms") or 0.0), 2),
                         "rule_screening_batch": self._build_rule_screening_batch_metadata(raw_batch),
                         "rule_screening": self._build_rule_screening_metadata(rule_screening),
                         **(batch_llm_metadata or self._expert_llm_metadata(expert, runtime_settings)),
@@ -6208,6 +6278,7 @@ class ReviewRunner:
             "api_key_env": str(llm.get("api_key_env") or "").strip(),
             "mode": str(llm.get("mode") or "").strip(),
             "llm_error": str(llm.get("llm_error") or "").strip(),
+            "elapsed_ms": round(float(llm.get("elapsed_ms") or 0.0), 2),
             "prompt_tokens": int(llm.get("prompt_tokens") or 0),
             "completion_tokens": int(llm.get("completion_tokens") or 0),
             "total_tokens": int(llm.get("total_tokens") or 0),

@@ -469,7 +469,8 @@ def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_pa
             metadata={
                 "file_path": "src/main/java/A.java",
                 "line_start": 42,
-                "rule_screening": {"matched_rule_count": 2},
+                "rule_screening": {"matched_rule_count": 2, "total_elapsed_ms": 321.45},
+                "rule_screening_total_elapsed_ms": 321.45,
                 "tool_result": {"summary": "compact"},
                 "review_inputs": {"language_guidance_present": True},
                 "large_unused_blob": "x" * 500,
@@ -484,7 +485,8 @@ def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_pa
     assert messages[0]["metadata"] == {
         "file_path": "src/main/java/A.java",
         "line_start": 42,
-        "rule_screening": {"matched_rule_count": 2},
+        "rule_screening": {"matched_rule_count": 2, "total_elapsed_ms": 321.45},
+        "rule_screening_total_elapsed_ms": 321.45,
         "tool_result": {"summary": "compact"},
         "review_inputs": {"language_guidance_present": True},
     }

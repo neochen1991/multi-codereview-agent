@@ -160,6 +160,117 @@ def test_review_runner_skips_routing_plan_llm_when_user_selected_experts(storage
     assert routing_ready.metadata.get("selected_expert_ids") == ["correctness_business"]
 
 
+def test_review_runner_batches_rule_screening_once_per_expert(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    route_hints = [
+        {
+            "file_path": "src/main/java/com/example/OrderService.java",
+            "line_start": 18,
+            "target_hunk": {
+                "file_path": "src/main/java/com/example/OrderService.java",
+                "start_line": 18,
+                "changed_lines": [18],
+                "excerpt": "+ create(order);",
+            },
+            "target_hunks": [
+                {
+                    "file_path": "src/main/java/com/example/OrderService.java",
+                    "start_line": 18,
+                    "changed_lines": [18],
+                    "excerpt": "+ create(order);",
+                }
+            ],
+            "repo_hits": {},
+            "confidence": 0.9,
+            "routing_reason": "批量覆盖业务文件",
+        },
+        {
+            "file_path": "src/main/java/com/example/OrderRepository.java",
+            "line_start": 33,
+            "target_hunk": {
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "start_line": 33,
+                "changed_lines": [33],
+                "excerpt": "+ findAll();",
+            },
+            "target_hunks": [
+                {
+                    "file_path": "src/main/java/com/example/OrderRepository.java",
+                    "start_line": 33,
+                    "changed_lines": [33],
+                    "excerpt": "+ findAll();",
+                }
+            ],
+            "repo_hits": {},
+            "confidence": 0.9,
+            "routing_reason": "批量覆盖仓储文件",
+        },
+    ]
+
+    monkeypatch.setattr(runner, "_build_expert_route_hints", lambda *_args, **_kwargs: route_hints)
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_command",
+        lambda _subject, _expert, _runtime_settings, route_hint=None: {
+            "file_path": str((route_hint or {}).get("file_path") or ""),
+            "line_start": int((route_hint or {}).get("line_start") or 1),
+            "summary": "批量派工",
+            "related_files": [str((route_hint or {}).get("file_path") or "")],
+            "target_hunk": dict((route_hint or {}).get("target_hunk") or {}),
+            "target_hunks": [dict(item) for item in list((route_hint or {}).get("target_hunks") or [])],
+            "repository_context": {},
+            "expected_checks": [],
+            "disallowed_inference": [],
+            "routing_reason": str((route_hint or {}).get("routing_reason") or ""),
+            "routing_confidence": float((route_hint or {}).get("confidence") or 0.0),
+        },
+    )
+    monkeypatch.setattr(runner.knowledge_service, "retrieve_for_expert", lambda *_args, **_kwargs: [])
+    screening_calls: list[dict[str, object]] = []
+
+    def _fake_screen_rules_for_expert(expert_id, review_context, **_kwargs):
+        screening_calls.append(
+            {
+                "expert_id": expert_id,
+                "changed_files": list(review_context.get("changed_files", []) or []),
+                "query_terms": list(review_context.get("query_terms", []) or []),
+            }
+        )
+        return {
+            "total_rules": 2,
+            "enabled_rules": 2,
+            "must_review_count": 1,
+            "possible_hit_count": 0,
+            "matched_rule_count": 1,
+            "screening_mode": "heuristic",
+            "screening_fallback_used": False,
+            "matched_rules_for_llm": [{"rule_id": "RULE-1", "title": "demo"}],
+            "batch_summaries": [],
+        }
+
+    monkeypatch.setattr(runner.knowledge_service, "screen_rules_for_expert", _fake_screen_rules_for_expert)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner.graph, "invoke", lambda _state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda *_args, **_kwargs: ("批量筛选测试完成", {"provider": "test", "model": "test", "mode": "mock"}),
+    )
+
+    runner.run_once(review_id)
+
+    assert len(screening_calls) == 1
+    assert screening_calls[0]["expert_id"] == "correctness_business"
+    assert "src/main/java/com/example/OrderService.java" in screening_calls[0]["query_terms"]
+    assert "src/main/java/com/example/OrderRepository.java" in screening_calls[0]["query_terms"]
+
+
 def test_review_runner_emits_routing_preparing_before_build_routing_plan(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
@@ -210,6 +321,7 @@ def test_review_runner_emits_rule_screening_batch_messages(storage_root: Path, m
             "matched_rule_count": 2,
             "screening_mode": "llm",
             "screening_fallback_used": False,
+            "total_elapsed_ms": 321.45,
             "matched_rules_for_llm": [
                 {
                     "rule_id": "PERF-SQL-001",
@@ -249,6 +361,19 @@ def test_review_runner_emits_rule_screening_batch_messages(storage_root: Path, m
                     "must_review_count": 1,
                     "possible_hit_count": 0,
                     "no_hit_count": 1,
+                    "llm": {
+                        "llm_call_id": "llm_rule_1",
+                        "provider": "test",
+                        "model": "demo",
+                        "base_url": "http://llm.test",
+                        "api_key_env": "TEST_KEY",
+                        "mode": "live",
+                        "llm_error": "",
+                        "prompt_tokens": 120,
+                        "completion_tokens": 20,
+                        "total_tokens": 140,
+                        "elapsed_ms": 111.1,
+                    },
                     "input_rules": [
                         {"rule_id": "PERF-SQL-001", "title": "大结果集查询必须显式分页或限流", "priority": "P1"},
                         {"rule_id": "PERF-SQL-002", "title": "N+1 查询风险必须在服务层被识别", "priority": "P1"},
@@ -282,6 +407,19 @@ def test_review_runner_emits_rule_screening_batch_messages(storage_root: Path, m
                     "must_review_count": 0,
                     "possible_hit_count": 1,
                     "no_hit_count": 1,
+                    "llm": {
+                        "llm_call_id": "llm_rule_2",
+                        "provider": "test",
+                        "model": "demo",
+                        "base_url": "http://llm.test",
+                        "api_key_env": "TEST_KEY",
+                        "mode": "live",
+                        "llm_error": "",
+                        "prompt_tokens": 90,
+                        "completion_tokens": 18,
+                        "total_tokens": 108,
+                        "elapsed_ms": 210.35,
+                    },
                     "input_rules": [
                         {"rule_id": "PERF-BATCH-001", "title": "批处理写入必须控制批大小与事务范围", "priority": "P1"},
                         {"rule_id": "PERF-JSON-001", "title": "大型对象序列化路径必须避免重复拷贝", "priority": "P2"},
@@ -323,6 +461,9 @@ def test_review_runner_emits_rule_screening_batch_messages(storage_root: Path, m
     batch_metadata = first_batch.metadata.get("rule_screening_batch", {})
     assert batch_metadata["batch_index"] == 1
     assert batch_metadata["input_rule_count"] == 2
+    assert batch_metadata["elapsed_ms"] == 111.1
+    assert first_batch.metadata["rule_screening"]["total_elapsed_ms"] == 321.45
+    assert first_batch.metadata["rule_screening_total_elapsed_ms"] == 321.45
 
 
 def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_findings(storage_root: Path, monkeypatch):
@@ -1820,7 +1961,7 @@ def test_review_runner_downgrades_import_only_dependency_guess(storage_root: Pat
     assert stabilized["verification_needed"] is True
     assert stabilized["severity"] == "medium"
     assert float(stabilized["confidence"]) <= 0.45
-    assert any("constructor" in item for item in stabilized["assumptions"])
+    assert any("系统尚需补齐完整类定义与 constructor 信息" in item for item in stabilized["assumptions"])
 
 
 def test_review_runner_downgrades_speculative_high_severity_claim(storage_root: Path):
@@ -1858,7 +1999,9 @@ def test_review_runner_downgrades_speculative_high_severity_claim(storage_root: 
     assert stabilized["direct_evidence"] is False
     assert stabilized["severity"] == "medium"
     assert float(stabilized["confidence"]) <= 0.4
-    assert any("完整方法/类定义" in item for item in stabilized["assumptions"])
+    assert any("系统需要补齐完整方法/类定义" in item for item in stabilized["assumptions"])
+    assert "回看完整 diff" not in str(stabilized["verification_plan"])
+    assert "系统将补齐完整 diff" in str(stabilized["verification_plan"])
 
 
 def test_review_runner_keeps_lock_risk_as_high_value_verifiable_finding(storage_root: Path):
