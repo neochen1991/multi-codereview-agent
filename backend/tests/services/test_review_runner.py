@@ -2544,6 +2544,55 @@ def test_review_runner_stabilize_expert_analysis_reanchors_line_start_to_target_
     assert stabilized["line_end"] >= 22
 
 
+def test_review_runner_refines_same_hunk_findings_to_semantic_changed_lines(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "hunk_header": "@@ -20,7 +20,7 @@",
+        "start_line": 20,
+        "end_line": 60,
+        "changed_lines": [23, 40, 56],
+        "excerpt": (
+            "-\tprivate final Integer CHUNKS = 200;\n"
+            "+\tprivate final Integer chunksTmp = 200;\n"
+            '-\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk"\n'
+            '+\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC"\n'
+            "-\t\t\t\te.printStackTrace();\n"
+        ),
+    }
+
+    naming_line = runner._refine_line_start_within_hunk(
+        {
+            "title": "常量命名退化",
+            "claim": "chunksTmp 破坏常量命名规范，可读性下降",
+            "evidence": ["CHUNKS 改为 chunksTmp"],
+        },
+        target_hunk,
+        20,
+    )
+    sql_line = runner._refine_line_start_within_hunk(
+        {
+            "title": "SQL LIMIT 被移除",
+            "claim": "查询去掉 limit 后可能导致大结果集扫描",
+            "evidence": ["SQL 从 limit :chunk 变成无 limit"],
+        },
+        target_hunk,
+        20,
+    )
+    exception_line = runner._refine_line_start_within_hunk(
+        {
+            "title": "异常被静默吞掉",
+            "claim": "catch 中的 printStackTrace 被移除后，问题会更难定位",
+            "evidence": ["printStackTrace 被删除"],
+        },
+        target_hunk,
+        20,
+    )
+
+    assert naming_line == 23
+    assert sql_line == 40
+    assert exception_line == 56
+
+
 def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(

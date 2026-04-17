@@ -2929,6 +2929,7 @@ class ReviewRunner:
             severity = self._normalize_severity(parsed.get("severity"), base_severity)
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
             parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
+            parsed_line_start = self._refine_line_start_within_hunk(parsed, matched_target_hunk, parsed_line_start)
             if not self._line_in_target_hunks(parsed_line_start, per_file_target_hunks):
                 parsed_line_start = int(matched_hunk_line_start or parsed_line_start or 1)
             dedupe_key = (
@@ -5403,6 +5404,80 @@ class ReviewRunner:
         if end_line is None:
             return max(fallback, normalized)
         return max(fallback, min(normalized, end_line))
+
+    def _refine_line_start_within_hunk(
+        self,
+        parsed: dict[str, object],
+        target_hunk: dict[str, object],
+        fallback_line_start: int,
+    ) -> int:
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if len(changed_lines) <= 1:
+            return int(fallback_line_start or 1)
+
+        line_candidates = self._extract_semantic_line_candidates(target_hunk)
+        if not line_candidates:
+            return int(fallback_line_start or 1)
+
+        semantic_parts: list[str] = []
+        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning", "suggested_code"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "assumptions", "matched_rules", "violated_guidelines", "change_steps"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        if not finding_tokens:
+            return int(fallback_line_start or 1)
+
+        best_line = int(fallback_line_start or 1)
+        best_score = 0
+        explicit_line = self._normalize_optional_line_value(parsed.get("line_start"))
+        for line_no, texts in line_candidates.items():
+            combined_text = "\n".join(texts)
+            candidate_tokens = self._extract_anchor_tokens(combined_text)
+            overlap = finding_tokens & candidate_tokens
+            score = 0
+            for token in overlap:
+                score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+            lowered_text = combined_text.lower()
+            for phrase in semantic_parts:
+                normalized_phrase = phrase.lower()
+                if normalized_phrase and len(normalized_phrase) >= 6 and normalized_phrase in lowered_text:
+                    score += 4
+            if explicit_line is not None and explicit_line == line_no:
+                score += 2
+            if score > best_score:
+                best_score = score
+                best_line = line_no
+        return best_line if best_score > 0 else int(fallback_line_start or 1)
+
+    def _extract_semantic_line_candidates(self, target_hunk: dict[str, object]) -> dict[int, list[str]]:
+        excerpt = str(target_hunk.get("excerpt") or "")
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if not excerpt or not changed_lines:
+            return {}
+
+        relevant_lines = [
+            raw_line
+            for raw_line in excerpt.splitlines()
+            if raw_line[:1] in {"+", "-"} and not raw_line.startswith("+++") and not raw_line.startswith("---")
+        ]
+        if not relevant_lines:
+            return {}
+
+        line_candidates: dict[int, list[str]] = {}
+        changed_index = 0
+        for index, raw_line in enumerate(relevant_lines):
+            assigned_line = changed_lines[min(changed_index, len(changed_lines) - 1)]
+            line_candidates.setdefault(assigned_line, []).append(raw_line[1:].strip())
+            next_line = relevant_lines[index + 1] if index + 1 < len(relevant_lines) else ""
+            if raw_line.startswith("+") and changed_index < len(changed_lines) - 1:
+                changed_index += 1
+            elif raw_line.startswith("-") and (not next_line.startswith("+")) and changed_index < len(changed_lines) - 1:
+                changed_index += 1
+        return line_candidates
 
     def _normalize_changed_line_values(self, values: object) -> list[int]:
         normalized: list[int] = []

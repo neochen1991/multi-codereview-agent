@@ -894,7 +894,10 @@ class ReviewService:
         return self.finding_repo.get(review_id, finding_id)
 
     def list_issues(self, review_id: str) -> list[DebateIssue]:
-        return self.issue_repo.list(review_id)
+        issues = self.issue_repo.list(review_id)
+        findings = self.finding_repo.list(review_id)
+        finding_by_id = {item.finding_id: item for item in findings}
+        return [self._realign_issue_location(issue, finding_by_id) for issue in issues]
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return self.message_repo.list_by_issue(review_id, issue_id)
@@ -1211,6 +1214,23 @@ class ReviewService:
                 "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
             },
         )
+
+    def _realign_issue_location(
+        self,
+        issue: DebateIssue,
+        finding_by_id: dict[str, ReviewFinding],
+    ) -> DebateIssue:
+        for finding_id in issue.finding_ids:
+            finding = finding_by_id.get(str(finding_id))
+            if finding is None:
+                continue
+            return issue.model_copy(
+                update={
+                    "file_path": finding.file_path,
+                    "line_start": int(finding.line_start or 1),
+                }
+            )
+        return issue
 
     def _build_light_report_finding(self, finding: ReviewFinding) -> ReviewFinding:
         """结果页首屏只返回轻量 finding，避免 report 载荷过大。"""
