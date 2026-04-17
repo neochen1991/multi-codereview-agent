@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -63,3 +63,16 @@ def update_expert(expert_id: str, payload: CreateExpertRequest) -> dict[str, obj
 
     expert = review_service_module.review_service.update_expert(expert_id, payload.model_dump())
     return expert.model_dump(mode="json")
+
+
+@router.delete("/experts/{expert_id}")
+def delete_expert(expert_id: str) -> dict[str, object]:
+    """删除自定义专家；内置专家只能禁用，不能删除。"""
+
+    try:
+        review_service_module.review_service.delete_expert(expert_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"expert not found: {expert_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"deleted": True, "expert_id": expert_id}

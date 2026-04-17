@@ -807,6 +807,9 @@ export const expertApi = {
     const { data } = await api.put(`/experts/${expertId}`, payload);
     return data;
   },
+  async remove(expertId: string): Promise<void> {
+    await api.delete(`/experts/${expertId}`);
+  },
 };
 
 export const knowledgeApi = {

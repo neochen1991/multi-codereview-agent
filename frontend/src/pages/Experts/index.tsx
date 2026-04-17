@@ -104,6 +104,27 @@ const ExpertsPage: React.FC = () => {
     setDetailTarget(null);
   };
 
+  const handleDeleteCustomExpert = async (expert: ExpertProfile) => {
+    Modal.confirm({
+      title: `删除 ${expert.name_zh}`,
+      content: "删除后该自定义专家及其当前配置将被移除，内置专家不受影响。这个操作不能撤销。",
+      okText: "确认删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        await expertApi.remove(expert.expert_id);
+        if (detailTarget?.expert_id === expert.expert_id) {
+          setDetailTarget(null);
+        }
+        if (uploadTarget?.expert_id === expert.expert_id) {
+          closeUploadModal();
+        }
+        await loadPage();
+        message.success(`已删除自定义专家：${expert.name_zh}`);
+      },
+    });
+  };
+
   return (
     <div>
       <Card className="module-card">
@@ -414,6 +435,9 @@ const ExpertsPage: React.FC = () => {
                                       </Button>
                                       <Button size="small" onClick={() => openUploadModal(item)}>
                                         上传并绑定 Markdown
+                                      </Button>
+                                      <Button danger size="small" onClick={() => void handleDeleteCustomExpert(item)}>
+                                        删除
                                       </Button>
                                     </Space>
                                     <div style={{ marginTop: 8, color: "var(--text-secondary)" }}>

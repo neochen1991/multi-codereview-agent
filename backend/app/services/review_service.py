@@ -914,6 +914,9 @@ class ReviewService:
     def update_expert(self, expert_id: str, payload: dict[str, object]) -> ExpertProfile:
         return self.expert_registry.update(expert_id, payload)
 
+    def delete_expert(self, expert_id: str) -> None:
+        self.expert_registry.delete(expert_id)
+
     def list_knowledge(self) -> list[KnowledgeDocument]:
         return self.knowledge_service.list_documents()
 

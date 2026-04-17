@@ -41,6 +41,11 @@ class ExpertRegistry:
         expert = current.model_copy(update=normalized)
         return self._repository.save(expert)
 
+    def delete(self, expert_id: str) -> None:
+        """删除一个自定义专家。"""
+
+        self._repository.delete(expert_id)
+
     def _normalize_llm_overrides(self, payload: dict[str, object]) -> dict[str, object]:
         """把空白模型配置字段归一化为 None，表示继承系统配置。"""
 

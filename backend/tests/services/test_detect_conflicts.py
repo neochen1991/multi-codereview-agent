@@ -270,8 +270,9 @@ def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue()
     result = detect_conflicts(state)
 
     assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_low", "fdg_group_high"]
-    assert result["issue_filter_decisions"] == []
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_high"]
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_group_low"]
 
 
 def test_detect_conflicts_skips_non_code_review_scope_findings():
@@ -348,14 +349,13 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 1
-    conflict = result["conflicts"][0]
-    assert conflict["confidence"] == 0.95
-    assert conflict["confidence_breakdown"]["base_weighted_confidence"] == 0.86
-    assert conflict["confidence_breakdown"]["consensus_bonus"] == 0.03
-    assert conflict["confidence_breakdown"]["evidence_bonus"] == 0.06
-    assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.0
-    assert conflict["confidence_breakdown"]["participant_count"] == 2
+    assert len(result["conflicts"]) == 2
+    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
+    assert conflicts_by_id["fdg_weighted_1"]["confidence"] == 0.98
+    assert conflicts_by_id["fdg_weighted_1"]["confidence_breakdown"]["participant_count"] == 1
+    assert conflicts_by_id["fdg_weighted_1"]["confidence_breakdown"]["consensus_bonus"] == 0.0
+    assert conflicts_by_id["fdg_weighted_2"]["confidence"] == 0.74
+    assert conflicts_by_id["fdg_weighted_2"]["confidence_breakdown"]["hypothesis_penalty"] == 0.08
 
 
 def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
@@ -445,7 +445,7 @@ def test_detect_conflicts_splits_findings_on_different_lines():
     assert ("fdg_semantic_name",) in conflict_finding_ids
 
 
-def test_detect_conflicts_keeps_same_line_findings_grouped_together():
+def test_detect_conflicts_keeps_same_line_findings_as_separate_issues():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -493,14 +493,16 @@ def test_detect_conflicts_keeps_same_line_findings_grouped_together():
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["finding_ids"] == ["fdg_same_1", "fdg_same_2"]
-    assert len(result["conflicts"][0]["aggregated_titles"]) == 1
-    assert "在入口层补齐统一鉴权守卫" in result["conflicts"][0]["aggregated_remediation_strategies"]
-    assert "补充入口鉴权" in result["conflicts"][0]["aggregated_remediation_steps"]
+    assert len(result["conflicts"]) == 2
+    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
+    assert conflicts_by_id["fdg_same_1"]["finding_ids"] == ["fdg_same_1"]
+    assert conflicts_by_id["fdg_same_2"]["finding_ids"] == ["fdg_same_2"]
+    assert conflicts_by_id["fdg_same_1"]["aggregated_titles"] == ["权限绕过风险"]
+    assert "在入口层补齐统一鉴权守卫" in conflicts_by_id["fdg_same_2"]["aggregated_remediation_strategies"]
+    assert "补充入口鉴权" in conflicts_by_id["fdg_same_2"]["aggregated_remediation_steps"]
 
 
-def test_detect_conflicts_groups_same_line_different_problems_into_one_issue():
+def test_detect_conflicts_keeps_same_line_different_problems_as_separate_issues():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -551,21 +553,22 @@ def test_detect_conflicts_groups_same_line_different_problems_into_one_issue():
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 1
-    conflict = result["conflicts"][0]
-    assert conflict["finding_ids"] == ["fdg_line_1", "fdg_line_2"]
-    assert len(conflict["aggregated_titles"]) == 2
-    assert "SQL 查询语义被放宽为模糊匹配" in conflict["aggregated_titles"]
-    assert conflict["finding_type"] == "direct_defect"
-    assert conflict["aggregated_finding_types"] == ["direct_defect", "design_concern"]
-    assert "临时变量命名不符合约定" in conflict["aggregated_titles"]
-    assert "恢复精确匹配语义" in conflict["aggregated_remediation_strategies"]
-    assert "把临时变量改成表达语义的名称" in conflict["aggregated_remediation_strategies"]
-    assert "恢复 equal 条件" in conflict["aggregated_remediation_steps"]
-    assert "统一变量命名" in conflict["aggregated_remediation_steps"]
+    assert len(result["conflicts"]) == 2
+    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
+    assert conflicts_by_id["fdg_line_1"]["finding_ids"] == ["fdg_line_1"]
+    assert conflicts_by_id["fdg_line_1"]["aggregated_titles"] == ["SQL 查询语义被放宽为模糊匹配"]
+    assert conflicts_by_id["fdg_line_1"]["finding_type"] == "direct_defect"
+    assert conflicts_by_id["fdg_line_1"]["aggregated_finding_types"] == ["direct_defect"]
+    assert "恢复精确匹配语义" in conflicts_by_id["fdg_line_1"]["aggregated_remediation_strategies"]
+    assert "恢复 equal 条件" in conflicts_by_id["fdg_line_1"]["aggregated_remediation_steps"]
+    assert conflicts_by_id["fdg_line_2"]["finding_ids"] == ["fdg_line_2"]
+    assert conflicts_by_id["fdg_line_2"]["aggregated_titles"] == ["临时变量命名不符合约定"]
+    assert conflicts_by_id["fdg_line_2"]["aggregated_finding_types"] == ["design_concern"]
+    assert "把临时变量改成表达语义的名称" in conflicts_by_id["fdg_line_2"]["aggregated_remediation_strategies"]
+    assert "统一变量命名" in conflicts_by_id["fdg_line_2"]["aggregated_remediation_steps"]
 
 
-def test_detect_conflicts_keeps_same_line_secondary_problem_when_primary_problem_is_issue_worthy():
+def test_detect_conflicts_keeps_same_line_secondary_problem_as_separate_issue():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": True,
@@ -615,5 +618,6 @@ def test_detect_conflicts_keeps_same_line_secondary_problem_when_primary_problem
     result = detect_conflicts(state)
 
     assert len(result["conflicts"]) == 1
-    assert result["issue_filter_decisions"] == []
-    assert result["conflicts"][0]["finding_ids"] == ["fdg_combo_1", "fdg_combo_2"]
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_combo_1"]
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_combo_2"]

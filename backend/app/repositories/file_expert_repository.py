@@ -85,6 +85,18 @@ class FileExpertRepository:
             connection.commit()
         return expert
 
+    def delete(self, expert_id: str) -> None:
+        """删除一个自定义专家；内置专家只允许禁用，不允许物理删除。"""
+
+        current = next((item for item in self.list() if item.expert_id == expert_id), None)
+        if current is None:
+            raise KeyError(expert_id)
+        if not current.custom:
+            raise ValueError("builtin expert cannot be deleted; disable it instead")
+        with self._db.connect() as connection:
+            connection.execute("DELETE FROM experts WHERE expert_id = ?", (expert_id,))
+            connection.commit()
+
     def _load_extension_skill_bindings(self, root: Path) -> dict[str, list[str]]:
         """从 extensions/skills 中加载 skill -> expert 绑定关系。
 

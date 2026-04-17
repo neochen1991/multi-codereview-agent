@@ -2570,6 +2570,32 @@ def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     assert runner._should_skip_finding("performance_reliability", finding) is True
 
 
+def test_review_runner_keeps_loop_amplification_performance_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        review_id="rev_demo",
+        expert_id="performance_reliability",
+        title="循环内逐条查库会放大调用成本",
+        summary="当前变更把 repository 查询放进 for 循环，批量场景会放大数据库往返和超时风险。",
+        finding_type="risk_hypothesis",
+        severity="medium",
+        confidence=0.46,
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        line_start=41,
+        evidence=["for 循环内调用 orderRepository.findByOrderNo"],
+        cross_file_evidence=[],
+        context_files=["src/main/java/com/example/OrderBatchService.java"],
+        remediation_strategy="批量化",
+        remediation_suggestion="把逐条查库改成批量查询或预加载。",
+        remediation_steps=[],
+        code_excerpt="41 | for (OrderItem item : items) {\n42 |   orderRepository.findByOrderNo(item.getOrderNo());\n43 | }",
+        suggested_code="",
+        suggested_code_language="java",
+    )
+
+    assert runner._should_skip_finding("performance_reliability", finding) is False
+
+
 def test_review_runner_suppresses_no_risk_formatting_findings(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(

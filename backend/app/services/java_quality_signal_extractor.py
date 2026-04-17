@@ -89,6 +89,20 @@ class JavaQualitySignalExtractor:
             signal_terms["factory_bypass"] = factory_terms
             summary_parts.append("检测到工厂方法被直接构造绕过")
 
+        loop_amplification_terms = self._detect_loop_call_amplification(diff_excerpt)
+        if loop_amplification_terms:
+            signals.append("loop_call_amplification")
+            matched_terms.extend(loop_amplification_terms)
+            signal_terms["loop_call_amplification"] = loop_amplification_terms
+            summary_parts.append("检测到循环内仓储或远程调用，批量路径可能被逐条放大")
+
+        comment_contract_terms = self._detect_comment_contract_unimplemented(diff_excerpt)
+        if comment_contract_terms:
+            signals.append("comment_contract_unimplemented")
+            matched_terms.extend(comment_contract_terms)
+            signal_terms["comment_contract_unimplemented"] = comment_contract_terms
+            summary_parts.append("检测到注释或 TODO 承诺的行为没有在当前实现中落地")
+
         return {
             "signals": self._dedupe(signals),
             "summary": "；".join(summary_parts),
@@ -215,6 +229,59 @@ class JavaQualitySignalExtractor:
             re.search(r"^-.*\.[a-z_]*create\s*\(", diff_lower, flags=re.MULTILINE)
             and re.search(r"^\+.*\bnew\s+[a-z_][a-z0-9_]*\s*\(", diff_lower, flags=re.MULTILINE)
         )
+
+    def _detect_loop_call_amplification(self, diff_excerpt: str) -> list[str]:
+        added_lines = [
+            line[1:]
+            for line in diff_excerpt.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        if not added_lines:
+            return []
+        excerpt = "\n".join(added_lines)
+        loop_pattern = re.compile(
+            r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|forEach\s*\([^)]*\)\s*->)"
+            r"[\s\S]{0,240}?"
+            r"(repository\.|dao\.|mapper\.|query\.|jdbcTemplate\.|restTemplate\.|webClient\.|feign|client\.)",
+            flags=re.IGNORECASE,
+        )
+        match = loop_pattern.search(excerpt)
+        if not match:
+            return []
+        loop_token = match.group(1).strip()
+        call_token = match.group(2).strip()
+        normalized_call = call_token.rstrip(".")
+        return [loop_token, normalized_call]
+
+    def _detect_comment_contract_unimplemented(self, diff_excerpt: str) -> list[str]:
+        added_lines = [
+            line[1:].strip()
+            for line in diff_excerpt.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        if not added_lines:
+            return []
+        comment_lines = [
+            line
+            for line in added_lines
+            if line.startswith("//") or line.startswith("/*") or "todo" in line.lower()
+        ]
+        if not comment_lines:
+            return []
+        code_blob = "\n".join(line for line in added_lines if line not in comment_lines).lower()
+        contract_pairs = [
+            (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
+            (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),
+            (["发送通知", "notify", "通知"], ["notify", "message", "publish"]),
+            (["缓存", "cache"], ["cache"]),
+        ]
+        for comment in comment_lines:
+            lowered_comment = comment.lower()
+            for source_tokens, impl_tokens in contract_pairs:
+                if any(token in comment or token in lowered_comment for token in source_tokens):
+                    if not any(token in code_blob for token in impl_tokens):
+                        return [comment[:48].strip()]
+        return []
 
     def _dedupe(self, values: list[str]) -> list[str]:
         seen: set[str] = set()

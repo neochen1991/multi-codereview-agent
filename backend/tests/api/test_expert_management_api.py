@@ -70,3 +70,44 @@ def test_update_expert_bindings(client):
     assert "knowledge_search" in payload["runtime_tool_bindings"]
     assert "auth-guideline" in payload["knowledge_sources"]
     assert "安全与合规审视规范" in payload["review_spec"]
+
+
+def test_delete_custom_expert(client):
+    create = client.post(
+        "/api/experts",
+        json={
+            "expert_id": "custom_delete_me",
+            "name": "Custom Delete Me",
+            "name_zh": "待删除自定义专家",
+            "role": "test delete custom expert",
+            "focus_areas": ["cleanup"],
+            "knowledge_sources": [],
+            "tool_bindings": ["local_diff"],
+            "mcp_tools": [],
+            "runtime_tool_bindings": [],
+            "agent_bindings": ["judge"],
+            "max_tool_calls": 2,
+            "max_debate_rounds": 1,
+            "provider": None,
+            "api_base_url": None,
+            "api_key_env": None,
+            "model": None,
+            "system_prompt": "Delete me after creation.",
+            "review_spec": "# 删除测试",
+        },
+    )
+    assert create.status_code == 201
+
+    response = client.delete("/api/experts/custom_delete_me")
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "expert_id": "custom_delete_me"}
+
+    experts = client.get("/api/experts").json()
+    assert all(item["expert_id"] != "custom_delete_me" for item in experts)
+
+
+def test_delete_builtin_expert_is_rejected(client):
+    response = client.delete("/api/experts/security_compliance")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "builtin expert cannot be deleted; disable it instead"

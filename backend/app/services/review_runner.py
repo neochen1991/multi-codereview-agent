@@ -5342,6 +5342,34 @@ class ReviewRunner:
             if swallow_phrase not in evidence:
                 evidence.append(swallow_phrase)
 
+        if "loop_call_amplification" in signal_set and expert_id in {"performance_reliability", "database_analysis"}:
+            loop_terms = [term for term in list(signal_terms.get("loop_call_amplification") or []) if term]
+            loop_display = " / ".join(loop_terms[:2]) if loop_terms else "循环内调用"
+            loop_summary = "当前改动把仓储或远程调用放进循环路径，批量场景下会放大数据库往返、网络调用和超时风险。"
+            if "循环调用放大" not in title:
+                title = f"{title}（循环调用放大）" if title else "循环调用放大"
+            if "循环" not in claim:
+                claim = f"{claim.rstrip('。')}；当前实现存在循环内调用放大（{loop_display}）。".strip("；")
+            if loop_summary not in summary_parts:
+                summary_parts.append(loop_summary)
+            evidence_phrase = f"检测到循环内调用放大：{loop_display}"
+            if evidence_phrase not in evidence:
+                evidence.append(evidence_phrase)
+
+        if "comment_contract_unimplemented" in signal_set and expert_id in {"correctness_business", "maintainability_code_health"}:
+            contract_terms = [term for term in list(signal_terms.get("comment_contract_unimplemented") or []) if term]
+            contract_display = contract_terms[0] if contract_terms else "注释/TODO 承诺"
+            contract_summary = "当前改动留下了注释或 TODO 承诺，但实现里没有对应动作，容易让调用方误以为能力已经落地。"
+            if "承诺未落地" not in title:
+                title = f"{title}（承诺未落地）" if title else "承诺未落地"
+            if "承诺" not in claim and "TODO" not in claim:
+                claim = f"{claim.rstrip('。')}；当前注释或 TODO 中承诺的行为没有在实现中落地（{contract_display}）。".strip("；")
+            if contract_summary not in summary_parts:
+                summary_parts.append(contract_summary)
+            evidence_phrase = f"检测到注释/待办承诺未实现：{contract_display}"
+            if evidence_phrase not in evidence:
+                evidence.append(evidence_phrase)
+
         result["title"] = title
         if summary_parts:
             result["summary"] = "；".join(part for part in summary_parts if part)

@@ -81,3 +81,43 @@ def test_java_quality_signal_extractor_detects_magic_value_and_weak_naming() -> 
 
     assert "naming_convention_violation" in payload["signals"]
     assert "magic_value_literal" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_loop_call_amplification() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,6 +40,10 @@ public class OrderBatchService {",
+                    "+    for (OrderItem item : items) {",
+                    "+        OrderEntity entity = orderRepository.findByOrderNo(item.getOrderNo());",
+                    "+        remoteInventoryClient.reserve(item.getSku(), item.getQuantity());",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "loop_call_amplification" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,4 +22,6 @@ public class OrderService {",
+                    "+    // TODO: 创建订单后自动扣减库存并发送事件",
+                    "+    public Order create(Order order) {",
+                    "+        return orderRepository.save(order);",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]

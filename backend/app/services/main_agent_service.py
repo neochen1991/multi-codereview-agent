@@ -1659,6 +1659,25 @@ class MainAgentService:
                 0.81,
             )
 
+        if {"loop_call_amplification", "unbounded_query_risk"} & signal_set:
+            _add_if_requested(
+                "performance_reliability",
+                "检测到循环内调用放大或批量边界缺失，系统补入性能与可靠性专家复核数据库往返、远程调用和超时风险。",
+                0.84,
+            )
+            _add_if_requested(
+                "database_analysis",
+                "检测到循环查库或分页边界缺失，系统补入数据库专家复核查询路径、索引命中和批量访问模式。",
+                0.8,
+            )
+
+        if {"comment_contract_unimplemented"} & signal_set:
+            _add_if_requested(
+                "correctness_business",
+                "检测到注释或 TODO 承诺未落地，系统补入正确性与业务专家复核承诺与实现是否一致。",
+                0.79,
+            )
+
         if {"query_semantics_weakened", "exception_swallowed"} & signal_set:
             _add_if_requested(
                 "security_compliance",
@@ -1666,7 +1685,7 @@ class MainAgentService:
                 0.76,
             )
 
-        if {"naming_convention_violation", "magic_value_literal", "exception_swallowed"} & signal_set:
+        if {"naming_convention_violation", "magic_value_literal", "exception_swallowed", "comment_contract_unimplemented"} & signal_set:
             _add_if_requested(
                 "maintainability_code_health",
                 "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",

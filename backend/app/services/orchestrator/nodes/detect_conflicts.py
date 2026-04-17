@@ -93,21 +93,19 @@ def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
 
 
 def detect_conflicts(state: ReviewState) -> ReviewState:
-    """按文件和代码行聚合 findings，形成 conflict 候选。"""
+    """将每个 finding 独立升级为 conflict 候选，不再按代码行合并。"""
 
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
     issue_filter_config = _resolve_issue_filter_config(next_state)
     findings = list(next_state.get("findings", []))
-    grouped: dict[str, list[dict[str, object]]] = {}
     issue_filter_decisions: list[dict[str, object]] = []
+    conflicts: list[dict[str, object]] = []
     for finding in findings:
         file_path = str(finding.get("file_path", "")).strip() or "unknown"
         line_start = int(finding.get("line_start", 1) or 1)
-        key = f"{file_path}::{line_start}"
-        grouped.setdefault(key, []).append(finding)
-    conflicts: list[dict[str, object]] = []
-    for key, items in grouped.items():
+        key = f"{file_path}::{line_start}::{str(finding.get('finding_id') or '').strip() or 'unknown'}"
+        items = [finding]
         skip_decision = _classify_issue_candidate(items, issue_filter_config)
         if skip_decision is not None:
             issue_filter_decisions.append(
@@ -132,7 +130,6 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             )
             continue
         eligible_items = items
-
         first = eligible_items[0]
         highest_severity = "medium"
         if any(str(item.get("severity")) in {"critical", "high"} for item in eligible_items):
