@@ -95,8 +95,17 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
         if not suggestion_parts:
             suggestion_parts.extend(issue.aggregated_remediation_suggestions or [])
             suggestion_parts.extend(issue.aggregated_remediation_steps or [])
+        if issue.remediation_strategy:
+            suggestion_parts.insert(0, issue.remediation_strategy)
+        if issue.remediation_suggestion:
+            suggestion_parts.insert(0, issue.remediation_suggestion)
+        for step in issue.remediation_steps or []:
+            if step:
+                suggestion_parts.append(step)
         if not suggestion_parts:
             suggestion_parts.append("请结合审核结论补充修复方案。")
+        if issue.suggested_code:
+            patched_code = issue.suggested_code
         if not patched_code:
             patched_code = "// TODO: replace with actual patched code before real CodeHub submission"
 

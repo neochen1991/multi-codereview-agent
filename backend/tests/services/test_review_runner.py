@@ -4,12 +4,13 @@ import app.services.review_runner as review_runner_module
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
 from app.domain.models.finding import ReviewFinding
+from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
-from app.services.llm_chat_service import LLMTextResult
+from app.services.llm_chat_service import LLMResolution, LLMTextResult
 from app.services.review_runner import ReviewRunner
 
 PERFORMANCE_SPEC_PATH = (
@@ -2670,6 +2671,37 @@ def test_review_runner_prefers_explicit_line_number_mentioned_in_problem_descrip
     assert stabilized["line_start"] == 56
 
 
+def test_review_runner_refine_line_start_ignores_suggested_code_semantics(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "hunk_header": "@@ -20,7 +20,7 @@",
+        "start_line": 20,
+        "end_line": 60,
+        "changed_lines": [23, 40, 56],
+        "excerpt": (
+            "-\tprivate final Integer CHUNKS = 200;\n"
+            "+\tprivate final Integer chunksTmp = 200;\n"
+            '-\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk"\n'
+            '+\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC"\n'
+            "-\t\t\t\te.printStackTrace();\n"
+        ),
+    }
+
+    line = runner._refine_line_start_within_hunk(
+        {
+            "title": "命名规范退化",
+            "claim": "常量命名从 CHUNKS 退化为 chunksTmp。",
+            "summary": "问题在命名，不在 SQL。",
+            "suggested_code": 'select * from domain_events order by occurred_on asc limit :chunk',
+            "evidence": ["chunksTmp"],
+        },
+        target_hunk,
+        20,
+    )
+
+    assert line == 23
+
+
 def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(
@@ -2790,6 +2822,88 @@ def test_review_runner_resolves_multifile_path_from_semantics(storage_root: Path
         batch_items=batch_items,
     )
     assert resolved == "src/main/java/com/example/InventoryService.java"
+
+
+def test_review_runner_recognizes_generic_suggested_code_as_invalid(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    assert (
+        runner._looks_like_concrete_suggested_code(
+            "# Suggested rewrite for src/main/java/com/example/OrderService.java\n# 1. Separate validation from execution",
+            file_path="src/main/java/com/example/OrderService.java",
+        )
+        is False
+    )
+    assert (
+        runner._looks_like_concrete_suggested_code(
+            "public void save(Order request) {\n    Objects.requireNonNull(request);\n    repository.save(request);\n}",
+            file_path="src/main/java/com/example/OrderService.java",
+        )
+        is True
+    )
+
+
+def test_review_runner_repairs_missing_suggested_code(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_repair_suggested_code",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/repair",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderService.java"],
+        ),
+        selected_experts=[expert.expert_id],
+    )
+
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text='{"suggested_code":"public void save(Order request) {\\n    Objects.requireNonNull(request);\\n    repository.save(request);\\n}"}',
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_load_repository_problem_context",
+        lambda *_args, **_kwargs: {"snippet": "18 | public void save(Order request) {\n19 |     repository.save(request);\n20 | }"},
+    )
+
+    repaired = runner._repair_missing_suggested_code(
+        review=review,
+        expert=expert,
+        runtime_settings=runner.runtime_settings_service.get(),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=18,
+        parsed={
+            "title": "空参未校验",
+            "claim": "request 为空时会触发异常",
+            "fix_strategy": "入口增加非空校验",
+            "suggested_fix": "添加 Objects.requireNonNull",
+            "change_steps": ["补判空"],
+        },
+        target_hunk={"excerpt": "+ repository.save(request);"},
+    )
+
+    assert "Objects.requireNonNull" in repaired
 
 
 def test_review_runner_suppresses_no_risk_formatting_findings(storage_root: Path):
@@ -4277,3 +4391,143 @@ def test_review_runner_build_knowledge_review_context_includes_java_mode_and_sig
     assert "java_quality:factory_bypass" in context["query_terms"]
     assert "java_quality:event_ordering_risk" in context["query_terms"]
     assert "java_term:create" in context["query_terms"]
+
+
+def test_review_runner_apply_issue_consistency_validation_downgrades_conflicted_issue(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_demo",
+        title="订单循环里逐条查库",
+        summary="for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        status="resolved",
+        severity="high",
+        confidence=0.92,
+        finding_ids=["fdg_demo"],
+        participant_expert_ids=["performance_reliability"],
+    )
+
+    validated, metadata = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline={
+            "title": issue.title,
+            "summary": issue.summary,
+            "file_path": issue.file_path,
+            "line_start": issue.line_start,
+            "remediation_strategy": "将逐条查库改成批量查询",
+            "remediation_suggestion": "先批量查询订单，再在内存中组装。",
+            "remediation_steps": ["抽取订单ID", "批量查询", "构建映射"],
+            "current_code": "for (Long id : ids) { repository.findById(id); }",
+            "suggested_code": "Map<Long, Order> orders = repository.findAllById(ids)...;",
+        },
+        payload={
+            "status": "downgraded",
+            "summary": "问题说明与当前代码、建议代码无法可靠对齐。",
+            "file_path": "src/main/java/com/example/OrderService.java",
+            "line_start": 42,
+            "remediation_strategy": "将逐条查库改成批量查询",
+            "remediation_suggestion": "先补齐准确代码片段，再给出修复代码。",
+            "remediation_steps": ["核对真实问题代码", "再输出修复建议"],
+            "current_code": "for (Long id : ids) { repository.findById(id); }",
+            "suggested_code": "",
+            "consistency_conflicts": ["建议代码修的是缓存问题，不是 N+1 查询问题。"],
+            "reason": "当前 issue 内容存在明显冲突，需人工确认。",
+        },
+    )
+
+    assert validated.status == "needs_human"
+    assert validated.needs_human is True
+    assert validated.resolution == "consistency_validation_failed"
+    assert validated.consistency_check_status == "downgraded"
+    assert validated.consistency_conflicts == ["建议代码修的是缓存问题，不是 N+1 查询问题。"]
+    assert "当前 issue 内容存在明显冲突" in str(metadata["summary"])
+
+
+def test_review_runner_validate_final_issues_with_judge_emits_validation_message(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderService.java"],
+        ),
+        status="running",
+        phase="judge",
+    )
+    issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_demo",
+        title="订单循环里逐条查库",
+        summary="for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        status="resolved",
+        severity="high",
+        confidence=0.9,
+        finding_ids=["fdg_demo"],
+        participant_expert_ids=["performance_reliability"],
+    )
+    finding = ReviewFinding(
+        review_id=review.review_id,
+        finding_id="fdg_demo",
+        expert_id="performance_reliability",
+        title="循环中逐条查库",
+        summary="for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        remediation_strategy="改成批量查询",
+        remediation_suggestion="先批量查，再组装映射。",
+        remediation_steps=["抽取ID", "批量查询", "组装Map"],
+        code_excerpt="for (Long id : ids) { repository.findById(id); }",
+        code_context={
+            "problem_source_context": {
+                "snippet": "for (Long id : ids) {\n    repository.findById(id);\n}",
+            }
+        },
+        suggested_code="Map<Long, Order> orderMap = repository.findAllById(ids)...;",
+    )
+
+    def _fake_complete_text(**_kwargs):
+        return LLMTextResult(
+            text='{"status":"repaired","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询","组装Map"],"current_code":"for (Long id : ids) {\\n    repository.findById(id);\\n}","suggested_code":"Map<Long, Order> orderMap = repository.findAllById(ids)...;","consistency_conflicts":[],"reason":"Judge 已修正 issue 文案与代码片段，四段内容现已一致。"}',
+            mode="live",
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "resolve_main_agent",
+        lambda _runtime: LLMResolution(
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            api_key="secret",
+        ),
+    )
+
+    validated = runner._validate_final_issues_with_judge(
+        review=review,
+        issues=[issue],
+        findings_by_id={"fdg_demo": finding},
+        runtime_settings=runner.runtime_settings_service.get(),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+    )
+
+    assert validated[0].consistency_check_status == "repaired"
+    assert validated[0].current_code.startswith("for (Long id : ids)")
+    assert validated[0].suggested_code.startswith("Map<Long, Order>")
+    messages = runner.message_repo.list(review.review_id)
+    validation_message = next(item for item in messages if item.message_type == "judge_consistency_validation")
+    assert validation_message.metadata["validation_status"] == "repaired"
+    assert "Judge 已修正 issue 文案与代码片段" in validation_message.content

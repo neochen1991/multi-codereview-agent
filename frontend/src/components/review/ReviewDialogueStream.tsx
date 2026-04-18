@@ -708,6 +708,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   if (eventType === "main_agent_command") messageKind = "command";
   if (
     eventType === "judge_summary" ||
+    eventType === "judge_consistency_validation" ||
     eventType === "main_agent_summary" ||
     eventType === "main_agent_intake" ||
     eventType === "main_agent_expert_selection" ||
@@ -757,6 +758,18 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push(`${message.expert_id} 正在回应 ${replyToExpertId || "上一位专家"}`);
   } else if (eventType === "judge_summary") {
     summaryParts.push("Judge 正在收敛本轮议题");
+  } else if (eventType === "judge_consistency_validation") {
+    const validationStatus = typeof metadata.validation_status === "string" ? metadata.validation_status : "";
+    const updatedFields = Array.isArray(metadata.updated_fields)
+      ? metadata.updated_fields.map((item) => String(item)).filter(Boolean)
+      : [];
+    const conflicts = Array.isArray(metadata.consistency_conflicts)
+      ? metadata.consistency_conflicts.map((item) => String(item)).filter(Boolean)
+      : [];
+    summaryParts.push("Judge 已完成正式 issue 一致性校验");
+    if (validationStatus) summaryParts.push(`结果：${validationStatus}`);
+    if (updatedFields.length) summaryParts.push(`修正字段 ${updatedFields.join(" / ")}`);
+    if (conflicts.length) summaryParts.push(`冲突 ${conflicts.length} 项`);
   } else if (eventType === "main_agent_summary") {
     summaryParts.push("主Agent 已输出最终收敛播报");
   } else if (eventType === "main_agent_intake") {

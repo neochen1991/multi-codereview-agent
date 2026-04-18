@@ -40,6 +40,11 @@ class DebateIssue(BaseModel):
     aggregated_remediation_strategies: list[str] = Field(default_factory=list)
     aggregated_remediation_suggestions: list[str] = Field(default_factory=list)
     aggregated_remediation_steps: list[str] = Field(default_factory=list)
+    remediation_strategy: str = ""
+    remediation_suggestion: str = ""
+    remediation_steps: list[str] = Field(default_factory=list)
+    current_code: str = ""
+    suggested_code: str = ""
     evidence: list[str] = Field(default_factory=list)
     cross_file_evidence: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -53,5 +58,8 @@ class DebateIssue(BaseModel):
     tool_verified: bool = False
     human_decision: str = "pending"
     resolution: str = ""
+    consistency_check_status: str = "unchecked"
+    consistency_check_summary: str = ""
+    consistency_conflicts: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

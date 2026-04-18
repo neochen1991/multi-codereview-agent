@@ -36,7 +36,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       finding?.suggested_code ||
       (finding?.code_context && Object.keys(finding.code_context).length > 0),
   );
-  const issueDescription = finding?.summary || issue?.summary || "-";
+  const issueDescription = issue?.summary || finding?.summary || "-";
+  const issueStrategy = issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-";
+  const issueSuggestion = issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-";
+  const issueSteps = uniqueList(issue?.remediation_steps).length
+    ? uniqueList(issue?.remediation_steps)
+    : aggregatedSteps.length
+      ? aggregatedSteps
+      : uniqueList(finding?.remediation_steps);
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
@@ -107,6 +114,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="置信度">
                 {`${(issue.confidence * 100).toFixed(0)}%`}
               </Descriptions.Item>
+              <Descriptions.Item label="一致性校验">
+                <Space wrap>
+                  <Tag color={issue.consistency_check_status === "passed" ? "success" : issue.consistency_check_status === "repaired" ? "processing" : issue.consistency_check_status === "downgraded" ? "error" : "default"}>
+                    {issue.consistency_check_status || "unchecked"}
+                  </Tag>
+                  {issue.consistency_check_summary ? <span>{issue.consistency_check_summary}</span> : null}
+                </Space>
+              </Descriptions.Item>
             </Descriptions>
 
             {Object.keys(confidenceBreakdown).length ? (
@@ -166,36 +181,24 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </div>
             ) : null}
 
-            {aggregatedStrategies.length || aggregatedSuggestions.length || aggregatedSteps.length ? (
+            {issueStrategy !== "-" || issueSuggestion !== "-" || issueSteps.length ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合修复方案</Paragraph>
                 <Descriptions column={1} size="small">
-                  {aggregatedStrategies.length ? (
+                  {issueStrategy !== "-" ? (
                     <Descriptions.Item label="修复思路">
-                      <div>
-                        {aggregatedStrategies.map((item) => (
-                          <Paragraph key={item} style={{ marginBottom: 8 }}>
-                            {item}
-                          </Paragraph>
-                        ))}
-                      </div>
+                      <Paragraph style={{ marginBottom: 0 }}>{issueStrategy}</Paragraph>
                     </Descriptions.Item>
                   ) : null}
-                  {aggregatedSuggestions.length ? (
+                  {issueSuggestion !== "-" ? (
                     <Descriptions.Item label="修复建议">
-                      <div>
-                        {aggregatedSuggestions.map((item) => (
-                          <Paragraph key={item} style={{ marginBottom: 8 }}>
-                            {item}
-                          </Paragraph>
-                        ))}
-                      </div>
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{issueSuggestion}</Paragraph>
                     </Descriptions.Item>
                   ) : null}
-                  {aggregatedSteps.length ? (
+                  {issueSteps.length ? (
                     <Descriptions.Item label="修复步骤">
                       <div>
-                        {aggregatedSteps.map((item, index) => (
+                        {issueSteps.map((item, index) => (
                           <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
                             {index + 1}. {item}
                           </Paragraph>

@@ -198,6 +198,11 @@ export interface DebateIssue {
   aggregated_remediation_strategies?: string[];
   aggregated_remediation_suggestions?: string[];
   aggregated_remediation_steps?: string[];
+  remediation_strategy?: string;
+  remediation_suggestion?: string;
+  remediation_steps?: string[];
+  current_code?: string;
+  suggested_code?: string;
   evidence: string[];
   needs_human: boolean;
   verified: boolean;
@@ -207,6 +212,9 @@ export interface DebateIssue {
   tool_verified?: boolean;
   human_decision: string;
   resolution?: string;
+  consistency_check_status?: string;
+  consistency_check_summary?: string;
+  consistency_conflicts?: string[];
   created_at: string;
   updated_at: string;
 }

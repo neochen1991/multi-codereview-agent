@@ -147,11 +147,25 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
   const codeContext = finding.code_context;
   const currentCode =
-    finding.code_excerpt ||
     codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
+    finding.code_excerpt ||
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet;
+  const suggestedCode = (() => {
+    const value = String(finding.suggested_code || "").trim();
+    if (!value) return "";
+    const lower = value.toLowerCase();
+    const genericMarkers = [
+      "# suggested rewrite for",
+      "当前还没有生成建议修改代码",
+      "please verify against real source",
+      "separate validation from execution",
+      "return early on invalid input",
+      "keep the happy path flat and testable",
+    ];
+    return genericMarkers.some((marker) => lower.includes(marker)) ? "" : value;
+  })();
   const hasFullDetails = Boolean(
     finding.code_excerpt ||
       finding.suggested_code ||
@@ -416,7 +430,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                 {finding.suggested_code_language ? <Tag color="blue">{finding.suggested_code_language}</Tag> : null}
               </div>
               {renderSuggestedCode(
-                finding.suggested_code || "// 当前还没有生成建议修改代码，请先补充更多上下文后重试。"
+                suggestedCode || "// 当前未生成可直接落地的建议代码，请结合本条问题说明和修改思路处理。"
               )}
             </div>
           </Col>

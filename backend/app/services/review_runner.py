@@ -874,6 +874,11 @@ class ReviewRunner:
                 aggregated_remediation_steps=[
                     str(value) for value in item.get("aggregated_remediation_steps", [])
                 ],
+                remediation_strategy=str(item.get("remediation_strategy") or ""),
+                remediation_suggestion=str(item.get("remediation_suggestion") or ""),
+                remediation_steps=[str(value) for value in item.get("remediation_steps", [])],
+                current_code=str(item.get("current_code") or ""),
+                suggested_code=str(item.get("suggested_code") or ""),
                 evidence=[str(value) for value in item.get("evidence", [])],
                 cross_file_evidence=[str(value) for value in item.get("cross_file_evidence", [])],
                 assumptions=[str(value) for value in item.get("assumptions", [])],
@@ -886,6 +891,9 @@ class ReviewRunner:
                 tool_name=str(item.get("tool_name") or ""),
                 tool_verified=bool(item.get("tool_verified")),
                 resolution=str(item.get("resolution") or ""),
+                consistency_check_status=str(item.get("consistency_check_status") or "unchecked"),
+                consistency_check_summary=str(item.get("consistency_check_summary") or ""),
+                consistency_conflicts=[str(value) for value in item.get("consistency_conflicts", [])],
             )
             for item in graph_result.get("issues", [])
         ]
@@ -1005,6 +1013,17 @@ class ReviewRunner:
                     },
                 )
             )
+        findings_by_id = {
+            item.finding_id: item
+            for item in self.finding_repo.list(review_id)
+        }
+        issues = self._validate_final_issues_with_judge(
+            review=review,
+            issues=issues,
+            findings_by_id=findings_by_id,
+            runtime_settings=effective_runtime_settings,
+            llm_request_options=llm_request_options,
+        )
         self.issue_repo.save_all(review_id, issues)
         for issue in issues:
             self._abort_if_closed(review_id)
@@ -2840,8 +2859,11 @@ class ReviewRunner:
                 f"{self._build_multi_file_prompt_appendix(review.subject, expert, normalized_batch_items)}\n"
                 "输出补充要求：\n"
                 f"1. 本次允许输出最多 {max_findings_cap} 条 findings；\n"
+                "2. 输出根结构必须是 {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
+                "3. 每条 finding 都必须同时包含 file_path、line_start、line_end、title、claim、suggested_code；\n"
                 "2. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
-                "3. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条。\n"
+                "4. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条；\n"
+                "5. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
             )
         llm_result = self.llm_chat_service.complete_text(
             system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
@@ -2948,6 +2970,19 @@ class ReviewRunner:
                 repository_context=per_file_repository_context,
                 input_completeness=input_completeness,
             )
+            suggested_code = str(parsed.get("suggested_code") or "").strip()
+            if not self._looks_like_concrete_suggested_code(suggested_code, file_path=finding_file_path):
+                suggested_code = self._repair_missing_suggested_code(
+                    review=review,
+                    expert=expert,
+                    runtime_settings=runtime_settings,
+                    llm_request_options=llm_request_options,
+                    file_path=finding_file_path,
+                    line_start=int(parsed.get("line_start") or matched_hunk_line_start or line_start or 1),
+                    parsed=parsed,
+                    target_hunk=matched_target_hunk,
+                )
+                parsed["suggested_code"] = suggested_code
             severity = self._normalize_severity(parsed.get("severity"), base_severity)
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
             parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
@@ -3036,10 +3071,7 @@ class ReviewRunner:
                     bound_documents=bound_documents,
                     rule_screening=rule_screening,
                 ),
-                suggested_code=str(
-                    parsed.get("suggested_code")
-                    or self._build_suggested_code(review.subject, finding_file_path, parsed_line_start, expert.expert_id)
-                ),
+                suggested_code=str(parsed.get("suggested_code") or "").strip(),
                 suggested_code_language=self._infer_code_language(finding_file_path),
             )
             if self._should_skip_finding(expert.expert_id, finding):
@@ -3291,6 +3323,329 @@ class ReviewRunner:
                 },
             )
         )
+
+    def _validate_final_issues_with_judge(
+        self,
+        *,
+        review: ReviewTask,
+        issues: list[DebateIssue],
+        findings_by_id: dict[str, ReviewFinding],
+        runtime_settings,
+        llm_request_options: dict[str, int | float],
+    ) -> list[DebateIssue]:
+        if not issues:
+            return []
+        validated_issues: list[DebateIssue] = []
+        resolution = self.llm_chat_service.resolve_main_agent(runtime_settings)
+        for issue in issues:
+            self._abort_if_closed(review.review_id)
+            related_findings = [
+                findings_by_id[finding_id]
+                for finding_id in issue.finding_ids
+                if finding_id in findings_by_id
+            ]
+            baseline = self._build_issue_consistency_baseline(issue, related_findings)
+            validator_result = self.llm_chat_service.complete_text(
+                system_prompt=(
+                    "你是最终裁决校验 Judge。你的唯一任务是校验正式 issue 的问题说明、修改思路、当前代码、建议修改后代码"
+                    " 是否完全一致，并在必要时只基于给定上下文修正这些字段。"
+                ),
+                user_prompt=self._build_issue_consistency_validation_prompt(issue, baseline, related_findings),
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=json.dumps(
+                    {
+                        "status": "validator_failed",
+                        **baseline,
+                        "consistency_conflicts": ["LLM 一致性校验未完成，本次保留原 issue 内容。"],
+                        "reason": "LLM 一致性校验失败，当前先保留原始 issue 内容。",
+                    },
+                    ensure_ascii=False,
+                ),
+                allow_fallback=self._allow_llm_fallback(runtime_settings),
+                timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.6),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": issue.issue_id,
+                    "expert_id": "judge",
+                    "phase": "judge_consistency_validation",
+                    "file_path": baseline["file_path"],
+                    "line_start": baseline["line_start"],
+                    "finding_count": len(related_findings),
+                },
+            )
+            payload = self._parse_json_object(validator_result.text)
+            validated_issue, validation_metadata = self._apply_issue_consistency_validation(
+                issue=issue,
+                baseline=baseline,
+                payload=payload,
+            )
+            validated_issues.append(validated_issue)
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id=issue.issue_id,
+                    expert_id="judge",
+                    message_type="judge_consistency_validation",
+                    content=str(validation_metadata.get("summary") or "Judge 已完成正式 issue 一致性校验。"),
+                    metadata={
+                        "phase": "judge",
+                        "validation_status": validated_issue.consistency_check_status,
+                        "consistency_check_summary": validated_issue.consistency_check_summary,
+                        "consistency_conflicts": validated_issue.consistency_conflicts,
+                        "updated_fields": validation_metadata.get("updated_fields", []),
+                        "file_path": validated_issue.file_path,
+                        "line_start": validated_issue.line_start,
+                        "current_code": validated_issue.current_code,
+                        "suggested_code": validated_issue.suggested_code,
+                        "remediation_strategy": validated_issue.remediation_strategy,
+                        "remediation_suggestion": validated_issue.remediation_suggestion,
+                        "remediation_steps": validated_issue.remediation_steps,
+                        **self._llm_message_metadata(validator_result),
+                    },
+                )
+            )
+        return validated_issues
+
+    def _build_issue_consistency_baseline(
+        self,
+        issue: DebateIssue,
+        related_findings: list[ReviewFinding],
+    ) -> dict[str, object]:
+        primary_finding = self._pick_issue_primary_finding(issue, related_findings)
+        file_path = str(issue.file_path or (primary_finding.file_path if primary_finding else "")).strip()
+        line_start = int(issue.line_start or (primary_finding.line_start if primary_finding else 1) or 1)
+        remediation_strategy = (
+            str(issue.remediation_strategy or "").strip()
+            or str(primary_finding.remediation_strategy if primary_finding else "").strip()
+            or next((item for item in issue.aggregated_remediation_strategies if str(item).strip()), "")
+        )
+        remediation_suggestion = (
+            str(issue.remediation_suggestion or "").strip()
+            or str(primary_finding.remediation_suggestion if primary_finding else "").strip()
+            or next((item for item in issue.aggregated_remediation_suggestions if str(item).strip()), "")
+        )
+        remediation_steps = (
+            [str(item).strip() for item in list(issue.remediation_steps or []) if str(item).strip()]
+            or [str(item).strip() for item in list(getattr(primary_finding, "remediation_steps", []) or []) if str(item).strip()]
+            or [str(item).strip() for item in list(issue.aggregated_remediation_steps or []) if str(item).strip()]
+        )
+        current_code = (
+            str(issue.current_code or "").strip()
+            or self._extract_issue_current_code(primary_finding)
+        )
+        suggested_code = str(issue.suggested_code or "").strip()
+        if not self._looks_like_concrete_suggested_code(suggested_code, file_path=file_path):
+            suggested_code = next(
+                (
+                    str(item.suggested_code or "").strip()
+                    for item in related_findings
+                    if self._looks_like_concrete_suggested_code(item.suggested_code, file_path=file_path or item.file_path)
+                ),
+                "",
+            )
+        summary = (
+            str(issue.summary or "").strip()
+            or str(primary_finding.summary if primary_finding else "").strip()
+        )
+        return {
+            "title": str(issue.title or "").strip(),
+            "summary": summary,
+            "file_path": file_path,
+            "line_start": line_start,
+            "remediation_strategy": remediation_strategy,
+            "remediation_suggestion": remediation_suggestion,
+            "remediation_steps": remediation_steps,
+            "current_code": current_code,
+            "suggested_code": suggested_code,
+        }
+
+    def _pick_issue_primary_finding(
+        self,
+        issue: DebateIssue,
+        related_findings: list[ReviewFinding],
+    ) -> ReviewFinding | None:
+        if not related_findings:
+            return None
+        issue_file = str(issue.file_path or "").strip()
+        issue_line = int(issue.line_start or 0)
+        exact = next(
+            (
+                finding
+                for finding in related_findings
+                if str(finding.file_path or "").strip() == issue_file and int(finding.line_start or 0) == issue_line
+            ),
+            None,
+        )
+        if exact is not None:
+            return exact
+        same_file = next(
+            (
+                finding
+                for finding in related_findings
+                if str(finding.file_path or "").strip() == issue_file
+            ),
+            None,
+        )
+        return same_file or related_findings[0]
+
+    def _extract_issue_current_code(self, finding: ReviewFinding | None) -> str:
+        if finding is None:
+            return ""
+        code_context = finding.code_context if isinstance(finding.code_context, dict) else {}
+        problem_source = code_context.get("problem_source_context") if isinstance(code_context.get("problem_source_context"), dict) else {}
+        target_hunk = code_context.get("target_hunk") if isinstance(code_context.get("target_hunk"), dict) else {}
+        primary_context = code_context.get("primary_context") if isinstance(code_context.get("primary_context"), dict) else {}
+        for candidate in (
+            str(problem_source.get("snippet") or "").strip(),
+            str(target_hunk.get("excerpt") or "").strip(),
+            str(primary_context.get("snippet") or "").strip(),
+            str(finding.code_excerpt or "").strip(),
+        ):
+            if candidate:
+                return candidate
+        return ""
+
+    def _build_issue_consistency_validation_prompt(
+        self,
+        issue: DebateIssue,
+        baseline: dict[str, object],
+        related_findings: list[ReviewFinding],
+    ) -> str:
+        findings_payload = []
+        for finding in related_findings:
+            code_context = finding.code_context if isinstance(finding.code_context, dict) else {}
+            problem_source = (
+                code_context.get("problem_source_context")
+                if isinstance(code_context.get("problem_source_context"), dict)
+                else {}
+            )
+            target_hunk = code_context.get("target_hunk") if isinstance(code_context.get("target_hunk"), dict) else {}
+            findings_payload.append(
+                {
+                    "finding_id": finding.finding_id,
+                    "file_path": finding.file_path,
+                    "line_start": finding.line_start,
+                    "title": finding.title,
+                    "summary": finding.summary,
+                    "remediation_strategy": finding.remediation_strategy,
+                    "remediation_suggestion": finding.remediation_suggestion,
+                    "remediation_steps": finding.remediation_steps,
+                    "code_excerpt": finding.code_excerpt,
+                    "problem_source_context": str(problem_source.get("snippet") or ""),
+                    "target_hunk_excerpt": str(target_hunk.get("excerpt") or ""),
+                    "suggested_code": finding.suggested_code,
+                }
+            )
+        return (
+            "请对下面这条正式 issue 做最终一致性校验。\n"
+            "你必须检查并保证以下四部分完全一致：问题说明、修改思路、当前代码、建议修改后代码。\n"
+            "严格要求：\n"
+            "1. 当前代码必须与问题说明指向同一文件、同一代码位置、同一问题点；\n"
+            "2. 建议修改后代码必须与问题说明和修改思路修复的是同一个问题；\n"
+            "3. 只能使用提供的 findings 和代码上下文，不允许臆造新代码、新文件或新问题；\n"
+            "4. 如果能从给定材料中纠正错位，请输出 repaired；\n"
+            "5. 如果材料本身互相冲突且无法可靠纠正，请输出 downgraded，并列出冲突；\n"
+            "6. 如果完全一致，请输出 passed。\n\n"
+            f"当前 issue:\n{json.dumps(issue.model_dump(mode='json'), ensure_ascii=False, indent=2)}\n\n"
+            f"建议基线:\n{json.dumps(baseline, ensure_ascii=False, indent=2)}\n\n"
+            f"关联 findings:\n{json.dumps(findings_payload, ensure_ascii=False, indent=2)}\n\n"
+            "只输出 JSON 对象，格式如下：\n"
+            '{'
+            '"status":"passed|repaired|downgraded",'
+            '"title":"",'
+            '"summary":"",'
+            '"file_path":"",'
+            '"line_start":1,'
+            '"remediation_strategy":"",'
+            '"remediation_suggestion":"",'
+            '"remediation_steps":[""],'
+            '"current_code":"",'
+            '"suggested_code":"",'
+            '"consistency_conflicts":[""],'
+            '"reason":""'
+            '}'
+        )
+
+    def _apply_issue_consistency_validation(
+        self,
+        *,
+        issue: DebateIssue,
+        baseline: dict[str, object],
+        payload: dict[str, object],
+    ) -> tuple[DebateIssue, dict[str, object]]:
+        next_issue = issue.model_copy(deep=True)
+        previous_fields = {
+            "summary": str(issue.summary or "").strip(),
+            "file_path": str(issue.file_path or "").strip(),
+            "line_start": int(issue.line_start or 1),
+            "remediation_strategy": str(issue.remediation_strategy or "").strip(),
+            "remediation_suggestion": str(issue.remediation_suggestion or "").strip(),
+            "current_code": str(issue.current_code or "").strip(),
+            "suggested_code": str(issue.suggested_code or "").strip(),
+        }
+        status = str(payload.get("status") or "validator_failed").strip().lower()
+        if status not in {"passed", "repaired", "downgraded"}:
+            status = "validator_failed"
+        next_issue.title = str(payload.get("title") or baseline["title"] or issue.title).strip() or issue.title
+        next_issue.summary = str(payload.get("summary") or baseline["summary"] or issue.summary).strip() or issue.summary
+        next_issue.file_path = str(payload.get("file_path") or baseline["file_path"] or issue.file_path).strip() or issue.file_path
+        next_issue.line_start = self._normalize_line_start(
+            payload.get("line_start"),
+            int(baseline.get("line_start") or issue.line_start or 1),
+        )
+        next_issue.remediation_strategy = str(
+            payload.get("remediation_strategy") or baseline["remediation_strategy"] or issue.remediation_strategy
+        ).strip()
+        next_issue.remediation_suggestion = str(
+            payload.get("remediation_suggestion") or baseline["remediation_suggestion"] or issue.remediation_suggestion
+        ).strip()
+        next_issue.remediation_steps = self._normalize_text_list(
+            payload.get("remediation_steps"),
+            list(baseline.get("remediation_steps") or issue.remediation_steps or []),
+        )
+        next_issue.current_code = str(payload.get("current_code") or baseline["current_code"] or issue.current_code).strip()
+        candidate_suggested_code = str(payload.get("suggested_code") or baseline["suggested_code"] or issue.suggested_code).strip()
+        if self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=next_issue.file_path):
+            next_issue.suggested_code = candidate_suggested_code
+        else:
+            next_issue.suggested_code = str(baseline.get("suggested_code") or issue.suggested_code or "").strip()
+        next_issue.consistency_check_status = status
+        next_issue.consistency_conflicts = self._normalize_text_list(payload.get("consistency_conflicts"), [])
+        next_issue.consistency_check_summary = str(payload.get("reason") or "").strip()
+        if not next_issue.consistency_check_summary:
+            if status == "passed":
+                next_issue.consistency_check_summary = "Judge 校验通过，issue 四段内容一致。"
+            elif status == "repaired":
+                next_issue.consistency_check_summary = "Judge 已基于关联 findings 修正 issue 内容错位。"
+            elif status == "downgraded":
+                next_issue.consistency_check_summary = "Judge 发现 issue 内容存在冲突，已降级为待人工校验。"
+            else:
+                next_issue.consistency_check_summary = "Judge 一致性校验未完成，当前保留原 issue 内容。"
+        if status == "downgraded":
+            next_issue.status = "needs_human"
+            next_issue.needs_human = True
+            next_issue.resolution = "consistency_validation_failed"
+            next_issue.verified = False
+        next_issue.updated_at = datetime.now(UTC)
+        updated_fields = [
+            field
+            for field, old_value in previous_fields.items()
+            if old_value != {
+                "summary": next_issue.summary,
+                "file_path": next_issue.file_path,
+                "line_start": next_issue.line_start,
+                "remediation_strategy": next_issue.remediation_strategy,
+                "remediation_suggestion": next_issue.remediation_suggestion,
+                "current_code": next_issue.current_code,
+                "suggested_code": next_issue.suggested_code,
+            }[field]
+        ]
+        summary = next_issue.consistency_check_summary
+        if next_issue.consistency_conflicts:
+            summary = f"{summary} 冲突: {'；'.join(next_issue.consistency_conflicts[:3])}"
+        return next_issue, {"updated_fields": updated_fields, "summary": summary}
 
     def _expert_llm_metadata(self, expert: ExpertProfile, runtime_settings) -> dict[str, object]:
         resolution = self.llm_chat_service.resolve_expert(expert, runtime_settings)
@@ -4998,6 +5353,92 @@ class ReviewRunner:
                 break
         return normalized
 
+    def _looks_like_concrete_suggested_code(self, value: object, *, file_path: str) -> bool:
+        code = str(value or "").strip()
+        if not code:
+            return False
+        lower = code.lower()
+        generic_markers = [
+            "当前还没有生成建议修改代码",
+            "请先补充更多上下文",
+            "修复思路",
+            "修复建议",
+            "建议如下",
+            "可以考虑",
+            "需要结合实际",
+            "请结合实际",
+            "# suggested rewrite for",
+        ]
+        if any(marker in lower for marker in generic_markers):
+            return False
+        language = self._infer_code_language(file_path)
+        if language == "java":
+            return any(token in code for token in (";", "{", "}", "class ", "public ", "private ", "protected ", "return "))
+        if language in {"javascript", "typescript", "jsx", "tsx"}:
+            return any(token in code for token in (";", "{", "}", "function ", "const ", "let ", "return "))
+        if language == "python":
+            return any(token in code for token in (":\n", "def ", "return ", "if "))
+        return len(code.splitlines()) >= 2
+
+    def _repair_missing_suggested_code(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        llm_request_options: dict[str, int | float],
+        file_path: str,
+        line_start: int,
+        parsed: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> str:
+        current_code = (
+            str(target_hunk.get("excerpt") or "").strip()
+            or self._load_repository_problem_context(review.subject, file_path, line_start, target_hunk).get("snippet", "")
+            or self._load_repository_source_excerpt(review.subject, file_path, line_start)
+        )
+        repair_prompt = (
+            f"你只需要补全 suggested_code 字段，不要重新审查。\n"
+            f"目标文件: {file_path}\n"
+            f"目标行号: {line_start}\n"
+            f"问题标题: {str(parsed.get('title') or '').strip()}\n"
+            f"问题结论: {str(parsed.get('claim') or '').strip()}\n"
+            f"修改思路: {str(parsed.get('fix_strategy') or '').strip()}\n"
+            f"修复建议: {str(parsed.get('suggested_fix') or '').strip()}\n"
+            f"修改步骤: {' / '.join(str(item).strip() for item in list(parsed.get('change_steps') or []) if str(item).strip())}\n"
+            f"当前代码:\n{current_code}\n\n"
+            "输出要求：\n"
+            "1. 只输出 JSON 对象；\n"
+            "2. 必须包含字段 suggested_code；\n"
+            "3. suggested_code 必须是该文件该问题对应的具体修改后代码片段；\n"
+            "4. 不要输出解释、Markdown、修复思路、占位文字。\n"
+            '输出格式: {"suggested_code":"..."}'
+        )
+        repair_result = self.llm_chat_service.complete_text(
+            system_prompt="你是代码修复补全器。你的唯一任务是根据已确认的问题结论补出具体 suggested_code。",
+            user_prompt=repair_prompt,
+            resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
+            runtime_settings=runtime_settings,
+            fallback_text='{"suggested_code":""}',
+            allow_fallback=self._allow_llm_fallback(runtime_settings),
+            timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.5),
+            max_attempts=1,
+            log_context={
+                "review_id": review.review_id,
+                "issue_id": "review_orchestration",
+                "expert_id": expert.expert_id,
+                "phase": "expert_repair_suggested_code",
+                "file_path": file_path,
+                "line_start": line_start,
+            },
+        )
+        payload = self._parse_json_payload(repair_result.text)
+        if isinstance(payload, dict):
+            candidate = str(payload.get("suggested_code") or "").strip()
+            if self._looks_like_concrete_suggested_code(candidate, file_path=file_path):
+                return candidate
+        return ""
+
     def _stabilize_expert_analysis(
         self,
         parsed: dict[str, object],
@@ -5505,7 +5946,7 @@ class ReviewRunner:
             return int(fallback_line_start or 1)
 
         semantic_parts: list[str] = []
-        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning", "suggested_code"):
+        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning"):
             value = str(parsed.get(key) or "").strip()
             if value:
                 semantic_parts.append(value)
@@ -6696,7 +7137,6 @@ class ReviewRunner:
             "fix_strategy",
             "suggested_fix",
             "rule_based_reasoning",
-            "suggested_code",
         ):
             value = str(parsed.get(key) or "").strip()
             if value:
