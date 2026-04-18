@@ -1061,3 +1061,50 @@ def test_llm_chat_light_mode_summarizes_doc_block(monkeypatch, tmp_path: Path):
     sent_system = str((messages[0] or {}).get("content") or "")
     sent_user = str((messages[1] or {}).get("content") or "")
     assert "[light summary: doc block compressed]" in sent_system or "[light summary: doc block compressed]" in sent_user
+
+
+def test_decode_sse_payload_supports_nested_output_content_text():
+    service = LLMChatService()
+    chunks = [
+        {"id": "resp_1", "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"results":['}]}]},
+        {
+            "id": "resp_1",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"issue_id":"iss_1","status":"passed"}'}],
+                }
+            ],
+        },
+        {"id": "resp_1", "output": [{"type": "message", "content": [{"type": "output_text", "text": "]}"}]}]},
+    ]
+    response_text = "\n".join(
+        [*(f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks), "data: [DONE]"]
+    )
+
+    payload = service._decode_sse_payload(response_text)
+
+    choices = payload.get("choices")
+    assert isinstance(choices, list) and choices
+    message = choices[0].get("message")
+    assert isinstance(message, dict)
+    assert message.get("content") == '{"results":[{"issue_id":"iss_1","status":"passed"}]}'
+
+
+def test_decode_sse_payload_supports_nested_choice_message_content_blocks():
+    service = LLMChatService()
+    chunks = [
+        {"choices": [{"delta": {"content": [{"type": "output_text", "text": '{"status":'}]}}]},
+        {"choices": [{"delta": {"content": [{"type": "output_text", "text": '"repaired"}'}]}}]},
+    ]
+    response_text = "\n".join(
+        [*(f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks), "data: [DONE]"]
+    )
+
+    payload = service._decode_sse_payload(response_text)
+
+    choices = payload.get("choices")
+    assert isinstance(choices, list) and choices
+    message = choices[0].get("message")
+    assert isinstance(message, dict)
+    assert message.get("content") == '{"status":"repaired"}'

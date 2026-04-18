@@ -1246,6 +1246,7 @@ class LLMChatService:
         chunks: list[dict[str, object]] = []
         accumulated_text_parts: list[str] = []
         latest_usage: dict[str, object] | None = None
+        saw_choices = False
         for raw_line in response_text.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(":"):
@@ -1260,6 +1261,8 @@ class LLMChatService:
             chunk = json.loads(data)
             if isinstance(chunk, dict):
                 chunks.append(chunk)
+                if chunk.get("choices"):
+                    saw_choices = True
                 if isinstance(chunk.get("usage"), dict):
                     latest_usage = dict(chunk.get("usage") or {})
                 chunk_text = self._extract_text_from_chunk(chunk)
@@ -1267,7 +1270,37 @@ class LLMChatService:
                     accumulated_text_parts.append(chunk_text)
         if not chunks:
             raise ValueError("sse_no_data_chunks")
+        accumulated_text = "".join(accumulated_text_parts).strip()
+        if accumulated_text and not saw_choices:
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": accumulated_text,
+                        }
+                    }
+                ]
+            }
+            if latest_usage:
+                payload["usage"] = latest_usage
+            return payload
         for chunk in reversed(chunks):
+            top_level_text = self._extract_sse_top_level_text(chunk).strip()
+            if top_level_text:
+                payload = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": top_level_text,
+                            }
+                        }
+                    ]
+                }
+                if latest_usage and not isinstance(chunk.get("usage"), dict):
+                    payload["usage"] = latest_usage
+                elif isinstance(chunk.get("usage"), dict):
+                    payload["usage"] = dict(chunk.get("usage") or {})
+                return payload
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -1277,7 +1310,6 @@ class LLMChatService:
                 if latest_usage and not isinstance(chunk.get("usage"), dict):
                     chunk = {**chunk, "usage": latest_usage}
                 return chunk
-        accumulated_text = "".join(accumulated_text_parts).strip()
         if accumulated_text:
             payload = {
                 "choices": [
@@ -1313,14 +1345,45 @@ class LLMChatService:
     def _extract_text_from_chunk(self, chunk: dict[str, object]) -> str:
         choices = chunk.get("choices") or []
         if not choices:
-            return ""
+            return self._extract_sse_top_level_text(chunk)
         choice = choices[0] if isinstance(choices[0], dict) else {}
         message = choice.get("message") or {}
-        message_content = self._extract_content(message.get("content"))
+        message_content = self._extract_content(message)
         if message_content:
             return message_content
+        message_content = self._extract_content(choice.get("message"))
+        if message_content:
+            return message_content
+        if isinstance(choice.get("text"), str):
+            return str(choice.get("text") or "")
+        if isinstance(choice.get("output_text"), str):
+            return str(choice.get("output_text") or "")
         delta = choice.get("delta") or {}
-        return self._extract_content(delta.get("content"))
+        delta_content = self._extract_content(delta)
+        if delta_content:
+            return delta_content
+        if isinstance(delta, dict):
+            if isinstance(delta.get("text"), str):
+                return str(delta.get("text") or "")
+            if isinstance(delta.get("output_text"), str):
+                return str(delta.get("output_text") or "")
+        return self._extract_sse_top_level_text(chunk)
+
+    def _extract_sse_top_level_text(self, chunk: dict[str, object]) -> str:
+        for key in ("text", "output_text", "content"):
+            value = chunk.get(key)
+            extracted = self._extract_content(value).strip()
+            if extracted:
+                return extracted
+        output = chunk.get("output")
+        if isinstance(output, list):
+            parts: list[str] = []
+            for item in output:
+                extracted = self._extract_content(item).strip()
+                if extracted:
+                    parts.append(extracted)
+            return "".join(parts)
+        return ""
 
     def _extract_content(self, content: object) -> str:
         if content is None:
@@ -1330,25 +1393,16 @@ class LLMChatService:
         if isinstance(content, list):
             parts: list[str] = []
             for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                    continue
-                if isinstance(item, dict):
-                    if isinstance(item.get("text"), str):
-                        parts.append(str(item["text"]))
-                        continue
-                    if isinstance(item.get("content"), str):
-                        parts.append(str(item["content"]))
-                        continue
-                    if isinstance(item.get("delta"), str):
-                        parts.append(str(item["delta"]))
-                        continue
+                extracted = self._extract_content(item)
+                if extracted:
+                    parts.append(extracted)
             return "".join(parts)
         if isinstance(content, dict):
-            if isinstance(content.get("text"), str):
-                return str(content["text"])
-            if isinstance(content.get("content"), str):
-                return str(content["content"])
+            for key in ("text", "content", "delta", "output_text", "message", "output", "parts", "result"):
+                extracted = self._extract_content(content.get(key))
+                if extracted:
+                    return extracted
+            return ""
         return str(content)
 
     def _fallback(

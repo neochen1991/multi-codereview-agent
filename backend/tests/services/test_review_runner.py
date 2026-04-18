@@ -2780,6 +2780,54 @@ def test_review_runner_keeps_loop_amplification_finding_without_timeout_keywords
     assert runner._should_skip_finding("performance_reliability", finding) is False
 
 
+def test_review_runner_strengthens_comment_contract_unimplemented_for_correctness(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    stabilized = runner._enrich_java_quality_signal_language(
+        {
+            "title": "订单创建逻辑",
+            "summary": "create 逻辑存在实现缺口。",
+            "claim": "当前实现与承诺不一致。",
+            "evidence": [],
+            "signal_terms": {"comment_contract_unimplemented": ["// TODO: 创建订单后自动扣减库存并发送事件"]},
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderService.java",
+        {"excerpt": "+    // TODO: 创建订单后自动扣减库存并发送事件\n+    return orderRepository.save(order);"},
+        {},
+    )
+
+    assert "承诺未落地" in str(stabilized["title"])
+    assert "create 逻辑存在实现缺口" in str(stabilized["summary"])
+    assert any("注释/待办承诺未实现" in item for item in list(stabilized["evidence"]))
+
+
+def test_review_runner_keeps_comment_contract_unimplemented_risk_as_verifiable(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "TODO 未实现",
+            "claim": "注释说明需要扣减库存，但实现中没有对应动作，属于承诺未落地。",
+            "summary": "注释与实现不一致。",
+            "evidence": ["检测到注释/待办承诺未实现：// TODO: 扣减库存并发送事件"],
+            "assumptions": [],
+            "confidence": 0.78,
+            "severity": "high",
+            "finding_type": "risk_hypothesis",
+            "verification_needed": True,
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderService.java",
+        24,
+        {"excerpt": "+    // TODO: 扣减库存并发送事件\n+    return orderRepository.save(order);"},
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["verification_needed"] is True
+    assert "承诺未落地" in str(result["title"])
+    assert any("注释/待办承诺未实现" in item for item in list(result["evidence"]))
+
+
 def test_review_runner_does_not_fallback_to_default_file_when_multifile_path_missing(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     batch_items = [

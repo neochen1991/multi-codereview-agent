@@ -155,6 +155,42 @@ def test_java_quality_signal_extractor_detects_stream_foreach_loop_call_amplific
     assert "loop_call_amplification" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_detects_loop_call_amplification_for_service_call() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,2 +40,5 @@ public class OrderBatchService {",
+                    "+    for (OrderItem item : items) {",
+                    "+        pricingService.calculate(item);",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "loop_call_amplification" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_loop_call_amplification_for_method_reference() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,2 +40,4 @@ public class OrderBatchService {",
+                    "+    items.forEach(notificationService::send);",
+                ]
+            )
+        },
+    )
+
+    assert "loop_call_amplification" in payload["signals"]
+
+
 def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(
@@ -198,6 +234,44 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_fr
                     ]
                 )
             }
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_comment_only_empty_method() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,1 +22,5 @@ public class OrderService {",
+                    "+    public void syncInventory(Order order) {",
+                    "+        // TODO: 扣减库存并记录审计日志",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_unsupported_operation_placeholder() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,1 +22,5 @@ public class OrderService {",
+                    "+    public void syncInventory(Order order) {",
+                    '+        throw new UnsupportedOperationException("TODO implement");',
+                    "+    }",
+                ]
+            )
         },
     )
 

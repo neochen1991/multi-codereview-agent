@@ -101,7 +101,7 @@ class JavaQualitySignalExtractor:
             signals.append("comment_contract_unimplemented")
             matched_terms.extend(comment_contract_terms)
             signal_terms["comment_contract_unimplemented"] = comment_contract_terms
-            summary_parts.append("检测到注释或 TODO 承诺的行为没有在当前实现中落地")
+            summary_parts.append("检测到注释、TODO 或占位实现承诺的行为没有在当前实现中落地")
 
         return {
             "signals": self._dedupe(signals),
@@ -238,23 +238,44 @@ class JavaQualitySignalExtractor:
             r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|do\s*\{|\bforEach\s*\(|\.forEach\s*\()",
             flags=re.IGNORECASE,
         )
-        call_pattern = re.compile(
-            r"("
-            r"[A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|query|jdbcTemplate|sqlSession|entityManager)\."
-            r"|[A-Za-z_][A-Za-z0-9_]*(?:client|api|gateway|facade|proxy|feign)\."
-            r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager)\.(?:get|find|load|fetch|query|list|select|call|invoke|request|send|reserve|deduct|update|save|insert|delete|process|handle|execute)"
-            r"|jdbcTemplate\.|restTemplate\.|webClient\.|feign[A-Za-z0-9_]*\."
-            r")",
+        dependency_pattern = re.compile(
+            r"\b("
+            r"[A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|query|jdbcTemplate|sqlSession|entityManager)"
+            r"|[A-Za-z_][A-Za-z0-9_]*(?:client|api|gateway|facade|proxy|feign|adapter|connector|remote)"
+            r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager|provider)"
+            r"|jdbcTemplate|restTemplate|webClient|sqlSession|entityManager|redisTemplate"
+            r")\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)",
             flags=re.IGNORECASE,
         )
+        method_ref_pattern = re.compile(
+            r"\b([A-Za-z_][A-Za-z0-9_]*(?:service|manager|client|gateway|facade|proxy|adapter|connector|repository|repo|dao|mapper|provider))\s*::\s*([A-Za-z_][A-Za-z0-9_]*)",
+            flags=re.IGNORECASE,
+        )
+        risky_call_verbs = {
+            "get", "find", "load", "fetch", "query", "list", "select", "scan",
+            "call", "invoke", "request", "send", "execute", "process", "handle",
+            "save", "insert", "update", "delete", "deduct", "reserve", "publish",
+            "pull", "push", "batchquery", "batchfetch", "calculate", "compute",
+            "convert", "transform", "sync",
+        }
         for loop_match in loop_pattern.finditer(excerpt):
             loop_token = loop_match.group(1).strip()
             # 在循环起点后的窗口中检索外部调用，覆盖 for(:)、stream().forEach 与 lambda block 的常见写法。
             window = excerpt[loop_match.start() : loop_match.start() + 900]
-            call_match = call_pattern.search(window)
+            call_match = dependency_pattern.search(window)
             if call_match:
-                normalized_call = call_match.group(1).strip().rstrip(".")
-                return [loop_token, normalized_call]
+                dependency_name = call_match.group(1).strip()
+                method_name = call_match.group(2).strip()
+                if method_name.lower() in risky_call_verbs or dependency_name.lower().endswith(
+                    ("repository", "repo", "dao", "mapper", "client", "gateway", "facade", "proxy", "feign")
+                ):
+                    return [loop_token, f"{dependency_name}.{method_name}"]
+            method_ref_match = method_ref_pattern.search(window)
+            if method_ref_match:
+                dependency_name = method_ref_match.group(1).strip()
+                method_name = method_ref_match.group(2).strip()
+                if method_name.lower() in risky_call_verbs:
+                    return [loop_token, f"{dependency_name}::{method_name}"]
         return []
 
     def _detect_comment_contract_unimplemented(self, diff_excerpt: str, combined_context: str) -> list[str]:
@@ -293,6 +314,48 @@ class JavaQualitySignalExtractor:
                         return [comment[:48].strip()]
             if "todo" in lowered_comment:
                 return [comment[:48].strip()]
+        stub_terms = self._detect_stubbed_implementation(normalized_context)
+        if stub_terms:
+            return stub_terms
+        return []
+
+    def _detect_stubbed_implementation(self, normalized_context: str) -> list[str]:
+        context = str(normalized_context or "")
+        if not context.strip():
+            return []
+        placeholder_patterns = [
+            r"throw\s+new\s+UnsupportedOperationException\s*\(",
+            r"throw\s+new\s+NotImplementedException\s*\(",
+            r"throw\s+new\s+IllegalStateException\s*\(\s*\"TODO",
+            r"return\s+null\s*;",
+            r"return\s+Collections\.emptyList\s*\(\s*\)\s*;",
+            r"return\s+List\.of\s*\(\s*\)\s*;",
+            r"return\s+Map\.of\s*\(\s*\)\s*;",
+            r"return\s+false\s*;",
+            r"return\s+0\s*;",
+        ]
+        for pattern in placeholder_patterns:
+            match = re.search(pattern, context, flags=re.IGNORECASE)
+            if match:
+                return [match.group(0).strip()]
+        empty_method_pattern = re.compile(
+            r"((?://[^\n]*\n|/\*.*?\*/\s*)*)"
+            r"(public|private|protected)\s+[A-Za-z0-9_<>\[\], ?]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*\{\s*\}",
+            flags=re.DOTALL,
+        )
+        for match in empty_method_pattern.finditer(context):
+            comments = str(match.group(1) or "").strip()
+            if comments:
+                first_comment_line = comments.splitlines()[0].strip()
+                return [first_comment_line[:48]]
+        comment_only_block_pattern = re.compile(
+            r"(public|private|protected)\s+[A-Za-z0-9_<>\[\], ?]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*\{\s*(//[^\n]*|/\*.*?\*/)\s*\}",
+            flags=re.DOTALL,
+        )
+        comment_block_match = comment_only_block_pattern.search(context)
+        if comment_block_match:
+            comment_text = re.sub(r"\s+", " ", comment_block_match.group(2) or "").strip()
+            return [comment_text[:48]]
         return []
 
     def _normalize_java_context_snippet(self, content: str) -> str:
