@@ -103,6 +103,38 @@ def test_java_quality_signal_extractor_detects_loop_call_amplification() -> None
     assert "loop_call_amplification" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_detects_loop_call_amplification_from_context() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,2 +40,4 @@ public class OrderBatchService {",
+                    "+    processOrders(items);",
+                    "+    return;",
+                ]
+            )
+        },
+        repository_context={
+            "current_class_context": {
+                "snippet": "\n".join(
+                    [
+                        "40 |     private void processOrders(List<OrderItem> items) {",
+                        "41 |         for (OrderItem item : items) {",
+                        "42 |             orderRepository.findByOrderNo(item.getOrderNo());",
+                        "43 |             remoteInventoryClient.reserve(item.getSku(), item.getQuantity());",
+                        "44 |         }",
+                        "45 |     }",
+                    ]
+                )
+            }
+        },
+    )
+
+    assert "loop_call_amplification" in payload["signals"]
+
+
 def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(
@@ -117,6 +149,35 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() 
                     "+    }",
                 ]
             )
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_from_context() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,1 +22,2 @@ public class OrderService {",
+                    "+    return createOrder(order);",
+                ]
+            )
+        },
+        repository_context={
+            "current_class_context": {
+                "snippet": "\n".join(
+                    [
+                        "22 |     // TODO: 创建订单后自动扣减库存并发送事件",
+                        "23 |     public Order createOrder(Order order) {",
+                        "24 |         return orderRepository.save(order);",
+                        "25 |     }",
+                    ]
+                )
+            }
         },
     )
 

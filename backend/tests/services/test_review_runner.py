@@ -49,6 +49,43 @@ def test_review_runner_releases_large_expert_job_payload_after_execution(storage
     assert job == {"keep_me": "value"}
 
 
+def test_review_runner_route_hints_preserve_multi_line_hunk_metadata(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = runner.registry.list_all()[0]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"],
+    )
+    candidate_hunks = [
+        {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "line_start": 18,
+            "start_line": 18,
+            "end_line": 21,
+            "changed_lines": [18, 21],
+            "hunk_header": "@@ -15,9 +15,9 @@ public final class CourseCreator {",
+            "excerpt": "18 | +        Course course = new Course(id, name, duration);\n21 | +        repository.save(course);",
+            "repo_hits": {},
+        }
+    ]
+
+    route_hints = runner._build_expert_route_hints(
+        subject,
+        expert,
+        candidate_hunks,
+        primary_route={"confidence": 0.9, "routing_reason": "test"},
+    )
+
+    assert len(route_hints) == 1
+    assert route_hints[0]["target_hunk"]["start_line"] == 18
+    assert route_hints[0]["target_hunk"]["end_line"] == 21
+    assert route_hints[0]["target_hunk"]["changed_lines"] == [18, 21]
+
+
 def test_review_runner_emits_main_agent_intake_message(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
@@ -2593,6 +2630,46 @@ def test_review_runner_refines_same_hunk_findings_to_semantic_changed_lines(stor
     assert exception_line == 56
 
 
+def test_review_runner_prefers_explicit_line_number_mentioned_in_problem_description(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "异常被静默吞掉",
+            "summary": "问题出现在第56行的 catch 处理。",
+            "claim": "第 56 行把 printStackTrace 删除后，异常会被静默吞掉。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "confidence": 0.72,
+            "line_start": 20,
+            "line_end": 20,
+            "evidence": ["56 | } catch (...) {", "printStackTrace 被删除"],
+            "assumptions": [],
+            "context_files": [],
+            "verification_needed": False,
+        },
+        "correctness_business",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        20,
+        {
+            "hunk_header": "@@ -20,7 +20,7 @@",
+            "start_line": 20,
+            "end_line": 60,
+            "changed_lines": [23, 40, 56],
+            "excerpt": (
+                "-\tprivate final Integer CHUNKS = 200;\n"
+                "+\tprivate final Integer chunksTmp = 200;\n"
+                '-\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk"\n'
+                '+\t\t\t\t"SELECT * FROM domain_events ORDER BY occurred_on ASC"\n'
+                "-\t\t\t\te.printStackTrace();\n"
+            ),
+        },
+        repository_context={},
+    )
+
+    assert stabilized["line_start"] == 56
+
+
 def test_review_runner_suppresses_weak_performance_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(
@@ -3996,6 +4073,7 @@ def test_review_runner_build_expert_prompt_requests_comment_and_implementation_c
 
     assert "注释、方法名、接口说明或 TODO 明确承诺了某个行为" in prompt
     assert "实现缺失或与承诺不一致" in prompt
+    assert "阿里巴巴 Java 开发手册" in prompt
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):

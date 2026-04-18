@@ -897,6 +897,8 @@ class ReviewService:
         issues = self.issue_repo.list(review_id)
         findings = self.finding_repo.list(review_id)
         finding_by_id = {item.finding_id: item for item in findings}
+        if self._issues_require_finding_rehydration(issues):
+            return self._rehydrate_issues_from_findings(review_id, issues, findings)
         return [self._realign_issue_location(issue, finding_by_id) for issue in issues]
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
@@ -1231,6 +1233,138 @@ class ReviewService:
                 }
             )
         return issue
+
+    def _issues_require_finding_rehydration(self, issues: list[DebateIssue]) -> bool:
+        for issue in issues:
+            finding_ids = [str(item or "").strip() for item in issue.finding_ids if str(item or "").strip()]
+            if len(finding_ids) > 1:
+                return True
+        return False
+
+    def _rehydrate_issues_from_findings(
+        self,
+        review_id: str,
+        persisted_issues: list[DebateIssue],
+        findings: list[ReviewFinding],
+    ) -> list[DebateIssue]:
+        persisted_issue_by_finding_id: dict[str, DebateIssue] = {}
+        remaining_persisted_issues: list[DebateIssue] = list(persisted_issues)
+        for issue in persisted_issues:
+            for finding_id in issue.finding_ids:
+                finding_key = str(finding_id or "").strip()
+                if finding_key and finding_key not in persisted_issue_by_finding_id:
+                    persisted_issue_by_finding_id[finding_key] = issue
+        rebuilt: list[DebateIssue] = []
+        for finding in findings:
+            persisted_issue = persisted_issue_by_finding_id.get(finding.finding_id)
+            if persisted_issue is None:
+                persisted_issue = self._match_persisted_issue_for_finding(finding, remaining_persisted_issues)
+            if persisted_issue in remaining_persisted_issues:
+                remaining_persisted_issues.remove(persisted_issue)
+            rebuilt.append(self._build_issue_from_finding(review_id, finding, persisted_issue))
+        return rebuilt
+
+    def _match_persisted_issue_for_finding(
+        self,
+        finding: ReviewFinding,
+        persisted_issues: list[DebateIssue],
+    ) -> DebateIssue | None:
+        finding_title = str(finding.title or "").strip()
+        for issue in persisted_issues:
+            if str(issue.file_path or "").strip() != str(finding.file_path or "").strip():
+                continue
+            if int(issue.line_start or 1) != int(finding.line_start or 1):
+                continue
+            candidate_titles = [str(issue.title or "").strip(), *[str(item or "").strip() for item in issue.aggregated_titles]]
+            if finding_title and finding_title in candidate_titles:
+                return issue
+        same_line_candidates = [
+            issue
+            for issue in persisted_issues
+            if str(issue.file_path or "").strip() == str(finding.file_path or "").strip()
+            and int(issue.line_start or 1) == int(finding.line_start or 1)
+        ]
+        if len(same_line_candidates) == 1:
+            return same_line_candidates[0]
+        return None
+
+    def _build_issue_from_finding(
+        self,
+        review_id: str,
+        finding: ReviewFinding,
+        persisted_issue: DebateIssue | None = None,
+    ) -> DebateIssue:
+        issue_status = str(persisted_issue.status or "open").strip() if persisted_issue else "open"
+        issue_resolution = str(persisted_issue.resolution or "").strip() if persisted_issue else ""
+        issue_human_decision = (
+            str(persisted_issue.human_decision or "pending").strip() if persisted_issue else "pending"
+        )
+        issue_needs_human = bool(persisted_issue.needs_human) if persisted_issue else False
+        issue_verified = bool(persisted_issue.verified) if persisted_issue else False
+        issue_needs_debate = bool(persisted_issue.needs_debate) if persisted_issue else False
+        issue_confidence_breakdown = (
+            dict(persisted_issue.confidence_breakdown or {}) if persisted_issue else {}
+        )
+        issue_created_at = persisted_issue.created_at if persisted_issue else finding.created_at
+        issue_updated_at = persisted_issue.updated_at if persisted_issue else finding.created_at
+        return DebateIssue(
+            review_id=review_id,
+            issue_id=finding.finding_id,
+            title=finding.title,
+            summary=self._build_issue_summary_from_finding(finding),
+            finding_type=finding.finding_type,
+            aggregated_finding_types=[],
+            file_path=finding.file_path,
+            line_start=int(finding.line_start or 1),
+            status=issue_status,
+            severity=finding.severity,
+            confidence=float(finding.confidence or 0.0),
+            confidence_breakdown=issue_confidence_breakdown,
+            finding_ids=[finding.finding_id],
+            participant_expert_ids=[finding.expert_id] if str(finding.expert_id or "").strip() else [],
+            aggregated_titles=[finding.title] if str(finding.title or "").strip() else [],
+            aggregated_summaries=[finding.summary] if str(finding.summary or "").strip() else [],
+            aggregated_remediation_strategies=(
+                [finding.remediation_strategy] if str(finding.remediation_strategy or "").strip() else []
+            ),
+            aggregated_remediation_suggestions=(
+                [finding.remediation_suggestion] if str(finding.remediation_suggestion or "").strip() else []
+            ),
+            aggregated_remediation_steps=list(finding.remediation_steps or []),
+            evidence=list(finding.evidence or []),
+            cross_file_evidence=list(finding.cross_file_evidence or []),
+            assumptions=list(finding.assumptions or []),
+            context_files=list(finding.context_files or []),
+            direct_evidence=str(finding.finding_type or "") == "direct_defect",
+            needs_human=issue_needs_human,
+            verified=issue_verified,
+            needs_debate=issue_needs_debate,
+            verifier_name=str(persisted_issue.verifier_name or "").strip() if persisted_issue else "",
+            tool_name=str(persisted_issue.tool_name or "").strip() if persisted_issue else "",
+            tool_verified=bool(persisted_issue.tool_verified) if persisted_issue else False,
+            human_decision=issue_human_decision or "pending",
+            resolution=issue_resolution,
+            created_at=issue_created_at,
+            updated_at=issue_updated_at,
+        )
+
+    def _build_issue_summary_from_finding(self, finding: ReviewFinding) -> str:
+        parts: list[str] = []
+        summary_text = str(finding.summary or "").strip()
+        if summary_text:
+            parts.append("问题汇总：")
+            parts.append(f"- {summary_text}")
+        remediation_items: list[str] = []
+        remediation_suggestion = str(finding.remediation_suggestion or "").strip()
+        if remediation_suggestion:
+            remediation_items.append(remediation_suggestion)
+        remediation_items.extend(
+            str(item or "").strip() for item in list(finding.remediation_steps or []) if str(item or "").strip()
+        )
+        if remediation_items:
+            parts.append("修复建议汇总：")
+            parts.extend(f"- {item}" for item in remediation_items)
+        return "\n".join(parts).strip() or summary_text or "当前 issue 由单条 finding 升级而来。"
 
     def _build_light_report_finding(self, finding: ReviewFinding) -> ReviewFinding:
         """结果页首屏只返回轻量 finding，避免 report 载荷过大。"""

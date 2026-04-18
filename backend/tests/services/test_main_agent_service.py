@@ -941,6 +941,41 @@ def test_main_agent_candidate_hunks_drop_format_only_file_when_review_has_substa
     assert "EventBus" in candidates[0]["excerpt"]
 
 
+def test_main_agent_candidate_hunks_preserve_real_changed_lines():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"],
+        unified_diff=(
+            "diff --git a/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java b/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n"
+            "--- a/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n"
+            "+++ b/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n"
+            "@@ -15,9 +15,9 @@ public final class CourseCreator {\n"
+            "     }\n"
+            " \n"
+            "     public void create(CourseId id, CourseName name, CourseDuration duration) {\n"
+            "-        Course course = Course.create(id, name, duration);\n"
+            "+        Course course = new Course(id, name, duration);\n"
+            " \n"
+            "-        repository.save(course);\n"
+            "         eventBus.publish(course.pullDomainEvents());\n"
+            "+        repository.save(course);\n"
+            "     }\n"
+            " }\n"
+        ),
+    )
+
+    candidates = agent._build_candidate_hunks(subject, agent._build_repository_service(RuntimeSettings()))
+
+    assert len(candidates) == 1
+    assert candidates[0]["start_line"] == 15
+    assert candidates[0]["changed_lines"] == [18, 21]
+
+
 def test_main_agent_treats_sql_line_wrap_reflow_as_format_only():
     agent = MainAgentService()
     excerpt = (

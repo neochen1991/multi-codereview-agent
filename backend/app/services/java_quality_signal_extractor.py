@@ -89,14 +89,14 @@ class JavaQualitySignalExtractor:
             signal_terms["factory_bypass"] = factory_terms
             summary_parts.append("检测到工厂方法被直接构造绕过")
 
-        loop_amplification_terms = self._detect_loop_call_amplification(diff_excerpt)
+        loop_amplification_terms = self._detect_loop_call_amplification(diff_excerpt, combined)
         if loop_amplification_terms:
             signals.append("loop_call_amplification")
             matched_terms.extend(loop_amplification_terms)
             signal_terms["loop_call_amplification"] = loop_amplification_terms
             summary_parts.append("检测到循环内仓储或远程调用，批量路径可能被逐条放大")
 
-        comment_contract_terms = self._detect_comment_contract_unimplemented(diff_excerpt)
+        comment_contract_terms = self._detect_comment_contract_unimplemented(diff_excerpt, combined)
         if comment_contract_terms:
             signals.append("comment_contract_unimplemented")
             matched_terms.extend(comment_contract_terms)
@@ -230,19 +230,19 @@ class JavaQualitySignalExtractor:
             and re.search(r"^\+.*\bnew\s+[a-z_][a-z0-9_]*\s*\(", diff_lower, flags=re.MULTILINE)
         )
 
-    def _detect_loop_call_amplification(self, diff_excerpt: str) -> list[str]:
-        added_lines = [
-            line[1:]
-            for line in diff_excerpt.splitlines()
-            if line.startswith("+") and not line.startswith("+++")
-        ]
-        if not added_lines:
+    def _detect_loop_call_amplification(self, diff_excerpt: str, combined_context: str) -> list[str]:
+        excerpt = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))
+        if not excerpt.strip():
             return []
-        excerpt = "\n".join(added_lines)
         loop_pattern = re.compile(
             r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|forEach\s*\([^)]*\)\s*->)"
-            r"[\s\S]{0,240}?"
-            r"(repository\.|dao\.|mapper\.|query\.|jdbcTemplate\.|restTemplate\.|webClient\.|feign|client\.)",
+            r"[\s\S]{0,420}?"
+            r"("
+            r"[A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|query|jdbcTemplate|sqlSession|entityManager)\."
+            r"|[A-Za-z_][A-Za-z0-9_]*(?:client|api|gateway|facade|proxy|feign)\."
+            r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager)\.(?:get|find|load|fetch|query|list|select|call|invoke|request|send|reserve|deduct|update|save|insert|delete)"
+            r"|jdbcTemplate\.|restTemplate\.|webClient\.|feign[A-Za-z0-9_]*\."
+            r")",
             flags=re.IGNORECASE,
         )
         match = loop_pattern.search(excerpt)
@@ -253,27 +253,33 @@ class JavaQualitySignalExtractor:
         normalized_call = call_token.rstrip(".")
         return [loop_token, normalized_call]
 
-    def _detect_comment_contract_unimplemented(self, diff_excerpt: str) -> list[str]:
+    def _detect_comment_contract_unimplemented(self, diff_excerpt: str, combined_context: str) -> list[str]:
+        normalized_context = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))
         added_lines = [
             line[1:].strip()
             for line in diff_excerpt.splitlines()
             if line.startswith("+") and not line.startswith("+++")
         ]
-        if not added_lines:
+        context_lines = [line.strip() for line in normalized_context.splitlines() if line.strip()]
+        candidate_lines = added_lines + [line for line in context_lines if line not in added_lines]
+        if not candidate_lines:
             return []
         comment_lines = [
             line
-            for line in added_lines
+            for line in candidate_lines
             if line.startswith("//") or line.startswith("/*") or "todo" in line.lower()
         ]
         if not comment_lines:
             return []
-        code_blob = "\n".join(line for line in added_lines if line not in comment_lines).lower()
+        code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
         contract_pairs = [
             (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
             (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),
             (["发送通知", "notify", "通知"], ["notify", "message", "publish"]),
             (["缓存", "cache"], ["cache"]),
+            (["调用接口", "调用下游", "调用远程", "远程接口", "remote", "invoke"], ["client", "api", "gateway", "facade", "proxy", "feign", "resttemplate", "webclient", "invoke", "call", "request", "send"]),
+            (["重试", "retry"], ["retry", "backoff", "attempt"]),
+            (["校验", "validate"], ["validate", "check", "assert"]),
         ]
         for comment in comment_lines:
             lowered_comment = comment.lower()
@@ -281,7 +287,21 @@ class JavaQualitySignalExtractor:
                 if any(token in comment or token in lowered_comment for token in source_tokens):
                     if not any(token in code_blob for token in impl_tokens):
                         return [comment[:48].strip()]
+            if "todo" in lowered_comment:
+                return [comment[:48].strip()]
         return []
+
+    def _normalize_java_context_snippet(self, content: str) -> str:
+        normalized_lines: list[str] = []
+        for raw_line in str(content or "").splitlines():
+            line = str(raw_line or "").rstrip()
+            if not line:
+                normalized_lines.append("")
+                continue
+            line = re.sub(r"^\s*[+\-]\s*", "", line)
+            line = re.sub(r"^\s*\d+\s*\|\s*", "", line)
+            normalized_lines.append(line)
+        return "\n".join(normalized_lines)
 
     def _dedupe(self, values: list[str]) -> list[str]:
         seen: set[str] = set()

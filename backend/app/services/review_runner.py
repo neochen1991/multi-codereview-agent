@@ -1705,9 +1705,14 @@ class ReviewRunner:
                 {
                     "file_path": file_path,
                     "hunk_header": str(item.get("hunk_header") or ""),
-                    "start_line": int(item.get("line_start") or 1),
-                    "end_line": int(item.get("line_start") or 1),
-                    "changed_lines": [int(item.get("line_start") or 1)],
+                    "start_line": int(item.get("start_line") or item.get("line_start") or 1),
+                    "end_line": int(item.get("end_line") or item.get("line_start") or 1),
+                    "changed_lines": [
+                        int(value)
+                        for value in list(item.get("changed_lines") or [])
+                        if isinstance(value, int)
+                    ]
+                    or [int(item.get("line_start") or 1)],
                     "excerpt": str(item.get("excerpt") or ""),
                 }
                 for item in sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))
@@ -4216,10 +4221,13 @@ class ReviewRunner:
         normalized = str(language or "").strip().lower()
         if normalized == "java":
             return (
+                "- 以《阿里巴巴 Java 开发手册》作为 Java 代码最低通用规范基线，再叠加当前产品/专家绑定的规范文档一起审查。\n"
                 "- 遵循 Java / Spring 通用代码规范：命名清晰，单个方法职责收敛，避免把校验、事务、持久化、远程调用混成一个长方法，避免使用 tmp/data/value 这类弱语义命名。\n"
                 "- 关注输入校验、空值处理、异常边界、日志脱敏、权限/租户隔离，以及 @Transactional 范围内的副作用。\n"
+                "- 检查循环体内的 Repository / Service / Client / HTTP / SQL / MQ 调用，识别 N+1、逐条远程调用、批量场景串行放大和数据库往返放大风险。\n"
                 "- 检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写、EAGER/级联加载风险。\n"
                 "- 检查条件分支、状态码、重试次数、批量阈值、字符串标识等是否以魔法值形式直接散落在业务逻辑中，是否应提取为常量、枚举或配置。\n"
+                "- 检查注释、TODO、方法名、接口说明承诺的行为是否真的落地；如果只留下说明、占位或半截逻辑，要明确指出“承诺未实现/承诺与实现不一致”。\n"
                 "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据；证据不足的条目不要输出。"
             )
         if normalized in {"javascript", "jsx", "typescript", "tsx"}:
@@ -5060,7 +5068,12 @@ class ReviewRunner:
                 result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
                 result["verification_needed"] = True
 
-        effective_line_start = self._stabilize_line_start(result.get("line_start"), line_start, target_hunk)
+        explicit_line_start = self._extract_explicit_line_start_from_analysis(result, target_hunk)
+        effective_line_start = self._stabilize_line_start(
+            explicit_line_start if explicit_line_start is not None else result.get("line_start"),
+            line_start,
+            target_hunk,
+        )
         result["line_start"] = effective_line_start
         result["line_end"] = self._stabilize_line_end(result.get("line_end"), effective_line_start, target_hunk)
         result["matched_rules"] = [str(item).strip() for item in list(result.get("matched_rules") or []) if str(item).strip()]
@@ -5486,6 +5499,45 @@ class ReviewRunner:
             if parsed is not None:
                 normalized.append(parsed)
         return normalized
+
+    def _extract_explicit_line_start_from_analysis(
+        self,
+        parsed: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> int | None:
+        candidate_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if not candidate_lines:
+            start_line = self._normalize_optional_line_value(target_hunk.get("start_line"))
+            end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
+            if start_line is not None and end_line is not None:
+                candidate_lines = list(range(start_line, end_line + 1))
+        if not candidate_lines:
+            return None
+
+        text_parts: list[str] = []
+        for key in ("title", "claim", "summary", "code_excerpt", "suggested_code"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                text_parts.append(value)
+        for key in ("evidence", "cross_file_evidence", "assumptions", "change_steps"):
+            text_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+        text_blob = "\n".join(text_parts)
+        if not text_blob:
+            return None
+
+        candidate_set = set(candidate_lines)
+        line_numbers: list[int] = []
+        for pattern in (
+            r"第\s*(\d+)\s*行",
+            r"\bline\s*(\d+)\b",
+            r"^\s*(\d+)\s*\|",
+            r"(\d+)\s*行",
+        ):
+            for match in re.finditer(pattern, text_blob, flags=re.IGNORECASE | re.MULTILINE):
+                parsed_line = self._normalize_optional_line_value(match.group(1))
+                if parsed_line is not None and parsed_line in candidate_set and parsed_line not in line_numbers:
+                    line_numbers.append(parsed_line)
+        return line_numbers[0] if line_numbers else None
 
     def _normalize_optional_line_value(self, value: object) -> int | None:
         try:
