@@ -147,13 +147,14 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
   const codeContext = finding.code_context;
   const currentCode =
+    String(issue?.current_code || "").trim() ||
     codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
     finding.code_excerpt ||
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet;
   const suggestedCode = (() => {
-    const value = String(finding.suggested_code || "").trim();
+    const value = String(issue?.suggested_code || finding.suggested_code || "").trim();
     if (!value) return "";
     const lower = value.toLowerCase();
     const genericMarkers = [
@@ -199,7 +200,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           {
             key: "location",
             label: "代码位置",
-            children: `${finding.file_path}:${finding.line_start}`,
+            children: `${issue?.file_path || finding.file_path}:${issue?.line_start || finding.line_start}`,
           },
           {
             key: "severity",
@@ -210,6 +211,20 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             key: "expert",
             label: "提出专家",
             children: <Tag color="geekblue">{finding.expert_id}</Tag>,
+          },
+          {
+            key: "consistency",
+            label: "一致性校验",
+            children: issue ? (
+              <>
+                <Tag color={issue.consistency_check_status === "passed" ? "success" : issue.consistency_check_status === "repaired" ? "processing" : issue.consistency_check_status === "downgraded" ? "error" : "default"}>
+                  {issue.consistency_check_status || "unchecked"}
+                </Tag>
+                {issue.consistency_check_summary ? <span>{issue.consistency_check_summary}</span> : null}
+              </>
+            ) : (
+              <Tag color="default">未进入 Judge issue 校验</Tag>
+            ),
           },
           {
             key: "status",
