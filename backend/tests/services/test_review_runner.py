@@ -2722,6 +2722,76 @@ def test_review_runner_keeps_loop_amplification_performance_finding(storage_root
     assert runner._should_skip_finding("performance_reliability", finding) is False
 
 
+def test_review_runner_keeps_loop_amplification_finding_without_timeout_keywords(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        review_id="rev_demo",
+        expert_id="performance_reliability",
+        title="循环调用放大",
+        summary="检测到循环内调用，批量路径存在放大风险。",
+        finding_type="risk_hypothesis",
+        severity="medium",
+        confidence=0.42,
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        line_start=41,
+        evidence=["forEach 内调用 orderService.process(item)"],
+        cross_file_evidence=[],
+        context_files=["src/main/java/com/example/OrderBatchService.java"],
+        remediation_strategy="批处理化",
+        remediation_suggestion="把循环内逐条调用改为批量接口。",
+        remediation_steps=[],
+        code_excerpt="41 | items.forEach(item -> orderService.process(item));",
+        suggested_code="",
+        suggested_code_language="java",
+    )
+
+    assert runner._should_skip_finding("performance_reliability", finding) is False
+
+
+def test_review_runner_does_not_fallback_to_default_file_when_multifile_path_missing(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    batch_items = [
+        {
+            "file_path": "src/main/java/com/example/OrderService.java",
+            "target_hunk": {"hunk_header": "@@ -10,2 +10,2 @@", "excerpt": "+ orderRepository.save(order);"},
+        },
+        {
+            "file_path": "src/main/java/com/example/InventoryService.java",
+            "target_hunk": {"hunk_header": "@@ -20,2 +20,2 @@", "excerpt": "+ inventoryRepository.deduct(sku);"},
+        },
+    ]
+    resolved = runner._resolve_finding_file_path(
+        {"title": "可能存在性能风险", "claim": "建议关注批量路径"},
+        fallback_file_path="src/main/java/com/example/OrderService.java",
+        batch_items=batch_items,
+    )
+    assert resolved == ""
+
+
+def test_review_runner_resolves_multifile_path_from_semantics(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    batch_items = [
+        {
+            "file_path": "src/main/java/com/example/OrderService.java",
+            "target_hunk": {"hunk_header": "@@ -10,2 +10,2 @@", "excerpt": "+ orderRepository.save(order);"},
+        },
+        {
+            "file_path": "src/main/java/com/example/InventoryService.java",
+            "target_hunk": {"hunk_header": "@@ -20,4 +20,6 @@", "excerpt": "+ for (Item item : items) {\n+   inventoryRepository.findBySku(item.getSku());\n+ }"},
+        },
+    ]
+    resolved = runner._resolve_finding_file_path(
+        {
+            "title": "循环调用放大",
+            "claim": "for 循环内调用 inventoryRepository.findBySku，批量场景会放大数据库往返。",
+            "evidence": ["inventoryRepository.findBySku 出现在循环中"],
+        },
+        fallback_file_path="src/main/java/com/example/OrderService.java",
+        batch_items=batch_items,
+    )
+    assert resolved == "src/main/java/com/example/InventoryService.java"
+
+
 def test_review_runner_suppresses_no_risk_formatting_findings(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(

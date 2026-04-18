@@ -2891,6 +2891,23 @@ class ReviewRunner:
                 fallback_file_path=file_path,
                 batch_items=normalized_batch_items,
             )
+            if not finding_file_path:
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_dropped_unresolved_file",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 返回的 finding 未能定位到具体文件，已丢弃以避免串线。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "title": str(raw_parsed.get("title") or "").strip(),
+                            "line_start": int(raw_parsed.get("line_start") or 0) if raw_parsed.get("line_start") else 0,
+                            "batch_file_count": len(normalized_batch_items),
+                        },
+                    )
+                )
+                continue
             per_file_batch_item = self._find_batch_item_for_file(normalized_batch_items, finding_file_path)
             per_file_target_hunk = dict(
                 (per_file_batch_item or {}).get("target_hunk") or target_hunk
@@ -4439,17 +4456,72 @@ class ReviewRunner:
         fallback_file_path: str,
         batch_items: list[dict[str, object]],
     ) -> str:
-        allowed_paths = {
+        allowed_paths = sorted(
+            {
             str(item.get("file_path") or "").strip()
             for item in batch_items
             if str(item.get("file_path") or "").strip()
-        }
+            }
+        )
         parsed_path = str(parsed.get("file_path") or "").strip()
-        if parsed_path and parsed_path in allowed_paths:
+        if parsed_path and parsed_path in set(allowed_paths):
             return parsed_path
-        if fallback_file_path in allowed_paths:
-            return str(fallback_file_path)
-        return next(iter(allowed_paths), str(fallback_file_path))
+        if len(allowed_paths) <= 1:
+            if fallback_file_path in set(allowed_paths):
+                return str(fallback_file_path)
+            return allowed_paths[0] if allowed_paths else str(fallback_file_path)
+        inferred_path = self._infer_finding_file_path_from_batch_semantics(parsed, batch_items)
+        if inferred_path:
+            return inferred_path
+        # 多文件批量下如果无法可靠定位具体文件，宁可丢弃该 finding，避免串线污染。
+        return ""
+
+    def _infer_finding_file_path_from_batch_semantics(
+        self,
+        parsed: dict[str, object],
+        batch_items: list[dict[str, object]],
+    ) -> str | None:
+        semantic_parts: list[str] = []
+        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "cross_file_evidence", "assumptions", "change_steps", "matched_rules", "violated_guidelines"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        if not finding_tokens:
+            return None
+
+        scored: list[tuple[str, int]] = []
+        for item in batch_items:
+            file_path = str(item.get("file_path") or "").strip()
+            if not file_path:
+                continue
+            target_hunk = dict(item.get("target_hunk") or {})
+            hunk_tokens = self._extract_anchor_tokens(
+                "\n".join(
+                    [
+                        file_path,
+                        str(target_hunk.get("hunk_header") or ""),
+                        str(target_hunk.get("excerpt") or ""),
+                    ]
+                )
+            )
+            overlap = finding_tokens & hunk_tokens
+            score = 0
+            for token in overlap:
+                score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+            scored.append((file_path, score))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[1], reverse=True)
+        best_path, best_score = scored[0]
+        second_score = scored[1][1] if len(scored) > 1 else 0
+        if best_score <= 0:
+            return None
+        if second_score and best_score == second_score:
+            return None
+        return best_path
 
     def _build_multi_file_prompt_appendix(
         self,
@@ -7022,6 +7094,19 @@ class ReviewRunner:
             "重试",
             "限流",
             "吞吐",
+            "循环",
+            "for",
+            "foreach",
+            "n+1",
+            "逐条",
+            "查库",
+            "数据库往返",
+            "远程调用",
+            "批量",
+            "query",
+            "repository",
+            "jdbc",
+            "sql",
             "锁",
             "热点",
             "退化",
@@ -7039,10 +7124,14 @@ class ReviewRunner:
             "performance",
         }
         has_perf_signal = any(token in text_blob for token in perf_tokens)
+        has_loop_signal = any(
+            token in text_blob
+            for token in {"循环调用放大", "循环内调用", "loop_call_amplification", "for (", "forEach", ".forEach"}
+        )
         has_repo_context = len(finding.context_files) >= 2
         if (
             finding.finding_type == "risk_hypothesis"
-            and (not has_perf_signal and not has_repo_context)
+            and (not has_perf_signal and not has_repo_context and not has_loop_signal)
             and not finding.matched_rules
             and not finding.violated_guidelines
         ):

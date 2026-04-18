@@ -235,23 +235,27 @@ class JavaQualitySignalExtractor:
         if not excerpt.strip():
             return []
         loop_pattern = re.compile(
-            r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|forEach\s*\([^)]*\)\s*->)"
-            r"[\s\S]{0,420}?"
+            r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|do\s*\{|\bforEach\s*\(|\.forEach\s*\()",
+            flags=re.IGNORECASE,
+        )
+        call_pattern = re.compile(
             r"("
             r"[A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|query|jdbcTemplate|sqlSession|entityManager)\."
             r"|[A-Za-z_][A-Za-z0-9_]*(?:client|api|gateway|facade|proxy|feign)\."
-            r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager)\.(?:get|find|load|fetch|query|list|select|call|invoke|request|send|reserve|deduct|update|save|insert|delete)"
+            r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager)\.(?:get|find|load|fetch|query|list|select|call|invoke|request|send|reserve|deduct|update|save|insert|delete|process|handle|execute)"
             r"|jdbcTemplate\.|restTemplate\.|webClient\.|feign[A-Za-z0-9_]*\."
             r")",
             flags=re.IGNORECASE,
         )
-        match = loop_pattern.search(excerpt)
-        if not match:
-            return []
-        loop_token = match.group(1).strip()
-        call_token = match.group(2).strip()
-        normalized_call = call_token.rstrip(".")
-        return [loop_token, normalized_call]
+        for loop_match in loop_pattern.finditer(excerpt):
+            loop_token = loop_match.group(1).strip()
+            # 在循环起点后的窗口中检索外部调用，覆盖 for(:)、stream().forEach 与 lambda block 的常见写法。
+            window = excerpt[loop_match.start() : loop_match.start() + 900]
+            call_match = call_pattern.search(window)
+            if call_match:
+                normalized_call = call_match.group(1).strip().rstrip(".")
+                return [loop_token, normalized_call]
+        return []
 
     def _detect_comment_contract_unimplemented(self, diff_excerpt: str, combined_context: str) -> list[str]:
         normalized_context = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))

@@ -135,6 +135,26 @@ def test_java_quality_signal_extractor_detects_loop_call_amplification_from_cont
     assert "loop_call_amplification" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_detects_stream_foreach_loop_call_amplification() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderBatchService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -40,2 +40,6 @@ public class OrderBatchService {",
+                    "+    items.stream().forEach(item -> {",
+                    "+        orderService.process(item);",
+                    "+        remotePriceClient.fetch(item.getSku());",
+                    "+    });",
+                ]
+            )
+        },
+    )
+
+    assert "loop_call_amplification" in payload["signals"]
+
+
 def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(
