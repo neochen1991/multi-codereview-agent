@@ -3446,7 +3446,7 @@ class ReviewRunner:
         issues: list[DebateIssue],
         findings_by_id: dict[str, ReviewFinding],
         *,
-        max_batch_size: int = 5,
+        max_batch_size: int = 2,
     ) -> list[list[dict[str, object]]]:
         grouped: dict[str, list[dict[str, object]]] = {}
         for issue in issues:
@@ -3609,7 +3609,7 @@ class ReviewRunner:
             batch_payload.append(
                 {
                     "issue_id": issue.issue_id,
-                    "issue": issue.model_dump(mode="json"),
+                    "issue": self._build_issue_consistency_issue_payload(issue),
                     "baseline": baseline,
                     "related_findings": findings_payload,
                 }
@@ -3647,6 +3647,31 @@ class ReviewRunner:
             ']'
             '}'
         )
+
+    def _build_issue_consistency_issue_payload(
+        self,
+        issue: DebateIssue,
+    ) -> dict[str, object]:
+        return {
+            "issue_id": issue.issue_id,
+            "title": str(issue.title or "").strip(),
+            "summary": str(issue.summary or "").strip(),
+            "file_path": str(issue.file_path or "").strip(),
+            "line_start": int(issue.line_start or 1),
+            "status": str(issue.status or "").strip(),
+            "severity": str(issue.severity or "").strip(),
+            "confidence": float(issue.confidence or 0.0),
+            "finding_ids": list(issue.finding_ids or []),
+            "participant_expert_ids": list(issue.participant_expert_ids or []),
+            "needs_human": bool(issue.needs_human),
+            "verified": bool(issue.verified),
+            "resolution": str(issue.resolution or "").strip(),
+            "remediation_strategy": str(issue.remediation_strategy or "").strip(),
+            "remediation_suggestion": str(issue.remediation_suggestion or "").strip(),
+            "remediation_steps": [str(item).strip() for item in list(issue.remediation_steps or []) if str(item).strip()],
+            "current_code": str(issue.current_code or "").strip(),
+            "suggested_code": str(issue.suggested_code or "").strip(),
+        }
 
     def _extract_issue_consistency_batch_results(self, text: str) -> list[dict[str, object]]:
         payload = self._parse_json_payload(text)
