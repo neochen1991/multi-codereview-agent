@@ -1025,6 +1025,177 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response_in_li
     assert len(finding_payloads) == 2
 
 
+def test_review_runner_detects_uncovered_review_observations(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    candidates = [
+        {
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "title": "已有问题",
+            "claim": "已有结论",
+            "observation_ids": ["obs_cov_001"],
+        }
+    ]
+    observations = [
+        {
+            "observation_id": "obs_cov_001",
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "summary": "已覆盖 observation",
+        },
+        {
+            "observation_id": "obs_miss_001",
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 36,
+            "summary": "未覆盖 observation",
+        },
+    ]
+
+    uncovered = runner._find_uncovered_review_observations(candidates, observations)
+
+    assert len(uncovered) == 1
+    assert uncovered[0]["observation_id"] == "obs_miss_001"
+
+
+def test_review_runner_runs_observation_followup_when_first_pass_misses_observation(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_observation_followup_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/obs",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/OrderService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+                "--- a/src/main/java/com/acme/OrderService.java\n"
+                "+++ b/src/main/java/com/acme/OrderService.java\n"
+                "@@ -18,2 +18,5 @@\n"
+                "+ for (Order item : items) {\n"
+                "+     paymentClient.sync(item);\n"
+                "+ }\n"
+                "+ // TODO publish event\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请审查本段变更",
+        metadata={
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "target_hunk": {"hunk_header": "@@ -18,2 +18,5 @@", "excerpt": "+ for (Order item : items) {\n+     paymentClient.sync(item);\n+ }\n+ // TODO publish event"},
+            "repository_context": {
+                "routing_reason": "关键路径改动",
+                "review_observations": [
+                    {
+                        "observation_id": "obs_loop_001",
+                        "kind": "control_flow_with_external_call",
+                        "file_path": "src/main/java/com/acme/OrderService.java",
+                        "line_start": 19,
+                        "line_end": 19,
+                        "summary": "循环体内存在外部调用",
+                        "evidence": ["paymentClient.sync(item) 位于循环体内"],
+                        "risk_hints": ["可能导致逐条远程调用放大"],
+                    }
+                ],
+            },
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+
+    llm_calls: list[str] = []
+
+    def _fake_complete_text(**kwargs):
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        llm_calls.append(phase)
+        if phase == "expert_observation_followup":
+            return LLMTextResult(
+                text=(
+                    '{"findings":['
+                    '{"file_path":"src/main/java/com/acme/OrderService.java","title":"循环内逐条远程调用","claim":"paymentClient.sync(item) 位于循环体内，会放大网络往返与整体时延","finding_type":"direct_defect","severity":"high","line_start":19,"line_end":19,'
+                    '"matched_rules":["PERF-001"],"violated_guidelines":["循环体内避免逐条外部调用"],"rule_based_reasoning":"循环体内逐条远程调用会造成线性放大。",'
+                    '"evidence":["paymentClient.sync(item) 位于 for 循环体内"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                    '"observation_ids":["obs_loop_001"],"fix_strategy":"先聚合数据后批量同步","suggested_fix":"将逐条调用改为批量同步或异步批处理","change_steps":["提取批量入参","改成一次批量同步"],'
+                    '"suggested_code":"paymentClient.syncBatch(items);","confidence":0.92,"verification_needed":false,"verification_plan":""}'
+                    ']}'
+                ),
+                mode="mock",
+                provider="test",
+                model="test",
+                base_url="http://llm.test",
+                api_key_env="TEST_KEY",
+            )
+        return LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"file_path":"src/main/java/com/acme/OrderService.java","title":"注释承诺未落地","claim":"TODO 注释承诺的发布事件逻辑尚未实现","finding_type":"risk_hypothesis","severity":"medium","line_start":21,"line_end":21,'
+                '"matched_rules":["CORR-001"],"violated_guidelines":["承诺行为必须落地"],"rule_based_reasoning":"注释与实现不一致。",'
+                '"evidence":["存在 TODO publish event 注释"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"observation_ids":[],"fix_strategy":"补齐事件发布逻辑","suggested_fix":"在保存后补发领域事件","change_steps":["增加事件构造","补发事件"],'
+                '"suggested_code":"domainEventPublisher.publish(new OrderCreatedEvent(orderId));","confidence":0.73,"verification_needed":false,"verification_plan":""}'
+                ']}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _fake_complete_text)
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/OrderService.java",
+        line_start=18,
+        repository_context=dict(command_message.metadata.get("repository_context") or {}),
+        target_hunk=dict(command_message.metadata.get("target_hunk") or {}),
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    messages = runner.message_repo.list(review.review_id)
+
+    assert len(findings) == 2
+    followup_finding = next(
+        item for item in findings if (item.code_context or {}).get("observation_ids") == ["obs_loop_001"]
+    )
+    assert followup_finding.file_path == "src/main/java/com/acme/OrderService.java"
+    assert any(item.message_type == "expert_observation_followup" for item in messages)
+    assert "expert_observation_followup" in llm_calls
+
+
 def test_review_runner_reanchors_semantically_distinct_findings_to_different_hunks(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -2828,6 +2999,32 @@ def test_review_runner_keeps_comment_contract_unimplemented_risk_as_verifiable(s
     assert any("注释/待办承诺未实现" in item for item in list(result["evidence"]))
 
 
+def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "循环调用放大",
+            "claim": "在循环中调用下游依赖，批量路径会被逐条放大。",
+            "summary": "存在循环内外部调用。",
+            "evidence": ["for (OrderItem item : items)", "orderRepository.findByOrderNo(item.getOrderNo())"],
+            "observation_ids": ["obs_loop_001", "obs_loop_001", ""],
+        },
+        "performance_reliability",
+        "src/main/java/com/example/OrderBatchService.java",
+        41,
+        {
+            "excerpt": "+    for (OrderItem item : items) {\n+        orderRepository.findByOrderNo(item.getOrderNo());\n+    }",
+            "changed_lines": [41, 42, 43],
+            "start_line": 41,
+            "end_line": 43,
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["observation_ids"] == ["obs_loop_001"]
+
+
 def test_review_runner_does_not_fallback_to_default_file_when_multifile_path_missing(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     batch_items = [
@@ -4306,6 +4503,8 @@ def test_review_runner_build_expert_prompt_requests_comment_and_implementation_c
     assert "注释、方法名、接口说明或 TODO 明确承诺了某个行为" in prompt
     assert "实现缺失或与承诺不一致" in prompt
     assert "阿里巴巴 Java 开发手册" in prompt
+    assert "结构化观察点" in prompt
+    assert "observation_ids" in prompt
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):
@@ -4321,10 +4520,10 @@ def test_review_runner_build_finding_code_context_includes_input_trace(storage_r
             "diff --git a/src/main/java/com/example/UserService.java b/src/main/java/com/example/UserService.java\n"
             "--- a/src/main/java/com/example/UserService.java\n"
             "+++ b/src/main/java/com/example/UserService.java\n"
-            "@@ -12,1 +12,2 @@\n"
-            "-        userRepository.findByStatus(status);\n"
-            "+        validate(status);\n"
-            "+        userRepository.findByStatus(status);\n"
+            "@@ -12,1 +12,4 @@\n"
+            "+        for (String status : statuses) {\n"
+            "+            userRepository.findByStatus(status);\n"
+            "+        }\n"
         ),
     )
     expert = ExpertProfile(
@@ -4343,16 +4542,16 @@ def test_review_runner_build_finding_code_context_includes_input_trace(storage_r
         12,
         {
             "file_path": "src/main/java/com/example/UserService.java",
-            "hunk_header": "@@ -12,1 +12,2 @@",
+            "hunk_header": "@@ -12,1 +12,4 @@",
             "start_line": 12,
-            "end_line": 13,
-            "changed_lines": [12, 13],
-            "excerpt": "+        userRepository.findByStatus(status);",
+            "end_line": 15,
+            "changed_lines": [12, 13, 14],
+            "excerpt": "+        for (String status : statuses) {\n+            userRepository.findByStatus(status);\n+        }",
         },
         {
             "primary_context": {
                 "path": "src/main/java/com/example/UserService.java",
-                "snippet": "  12 | validate(status);\n  13 | userRepository.findByStatus(status);",
+                "snippet": "  12 | for (String status : statuses) {\n  13 |     userRepository.findByStatus(status);\n  14 | }",
             },
             "related_contexts": [
                 {
@@ -4384,6 +4583,9 @@ def test_review_runner_build_finding_code_context_includes_input_trace(storage_r
     assert context["review_inputs"]["language_guidance_present"] is True
     assert "事务与副作用" in context["review_inputs"]["language_guidance_topics"]
     assert context["review_inputs"]["matched_rules"][0]["rule_id"] == "PERF-JAVA-001"
+    observations = context["review_observations"]
+    assert isinstance(observations, list) and observations
+    assert observations[0]["kind"] == "control_flow_with_external_call"
 
 
 def test_review_runner_build_knowledge_review_context_includes_java_mode_and_signals(storage_root: Path):

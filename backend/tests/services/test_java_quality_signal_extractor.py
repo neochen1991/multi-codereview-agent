@@ -101,6 +101,10 @@ def test_java_quality_signal_extractor_detects_loop_call_amplification() -> None
     )
 
     assert "loop_call_amplification" in payload["signals"]
+    observation = next(item for item in payload["observations"] if item["signal"] == "loop_call_amplification")
+    assert observation["kind"] == "control_flow_with_external_call"
+    assert observation["line_start"] == 40
+    assert "批量路径放大" in observation["risk_hints"]
 
 
 def test_java_quality_signal_extractor_detects_loop_call_amplification_from_context() -> None:
@@ -209,6 +213,10 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() 
     )
 
     assert "comment_contract_unimplemented" in payload["signals"]
+    observation = next(item for item in payload["observations"] if item["signal"] == "comment_contract_unimplemented")
+    assert observation["kind"] == "declared_intent_without_implementation"
+    assert observation["line_start"] == 22
+    assert "承诺未落地" in observation["risk_hints"]
 
 
 def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_from_context() -> None:

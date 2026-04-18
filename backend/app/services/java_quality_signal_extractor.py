@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -103,12 +104,255 @@ class JavaQualitySignalExtractor:
             signal_terms["comment_contract_unimplemented"] = comment_contract_terms
             summary_parts.append("检测到注释、TODO 或占位实现承诺的行为没有在当前实现中落地")
 
+        observations = self._build_observations(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            signal_terms=signal_terms,
+        )
+
         return {
             "signals": self._dedupe(signals),
             "summary": "；".join(summary_parts),
             "matched_terms": self._dedupe(matched_terms)[:12],
             "signal_terms": {key: self._dedupe(value)[:8] for key, value in signal_terms.items()},
+            "observations": observations,
         }
+
+    def _build_observations(
+        self,
+        *,
+        file_path: str,
+        target_hunk: dict[str, Any],
+        repository_context: dict[str, Any],
+        signal_terms: dict[str, list[str]],
+    ) -> list[dict[str, object]]:
+        observations: list[dict[str, object]] = []
+        for signal_name, terms in signal_terms.items():
+            normalized_terms = [str(item).strip() for item in list(terms or []) if str(item).strip()]
+            if not normalized_terms:
+                continue
+            profile = self._observation_profile(signal_name)
+            if not profile:
+                continue
+            line_start = self._locate_observation_line_start(
+                terms=normalized_terms,
+                target_hunk=target_hunk,
+                repository_context=repository_context,
+            )
+            summary = str(profile.get("summary") or "").format(
+                terms=" / ".join(normalized_terms[:2]),
+            )
+            evidence = self._build_observation_evidence(
+                terms=normalized_terms,
+                target_hunk=target_hunk,
+                repository_context=repository_context,
+            )
+            observation_id = self._build_observation_id(
+                signal_name=signal_name,
+                file_path=file_path,
+                line_start=line_start,
+                terms=normalized_terms,
+            )
+            observations.append(
+                {
+                    "observation_id": observation_id,
+                    "kind": str(profile.get("kind") or signal_name),
+                    "signal": signal_name,
+                    "file_path": str(file_path or "").strip(),
+                    "line_start": line_start,
+                    "line_end": line_start,
+                    "summary": summary,
+                    "evidence": evidence[:3],
+                    "risk_hints": [str(item).strip() for item in list(profile.get("risk_hints") or []) if str(item).strip()][:4],
+                    "related_symbols": normalized_terms[:3],
+                    "confidence": float(profile.get("confidence") or 0.7),
+                }
+            )
+        return observations
+
+    def _observation_profile(self, signal_name: str) -> dict[str, object]:
+        profiles: dict[str, dict[str, object]] = {
+            "loop_call_amplification": {
+                "kind": "control_flow_with_external_call",
+                "summary": "检测到循环体中的外部依赖调用现象：{terms}",
+                "risk_hints": ["批量路径放大", "数据库/网络往返", "N+1 或串行调用风险"],
+                "confidence": 0.86,
+            },
+            "comment_contract_unimplemented": {
+                "kind": "declared_intent_without_implementation",
+                "summary": "检测到注释、TODO、占位实现或方法意图与当前实现可能不一致：{terms}",
+                "risk_hints": ["承诺未落地", "语义误导", "业务行为缺失"],
+                "confidence": 0.84,
+            },
+            "naming_convention_violation": {
+                "kind": "weak_identifier_signal",
+                "summary": "检测到标识符命名质量退化现象：{terms}",
+                "risk_hints": ["可读性下降", "语义不清", "维护成本升高"],
+                "confidence": 0.72,
+            },
+            "magic_value_literal": {
+                "kind": "literal_embedded_in_business_logic",
+                "summary": "检测到业务逻辑中嵌入字面量现象：{terms}",
+                "risk_hints": ["魔法值", "可维护性风险", "配置收敛不足"],
+                "confidence": 0.74,
+            },
+            "unbounded_query_risk": {
+                "kind": "query_without_bound",
+                "summary": "检测到查询缺少边界保护现象：{terms}",
+                "risk_hints": ["无分页", "全量扫描", "数据库压力"],
+                "confidence": 0.8,
+            },
+            "query_semantics_weakened": {
+                "kind": "query_semantics_changed",
+                "summary": "检测到查询语义变化现象：{terms}",
+                "risk_hints": ["结果集扩大", "索引命中下降", "业务语义偏移"],
+                "confidence": 0.76,
+            },
+            "exception_swallowed": {
+                "kind": "error_handling_weakened",
+                "summary": "检测到异常处理被削弱或吞掉异常的现象：{terms}",
+                "risk_hints": ["异常丢失", "排障困难", "补偿风险"],
+                "confidence": 0.77,
+            },
+            "event_ordering_risk": {
+                "kind": "state_and_event_ordering_change",
+                "summary": "检测到事件发布与持久化顺序变化现象：{terms}",
+                "risk_hints": ["事件顺序风险", "一致性风险", "领域事件时序异常"],
+                "confidence": 0.78,
+            },
+            "factory_bypass": {
+                "kind": "construction_path_changed",
+                "summary": "检测到对象构造路径变化现象：{terms}",
+                "risk_hints": ["工厂约束绕过", "不变量丢失", "领域建模退化"],
+                "confidence": 0.73,
+            },
+        }
+        return dict(profiles.get(signal_name) or {})
+
+    def _build_observation_id(
+        self,
+        *,
+        signal_name: str,
+        file_path: str,
+        line_start: int,
+        terms: list[str],
+    ) -> str:
+        raw = f"{signal_name}|{file_path}|{line_start}|{'|'.join(terms[:3])}"
+        return f"obs_{hashlib.md5(raw.encode('utf-8')).hexdigest()[:12]}"
+
+    def _locate_observation_line_start(
+        self,
+        *,
+        terms: list[str],
+        target_hunk: dict[str, Any],
+        repository_context: dict[str, Any],
+    ) -> int:
+        numbered_sources = [
+            str((repository_context.get("current_class_context") or {}).get("snippet") or ""),
+            str((repository_context.get("primary_context") or {}).get("snippet") or ""),
+            str((repository_context.get("current_method_context") or {}).get("snippet") or ""),
+        ]
+        for source in numbered_sources:
+            for line_start, text in self._iter_numbered_lines(source):
+                if self._line_matches_terms(text, terms):
+                    return line_start
+
+        changed_lines = [
+            int(value)
+            for value in list(target_hunk.get("changed_lines") or [])
+            if str(value).strip().isdigit()
+        ]
+        if not changed_lines:
+            excerpt_header = ""
+            excerpt_lines_raw = str(target_hunk.get("excerpt") or "").splitlines()
+            if excerpt_lines_raw and str(excerpt_lines_raw[0] or "").strip().startswith("@@"):
+                excerpt_header = str(excerpt_lines_raw[0] or "").strip()
+            start_line, line_count = self._parse_hunk_new_file_range(
+                str(target_hunk.get("hunk_header") or "").strip() or excerpt_header
+            )
+            if start_line is not None and line_count > 0:
+                changed_lines = list(range(start_line, start_line + line_count))
+        excerpt_lines = [
+            line
+            for line in str(target_hunk.get("excerpt") or "").splitlines()
+            if line.strip() and not line.strip().startswith("@@")
+        ]
+        changed_index = 0
+        for raw_line in excerpt_lines:
+            stripped = raw_line.strip()
+            if stripped.startswith("-"):
+                continue
+            candidate_line = changed_lines[changed_index] if changed_index < len(changed_lines) else None
+            if stripped.startswith("+") or not stripped.startswith("-"):
+                changed_index += 1 if candidate_line is not None else 0
+            cleaned = re.sub(r"^\s*[+ ]\s*", "", stripped)
+            if candidate_line is not None and self._line_matches_terms(cleaned, terms):
+                return candidate_line
+
+        fallback = target_hunk.get("start_line") or (changed_lines[0] if changed_lines else 1)
+        try:
+            return int(fallback or 1)
+        except Exception:
+            return 1
+
+    def _parse_hunk_new_file_range(self, hunk_header: str) -> tuple[int | None, int]:
+        match = re.search(r"\+\s*(\d+)(?:,(\d+))?", str(hunk_header or ""))
+        if not match:
+            return None, 0
+        start_line = int(match.group(1))
+        line_count = int(match.group(2) or 1)
+        return start_line, max(1, line_count)
+
+    def _build_observation_evidence(
+        self,
+        *,
+        terms: list[str],
+        target_hunk: dict[str, Any],
+        repository_context: dict[str, Any],
+    ) -> list[str]:
+        evidence: list[str] = []
+        sources = [
+            str(target_hunk.get("excerpt") or ""),
+            str((repository_context.get("current_class_context") or {}).get("snippet") or ""),
+            str((repository_context.get("primary_context") or {}).get("snippet") or ""),
+        ]
+        for source in sources:
+            for raw_line in str(source or "").splitlines():
+                cleaned = re.sub(r"^\s*\d+\s*\|\s*", "", re.sub(r"^\s*[+ ]\s*", "", raw_line)).strip()
+                if not cleaned:
+                    continue
+                if self._line_matches_terms(cleaned, terms):
+                    evidence.append(cleaned[:180])
+                if len(evidence) >= 3:
+                    return self._dedupe(evidence)
+        return self._dedupe(evidence or terms[:2])
+
+    def _iter_numbered_lines(self, content: str) -> list[tuple[int, str]]:
+        numbered: list[tuple[int, str]] = []
+        for raw_line in str(content or "").splitlines():
+            match = re.match(r"^\s*(\d+)\s*\|\s*(.*)$", str(raw_line or ""))
+            if not match:
+                continue
+            numbered.append((int(match.group(1)), str(match.group(2) or "").strip()))
+        return numbered
+
+    def _line_matches_terms(self, line: str, terms: list[str]) -> bool:
+        lowered_line = str(line or "").lower()
+        for term in terms:
+            normalized = str(term or "").strip().lower()
+            if not normalized:
+                continue
+            if normalized in lowered_line:
+                return True
+            token_candidates = [
+                token
+                for token in re.split(r"[^a-zA-Z0-9_:.#]+", normalized)
+                if token and token not in {"for", "while", "todo", "public", "private", "protected"}
+            ]
+            if any(token in lowered_line for token in token_candidates[:3]):
+                return True
+        return False
 
     def _detect_query_semantics_weakened(self, diff_lower: str) -> bool:
         return bool(

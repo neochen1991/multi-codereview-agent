@@ -2900,6 +2900,23 @@ class ReviewRunner:
             line_start,
             max_findings=max_findings_cap,
         )
+        parsed_candidates = self._append_observation_followup_candidates(
+            review=review,
+            subject=review.subject,
+            expert=expert,
+            file_path=file_path,
+            line_start=line_start,
+            repository_context=repository_context,
+            normalized_batch_items=normalized_batch_items,
+            runtime_settings=runtime_settings,
+            analysis_mode=analysis_mode,
+            llm_request_options=llm_request_options,
+            bound_documents=bound_documents,
+            active_skills=active_skills,
+            rule_screening=rule_screening,
+            initial_candidates=parsed_candidates,
+            max_findings=max_findings_cap,
+        )
         design_alignment = self._extract_design_alignment(runtime_tool_results)
         saved_count = 0
         pending_findings: list[ReviewFinding] = []
@@ -3074,6 +3091,11 @@ class ReviewRunner:
                 suggested_code=str(parsed.get("suggested_code") or "").strip(),
                 suggested_code_language=self._infer_code_language(finding_file_path),
             )
+            observation_ids = self._normalize_text_list(parsed.get("observation_ids"), [])
+            if observation_ids:
+                code_context = dict(finding.code_context or {})
+                code_context["observation_ids"] = observation_ids
+                finding.code_context = code_context
             if self._should_skip_finding(expert.expert_id, finding):
                 self.event_repo.append(
                     ReviewEvent(
@@ -4354,6 +4376,7 @@ class ReviewRunner:
                 if str(item).strip()
             ],
             "java_quality_signal_summary": str(java_quality.get("summary") or "").strip(),
+            "review_observations": self._normalize_review_observations(java_quality.get("observations")),
             "current_class_context": dict(repository_context.get("current_class_context") or {})
             if isinstance(repository_context.get("current_class_context"), dict)
             else {},
@@ -4729,6 +4752,10 @@ class ReviewRunner:
             prompt_repository_context["java_quality_signals"] = list(java_quality.get("signals") or [])
         if str(java_quality.get("summary") or "").strip():
             prompt_repository_context["java_quality_signal_summary"] = str(java_quality.get("summary") or "").strip()
+        if list(java_quality.get("observations") or []):
+            prompt_repository_context["review_observations"] = self._normalize_review_observations(
+                java_quality.get("observations")
+            )
         runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
         repository_context_summary = self._build_repository_context_summary(prompt_repository_context, runtime_tool_results)
         repository_source_blocks = self._build_repository_source_blocks(prompt_repository_context, runtime_tool_results)
@@ -4742,6 +4769,7 @@ class ReviewRunner:
         language = self._infer_code_language(file_path)
         language_general_guidance = self._build_language_general_guidance(language)
         java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, prompt_repository_context)
+        observation_review_summary = self._build_observation_review_summary(prompt_repository_context)
         input_completeness_summary = self._build_review_input_completeness_summary(
             subject,
             file_path,
@@ -4793,6 +4821,7 @@ class ReviewRunner:
             f"代码仓上下文:\n{repository_context_summary}\n"
             f"关键源码上下文:\n{repository_source_blocks}\n"
             f"当前代码片段:\n{code_excerpt}\n"
+            f"结构化观察点:\n{observation_review_summary}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
@@ -4801,12 +4830,13 @@ class ReviewRunner:
             f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”这类推断，"
             f"请直接不输出该条 finding；严禁把“需要用户再去核对上下文”的不确定意见输出为审查结果。\n"
+            f"对“结构化观察点”要逐条复核：它们只是主Agent提炼的可疑代码现象，不等于已经确认的问题。你可以否定观察点；若确认其成立并输出 finding，必须把对应 observation_id 写入 observation_ids。\n"
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _normalize_expert_batch_items(
@@ -4971,6 +5001,9 @@ class ReviewRunner:
             lines.append(f"   同文件 hunk:\n{self._build_hunk_batch_summary(target_hunks)}")
             lines.append(
                 f"   代码仓上下文摘要:\n{self._build_repository_context_summary(repository_context, [])}"
+            )
+            lines.append(
+                f"   结构化观察点:\n{self._build_observation_review_summary(repository_context)}"
             )
             lines.append(f"   目标文件完整 diff:\n{self._build_target_file_full_diff(subject, file_path)}")
             lines.append(
@@ -5423,6 +5456,267 @@ class ReviewRunner:
                 break
         return normalized
 
+    def _append_observation_followup_candidates(
+        self,
+        *,
+        review: ReviewTask,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        normalized_batch_items: list[dict[str, object]],
+        runtime_settings,
+        analysis_mode: Literal["standard", "light"],
+        llm_request_options: dict[str, int | float],
+        bound_documents: list[object],
+        active_skills: list[object],
+        rule_screening: dict[str, object],
+        initial_candidates: list[dict[str, object]],
+        max_findings: int,
+    ) -> list[dict[str, object]]:
+        observations = self._collect_batch_review_observations(repository_context, normalized_batch_items)
+        uncovered_observations = self._find_uncovered_review_observations(initial_candidates, observations)
+        if not uncovered_observations:
+            return list(initial_candidates)
+
+        batch_files = sorted(
+            {
+                str(item.get("file_path") or "").strip()
+                for item in normalized_batch_items
+                if str(item.get("file_path") or "").strip()
+            }
+        )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_observation_followup",
+                content=f"{expert.name_zh} 将对 {len(uncovered_observations)} 个未覆盖 observation 做一次增量复核，避免遗漏问题。",
+                metadata={
+                    "phase": "expert_review",
+                    "analysis_mode": analysis_mode,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "batch_file_count": len(batch_files),
+                    "batch_files": batch_files[:20],
+                    "uncovered_observation_ids": [
+                        str(item.get("observation_id") or "").strip() for item in uncovered_observations[:12]
+                    ],
+                    **self._expert_llm_metadata(expert, runtime_settings),
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="expert_observation_followup_started",
+                phase="expert_review",
+                message=f"{expert.name_zh} 开始对未覆盖 observation 做增量复核",
+                payload={
+                    "expert_id": expert.expert_id,
+                    "observation_count": len(uncovered_observations),
+                    "batch_file_count": len(batch_files),
+                },
+            )
+        )
+
+        followup_prompt = self._build_observation_followup_prompt(
+            subject=subject,
+            expert=expert,
+            repository_context=repository_context,
+            batch_items=normalized_batch_items,
+            uncovered_observations=uncovered_observations,
+            existing_candidates=initial_candidates,
+            max_findings=max_findings,
+        )
+        followup_result = self.llm_chat_service.complete_text(
+            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
+            user_prompt=followup_prompt,
+            resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
+            runtime_settings=runtime_settings,
+            fallback_text='{"findings":[]}',
+            allow_fallback=self._allow_llm_fallback(runtime_settings),
+            timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.75),
+            max_attempts=1,
+            log_context={
+                "review_id": review.review_id,
+                "issue_id": "review_orchestration",
+                "expert_id": expert.expert_id,
+                "phase": "expert_observation_followup",
+                "analysis_mode": analysis_mode,
+                "file_path": file_path,
+                "line_start": line_start,
+            },
+        )
+        followup_candidates = self._parse_expert_analyses(
+            followup_result.text,
+            subject,
+            expert,
+            file_path,
+            line_start,
+            max_findings=max(1, int(max_findings or 1)),
+        )
+        if not followup_candidates:
+            return list(initial_candidates)
+        return self._merge_expert_analysis_candidates(initial_candidates, followup_candidates, max_findings=max_findings)
+
+    def _collect_batch_review_observations(
+        self,
+        repository_context: dict[str, object],
+        batch_items: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        collected: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for item in self._normalize_review_observations(repository_context.get("review_observations")):
+            observation_id = str(item.get("observation_id") or "").strip()
+            if observation_id and observation_id in seen:
+                continue
+            if observation_id:
+                seen.add(observation_id)
+            collected.append(item)
+        for batch_item in batch_items:
+            batch_context = batch_item.get("repository_context")
+            if not isinstance(batch_context, dict):
+                continue
+            for item in self._normalize_review_observations(batch_context.get("review_observations")):
+                observation_id = str(item.get("observation_id") or "").strip()
+                if observation_id and observation_id in seen:
+                    continue
+                if observation_id:
+                    seen.add(observation_id)
+                collected.append(item)
+        return collected
+
+    def _find_uncovered_review_observations(
+        self,
+        candidates: list[dict[str, object]],
+        observations: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        if not observations:
+            return []
+        covered_ids: set[str] = set()
+        covered_lines: dict[str, set[int]] = {}
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            for observation_id in self._normalize_text_list(candidate.get("observation_ids"), []):
+                covered_ids.add(observation_id)
+            candidate_file_path = str(candidate.get("file_path") or "").strip()
+            candidate_line = self._normalize_optional_line_value(candidate.get("line_start"))
+            if candidate_file_path and candidate_line is not None:
+                covered_lines.setdefault(candidate_file_path, set()).add(int(candidate_line))
+
+        uncovered: list[dict[str, object]] = []
+        for item in observations:
+            observation_id = str(item.get("observation_id") or "").strip()
+            if observation_id and observation_id in covered_ids:
+                continue
+            observation_file_path = str(item.get("file_path") or "").strip()
+            observation_line = self._normalize_optional_line_value(item.get("line_start"))
+            if observation_file_path and observation_line is not None:
+                if any(abs(int(observation_line) - line) <= 1 for line in covered_lines.get(observation_file_path, set())):
+                    continue
+            uncovered.append(dict(item))
+        return uncovered[:8]
+
+    def _merge_expert_analysis_candidates(
+        self,
+        base_candidates: list[dict[str, object]],
+        extra_candidates: list[dict[str, object]],
+        *,
+        max_findings: int,
+    ) -> list[dict[str, object]]:
+        merged: list[dict[str, object]] = []
+        seen: set[tuple[str, str, int, str]] = set()
+        for item in list(base_candidates) + list(extra_candidates):
+            if not isinstance(item, dict):
+                continue
+            key = (
+                str(item.get("file_path") or "").strip().lower(),
+                str(item.get("title") or "").strip().lower(),
+                int(self._normalize_optional_line_value(item.get("line_start")) or 0),
+                str(item.get("claim") or "").strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(item))
+            if len(merged) >= max(1, int(max_findings or 1)):
+                break
+        return merged
+
+    def _build_observation_followup_prompt(
+        self,
+        *,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        repository_context: dict[str, object],
+        batch_items: list[dict[str, object]],
+        uncovered_observations: list[dict[str, object]],
+        existing_candidates: list[dict[str, object]],
+        max_findings: int,
+    ) -> str:
+        lines = [
+            f"你是 {expert.name_zh}，现在只做遗漏问题增量复核。",
+            "要求：",
+            "1. 下面给出的 observation 是首轮结果尚未明确覆盖的可疑代码现象；",
+            "2. 你必须逐条判断 observation 是否构成真实问题；",
+            "3. 只有确认成立且不是首轮已输出重复问题时，才输出新的 finding；",
+            "4. 每条新增 finding 必须带 file_path、line_start、line_end、claim、suggested_code、observation_ids；",
+            "5. 如果没有新增问题，返回 {\"findings\":[]}。",
+            f"6. 最多新增 {max(1, int(max_findings or 1))} 条 findings。",
+            "",
+            f"仓库: {subject.repo_id}",
+            f"目标分支: {subject.target_ref}",
+            f"变更文件: {', '.join(subject.changed_files[:20]) or 'unknown'}",
+            "",
+            "首轮已输出 findings 摘要：",
+        ]
+        if existing_candidates:
+            for item in existing_candidates[:12]:
+                lines.append(
+                    f"- {str(item.get('file_path') or '').strip() or 'unknown'}"
+                    f":L{int(self._normalize_optional_line_value(item.get('line_start')) or 1)} "
+                    f"{str(item.get('title') or '').strip() or 'untitled'} | "
+                    f"{str(item.get('claim') or '').strip() or 'no-claim'}"
+                )
+        else:
+            lines.append("- 首轮没有输出 findings。")
+        lines.extend(["", "待复核 observation："])
+        for item in uncovered_observations:
+            observation_id = str(item.get("observation_id") or "").strip() or "observation"
+            file_path = str(item.get("file_path") or "").strip() or "unknown"
+            line_start = int(self._normalize_optional_line_value(item.get("line_start")) or 1)
+            summary = str(item.get("summary") or "").strip()
+            kind = str(item.get("kind") or "").strip()
+            lines.append(f"- {observation_id} | {file_path}:L{line_start} | {kind} | {summary}")
+            evidence = [str(value).strip() for value in list(item.get("evidence") or []) if str(value).strip()]
+            if evidence:
+                lines.append(f"  证据: {' / '.join(evidence[:3])}")
+            risk_hints = [str(value).strip() for value in list(item.get("risk_hints") or []) if str(value).strip()]
+            if risk_hints:
+                lines.append(f"  风险提示: {' / '.join(risk_hints[:3])}")
+
+        appendix = self._build_multi_file_prompt_appendix(subject, expert, batch_items)
+        if appendix.strip():
+            lines.extend(["", appendix])
+        repository_blocks = self._build_repository_source_blocks(repository_context, [])
+        if repository_blocks.strip():
+            lines.extend(["", "关键源码上下文：", repository_blocks])
+
+        lines.extend(
+            [
+                "",
+                "输出格式要求：",
+                '仅输出 JSON：{"findings":[{...}]}',
+                'finding 字段至少包含: file_path, line_start, line_end, title, finding_type, claim, evidence, '
+                'fix_strategy, suggested_fix, change_steps, suggested_code, confidence, observation_ids',
+            ]
+        )
+        return "\n".join(lines)
+
     def _looks_like_concrete_suggested_code(self, value: object, *, file_path: str) -> bool:
         code = str(value or "").strip()
         if not code:
@@ -5674,6 +5968,7 @@ class ReviewRunner:
                 )
         result["context_files"] = [str(item).strip() for item in list(result.get("context_files") or []) if str(item).strip()]
         result["evidence"] = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        result["observation_ids"] = list(dict.fromkeys(self._normalize_text_list(result.get("observation_ids"), [])))
         result["matched_design_points"] = self._normalize_text_list(result.get("matched_design_points"), [])
         result["missing_design_points"] = self._normalize_text_list(result.get("missing_design_points"), [])
         result["extra_implementation_points"] = self._normalize_text_list(result.get("extra_implementation_points"), [])
@@ -6381,6 +6676,65 @@ class ReviewRunner:
             self._append_java_ddd_context_summary(lines, item)
         return "\n".join(lines) if lines else "未补充代码仓上下文。"
 
+    def _normalize_review_observations(self, observations: object) -> list[dict[str, object]]:
+        normalized: list[dict[str, object]] = []
+        for item in list(observations or []):
+            if not isinstance(item, dict):
+                continue
+            observation_id = str(item.get("observation_id") or "").strip()
+            kind = str(item.get("kind") or "").strip()
+            summary = str(item.get("summary") or "").strip()
+            try:
+                line_start = int(item.get("line_start") or 1)
+            except Exception:
+                line_start = 1
+            try:
+                line_end = int(item.get("line_end") or line_start or 1)
+            except Exception:
+                line_end = line_start
+            risk_hints = [str(value).strip() for value in list(item.get("risk_hints") or []) if str(value).strip()]
+            evidence = [str(value).strip() for value in list(item.get("evidence") or []) if str(value).strip()]
+            related_symbols = [
+                str(value).strip() for value in list(item.get("related_symbols") or []) if str(value).strip()
+            ]
+            normalized.append(
+                {
+                    "observation_id": observation_id,
+                    "kind": kind,
+                    "signal": str(item.get("signal") or "").strip(),
+                    "file_path": str(item.get("file_path") or "").strip(),
+                    "line_start": line_start,
+                    "line_end": line_end,
+                    "summary": summary,
+                    "risk_hints": risk_hints[:4],
+                    "evidence": evidence[:3],
+                    "related_symbols": related_symbols[:4],
+                    "confidence": float(item.get("confidence") or 0.0),
+                }
+            )
+        return normalized
+
+    def _build_observation_review_summary(self, repository_context: dict[str, object]) -> str:
+        observations = self._normalize_review_observations(repository_context.get("review_observations"))
+        if not observations:
+            return "- 未提炼到额外结构化观察点；请仍按规范、diff 和源码上下文独立审查。"
+        lines = [
+            "- 以下 observation 只是待复核的代码现象，不是预设结论；请逐条判断其是否构成真实问题。"
+        ]
+        for item in observations[:8]:
+            observation_id = str(item.get("observation_id") or "").strip()
+            line_start = int(item.get("line_start") or 1)
+            kind = str(item.get("kind") or "").strip()
+            summary = str(item.get("summary") or "").strip()
+            lines.append(f"- {observation_id or 'observation'} @L{line_start} [{kind or 'signal'}] {summary}")
+            risk_hints = [str(value).strip() for value in list(item.get("risk_hints") or []) if str(value).strip()]
+            if risk_hints:
+                lines.append(f"  风险提示: {' / '.join(risk_hints[:3])}")
+            evidence = [str(value).strip() for value in list(item.get("evidence") or []) if str(value).strip()]
+            if evidence:
+                lines.append(f"  证据: {' / '.join(evidence[:2])}")
+        return "\n".join(lines)
+
     def _build_repository_source_blocks(
         self,
         repository_context: dict[str, object],
@@ -6492,6 +6846,16 @@ class ReviewRunner:
         java_quality_signal_summary = str(context_payload.get("java_quality_signal_summary") or "").strip()
         if java_quality_signal_summary:
             lines.append(f"- Java 通用质量摘要: {java_quality_signal_summary}")
+        review_observations = self._normalize_review_observations(context_payload.get("review_observations"))
+        if review_observations:
+            lines.append("- 结构化观察点:")
+            for item in review_observations[:6]:
+                lines.append(
+                    f"  * {str(item.get('observation_id') or '').strip() or 'observation'} "
+                    f"@L{int(item.get('line_start') or 1)} "
+                    f"[{str(item.get('kind') or '').strip() or 'signal'}] "
+                    f"{str(item.get('summary') or '').strip()}"
+                )
         current_class_context = context_payload.get("current_class_context")
         if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
             lines.append("- Java 当前类问题片段:")
