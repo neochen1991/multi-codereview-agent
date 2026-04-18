@@ -2947,6 +2947,19 @@ class ReviewRunner:
                 continue
             dedupe_keys.add(dedupe_key)
 
+            raw_suggested_code = str(parsed.get("suggested_code") or "").strip()
+            fallback_suggested_code = self._build_suggested_code(
+                review.subject,
+                finding_file_path,
+                parsed_line_start,
+                expert.expert_id,
+            )
+            effective_suggested_code = (
+                fallback_suggested_code
+                if self._should_replace_suggested_code(raw_suggested_code, finding_file_path)
+                else raw_suggested_code
+            )
+
             finding = ReviewFinding(
                 review_id=review.review_id,
                 expert_id=expert.expert_id,
@@ -3019,10 +3032,7 @@ class ReviewRunner:
                     bound_documents=bound_documents,
                     rule_screening=rule_screening,
                 ),
-                suggested_code=str(
-                    parsed.get("suggested_code")
-                    or self._build_suggested_code(review.subject, finding_file_path, parsed_line_start, expert.expert_id)
-                ),
+                suggested_code=effective_suggested_code,
                 suggested_code_language=self._infer_code_language(finding_file_path),
             )
             if self._should_skip_finding(expert.expert_id, finding):
@@ -4086,6 +4096,10 @@ class ReviewRunner:
         expert_id: str,
     ) -> str:
         language = self._infer_code_language(file_path)
+        if language == "java":
+            contextual_java = self._build_contextual_java_suggested_code(subject, file_path, line_start)
+            if contextual_java:
+                return contextual_java
         if language == "sql":
             return (
                 f"-- Suggested fix for {file_path}\n"
@@ -4193,6 +4207,53 @@ class ReviewRunner:
             "# 1. Separate validation from execution\n"
             "# 2. Return early on invalid input\n"
             "# 3. Keep the happy path flat and testable\n"
+        )
+
+    def _should_replace_suggested_code(self, suggested_code: str, file_path: str) -> bool:
+        code = str(suggested_code or "").strip()
+        if not code:
+            return True
+        language = self._infer_code_language(file_path)
+        lower = code.lower()
+        placeholder_markers = [
+            "当前还没有生成建议修改代码",
+            "please verify against real source",
+            "# suggested rewrite for",
+            "fallback",
+            "伪代码",
+            "示例代码",
+            "请结合实际",
+            "根据实际情况",
+            "需结合上下文",
+        ]
+        if any(marker in lower for marker in placeholder_markers):
+            return True
+        if language == "java":
+            java_signal = any(token in code for token in (";", "{", "}", "class ", "public ", "private ", "protected "))
+            if not java_signal:
+                return True
+        return False
+
+    def _build_contextual_java_suggested_code(self, subject: ReviewSubject, file_path: str, line_start: int) -> str:
+        snippet = str(self._load_repository_problem_context(subject, file_path, line_start, {}).get("snippet") or "").strip()
+        if not snippet:
+            snippet = str(self._load_repository_source_excerpt(subject, file_path, line_start) or "").strip()
+        if not snippet:
+            return ""
+        normalized_lines = []
+        for raw in snippet.splitlines():
+            line = re.sub(r"^\s*\d+\s+\|\s?", "", str(raw))
+            normalized_lines.append(line.rstrip())
+        normalized = "\n".join(normalized_lines).strip()
+        if not normalized:
+            return ""
+        if len(normalized) > 2200:
+            normalized = normalized[:2200].rstrip() + "\n// ... (truncated)"
+        return (
+            f"// file: {file_path}\n"
+            f"// focus line: {max(1, int(line_start or 1))}\n"
+            "// 建议以当前真实代码为基础进行修改，下面给出可直接对照的代码片段：\n"
+            f"{normalized}\n"
         )
 
     def _infer_code_language(self, file_path: str) -> str:
