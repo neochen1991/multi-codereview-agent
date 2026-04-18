@@ -213,20 +213,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             children: <Tag color="geekblue">{finding.expert_id}</Tag>,
           },
           {
-            key: "consistency",
-            label: "一致性校验",
-            children: issue ? (
-              <>
-                <Tag color={issue.consistency_check_status === "passed" ? "success" : issue.consistency_check_status === "repaired" ? "processing" : issue.consistency_check_status === "downgraded" ? "error" : "default"}>
-                  {issue.consistency_check_status || "unchecked"}
-                </Tag>
-                {issue.consistency_check_summary ? <span>{issue.consistency_check_summary}</span> : null}
-              </>
-            ) : (
-              <Tag color="default">未进入 Judge issue 校验</Tag>
-            ),
-          },
-          {
             key: "status",
             label: "裁决状态",
             children: (

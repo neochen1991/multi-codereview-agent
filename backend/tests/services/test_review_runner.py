@@ -4495,7 +4495,7 @@ def test_review_runner_validate_final_issues_with_judge_emits_validation_message
 
     def _fake_complete_text(**_kwargs):
         return LLMTextResult(
-            text='{"status":"repaired","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询","组装Map"],"current_code":"for (Long id : ids) {\\n    repository.findById(id);\\n}","suggested_code":"Map<Long, Order> orderMap = repository.findAllById(ids)...;","consistency_conflicts":[],"reason":"Judge 已修正 issue 文案与代码片段，四段内容现已一致。"}',
+            text='{"results":[{"issue_id":"iss_demo","status":"repaired","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询","组装Map"],"current_code":"for (Long id : ids) {\\n    repository.findById(id);\\n}","suggested_code":"Map<Long, Order> orderMap = repository.findAllById(ids)...;","consistency_conflicts":[],"reason":"Judge 已修正 issue 文案与代码片段，四段内容现已一致。"}]}',
             mode="live",
             provider="test",
             model="test-model",
@@ -4531,3 +4531,115 @@ def test_review_runner_validate_final_issues_with_judge_emits_validation_message
     validation_message = next(item for item in messages if item.message_type == "judge_consistency_validation")
     assert validation_message.metadata["validation_status"] == "repaired"
     assert "Judge 已修正 issue 文案与代码片段" in validation_message.content
+
+
+def test_review_runner_batches_issue_consistency_validation_by_file(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderService.java"],
+        ),
+        status="running",
+        phase="judge",
+    )
+    issues = [
+        DebateIssue(
+            review_id=review.review_id,
+            issue_id="iss_demo_1",
+            title="订单循环里逐条查库",
+            summary="for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=42,
+            status="resolved",
+            severity="high",
+            confidence=0.9,
+            finding_ids=["fdg_demo_1"],
+            participant_expert_ids=["performance_reliability"],
+        ),
+        DebateIssue(
+            review_id=review.review_id,
+            issue_id="iss_demo_2",
+            title="循环中逐条远程调用",
+            summary="for 循环中逐条调用 rpcClient.query，存在调用放大风险。",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=58,
+            status="resolved",
+            severity="high",
+            confidence=0.88,
+            finding_ids=["fdg_demo_2"],
+            participant_expert_ids=["performance_reliability"],
+        ),
+    ]
+    findings_by_id = {
+        "fdg_demo_1": ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_demo_1",
+            expert_id="performance_reliability",
+            title="循环中逐条查库",
+            summary="for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=42,
+            remediation_strategy="改成批量查询",
+            remediation_suggestion="先批量查，再组装映射。",
+            remediation_steps=["抽取ID", "批量查询"],
+            code_excerpt="for (Long id : ids) { repository.findById(id); }",
+            suggested_code="repository.findAllById(ids);",
+        ),
+        "fdg_demo_2": ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_demo_2",
+            expert_id="performance_reliability",
+            title="循环中逐条远程调用",
+            summary="for 循环中逐条调用 rpcClient.query，存在调用放大风险。",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=58,
+            remediation_strategy="改成批量接口",
+            remediation_suggestion="先聚合参数，再批量拉取。",
+            remediation_steps=["聚合参数", "批量调用"],
+            code_excerpt="for (Long id : ids) { rpcClient.query(id); }",
+            suggested_code="rpcClient.batchQuery(ids);",
+        ),
+    }
+    call_count = {"value": 0}
+
+    def _fake_complete_text(**_kwargs):
+        call_count["value"] += 1
+        return LLMTextResult(
+            text='{"results":[{"issue_id":"iss_demo_1","status":"passed","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询"],"current_code":"for (Long id : ids) { repository.findById(id); }","suggested_code":"repository.findAllById(ids);","consistency_conflicts":[],"reason":"通过。"},{"issue_id":"iss_demo_2","status":"passed","title":"循环中逐条远程调用","summary":"for 循环中逐条调用 rpcClient.query，存在调用放大风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":58,"remediation_strategy":"改成批量接口","remediation_suggestion":"先聚合参数，再批量拉取。","remediation_steps":["聚合参数","批量调用"],"current_code":"for (Long id : ids) { rpcClient.query(id); }","suggested_code":"rpcClient.batchQuery(ids);","consistency_conflicts":[],"reason":"通过。"}]}',
+            mode="live",
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "resolve_main_agent",
+        lambda _runtime: LLMResolution(
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            api_key="secret",
+        ),
+    )
+
+    validated = runner._validate_final_issues_with_judge(
+        review=review,
+        issues=issues,
+        findings_by_id=findings_by_id,
+        runtime_settings=runner.runtime_settings_service.get(),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+    )
+
+    assert call_count["value"] == 1
+    assert len(validated) == 2
+    assert all(item.consistency_check_status == "passed" for item in validated)

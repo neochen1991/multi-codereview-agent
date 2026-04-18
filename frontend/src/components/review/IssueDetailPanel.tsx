@@ -114,14 +114,6 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="置信度">
                 {`${(issue.confidence * 100).toFixed(0)}%`}
               </Descriptions.Item>
-              <Descriptions.Item label="一致性校验">
-                <Space wrap>
-                  <Tag color={issue.consistency_check_status === "passed" ? "success" : issue.consistency_check_status === "repaired" ? "processing" : issue.consistency_check_status === "downgraded" ? "error" : "default"}>
-                    {issue.consistency_check_status || "unchecked"}
-                  </Tag>
-                  {issue.consistency_check_summary ? <span>{issue.consistency_check_summary}</span> : null}
-                </Space>
-              </Descriptions.Item>
             </Descriptions>
 
             {Object.keys(confidenceBreakdown).length ? (
