@@ -3025,6 +3025,33 @@ def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(stora
     assert result["observation_ids"] == ["obs_loop_001"]
 
 
+def test_review_runner_normalize_review_observations_preserves_language_and_tags(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    normalized = runner._normalize_review_observations(
+        [
+            {
+                "observation_id": "obs_generic_001",
+                "kind": "cross_layer_dependency",
+                "signal": "cross_layer_dependency",
+                "language": "java",
+                "file_path": "src/main/java/com/example/OrderController.java",
+                "line_start": 24,
+                "line_end": 24,
+                "summary": "Controller 直接依赖 repository",
+                "risk_hints": ["分层耦合"],
+                "evidence": ["orderRepository.save(request)"],
+                "related_symbols": ["OrderController", "orderRepository"],
+                "tags": ["layering", "architecture"],
+                "confidence": 0.81,
+            }
+        ]
+    )
+
+    assert normalized[0]["language"] == "java"
+    assert normalized[0]["tags"] == ["layering", "architecture"]
+
+
 def test_review_runner_does_not_fallback_to_default_file_when_multifile_path_missing(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     batch_items = [

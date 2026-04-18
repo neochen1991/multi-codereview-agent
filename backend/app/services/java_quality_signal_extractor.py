@@ -18,7 +18,7 @@ class JavaQualitySignalExtractor:
         full_diff: str = "",
     ) -> dict[str, object]:
         if Path(str(file_path or "")).suffix.lower() != ".java":
-            return {"signals": [], "summary": "", "matched_terms": []}
+            return self._empty_payload(language="text")
 
         target_hunk = dict(target_hunk or {})
         repository_context = dict(repository_context or {})
@@ -55,6 +55,13 @@ class JavaQualitySignalExtractor:
             signal_terms["unbounded_query_risk"] = query_risk_terms
             summary_parts.append("检测到分页或 limit 保护被移除")
 
+        query_plan_terms = self._detect_query_plan_risk(diff_excerpt, combined)
+        if query_plan_terms:
+            signals.append("query_plan_risk")
+            matched_terms.extend(query_plan_terms)
+            signal_terms["query_plan_risk"] = query_plan_terms
+            summary_parts.append("检测到查询条件、排序或模糊匹配可能带来索引失配与计划退化")
+
         naming_violation = self._detect_naming_convention_violation(diff_excerpt)
         if naming_violation:
             signals.append("naming_convention_violation")
@@ -76,6 +83,13 @@ class JavaQualitySignalExtractor:
             signal_terms["exception_swallowed"] = swallow_terms
             summary_parts.append("检测到 catch 块吞异常或异常处理被移除")
 
+        exception_semantics_terms = self._detect_exception_semantics_weakened(diff_excerpt, combined)
+        if exception_semantics_terms:
+            signals.append("exception_semantics_weakened")
+            matched_terms.extend(exception_semantics_terms)
+            signal_terms["exception_semantics_weakened"] = exception_semantics_terms
+            summary_parts.append("检测到异常后的返回语义被弱化或成功语义被误保留")
+
         if self._detect_event_ordering_risk(diff_lower):
             signals.append("event_ordering_risk")
             event_terms = ["publish", "save", "pullDomainEvents"]
@@ -90,12 +104,50 @@ class JavaQualitySignalExtractor:
             signal_terms["factory_bypass"] = factory_terms
             summary_parts.append("检测到工厂方法被直接构造绕过")
 
+        cross_layer_terms = self._detect_cross_layer_dependency(
+            file_path=file_path,
+            diff_excerpt=diff_excerpt,
+            combined_context=combined,
+        )
+        if cross_layer_terms:
+            signals.append("cross_layer_dependency")
+            matched_terms.extend(cross_layer_terms)
+            signal_terms["cross_layer_dependency"] = cross_layer_terms
+            summary_parts.append("检测到分层边界被直接穿透")
+
+        transactional_side_effect_terms = self._detect_transactional_side_effect(
+            diff_excerpt=diff_excerpt,
+            combined_context=combined,
+        )
+        if transactional_side_effect_terms:
+            signals.append("transactional_side_effect")
+            matched_terms.extend(transactional_side_effect_terms)
+            signal_terms["transactional_side_effect"] = transactional_side_effect_terms
+            summary_parts.append("检测到事务边界内混入外部副作用")
+
+        configuration_behavior_terms = self._detect_configuration_behavior_coupling(
+            diff_excerpt=diff_excerpt,
+            combined_context=combined,
+        )
+        if configuration_behavior_terms:
+            signals.append("configuration_behavior_coupling")
+            matched_terms.extend(configuration_behavior_terms)
+            signal_terms["configuration_behavior_coupling"] = configuration_behavior_terms
+            summary_parts.append("检测到配置开关直接控制业务副作用或核心路径")
+
         loop_amplification_terms = self._detect_loop_call_amplification(diff_excerpt, combined)
         if loop_amplification_terms:
             signals.append("loop_call_amplification")
             matched_terms.extend(loop_amplification_terms)
             signal_terms["loop_call_amplification"] = loop_amplification_terms
             summary_parts.append("检测到循环内仓储或远程调用，批量路径可能被逐条放大")
+
+        bulk_processing_terms = self._detect_bulk_processing_risk(diff_excerpt, combined)
+        if bulk_processing_terms:
+            signals.append("bulk_processing_risk")
+            matched_terms.extend(bulk_processing_terms)
+            signal_terms["bulk_processing_risk"] = bulk_processing_terms
+            summary_parts.append("检测到集合/批处理路径缺少批量边界，可能逐条持久化或逐条外调")
 
         comment_contract_terms = self._detect_comment_contract_unimplemented(diff_excerpt, combined)
         if comment_contract_terms:
@@ -112,6 +164,7 @@ class JavaQualitySignalExtractor:
         )
 
         return {
+            "language": "java",
             "signals": self._dedupe(signals),
             "summary": "；".join(summary_parts),
             "matched_terms": self._dedupe(matched_terms)[:12],
@@ -159,6 +212,7 @@ class JavaQualitySignalExtractor:
                     "observation_id": observation_id,
                     "kind": str(profile.get("kind") or signal_name),
                     "signal": signal_name,
+                    "language": "java",
                     "file_path": str(file_path or "").strip(),
                     "line_start": line_start,
                     "line_end": line_start,
@@ -166,6 +220,7 @@ class JavaQualitySignalExtractor:
                     "evidence": evidence[:3],
                     "risk_hints": [str(item).strip() for item in list(profile.get("risk_hints") or []) if str(item).strip()][:4],
                     "related_symbols": normalized_terms[:3],
+                    "tags": [str(item).strip() for item in list(profile.get("tags") or []) if str(item).strip()][:4],
                     "confidence": float(profile.get("confidence") or 0.7),
                 }
             )
@@ -209,11 +264,25 @@ class JavaQualitySignalExtractor:
                 "risk_hints": ["结果集扩大", "索引命中下降", "业务语义偏移"],
                 "confidence": 0.76,
             },
+            "query_plan_risk": {
+                "kind": "query_plan_risk",
+                "summary": "检测到查询计划可能退化的现象：{terms}",
+                "risk_hints": ["索引失配", "排序放大", "扫描范围扩大"],
+                "confidence": 0.79,
+                "tags": ["query", "performance"],
+            },
             "exception_swallowed": {
                 "kind": "error_handling_weakened",
                 "summary": "检测到异常处理被削弱或吞掉异常的现象：{terms}",
                 "risk_hints": ["异常丢失", "排障困难", "补偿风险"],
                 "confidence": 0.77,
+            },
+            "exception_semantics_weakened": {
+                "kind": "error_semantics_changed",
+                "summary": "检测到异常后返回语义被弱化的现象：{terms}",
+                "risk_hints": ["错误被伪装成成功", "补偿链路失真", "状态不一致"],
+                "confidence": 0.8,
+                "tags": ["exception", "semantics"],
             },
             "event_ordering_risk": {
                 "kind": "state_and_event_ordering_change",
@@ -226,9 +295,48 @@ class JavaQualitySignalExtractor:
                 "summary": "检测到对象构造路径变化现象：{terms}",
                 "risk_hints": ["工厂约束绕过", "不变量丢失", "领域建模退化"],
                 "confidence": 0.73,
+                "tags": ["construction", "domain-model"],
+            },
+            "cross_layer_dependency": {
+                "kind": "cross_layer_dependency",
+                "summary": "检测到跨层直接依赖现象：{terms}",
+                "risk_hints": ["分层耦合", "职责穿透", "架构边界弱化"],
+                "confidence": 0.78,
+                "tags": ["layering", "architecture"],
+            },
+            "transactional_side_effect": {
+                "kind": "transactional_side_effect",
+                "summary": "检测到事务边界与外部副作用耦合现象：{terms}",
+                "risk_hints": ["事务内副作用", "一致性风险", "重试/回滚放大"],
+                "confidence": 0.82,
+                "tags": ["transaction", "side-effect"],
+            },
+            "configuration_behavior_coupling": {
+                "kind": "configuration_behavior_coupling",
+                "summary": "检测到配置或开关直接决定核心业务行为的现象：{terms}",
+                "risk_hints": ["配置驱动业务语义", "环境差异扩大", "隐藏分支"],
+                "confidence": 0.75,
+                "tags": ["configuration", "behavior"],
+            },
+            "bulk_processing_risk": {
+                "kind": "bulk_processing_boundary_missing",
+                "summary": "检测到批处理或集合路径缺少批量边界现象：{terms}",
+                "risk_hints": ["逐条持久化/外调", "批处理放大", "吞吐退化"],
+                "confidence": 0.82,
+                "tags": ["bulk", "performance"],
             },
         }
         return dict(profiles.get(signal_name) or {})
+
+    def _empty_payload(self, language: str) -> dict[str, object]:
+        return {
+            "language": str(language or "text"),
+            "signals": [],
+            "summary": "",
+            "matched_terms": [],
+            "signal_terms": {},
+            "observations": [],
+        }
 
     def _build_observation_id(
         self,
@@ -377,6 +485,28 @@ class JavaQualitySignalExtractor:
         )
         return removed_limit or added_unbounded_select or no_paging_visible
 
+    def _detect_query_plan_risk(self, diff_excerpt: str, combined_context: str) -> list[str]:
+        combined = "\n".join([diff_excerpt, combined_context])
+        lowered = combined.lower()
+        query_shape = any(token in lowered for token in ("select ", "jdbcTemplate.query", "@query", "criteriabuilder", "querywrapper", "lambdaquerywrapper"))
+        if not query_shape:
+            return []
+        like_and_order = (" like " in lowered or "containing" in lowered or "startswith" in lowered or "endswith" in lowered) and " order by " in lowered
+        leading_wildcard = bool(re.search(r"like\s+['\"]?%|like\s+\?", lowered))
+        fuzzy_condition = any(token in lowered for token in ("findby") ) and any(token in lowered for token in ("containing", "like"))
+        if like_and_order or leading_wildcard or fuzzy_condition:
+            terms: list[str] = []
+            if "like" in lowered or "containing" in lowered:
+                terms.append("like")
+            if "order by" in lowered:
+                terms.append("order_by")
+            if "select *" in lowered:
+                terms.append("select_all")
+            if "jdbcTemplate.query" in combined:
+                terms.append("jdbcTemplate.query")
+            return terms[:4]
+        return []
+
     def _detect_naming_convention_violation(self, diff_excerpt: str) -> list[str]:
         added_identifiers: list[str] = []
         for line in diff_excerpt.splitlines():
@@ -461,6 +591,28 @@ class JavaQualitySignalExtractor:
         )
         return removed_handling or empty_catch
 
+    def _detect_exception_semantics_weakened(self, diff_excerpt: str, combined_context: str) -> list[str]:
+        combined = "\n".join([diff_excerpt, combined_context])
+        lowered = combined.lower()
+        if "catch" not in lowered:
+            return []
+        catch_blocks = re.findall(r"catch\s*\([^)]*\)\s*\{(.*?)\}", combined, flags=re.IGNORECASE | re.DOTALL)
+        fallback_patterns = [
+            r"return\s+true\s*;",
+            r"return\s+false\s*;",
+            r"return\s+null\s*;",
+            r"return\s+collections\.empty\w*\(",
+            r"return\s+list\.of\(",
+            r"return\s+optional\.empty\(",
+            r"return\s+\d+\s*;",
+        ]
+        for block in catch_blocks:
+            lowered_block = str(block or "").lower()
+            if any(re.search(pattern, lowered_block, flags=re.IGNORECASE) for pattern in fallback_patterns):
+                fallback = re.search(r"return\s+([^;]+);", str(block or ""), flags=re.IGNORECASE)
+                return ["catch", str((fallback.group(1) if fallback else "fallback_return")).strip()]
+        return []
+
     def _detect_event_ordering_risk(self, diff_lower: str) -> bool:
         removed_save = re.search(r"^-.*\brepository\.save\(", diff_lower, flags=re.MULTILINE)
         added_save = re.search(r"^\+.*\brepository\.save\(", diff_lower, flags=re.MULTILINE)
@@ -473,6 +625,94 @@ class JavaQualitySignalExtractor:
             re.search(r"^-.*\.[a-z_]*create\s*\(", diff_lower, flags=re.MULTILINE)
             and re.search(r"^\+.*\bnew\s+[a-z_][a-z0-9_]*\s*\(", diff_lower, flags=re.MULTILINE)
         )
+
+    def _detect_cross_layer_dependency(
+        self,
+        *,
+        file_path: str,
+        diff_excerpt: str,
+        combined_context: str,
+    ) -> list[str]:
+        lowered_path = str(file_path or "").lower()
+        lowered = "\n".join([diff_excerpt, combined_context]).lower()
+        controller_like = any(token in lowered_path for token in ("/controller", "/interfaces/", "controller.java")) or any(
+            token in lowered for token in ("@restcontroller", "@controller", "class ordercontroller", "class .*controller")
+        )
+        domain_like = any(token in lowered_path for token in ("/domain/", "/model/"))
+        application_like = any(token in lowered_path for token in ("/application/", "/app/"))
+        direct_repository = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper))\s*\.", diff_excerpt, flags=re.IGNORECASE)
+        infra_import = re.search(r"\bimport\s+.*(?:infrastructure|infra|persistence)\.", combined_context, flags=re.IGNORECASE)
+        if controller_like and direct_repository:
+            return ["controller", str(direct_repository.group(1) or "").strip()]
+        if domain_like and (direct_repository or infra_import):
+            return ["domain", str((direct_repository.group(1) if direct_repository else "infrastructure"))]
+        if application_like and infra_import and direct_repository:
+            return ["application", str(direct_repository.group(1) or "").strip()]
+        return []
+
+    def _detect_transactional_side_effect(self, *, diff_excerpt: str, combined_context: str) -> list[str]:
+        combined = "\n".join([diff_excerpt, combined_context])
+        lowered = combined.lower()
+        if "@transactional" not in lowered:
+            return []
+        persistence_call = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper)|entityManager|jdbcTemplate)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        side_effect_call = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*(?:client|gateway|proxy|adapter|connector|eventBus|publisher|producer|mq|kafka|rocketMq|restTemplate|webClient))\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        if persistence_call and side_effect_call:
+            return [
+                f"{str(persistence_call.group(1) or '').strip()}.{str(persistence_call.group(2) or '').strip()}",
+                f"{str(side_effect_call.group(1) or '').strip()}.{str(side_effect_call.group(2) or '').strip()}",
+            ]
+        if persistence_call and ("publish(" in lowered or "send(" in lowered or "reserve(" in lowered):
+            return [f"{str(persistence_call.group(1) or '').strip()}.{str(persistence_call.group(2) or '').strip()}", "outbound_side_effect"]
+        return []
+
+    def _detect_configuration_behavior_coupling(self, *, diff_excerpt: str, combined_context: str) -> list[str]:
+        combined = "\n".join([diff_excerpt, combined_context])
+        lowered = combined.lower()
+        config_name_match = re.search(
+            r"(?:@value\(\s*\"\$\{([^}]+)\}\"|feature[A-Za-z0-9_]*|toggle[A-Za-z0-9_]*|flag[A-Za-z0-9_]*|config[A-Za-z0-9_]*)",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        if not config_name_match:
+            return []
+        business_effect = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*(?:repository|repo|client|gateway|publisher|eventBus|service))\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        conditional = " if " in f" {lowered} " or "switch" in lowered or "?" in combined
+        if business_effect and conditional:
+            config_name = str(config_name_match.group(1) or config_name_match.group(0) or "").strip()
+            return [config_name or "feature_flag", f"{str(business_effect.group(1) or '').strip()}.{str(business_effect.group(2) or '').strip()}"]
+        return []
+
+    def _detect_bulk_processing_risk(self, diff_excerpt: str, combined_context: str) -> list[str]:
+        excerpt = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))
+        lowered = excerpt.lower()
+        batch_shape = any(token in lowered for token in ("list<", "set<", "collection<", "page<", "items", "orders", "batch", "stream()", "foreach"))
+        if not batch_shape:
+            return []
+        loop_and_call_terms = self._detect_loop_call_amplification(diff_excerpt, combined_context)
+        if loop_and_call_terms:
+            return ["batch_items", *loop_and_call_terms[:2]]
+        batched_absent = not any(token in lowered for token in ("saveall(", "batch", "chunk", "partition", "bulkinsert", "batchupdate"))
+        per_item_write = re.search(
+            r"(?:foreach\s*\(|for\s*\([^)]*\)\s*\{|\.forEach\s*\().{0,600}\b([A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|client|gateway|publisher))\s*\.\s*(save|insert|update|send|publish)",
+            excerpt,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if batched_absent and per_item_write:
+            return [str(per_item_write.group(1) or "").strip(), str(per_item_write.group(2) or "").strip()]
+        return []
 
     def _detect_loop_call_amplification(self, diff_excerpt: str, combined_context: str) -> list[str]:
         excerpt = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))

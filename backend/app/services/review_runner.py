@@ -25,7 +25,7 @@ from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
-from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
+from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
@@ -72,7 +72,7 @@ class ReviewRunner:
         self.capability_service = ExpertCapabilityService()
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
-        self.java_quality_signal_extractor = JavaQualitySignalExtractor()
+        self.java_quality_signal_extractor = CodeObservationExtractor()
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
@@ -6697,11 +6697,13 @@ class ReviewRunner:
             related_symbols = [
                 str(value).strip() for value in list(item.get("related_symbols") or []) if str(value).strip()
             ]
+            tags = [str(value).strip() for value in list(item.get("tags") or []) if str(value).strip()]
             normalized.append(
                 {
                     "observation_id": observation_id,
                     "kind": kind,
                     "signal": str(item.get("signal") or "").strip(),
+                    "language": str(item.get("language") or "").strip() or self._infer_code_language(str(item.get("file_path") or "")),
                     "file_path": str(item.get("file_path") or "").strip(),
                     "line_start": line_start,
                     "line_end": line_end,
@@ -6709,6 +6711,7 @@ class ReviewRunner:
                     "risk_hints": risk_hints[:4],
                     "evidence": evidence[:3],
                     "related_symbols": related_symbols[:4],
+                    "tags": tags[:4],
                     "confidence": float(item.get("confidence") or 0.0),
                 }
             )

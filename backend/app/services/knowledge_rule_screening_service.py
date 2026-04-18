@@ -9,7 +9,7 @@ from pathlib import Path
 from app.domain.models.knowledge import KnowledgeReviewRule
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.storage_factory import StorageRepositoryFactory
-from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
+from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class KnowledgeRuleScreeningService:
     def __init__(self, root: Path) -> None:
         self._repository = StorageRepositoryFactory(Path(root)).create_knowledge_rule_repository()
         self._llm = LLMChatService()
-        self._java_quality_signal_extractor = JavaQualitySignalExtractor()
+        self._java_quality_signal_extractor = CodeObservationExtractor()
 
     def screen(
         self,

@@ -12,7 +12,7 @@ from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
-from app.services.java_quality_signal_extractor import JavaQualitySignalExtractor
+from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.repository_context_service import RepositoryContextService
 
@@ -33,7 +33,7 @@ class MainAgentService:
         self._llm = LLMChatService()
         self._diff_excerpt_service = DiffExcerptService()
         self._capability_service = ExpertCapabilityService()
-        self._java_quality_signal_extractor = JavaQualitySignalExtractor()
+        self._java_quality_signal_extractor = CodeObservationExtractor()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
     def build_command(
