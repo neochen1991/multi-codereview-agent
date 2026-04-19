@@ -22,6 +22,8 @@ from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.artifact_service import ArtifactService, build_report_summary
+from app.services.context_block import ContextBlock
+from app.services.context_priority_policy import priority_for_block_type
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
@@ -31,6 +33,7 @@ from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.memory_probe import MemoryProbe
 from app.services.orchestrator.graph import build_review_graph
+from app.services.prompt_budget_planner import PromptBudgetPlanner
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
@@ -40,6 +43,7 @@ from app.services.tool_gateway import ReviewToolGateway
 logger = logging.getLogger(__name__)
 
 FALLBACK_EXPERT_ID = "architecture_design"
+DDD_ARCHITECTURE_EXPERT_IDS = {"ddd_architecture", "ddd_specification"}
 
 
 class ReviewClosedError(RuntimeError):
@@ -79,6 +83,7 @@ class ReviewRunner:
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.knowledge_service.bootstrap_builtin_documents()
         self.graph = build_review_graph()
+        self.prompt_budget_planner = PromptBudgetPlanner()
         self._knowledge_runtime_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._source_excerpt_cache: dict[tuple[object, str, int, int], str] = {}
         self._target_diff_cache: dict[tuple[object, str], str] = {}
@@ -2676,6 +2681,36 @@ class ReviewRunner:
                     },
                 )
             )
+        prompt_budget_metadata = self._build_expert_prompt_budget_metadata(
+            subject=review.subject,
+            expert=expert,
+            file_path=file_path,
+            line_start=line_start,
+            runtime_tool_results=runtime_tool_results,
+            repository_context=repository_context,
+            target_hunk=target_hunk,
+            target_hunks=target_hunks,
+            bound_documents=bound_documents,
+            active_skills=active_skills,
+            rule_screening=rule_screening,
+            analysis_mode=analysis_mode,
+            include_target_file_full_diff=not multi_file_batch,
+            include_related_diff_summary=not multi_file_batch,
+        )
+        prompt_request_budget = dict(prompt_budget_metadata.get("prompt_request_budget") or {})
+        repository_context_budget = dict(prompt_budget_metadata.get("repository_context_budget") or {})
+        if prompt_request_budget:
+            logger.info(
+                "expert prompt budget review_id=%s expert_id=%s file_path=%s line_start=%s used=%s total=%s kept_sections=%s dropped_context_blocks=%s",
+                review.review_id,
+                expert.expert_id,
+                file_path,
+                line_start,
+                prompt_request_budget.get("used_budget"),
+                prompt_request_budget.get("total_budget"),
+                prompt_budget_metadata.get("retained_light_sections") or [],
+                repository_context_budget.get("dropped_blocks") or [],
+            )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review.review_id,
@@ -2711,6 +2746,7 @@ class ReviewRunner:
                         [item.get("title") for item in design_docs],
                         [],
                     ),
+                    "prompt_budget": prompt_budget_metadata,
                     "target_hunks": target_hunks[:8],
                     **self._expert_llm_metadata(expert, runtime_settings),
                 },
@@ -2889,6 +2925,7 @@ class ReviewRunner:
                 "analysis_mode": analysis_mode,
                 "file_path": file_path,
                 "line_start": line_start,
+                "prompt_budget": prompt_budget_metadata,
             },
         )
         MemoryProbe.log(
@@ -2897,6 +2934,8 @@ class ReviewRunner:
             expert_id=expert.expert_id,
             llm_mode=llm_result.mode,
             llm_error=llm_result.error,
+            prompt_budget_total=prompt_request_budget.get("total_budget"),
+            prompt_budget_used=prompt_request_budget.get("used_budget"),
         )
         self._abort_if_closed(review.review_id)
         parsed_candidates = self._parse_expert_analyses(
@@ -3173,6 +3212,7 @@ class ReviewRunner:
                         "batch_file_count": len(normalized_batch_items),
                         "input_completeness": finding.code_context.get("input_completeness", {}),
                         "review_inputs": finding.code_context.get("review_inputs", {}),
+                        "prompt_budget": prompt_budget_metadata,
                         **self._llm_message_metadata(llm_result),
                     },
                 )
@@ -3226,7 +3266,7 @@ class ReviewRunner:
             )
         )
         max_debate_rounds = max(1, int(runtime_settings.default_max_debate_rounds or 1))
-        debate_participants = issue.participant_expert_ids[:max_debate_rounds] or ["correctness_business", "architecture_design"]
+        debate_participants = issue.participant_expert_ids[:max_debate_rounds] or ["correctness_business", "ddd_architecture"]
         debate_participants = [item for item in debate_participants if item in experts_by_id] or list(experts_by_id)[:2]
         debate_participants = debate_participants[:max_debate_rounds]
         previous_expert_id = self.main_agent_service.agent_id
@@ -3816,7 +3856,7 @@ class ReviewRunner:
             token in file_blob for token in ["mq", "kafka", "rocketmq", "rabbit", "queue", "consumer", "producer"]
         ):
             return "high", 0.87
-        if expert_id == "ddd_specification":
+        if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             return "medium", 0.83
         if expert_id == "performance_reliability" and any(
             token in file_blob for token in ["migration", "sql", "repository", "db"]
@@ -3852,7 +3892,7 @@ class ReviewRunner:
             for file_path in subject.changed_files:
                 if any(token in file_path.lower() for token in ["mq", "kafka", "rocketmq", "rabbit", "queue", "consumer", "producer"]):
                     return file_path
-        if expert_id == "ddd_specification":
+        if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             for file_path in subject.changed_files:
                 if any(token in file_path.lower() for token in ["domain", "aggregate", "entity", "repository", "service", "application"]):
                     return file_path
@@ -3872,7 +3912,7 @@ class ReviewRunner:
         if expert_id == "security_compliance":
             preferred_line = 18
         elif expert_id == "architecture_design":
-            preferred_line = 42 if "service" in file_blob or "runtime" in file_blob else 24
+            preferred_line = 24
         elif expert_id == "performance_reliability":
             preferred_line = 57
         elif expert_id == "database_analysis":
@@ -3881,7 +3921,7 @@ class ReviewRunner:
             preferred_line = 28
         elif expert_id == "mq_analysis":
             preferred_line = 30
-        elif expert_id == "ddd_specification":
+        elif expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             preferred_line = 40
         elif expert_id == "test_verification":
             preferred_line = 73
@@ -3941,12 +3981,12 @@ class ReviewRunner:
             return f"缓存路径变更涉及 {file_blob}，当前实现对 key 设计、过期策略、一致性或击穿保护说明不足。"
         if expert_id == "mq_analysis":
             return f"消息链路变更涉及 {file_blob}，当前实现对消息顺序、幂等、重试和死信处理交代不足。"
-        if expert_id == "ddd_specification":
+        if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             return f"领域建模相关改动涉及 {file_blob}，当前实现可能混淆领域规则、应用编排和基础设施职责，偏离 DDD 分层。"
         if expert_id == "test_verification":
             return f"当前改动涉及 {file_blob}，缺少与改动风险相匹配的回归测试或更强断言保护。"
         if expert_id == "architecture_design":
-            return f"当前改动涉及 {file_blob}，模块边界、依赖方向或抽象层级出现了收缩，后续扩展成本会被放大。"
+            return f"当前改动涉及 {file_blob}，命名、判空、异常、日志或常量写法存在高价值通用编码规范问题，容易增加误用和排查成本。"
         if expert_id == "maintainability_code_health":
             return f"当前改动涉及 {file_blob}，实现把规则和流程揉在一起，后续维护和排错成本偏高。"
         return f"当前改动涉及 {file_blob}，存在需要进一步修正的实现风险，当前写法缺少足够的边界说明与保护。"
@@ -3962,12 +4002,12 @@ class ReviewRunner:
             return "缓存一致性与失效策略存在风险"
         if expert.expert_id == "mq_analysis":
             return "消息幂等与重试语义存在风险"
-        if expert.expert_id == "ddd_specification":
+        if expert.expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             return "领域边界与职责分层偏离 DDD 规范"
         if expert.expert_id == "test_verification":
             return "缺少与改动匹配的验证保护"
         if expert.expert_id == "architecture_design":
-            return "模块边界与抽象层次被削弱"
+            return "通用编码规范与工程一致性存在风险"
         if expert.expert_id == "maintainability_code_health":
             return "实现耦合偏高，维护成本上升"
         return f"{expert.name_zh} 识别到待修复问题"
@@ -3988,12 +4028,12 @@ class ReviewRunner:
             return f"在 {file_path} 明确 key 设计、TTL、一致性策略和缓存失效路径，并补充击穿/脏读保护。"
         if expert_id == "mq_analysis":
             return f"在 {file_path} 补充消息幂等键、重试上限、死信处理和消费顺序约束。"
-        if expert_id == "ddd_specification":
+        if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             return f"在 {file_path} 把领域规则、应用服务编排和基础设施访问重新分层，避免聚合职责外溢。"
         if expert_id == "test_verification":
             return f"围绕 {file_path} 的关键分支补充回归测试，并为异常路径增加断言。"
         if expert_id == "architecture_design":
-            return f"把 {file_path} 中的规则判断与执行流程解耦，收敛依赖方向，避免跨层直接耦合。"
+            return f"在 {file_path} 收紧命名、常量、判空、异常和日志写法，先把高价值通用编码规范问题修平。"
         if expert_id == "maintainability_code_health":
             return f"把 {file_path} 中的条件分支和魔法值提取成独立函数或策略对象，降低后续维护成本。"
         return f"重构 {file_path} 的当前实现，补充边界保护与必要注释，并为关键路径增加测试。"
@@ -4014,12 +4054,12 @@ class ReviewRunner:
             return f"围绕 {file_path} 先固定 key/TTL/失效顺序，再补缓存一致性和热点保护。"
         if expert_id == "mq_analysis":
             return f"在 {file_path} 先明确幂等、重试、死信策略，再落消费逻辑调整。"
-        if expert_id == "ddd_specification":
+        if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             return f"把 {file_path} 的领域规则、应用编排和基础设施访问重新拆层，先收回职责边界。"
         if expert_id == "test_verification":
             return f"先补测试锁住 {file_path} 当前风险，再根据断言结果决定是否继续改实现。"
         if expert_id == "architecture_design":
-            return f"把 {file_path} 的流程控制和业务规则拆开，保留单一入口，避免跨层耦合继续扩散。"
+            return f"先修正 {file_path} 的命名、常量、判空、异常和日志表达，再统一局部写法，降低误用与排查成本。"
         if expert_id == "maintainability_code_health":
             return f"先把 {file_path} 的重复判断和复杂分支提炼掉，再补命名和注释，降低维护成本。"
         return f"围绕 {file_path} 先缩小修改面、拉直主流程，再用更清晰的代码结构替换当前实现。"
@@ -4645,14 +4685,26 @@ class ReviewRunner:
                 )
             if expert_id == "architecture_design":
                 return (
-                    "function shouldEnableReview(payload: ReviewPayload): boolean {\n"
-                    "  return Boolean(payload.enabled);\n"
+                    "const REVIEW_ENABLED = true;\n\n"
+                    "function ensureTraceId(traceId?: string): string {\n"
+                    "  if (!traceId) {\n"
+                    "    throw new Error(\"traceId is required\");\n"
+                    "  }\n"
+                    "  return traceId;\n"
                     "}\n\n"
-                    "export function reviewGuard(payload: ReviewPayload, deps: { policy: ReviewPolicy }): boolean {\n"
-                    "  if (!shouldEnableReview(payload)) {\n"
-                    "    return false;\n"
-                    "  }\n\n"
-                    "  return deps.policy.allow(payload);\n"
+                    "export function reviewGuard(payload: ReviewPayload, logger: Logger): boolean {\n"
+                    "  const traceId = ensureTraceId(payload.traceId);\n"
+                    "  logger.info(\"review_guard\", { traceId, enabled: payload.enabled });\n"
+                    "  return REVIEW_ENABLED && Boolean(payload.enabled);\n"
+                    "}\n"
+                )
+            if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
+                return (
+                    "export function createCourse(command: CreateCourseCommand, deps: { repository: CourseRepository, eventBus: EventBus }): Course {\n"
+                    "  const course = Course.create(command.id, command.name, command.duration);\n"
+                    "  deps.repository.save(course);\n"
+                    "  deps.eventBus.publish(course.pullDomainEvents());\n"
+                    "  return course;\n"
                     "}\n"
                 )
             return (
@@ -4676,16 +4728,28 @@ class ReviewRunner:
                 )
             if expert_id == "architecture_design":
                 return (
-                    "def should_enable_review(payload: dict) -> bool:\n"
-                    "    return bool(payload.get(\"enabled\"))\n\n"
-                    "def review_guard(payload: dict, policy: ReviewPolicy) -> bool:\n"
-                    "    if not should_enable_review(payload):\n"
-                    "        return False\n"
-                    "    return policy.allow(payload)\n"
+                    "REVIEW_ENABLED = True\n\n"
+                    "def ensure_trace_id(payload: dict) -> str:\n"
+                    "    trace_id = str(payload.get(\"trace_id\") or \"\").strip()\n"
+                    "    if not trace_id:\n"
+                    "        raise ValueError(\"trace_id is required\")\n"
+                    "    return trace_id\n\n"
+                    "def review_guard(payload: dict, logger: Logger) -> bool:\n"
+                    "    trace_id = ensure_trace_id(payload)\n"
+                    "    logger.info(\"review_guard\", extra={\"trace_id\": trace_id, \"enabled\": payload.get(\"enabled\")})\n"
+                    "    return REVIEW_ENABLED and bool(payload.get(\"enabled\"))\n"
+                )
+            if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
+                return (
+                    "def create_course(command: CreateCourseCommand, repository: CourseRepository, event_bus: EventBus) -> Course:\n"
+                    "    course = Course.create(command.id, command.name, command.duration)\n"
+                    "    repository.save(course)\n"
+                    "    event_bus.publish(course.pull_domain_events())\n"
+                    "    return course\n"
                 )
             return (
                 "def review_guard(payload: dict) -> bool:\n"
-                "    enabled = bool(payload.get(\"enabled\"))\n"
+                    "    enabled = bool(payload.get(\"enabled\"))\n"
                 "    if not enabled:\n"
                 "        return False\n"
                 "    return True\n"
@@ -4842,14 +4906,45 @@ class ReviewRunner:
             else "本次未绑定详细设计文档，不要执行设计一致性检查，也不要输出任何 design_* / 设计一致性字段。\n"
         )
         if analysis_mode == "light":
-            repository_context_summary = self._compact_prompt_block(repository_context_summary, 3600)
-            repository_source_blocks = self._compact_prompt_block(repository_source_blocks, 5200)
-            runtime_tool_summary = self._compact_prompt_block(runtime_tool_summary, 2200)
-            code_excerpt = self._compact_prompt_block(code_excerpt, 1200)
-            hunk_summary = self._compact_prompt_block(hunk_summary, 1400)
-            hunk_batch_summary = self._compact_prompt_block(hunk_batch_summary, 1800)
-            target_file_full_diff = self._compact_prompt_block(target_file_full_diff, 2400)
-            related_diff_summary = self._compact_prompt_block(related_diff_summary, 1800)
+            light_sections, light_budget = self._apply_light_prompt_request_budget(
+                expert_id=expert.expert_id,
+                include_target_file_full_diff=include_target_file_full_diff,
+                sections={
+                    "review_spec_summary": review_spec_summary,
+                    "active_skill_summary": active_skill_summary,
+                    "bound_documents_summary": bound_documents_summary,
+                    "rule_screening_summary": rule_screening_summary,
+                    "input_completeness_summary": input_completeness_summary,
+                    "language_general_guidance": language_general_guidance,
+                    "design_doc_summary": design_doc_summary,
+                    "hunk_summary": hunk_summary,
+                    "hunk_batch_summary": hunk_batch_summary,
+                    "target_file_full_diff": target_file_full_diff,
+                    "related_diff_summary": related_diff_summary,
+                    "runtime_tool_summary": runtime_tool_summary,
+                    "repository_context_summary": repository_context_summary,
+                    "repository_source_blocks": repository_source_blocks,
+                    "code_excerpt": code_excerpt,
+                    "observation_review_summary": observation_review_summary,
+                },
+            )
+            review_spec_summary = light_sections["review_spec_summary"]
+            active_skill_summary = light_sections["active_skill_summary"]
+            bound_documents_summary = light_sections["bound_documents_summary"]
+            rule_screening_summary = light_sections["rule_screening_summary"]
+            input_completeness_summary = light_sections["input_completeness_summary"]
+            language_general_guidance = light_sections["language_general_guidance"]
+            design_doc_summary = light_sections["design_doc_summary"]
+            hunk_summary = light_sections["hunk_summary"]
+            hunk_batch_summary = light_sections["hunk_batch_summary"]
+            target_file_full_diff = light_sections["target_file_full_diff"]
+            related_diff_summary = light_sections["related_diff_summary"]
+            runtime_tool_summary = light_sections["runtime_tool_summary"]
+            repository_context_summary = light_sections["repository_context_summary"]
+            repository_source_blocks = light_sections["repository_source_blocks"]
+            code_excerpt = light_sections["code_excerpt"]
+            observation_review_summary = light_sections["observation_review_summary"]
+            prompt_repository_context["prompt_request_budget"] = light_budget
             if not include_target_file_full_diff:
                 repository_source_blocks = "本轮为多文件批量模式，详细源码片段已在“多文件联合审查补充”逐文件提供，此处不重复展开。"
                 related_diff_summary = "本轮为多文件批量模式，其他文件摘要已在附录逐文件提供。"
@@ -5137,7 +5232,12 @@ class ReviewRunner:
         context["prompt_context_section_order"] = section_order
         context["review_observations"] = focused_observations
         if analysis_mode == "light":
-            context = self._trim_prompt_repository_context_for_light(context, section_order)
+            context = self._trim_prompt_repository_context_for_light(
+                context,
+                section_order,
+                expert_id=expert.expert_id,
+                rule_screening=rule_screening,
+            )
         return context
 
     def _determine_prompt_context_section_order(
@@ -5185,10 +5285,18 @@ class ReviewRunner:
                 "domain_model_contexts",
             ],
             "architecture_design": [
+                "current_class_context",
+                "parent_contract_contexts",
                 "caller_contexts",
+                "same_file_other_hunks",
                 "callee_contexts",
                 "domain_model_contexts",
+            ],
+            "ddd_architecture": [
+                "domain_model_contexts",
                 "current_class_context",
+                "caller_contexts",
+                "callee_contexts",
                 "transaction_context",
                 "parent_contract_contexts",
             ],
@@ -5266,7 +5374,8 @@ class ReviewRunner:
             "security_compliance": {"query_semantics_changed", "cross_layer_dependency", "error_semantics_changed"},
             "performance_reliability": {"control_flow_with_external_call", "bulk_processing_boundary_missing", "query_plan_risk", "transactional_side_effect"},
             "database_analysis": {"query_plan_risk", "bulk_processing_boundary_missing", "transactional_side_effect", "query_semantics_changed"},
-            "architecture_design": {"cross_layer_dependency", "transactional_side_effect", "control_flow_with_external_call"},
+            "architecture_design": {"weak_identifier_signal", "literal_embedded_in_business_logic", "declared_intent_without_implementation"},
+            "ddd_architecture": {"cross_layer_dependency", "transactional_side_effect", "declared_intent_without_implementation"},
             "ddd_specification": {"cross_layer_dependency", "transactional_side_effect", "declared_intent_without_implementation"},
             "correctness_business": {"declared_intent_without_implementation", "error_semantics_changed", "query_semantics_changed"},
             "maintainability_code_health": {"weak_identifier_signal", "literal_embedded_in_business_logic", "declared_intent_without_implementation"},
@@ -5301,27 +5410,245 @@ class ReviewRunner:
         self,
         repository_context: dict[str, object],
         section_order: list[str],
+        *,
+        expert_id: str = "",
+        rule_screening: dict[str, object] | None = None,
     ) -> dict[str, object]:
         context = dict(repository_context or {})
-        primary_sections = section_order[:3]
-        per_section_limit = {
-            key: 3 if key in primary_sections else 1
-            for key in (
-                "related_contexts",
-                "related_source_snippets",
-                "caller_contexts",
-                "callee_contexts",
-                "domain_model_contexts",
-                "persistence_contexts",
-                "parent_contract_contexts",
-                "symbol_contexts",
-            )
+        blocks = self._build_prompt_repository_context_blocks(
+            repository_context=context,
+            section_order=section_order,
+            expert_id=expert_id,
+            rule_screening=rule_screening or {},
+        )
+        total_budget = max(
+            600,
+            int(os.getenv("REVIEW_LIGHT_REPOSITORY_CONTEXT_BUDGET_TOKENS", "1800") or 1800),
+        )
+        plan = self.prompt_budget_planner.plan(
+            blocks,
+            expert_id=expert_id,
+            total_budget=total_budget,
+        )
+        kept_ids = {block.block_id for block in plan.kept_blocks}
+        list_sections = {
+            "related_contexts",
+            "related_source_snippets",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "persistence_contexts",
+            "parent_contract_contexts",
+            "symbol_contexts",
+            "review_observations",
         }
-        for key, limit in per_section_limit.items():
+        scalar_sections = {
+            "primary_context",
+            "current_class_context",
+            "transaction_context",
+            "target_hunk",
+        }
+        for key in list_sections:
             value = context.get(key)
             if isinstance(value, list):
-                context[key] = [dict(item) for item in value[:limit] if isinstance(item, dict)]
+                kept_items = []
+                for index, item in enumerate(value):
+                    block_id = f"{key}:{index}"
+                    if block_id in kept_ids:
+                        kept_items.append(dict(item) if isinstance(item, dict) else item)
+                context[key] = kept_items
+        for key in scalar_sections:
+            if context.get(key) and f"{key}:0" not in kept_ids:
+                context.pop(key, None)
+        context["prompt_context_budget"] = {
+            "total_budget": plan.total_budget,
+            "used_budget": plan.used_budget,
+            "must_keep_blocks": [block.block_id for block in plan.must_keep_blocks],
+            "kept_blocks": [block.block_id for block in plan.kept_blocks],
+            "compressed_blocks": [block.block_id for block in plan.compressed_blocks],
+            "dropped_blocks": [block.block_id for block in plan.dropped_blocks],
+        }
         return context
+
+    def _build_prompt_repository_context_blocks(
+        self,
+        *,
+        repository_context: dict[str, object],
+        section_order: list[str],
+        expert_id: str,
+        rule_screening: dict[str, object],
+    ) -> list[ContextBlock]:
+        blocks: list[ContextBlock] = []
+
+        def _append_scalar_block(section_key: str, payload: dict[str, object], *, fallback_summary: str = "") -> None:
+            snippet = str(payload.get("snippet") or payload.get("excerpt") or payload.get("transaction_boundary_snippet") or "").strip()
+            if not snippet:
+                return
+            block_type = self._prompt_context_section_block_type(section_key)
+            priority = priority_for_block_type(block_type)
+            must_keep = priority == "P0"
+            blocks.append(
+                ContextBlock(
+                    block_id=f"{section_key}:0",
+                    type=block_type,
+                    priority=priority,
+                    expert_relevance=self._estimate_expert_relevance_for_context_block(
+                        section_key,
+                        expert_id=expert_id,
+                        rule_screening=rule_screening,
+                    ),
+                    evidence_strength=0.9 if section_key in {"target_hunk", "primary_context"} else 0.7,
+                    must_keep=must_keep,
+                    token_cost=self._estimate_context_block_token_cost(snippet),
+                    source="repository_context",
+                    file_path=str(payload.get("path") or payload.get("transactional_path") or "").strip(),
+                    line_start=int(payload.get("line_start") or payload.get("start_line") or 1),
+                    line_end=int(payload.get("line_end") or payload.get("end_line") or payload.get("start_line") or 1),
+                    summary=fallback_summary or str(payload.get("symbol") or payload.get("class_name") or section_key),
+                    content=snippet,
+                )
+            )
+
+        def _append_list_blocks(section_key: str, values: list[object]) -> None:
+            block_type = self._prompt_context_section_block_type(section_key)
+            priority = priority_for_block_type(block_type)
+            for index, item in enumerate(values):
+                if not isinstance(item, dict):
+                    continue
+                snippet = str(item.get("snippet") or "").strip()
+                if not snippet and section_key != "symbol_contexts" and section_key != "review_observations":
+                    continue
+                if section_key == "symbol_contexts":
+                    snippet = self._build_symbol_context_snippet(item)
+                    if not snippet:
+                        continue
+                if section_key == "review_observations":
+                    snippet = self._build_single_observation_summary(item)
+                    if not snippet:
+                        continue
+                blocks.append(
+                    ContextBlock(
+                        block_id=f"{section_key}:{index}",
+                        type=block_type,
+                        priority=priority_for_block_type(block_type),
+                        expert_relevance=self._estimate_expert_relevance_for_context_block(
+                            section_key,
+                            expert_id=expert_id,
+                            rule_screening=rule_screening,
+                        ),
+                        evidence_strength=float(item.get("confidence") or 0.85 if section_key == "review_observations" else 0.65),
+                        must_keep=False,
+                        token_cost=self._estimate_context_block_token_cost(snippet),
+                        source="repository_context",
+                        file_path=str(item.get("path") or item.get("file_path") or "").strip(),
+                        line_start=int(item.get("line_start") or 1),
+                        line_end=int(item.get("line_end") or item.get("line_start") or 1),
+                        summary=str(item.get("symbol") or item.get("summary") or section_key),
+                        content=snippet,
+                        related_observation_ids=[
+                            str(item.get("observation_id") or "").strip()
+                        ]
+                        if section_key == "review_observations" and str(item.get("observation_id") or "").strip()
+                        else [],
+                    )
+                )
+
+        primary_context = repository_context.get("primary_context")
+        if isinstance(primary_context, dict):
+            _append_scalar_block("primary_context", primary_context, fallback_summary="目标文件源码")
+        current_class_context = repository_context.get("current_class_context")
+        if isinstance(current_class_context, dict):
+            _append_scalar_block("current_class_context", current_class_context, fallback_summary="当前类问题片段")
+        transaction_context = repository_context.get("transaction_context")
+        if isinstance(transaction_context, dict):
+            _append_scalar_block("transaction_context", transaction_context, fallback_summary="事务边界")
+        target_hunk = repository_context.get("target_hunk")
+        if isinstance(target_hunk, dict):
+            _append_scalar_block("target_hunk", target_hunk, fallback_summary="目标 hunk")
+        for section_key in section_order:
+            values = repository_context.get(section_key)
+            if isinstance(values, list):
+                _append_list_blocks(section_key, values)
+        observations = repository_context.get("review_observations")
+        if isinstance(observations, list):
+            _append_list_blocks("review_observations", observations)
+        return blocks
+
+    def _prompt_context_section_block_type(self, section_key: str) -> str:
+        mapping = {
+            "primary_context": "current_code",
+            "target_hunk": "target_hunk",
+            "current_class_context": "current_class_context",
+            "caller_contexts": "caller_context",
+            "callee_contexts": "callee_context",
+            "transaction_context": "transaction_context",
+            "persistence_contexts": "persistence_context",
+            "domain_model_contexts": "domain_model_context",
+            "parent_contract_contexts": "parent_contract_context",
+            "related_contexts": "related_source_snippet",
+            "related_source_snippets": "related_source_snippet",
+            "symbol_contexts": "symbol_context",
+            "review_observations": "critical_observations",
+        }
+        return mapping.get(str(section_key or "").strip(), "secondary_context_note")
+
+    def _estimate_context_block_token_cost(self, text: str) -> int:
+        raw = str(text or "").strip()
+        if not raw:
+            return 0
+        return max(1, (len(raw) + 3) // 4)
+
+    def _estimate_expert_relevance_for_context_block(
+        self,
+        section_key: str,
+        *,
+        expert_id: str,
+        rule_screening: dict[str, object],
+    ) -> float:
+        top_sections = self._determine_prompt_context_section_order(
+            expert_id=expert_id,
+            rule_screening=rule_screening,
+            observations=[],
+        )[:4]
+        if section_key in {"primary_context", "target_hunk"}:
+            return 1.0
+        if section_key in top_sections[:2]:
+            return 0.95
+        if section_key in top_sections:
+            return 0.82
+        return 0.55
+
+    def _build_symbol_context_snippet(self, item: dict[str, object]) -> str:
+        lines: list[str] = []
+        symbol = str(item.get("symbol") or "").strip()
+        if symbol:
+            lines.append(f"symbol: {symbol}")
+        for definition in list(item.get("definitions") or [])[:2]:
+            if not isinstance(definition, dict):
+                continue
+            path = str(definition.get("path") or "").strip()
+            snippet = str(definition.get("snippet") or "").strip()
+            if path and snippet:
+                lines.append(f"definition: {path}")
+                lines.extend(snippet.splitlines()[:6])
+        for reference in list(item.get("references") or [])[:2]:
+            if not isinstance(reference, dict):
+                continue
+            path = str(reference.get("path") or "").strip()
+            snippet = str(reference.get("snippet") or "").strip()
+            if path and snippet:
+                lines.append(f"reference: {path}")
+                lines.extend(snippet.splitlines()[:4])
+        return "\n".join(lines).strip()
+
+    def _build_single_observation_summary(self, item: dict[str, object]) -> str:
+        observation_id = str(item.get("observation_id") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        parts = [part for part in (observation_id, kind, summary) if part]
+        if not parts:
+            return ""
+        return " | ".join(parts)
 
     def _build_review_input_completeness(
         self,
@@ -5513,12 +5840,12 @@ class ReviewRunner:
         elif expert_id == "architecture_design":
             base.extend(
                 [
-                    "- 重点检查 Controller/ApplicationService/DomainService/Repository 是否越层依赖、边界绕过、基础设施泄漏。",
-                    "- 重点检查 Service 是否承担过多编排与规则逻辑，是否把持久化和流程控制揉在一起。",
-                    "- 必须判断事务边界和模块边界是否一致；若处于 DDD 增强模式，再额外判断聚合边界是否被破坏。",
+                    "- 重点检查命名是否表达真实业务语义，是否出现 tmp/data/value/obj 之类弱语义命名。",
+                    "- 重点检查魔法值、硬编码状态值、判空写法、异常语义和关键日志字段是否存在通用高价值问题。",
+                    "- 只评论通用编码规范和工程一致性问题，不要越界评论聚合边界、依赖方向或业务规则正确性。",
                 ]
             )
-        elif expert_id == "ddd_specification":
+        elif expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
             base.extend(
                 [
                     "- 重点检查聚合根是否真正维护不变量，ValueObject 是否保持不可变语义。",
@@ -5591,6 +5918,242 @@ class ReviewRunner:
         if len(raw) <= safe_limit:
             return raw
         return raw[:safe_limit].rstrip() + "\n...<truncated for light mode>"
+
+    def _build_expert_prompt_budget_metadata(
+        self,
+        *,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        runtime_tool_results: list[dict[str, object]],
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]] | None,
+        bound_documents: list[object],
+        active_skills: list[object],
+        rule_screening: dict[str, object] | None,
+        analysis_mode: Literal["standard", "light"],
+        include_target_file_full_diff: bool,
+        include_related_diff_summary: bool,
+    ) -> dict[str, object]:
+        if analysis_mode != "light":
+            return {}
+        prompt_repository_context = self._prepare_prompt_repository_context(
+            expert=expert,
+            repository_context=dict(repository_context or {}),
+            rule_screening=rule_screening or {},
+            analysis_mode=analysis_mode,
+        )
+        repository_context_budget = dict(prompt_repository_context.get("prompt_context_budget") or {})
+        light_sections, request_budget = self._apply_light_prompt_request_budget(
+            expert_id=expert.expert_id,
+            include_target_file_full_diff=include_target_file_full_diff,
+            sections={
+                "review_spec_summary": self._build_review_spec_summary(expert.review_spec),
+                "active_skill_summary": self._build_active_skill_summary(active_skills),
+                "bound_documents_summary": self._build_bound_documents_summary(bound_documents),
+                "rule_screening_summary": self._build_rule_screening_summary(rule_screening or {}),
+                "input_completeness_summary": self._build_review_input_completeness_summary(
+                    subject,
+                    file_path,
+                    line_start,
+                    prompt_repository_context,
+                    expert=expert,
+                    bound_documents=bound_documents,
+                    rule_screening=rule_screening or {},
+                    language=self._infer_code_language(file_path),
+                ),
+                "language_general_guidance": self._build_language_general_guidance(
+                    self._infer_code_language(file_path)
+                ),
+                "design_doc_summary": self._build_design_doc_summary(subject),
+                "hunk_summary": self._build_hunk_summary(target_hunk),
+                "hunk_batch_summary": self._build_hunk_batch_summary(target_hunks or []),
+                "target_file_full_diff": (
+                    self._build_target_file_full_diff(subject, file_path)
+                    if include_target_file_full_diff
+                    else ""
+                ),
+                "related_diff_summary": (
+                    self._build_related_diff_summary(subject, file_path)
+                    if include_related_diff_summary
+                    else ""
+                ),
+                "runtime_tool_summary": self._build_runtime_tool_summary(runtime_tool_results),
+                "repository_context_summary": self._build_repository_context_summary(
+                    prompt_repository_context,
+                    runtime_tool_results,
+                ),
+                "repository_source_blocks": self._build_repository_source_blocks(
+                    prompt_repository_context,
+                    runtime_tool_results,
+                ),
+                "code_excerpt": self._build_code_excerpt(subject, file_path, line_start, expert.expert_id),
+                "observation_review_summary": self._build_observation_review_summary(prompt_repository_context),
+            },
+        )
+        return {
+            "repository_context_budget": repository_context_budget,
+            "prompt_request_budget": request_budget,
+            "retained_light_sections": [
+                key
+                for key, value in light_sections.items()
+                if str(value or "").strip()
+            ],
+        }
+
+    def _apply_light_prompt_request_budget(
+        self,
+        *,
+        expert_id: str,
+        include_target_file_full_diff: bool,
+        sections: dict[str, str],
+    ) -> tuple[dict[str, str], dict[str, object]]:
+        ordered_keys = [
+            "review_spec_summary",
+            "active_skill_summary",
+            "bound_documents_summary",
+            "rule_screening_summary",
+            "input_completeness_summary",
+            "language_general_guidance",
+            "design_doc_summary",
+            "hunk_summary",
+            "hunk_batch_summary",
+            "target_file_full_diff",
+            "related_diff_summary",
+            "runtime_tool_summary",
+            "repository_context_summary",
+            "repository_source_blocks",
+            "code_excerpt",
+            "observation_review_summary",
+        ]
+        blocks: list[ContextBlock] = []
+        for key in ordered_keys:
+            content = str(sections.get(key) or "").strip()
+            if not content:
+                continue
+            block_type, must_keep = self._light_prompt_section_policy(
+                key,
+                include_target_file_full_diff=include_target_file_full_diff,
+            )
+            blocks.append(
+                ContextBlock(
+                    block_id=key,
+                    type=block_type,
+                    priority=priority_for_block_type(block_type),
+                    expert_relevance=self._light_prompt_section_relevance(
+                        key,
+                        expert_id=expert_id,
+                    ),
+                    evidence_strength=self._light_prompt_section_evidence_strength(key),
+                    must_keep=must_keep,
+                    token_cost=self._estimate_context_block_token_cost(content),
+                    source="expert_prompt",
+                    summary=key,
+                    content=content,
+                )
+            )
+        total_budget = max(
+            400,
+            int(os.getenv("REVIEW_LIGHT_EXPERT_REQUEST_BUDGET_TOKENS", "9000") or 9000),
+        )
+        plan = self.prompt_budget_planner.plan(
+            blocks,
+            expert_id=expert_id,
+            total_budget=total_budget,
+        )
+        kept_map = {block.block_id: block for block in plan.kept_blocks}
+        rendered = dict(sections)
+        for key in ordered_keys:
+            block = kept_map.get(key)
+            rendered[key] = block.content if block is not None else ""
+        metadata = {
+            "total_budget": plan.total_budget,
+            "used_budget": plan.used_budget,
+            "must_keep_blocks": [block.block_id for block in plan.must_keep_blocks],
+            "kept_blocks": [block.block_id for block in plan.kept_blocks],
+            "compressed_blocks": [block.block_id for block in plan.compressed_blocks],
+            "dropped_blocks": [block.block_id for block in plan.dropped_blocks],
+        }
+        return rendered, metadata
+
+    def _light_prompt_section_policy(
+        self,
+        section_key: str,
+        *,
+        include_target_file_full_diff: bool,
+    ) -> tuple[str, bool]:
+        mapping: dict[str, tuple[str, bool]] = {
+            "review_spec_summary": ("expert_review_spec", True),
+            "active_skill_summary": ("matched_bound_doc_section", False),
+            "bound_documents_summary": ("matched_bound_doc_section", False),
+            "rule_screening_summary": ("matched_rules", True),
+            "input_completeness_summary": ("output_contract", True),
+            "language_general_guidance": ("language_guidance", True),
+            "design_doc_summary": ("design_doc_summary", False),
+            "hunk_summary": ("target_hunk", True),
+            "hunk_batch_summary": ("same_file_other_hunks", False),
+            "target_file_full_diff": ("same_file_other_hunks", bool(include_target_file_full_diff)),
+            "related_diff_summary": ("related_diff_summary", False),
+            "runtime_tool_summary": ("runtime_tool_evidence", False),
+            "repository_context_summary": ("repository_context_summary", False),
+            "repository_source_blocks": ("related_source_snippet", False),
+            "code_excerpt": ("current_code", True),
+            "observation_review_summary": ("critical_observations", False),
+        }
+        return mapping.get(section_key, ("secondary_context_note", False))
+
+    def _light_prompt_section_relevance(
+        self,
+        section_key: str,
+        *,
+        expert_id: str,
+    ) -> float:
+        if section_key in {"hunk_summary", "code_excerpt"}:
+            return 1.0
+        if section_key in {
+            "review_spec_summary",
+            "rule_screening_summary",
+            "input_completeness_summary",
+            "language_general_guidance",
+        }:
+            return 0.98
+        if expert_id == "performance_reliability" and section_key in {
+            "runtime_tool_summary",
+            "repository_source_blocks",
+            "target_file_full_diff",
+            "observation_review_summary",
+        }:
+            return 0.95
+        if expert_id == "security_compliance" and section_key in {
+            "runtime_tool_summary",
+            "repository_source_blocks",
+            "observation_review_summary",
+        }:
+            return 0.95
+        if section_key in {"repository_source_blocks", "target_file_full_diff", "runtime_tool_summary"}:
+            return 0.88
+        if section_key in {"hunk_batch_summary", "design_doc_summary", "observation_review_summary"}:
+            return 0.75
+        return 0.55
+
+    def _light_prompt_section_evidence_strength(self, section_key: str) -> float:
+        if section_key in {
+            "review_spec_summary",
+            "rule_screening_summary",
+            "input_completeness_summary",
+            "language_general_guidance",
+            "hunk_summary",
+            "code_excerpt",
+            "target_file_full_diff",
+        }:
+            return 0.98
+        if section_key in {"runtime_tool_summary", "repository_source_blocks", "observation_review_summary"}:
+            return 0.85
+        if section_key in {"hunk_batch_summary", "design_doc_summary"}:
+            return 0.7
+        return 0.45
 
     def _build_active_skill_summary(self, active_skills: list[object]) -> str:
         if not active_skills:
@@ -6389,7 +6952,7 @@ class ReviewRunner:
         parsed: dict[str, object],
         expert_id: str,
     ) -> dict[str, object]:
-        if expert_id not in {"ddd_specification", "architecture_design"}:
+        if expert_id not in DDD_ARCHITECTURE_EXPERT_IDS | {"architecture_design"}:
             return parsed
 
         matched_rules = [str(item).strip().upper() for item in list(parsed.get("matched_rules") or []) if str(item).strip()]

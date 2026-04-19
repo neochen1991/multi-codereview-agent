@@ -26,6 +26,7 @@ class DebateIssue(BaseModel):
     title: str
     summary: str
     finding_type: str = "risk_hypothesis"
+    normalized_issue_type: str = ""
     aggregated_finding_types: list[str] = Field(default_factory=list)
     file_path: str = ""
     line_start: int = 1
@@ -35,6 +36,7 @@ class DebateIssue(BaseModel):
     confidence_breakdown: dict[str, object] = Field(default_factory=dict)
     finding_ids: list[str] = Field(default_factory=list)
     participant_expert_ids: list[str] = Field(default_factory=list)
+    expert_views: list[dict[str, object]] = Field(default_factory=list)
     aggregated_titles: list[str] = Field(default_factory=list)
     aggregated_summaries: list[str] = Field(default_factory=list)
     aggregated_remediation_strategies: list[str] = Field(default_factory=list)
@@ -61,5 +63,8 @@ class DebateIssue(BaseModel):
     consistency_check_status: str = "unchecked"
     consistency_check_summary: str = ""
     consistency_conflicts: list[str] = Field(default_factory=list)
+    remediation_alignment_status: str = "unchecked"
+    remediation_alignment_conflicts: list[str] = Field(default_factory=list)
+    remediation_filtered: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

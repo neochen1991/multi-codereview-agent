@@ -740,15 +740,27 @@ class LLMChatService:
                     "目标 hunk:": 0.1,
                 },
             },
+            "ddd_architecture": {
+                "focus_tokens": (
+                    "aggregate", "entity", "valueobject", "domain", "applicationservice", "repository",
+                    "factory", "assembler", "domainservice", "boundary", "dependency", "context",
+                ),
+                "header_boosts": {
+                    "关键源码上下文:": 0.22,
+                    "代码仓上下文:": 0.2,
+                    "本次审核绑定的详细设计文档:": 0.16,
+                    "目标 hunk:": 0.1,
+                },
+            },
             "architecture_design": {
                 "focus_tokens": (
-                    "service", "facade", "adapter", "controller", "gateway", "repository", "domain",
-                    "dependency", "interface", "implementation", "boundary",
+                    "naming", "constant", "logger", "null", "exception", "enum", "magic",
+                    "guard", "optional", "collection", "generic", "comment", "todo",
                 ),
                 "header_boosts": {
                     "关键源码上下文:": 0.2,
-                    "代码仓上下文:": 0.18,
-                    "其他变更文件摘要:": 0.12,
+                    "当前代码片段:": 0.18,
+                    "目标 hunk:": 0.12,
                 },
             },
             "test_verification": {

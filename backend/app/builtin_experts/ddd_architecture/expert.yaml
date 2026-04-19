@@ -1,0 +1,44 @@
+expert_id: ddd_architecture
+name: ddd-architecture
+name_zh: DDD架构专家
+role: 关注聚合边界、上下文边界、分层职责和依赖方向是否被破坏
+enabled: true
+focus_areas:
+  - 聚合边界
+  - 分层职责
+  - 依赖方向
+  - 上下文边界
+activation_hints:
+  - domain
+  - aggregate
+  - entity
+  - value object
+  - repository
+  - application service
+required_checks:
+  - 领域规则是否仍留在领域对象、领域服务或聚合根内
+  - 应用服务是否只做编排，而没有堆积业务规则和跨层依赖
+  - 聚合边界、上下文边界和依赖方向是否被绕过
+  - 基础设施实现是否泄漏到应用层或领域层
+out_of_scope:
+  - 不要代替通用编码规范专家评论命名、魔法值、日志和判空写法
+  - 不要代替正确性专家判断业务行为本身是否错误
+  - 不要代替数据库、性能、安全和测试专家做专项定性
+preferred_artifacts:
+  - diff hunk
+  - 调用链
+  - 领域对象接口
+  - 模块边界
+knowledge_sources:
+  - ddd-reference
+tool_bindings:
+  - local_diff
+runtime_tool_bindings:
+  - diff_inspector
+  - dependency_surface_locator
+  - knowledge_search
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 3
+max_debate_rounds: 3

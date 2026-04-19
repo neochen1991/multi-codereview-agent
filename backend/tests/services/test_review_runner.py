@@ -929,6 +929,7 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response(stora
 
 def test_review_runner_saves_multiple_findings_from_single_expert_response_in_light_mode(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
+    monkeypatch.setenv("REVIEW_LIGHT_EXPERT_REQUEST_BUDGET_TOKENS", "1200")
     expert = ExpertProfile(
         expert_id="correctness_business",
         name="Correctness",
@@ -978,10 +979,11 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response_in_li
     monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        runner.llm_chat_service,
-        "complete_text",
-        lambda **_kwargs: LLMTextResult(
+    llm_log_context: dict[str, object] = {}
+
+    def _fake_complete_text(**kwargs):
+        llm_log_context.update(dict(kwargs.get("log_context") or {}))
+        return LLMTextResult(
             text=(
                 '{"findings":['
                 '{"title":"空参未校验","claim":"request 为空时会触发异常","finding_type":"direct_defect","severity":"high","line_start":18,'
@@ -1001,7 +1003,12 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response_in_li
             model="test",
             base_url="http://llm.test",
             api_key_env="TEST_KEY",
-        ),
+        )
+
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        _fake_complete_text,
     )
 
     finding_payloads: list[dict[str, object]] = []
@@ -1021,8 +1028,16 @@ def test_review_runner_saves_multiple_findings_from_single_expert_response_in_li
     )
 
     findings = runner.finding_repo.list(review.review_id)
+    messages = runner.message_repo.list(review.review_id)
+    ack = next(item for item in messages if item.message_type == "expert_ack")
+    analysis = next(item for item in messages if item.message_type == "expert_analysis")
+
     assert len(findings) == 2
     assert len(finding_payloads) == 2
+    assert ack.metadata["prompt_budget"]["prompt_request_budget"]["total_budget"] == 1200
+    assert ack.metadata["prompt_budget"]["retained_light_sections"]
+    assert analysis.metadata["prompt_budget"]["prompt_request_budget"]["used_budget"] >= 0
+    assert llm_log_context["prompt_budget"]["prompt_request_budget"]["total_budget"] == 1200
 
 
 def test_review_runner_detects_uncovered_review_observations(storage_root: Path):
@@ -2398,13 +2413,13 @@ def test_review_runner_builds_fallback_finding_when_expert_fails_with_matched_ru
                 "+        Course course = new Course(id, name, duration);\n"
             ),
         ),
-        selected_experts=["ddd_specification"],
+        selected_experts=["ddd_architecture"],
     )
     expert = ExpertProfile(
-        expert_id="ddd_specification",
-        name="DDD",
-        name_zh="DDD规范专家",
-        role="ddd",
+        expert_id="ddd_architecture",
+        name="DDD Architecture",
+        name_zh="DDD架构专家",
+        role="ddd architecture",
         enabled=True,
         focus_areas=["聚合边界"],
         system_prompt="prompt",
@@ -2569,7 +2584,7 @@ def test_review_runner_enriches_ddd_finding_with_canonical_terms(storage_root: P
             "context_files": [],
             "verification_needed": True,
         },
-        "ddd_specification",
+        "ddd_architecture",
         "src/main/java/com/example/CourseCreator.java",
         18,
         {
@@ -3258,11 +3273,11 @@ def test_review_runner_preserves_results_when_single_expert_fails(storage_root: 
     review_id = runner.bootstrap_demo_review()
     architecture = ExpertProfile(
         expert_id="architecture_design",
-        name="Architecture",
-        name_zh="架构与设计",
-        role="architecture",
+        name="Coding Standards",
+        name_zh="通用编码规范",
+        role="coding standards",
         enabled=True,
-        focus_areas=["DDD"],
+        focus_areas=["命名与表达"],
         system_prompt="prompt",
         runtime_tool_bindings=[],
     )
@@ -3286,7 +3301,7 @@ def test_review_runner_preserves_results_when_single_expert_fails(storage_root: 
             "candidate_expert_ids": ["architecture_design", "correctness_business"],
             "selected_expert_ids": ["architecture_design", "correctness_business"],
             "selected_experts": [
-                {"expert_id": "architecture_design", "expert_name": "架构与设计", "reason": "命中架构风险"},
+                {"expert_id": "architecture_design", "expert_name": "通用编码规范", "reason": "命中编码规范风险"},
                 {"expert_id": "correctness_business", "expert_name": "正确性", "reason": "命中正确性风险"},
             ],
             "skipped_experts": [],
@@ -4014,7 +4029,7 @@ def test_review_runner_build_java_review_focus_switches_between_general_and_ddd(
     )
     ddd_focus = runner._build_java_ddd_review_focus(
         "java",
-        "ddd_specification",
+        "ddd_architecture",
         {
             "java_review_mode": "ddd_enhanced",
             "java_context_signals": ["ddd_package_layout", "domain_model_context", "domain_aggregate"],
@@ -4025,7 +4040,7 @@ def test_review_runner_build_java_review_focus_switches_between_general_and_ddd(
 
     assert "Java 通用审查要求" in general_focus
     assert "Java 通用模式" in general_focus
-    assert "聚合边界是否被破坏" in general_focus
+    assert "命名是否表达真实业务语义" in general_focus
     assert "Java DDD 增强模式" in ddd_focus
     assert "Java DDD 增强要求" in ddd_focus
 
@@ -4125,33 +4140,33 @@ def test_review_runner_builds_routing_summary_with_system_fallback(storage_root:
     experts_by_id = {expert.expert_id: expert for expert in enabled_experts}
 
     summary = runner._build_routing_summary(
-        selected_ids=["ddd_specification"],
+        selected_ids=["ddd_architecture"],
         experts_by_id=experts_by_id,
         skipped_experts=[
             {
-                "expert_id": "ddd_specification",
-                "expert_name": "DDD规范专家",
+                "expert_id": "ddd_architecture",
+                "expert_name": "DDD架构专家",
                 "reason": "当前 hunk 仅为 import 级调整",
             }
         ],
         effective_experts=[
             {
                 "expert_id": "architecture_design",
-                "expert_name": "架构与设计专家",
+                "expert_name": "通用编码规范专家",
                 "source": "system_fallback",
             }
         ],
         system_added_experts=[
             {
                 "expert_id": "architecture_design",
-                "expert_name": "架构与设计专家",
-                "reason": "系统已自动补入架构与设计专家作为兜底审查者",
+                "expert_name": "通用编码规范专家",
+                "reason": "系统已自动补入通用编码规范专家作为兜底审查者",
             }
         ],
     )
 
     assert summary["fallback_expert_added"] is True
-    assert summary["user_selected_experts"][0]["expert_id"] == "ddd_specification"
+    assert summary["user_selected_experts"][0]["expert_id"] == "ddd_architecture"
     assert summary["system_added_experts"][0]["expert_id"] == "architecture_design"
     assert "自动补入" in runner._build_routing_summary_message(summary)
 
@@ -4180,18 +4195,18 @@ def test_review_runner_adds_architecture_fallback_job_when_all_selected_experts_
                 " export const demo = true\n"
             ),
         ),
-        selected_experts=["ddd_specification"],
+        selected_experts=["ddd_architecture"],
     )
 
     job = runner._maybe_build_fallback_job(
         review=review,
         enabled_experts=runner.registry.list_enabled(),
         existing_jobs=[],
-        selected_ids=["ddd_specification"],
+        selected_ids=["ddd_architecture"],
         skipped_experts=[
             {
-                "expert_id": "ddd_specification",
-                "expert_name": "DDD规范专家",
+                "expert_id": "ddd_architecture",
+                "expert_name": "DDD架构专家",
                 "reason": "当前 hunk 仅为 import 级调整",
             }
         ],
@@ -4539,25 +4554,121 @@ def test_review_runner_repository_source_blocks_follow_expert_context_priority(s
 def test_review_runner_light_prompt_context_trim_prioritizes_top_sections(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     repository_context = {
+        "primary_context": {"path": "src/Main.java", "snippet": "main snippet"},
         "related_contexts": [{"path": f"src/A{i}.java", "snippet": "related"} for i in range(4)],
         "caller_contexts": [{"path": f"src/C{i}.java", "snippet": "caller"} for i in range(4)],
         "callee_contexts": [{"path": f"src/D{i}.java", "snippet": "callee"} for i in range(4)],
         "domain_model_contexts": [{"path": f"src/M{i}.java", "snippet": "domain"} for i in range(4)],
         "persistence_contexts": [{"path": f"src/P{i}.java", "snippet": "persistence"} for i in range(4)],
         "symbol_contexts": [{"symbol": f"S{i}", "definitions": [], "references": []} for i in range(4)],
+        "review_observations": [
+            {"observation_id": f"obs-{i}", "kind": "query_plan_risk", "summary": "observation", "confidence": 0.9}
+            for i in range(3)
+        ],
     }
 
     trimmed = runner._trim_prompt_repository_context_for_light(
         repository_context,
         ["persistence_contexts", "callee_contexts", "caller_contexts", "domain_model_contexts"],
+        expert_id="performance_reliability",
+        rule_screening={"matched_rules_for_llm": [{"rule_id": "PERF-SQL-001", "title": "SQL risk"}]},
     )
 
-    assert len(trimmed["persistence_contexts"]) == 3
-    assert len(trimmed["callee_contexts"]) == 3
-    assert len(trimmed["caller_contexts"]) == 3
-    assert len(trimmed["domain_model_contexts"]) == 1
-    assert len(trimmed["related_contexts"]) == 1
-    assert len(trimmed["symbol_contexts"]) == 1
+    assert len(trimmed["persistence_contexts"]) >= len(trimmed["domain_model_contexts"])
+    assert len(trimmed["callee_contexts"]) >= len(trimmed["domain_model_contexts"])
+    assert "primary_context" in trimmed
+    assert "prompt_context_budget" in trimmed
+    assert trimmed["prompt_context_budget"]["must_keep_blocks"] == ["primary_context:0"]
+    assert "persistence_contexts:0" in trimmed["prompt_context_budget"]["kept_blocks"]
+
+
+def test_review_runner_builds_prompt_repository_context_blocks(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    repository_context = {
+        "primary_context": {
+            "path": "src/main/java/com/example/OrderService.java",
+            "snippet": "for (Long id : ids) { repository.findById(id); }",
+        },
+        "current_class_context": {
+            "path": "src/main/java/com/example/OrderService.java",
+            "snippet": "class OrderService { ... }",
+        },
+        "persistence_contexts": [
+            {
+                "path": "src/main/java/com/example/OrderRepository.java",
+                "symbol": "OrderRepository#findById",
+                "snippet": "Order findById(Long id);",
+            }
+        ],
+        "review_observations": [
+            {
+                "observation_id": "obs-loop-1",
+                "kind": "control_flow_with_external_call",
+                "summary": "loop inside repository call",
+                "confidence": 0.92,
+            }
+        ],
+    }
+
+    blocks = runner._build_prompt_repository_context_blocks(
+        repository_context=repository_context,
+        section_order=["persistence_contexts"],
+        expert_id="performance_reliability",
+        rule_screening={"matched_rules_for_llm": [{"rule_id": "PERF-001", "title": "Loop query"}]},
+    )
+
+    block_ids = {block.block_id for block in blocks}
+    assert "primary_context:0" in block_ids
+    assert "current_class_context:0" in block_ids
+    assert "persistence_contexts:0" in block_ids
+    assert "review_observations:0" in block_ids
+    primary = next(block for block in blocks if block.block_id == "primary_context:0")
+    observation = next(block for block in blocks if block.block_id == "review_observations:0")
+    assert primary.must_keep is True
+    assert primary.priority == "P0"
+    assert observation.related_observation_ids == ["obs-loop-1"]
+
+
+def test_review_runner_light_prompt_request_budget_keeps_core_sections(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    monkeypatch.setenv("REVIEW_LIGHT_EXPERT_REQUEST_BUDGET_TOKENS", "800")
+
+    rendered, metadata = runner._apply_light_prompt_request_budget(
+        expert_id="performance_reliability",
+        include_target_file_full_diff=True,
+        sections={
+            "review_spec_summary": "review spec " * 30,
+            "active_skill_summary": "active skill " * 20,
+            "bound_documents_summary": "bound docs " * 20,
+            "rule_screening_summary": "matched rules " * 30,
+            "input_completeness_summary": "input completeness " * 30,
+            "language_general_guidance": "java naming and transaction guidance " * 20,
+            "design_doc_summary": "design summary " * 20,
+            "hunk_summary": "target hunk " * 40,
+            "hunk_batch_summary": "same file other hunks " * 30,
+            "target_file_full_diff": "full diff " * 80,
+            "related_diff_summary": "related diff " * 50,
+            "runtime_tool_summary": "runtime tool " * 60,
+            "repository_context_summary": "repo summary " * 60,
+            "repository_source_blocks": "repo source " * 80,
+            "code_excerpt": "current code " * 50,
+            "observation_review_summary": "observation " * 40,
+        },
+    )
+
+    assert rendered["hunk_summary"].strip()
+    assert rendered["code_excerpt"].strip()
+    assert rendered["review_spec_summary"].strip()
+    assert rendered["rule_screening_summary"].strip()
+    assert rendered["language_general_guidance"].strip()
+    assert "hunk_summary" in metadata["must_keep_blocks"]
+    assert "code_excerpt" in metadata["must_keep_blocks"]
+    assert "review_spec_summary" in metadata["must_keep_blocks"]
+    assert "rule_screening_summary" in metadata["must_keep_blocks"]
+    assert "language_general_guidance" in metadata["must_keep_blocks"]
+    assert metadata["used_budget"] >= 0
+    assert metadata["total_budget"] == 800
+    assert metadata["compressed_blocks"] or metadata["dropped_blocks"]
 
 
 def test_review_runner_builds_knowledge_context_metadata(storage_root: Path):
@@ -4785,11 +4896,11 @@ def test_review_runner_build_knowledge_review_context_includes_java_mode_and_sig
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
         expert_id="architecture_design",
-        name="Architecture",
-        name_zh="架构与设计专家",
-        role="architecture",
+        name="Coding Standards",
+        name_zh="通用编码规范专家",
+        role="coding standards",
         enabled=True,
-        focus_areas=["分层边界"],
+        focus_areas=["命名与表达"],
         system_prompt="prompt",
         knowledge_sources=["knowledge_search"],
         runtime_tool_bindings=[],

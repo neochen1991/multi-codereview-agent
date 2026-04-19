@@ -184,6 +184,7 @@ export interface DebateIssue {
   title: string;
   summary: string;
   finding_type?: string;
+  normalized_issue_type?: string;
   aggregated_finding_types?: string[];
   file_path?: string;
   line_start?: number;
@@ -193,6 +194,7 @@ export interface DebateIssue {
   confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
   participant_expert_ids: string[];
+  expert_views?: Array<Record<string, unknown>>;
   aggregated_titles?: string[];
   aggregated_summaries?: string[];
   aggregated_remediation_strategies?: string[];
@@ -215,6 +217,9 @@ export interface DebateIssue {
   consistency_check_status?: string;
   consistency_check_summary?: string;
   consistency_conflicts?: string[];
+  remediation_alignment_status?: string;
+  remediation_alignment_conflicts?: string[];
+  remediation_filtered?: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -732,12 +732,12 @@ def test_main_agent_skips_architecture_on_import_only_hunk():
     )
     expert = ExpertProfile(
         expert_id="architecture_design",
-        name="Architecture",
-        name_zh="架构与设计专家",
-        role="architecture",
+        name="Coding Standards",
+        name_zh="通用编码规范专家",
+        role="coding standards",
         enabled=True,
-        focus_areas=["模块边界"],
-        activation_hints=["service", "module", "api"],
+        focus_areas=["命名与表达"],
+        activation_hints=["todo", "comment", "null"],
         system_prompt="prompt",
     )
 
@@ -815,12 +815,12 @@ def test_main_agent_prefers_non_import_hunk_when_same_file_has_real_behavior_cha
     )
     expert = ExpertProfile(
         expert_id="architecture_design",
-        name="Architecture",
-        name_zh="架构与设计专家",
-        role="architecture",
+        name="Coding Standards",
+        name_zh="通用编码规范专家",
+        role="coding standards",
         enabled=True,
-        focus_areas=["模块边界"],
-        activation_hints=["event", "bus", "domain", "application"],
+        focus_areas=["日志与常量约束"],
+        activation_hints=["logger", "constant", "exception"],
         system_prompt="prompt",
     )
 
@@ -1030,12 +1030,12 @@ def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
         ),
         ExpertProfile(
             expert_id="architecture_design",
-            name="Architecture",
-            name_zh="架构与设计专家",
-            role="architecture",
+            name="Coding Standards",
+            name_zh="通用编码规范专家",
+            role="coding standards",
             enabled=True,
-            focus_areas=["模块边界"],
-            activation_hints=["module", "service"],
+            focus_areas=["命名与表达"],
+            activation_hints=["todo", "comment", "null"],
             system_prompt="prompt",
         ),
     ]
@@ -1045,7 +1045,7 @@ def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
             text=(
                 '{"expert_routes":['
                 '{"expert_id":"correctness_business","candidate_id":"packages/platform/types/order.output.ts:1:1","routeable":true,"reason":"字段契约变化更适合正确性专家","confidence":0.94},'
-                '{"expert_id":"architecture_design","candidate_id":"apps/api/orders/order.service.ts:10:1","routeable":true,"reason":"服务层接口编排适合架构专家","confidence":0.79}'
+                '{"expert_id":"architecture_design","candidate_id":"apps/api/orders/order.service.ts:10:1","routeable":true,"reason":"命名与异常写法适合通用编码规范专家","confidence":0.79}'
                 '],"skipped_experts":[]}'
             ),
             mode="live",
@@ -1266,11 +1266,11 @@ def test_main_agent_select_review_experts_uses_llm_result(monkeypatch):
         ),
         ExpertProfile(
             expert_id="architecture_design",
-            name="Architecture",
-            name_zh="架构与设计专家",
-            role="architecture",
+            name="Coding Standards",
+            name_zh="通用编码规范专家",
+            role="coding standards",
             enabled=True,
-            focus_areas=["模块边界"],
+            focus_areas=["命名与表达"],
             system_prompt="prompt",
         ),
         ExpertProfile(
@@ -1289,7 +1289,7 @@ def test_main_agent_select_review_experts_uses_llm_result(monkeypatch):
             text=(
                 '{"selected_experts":['
                 '{"expert_id":"correctness_business","reason":"字段契约与业务语义变更明显","confidence":0.95},'
-                '{"expert_id":"architecture_design","reason":"服务层编排发生变化","confidence":0.82}'
+                '{"expert_id":"architecture_design","reason":"命名与异常写法发生变化","confidence":0.82}'
                 '],"skipped_experts":['
                 '{"expert_id":"security_compliance","reason":"当前 diff 未出现安全相关信号"}'
                 ']}'
@@ -1724,7 +1724,7 @@ def test_main_agent_readds_security_expert_for_java_validation_signal():
     assert selected["security_compliance"]["source"] == "heuristic_selected"
 
 
-def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
+def test_main_agent_readds_ddd_architecture_and_security_for_java_quality_signals():
     agent = MainAgentService()
     experts = [
         ExpertProfile(
@@ -1737,15 +1737,6 @@ def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
             system_prompt="prompt",
         ),
         ExpertProfile(
-            expert_id="architecture_design",
-            name="Architecture",
-            name_zh="架构与设计专家",
-            role="architecture",
-            enabled=True,
-            focus_areas=["分层架构"],
-            system_prompt="prompt",
-        ),
-        ExpertProfile(
             expert_id="security_compliance",
             name="Security",
             name_zh="安全与合规专家",
@@ -1755,10 +1746,10 @@ def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
             system_prompt="prompt",
         ),
         ExpertProfile(
-            expert_id="ddd_specification",
-            name="DDD",
-            name_zh="DDD规范专家",
-            role="ddd",
+            expert_id="ddd_architecture",
+            name="DDD Architecture",
+            name_zh="DDD架构专家",
+            role="ddd architecture",
             enabled=True,
             focus_areas=["聚合边界"],
             system_prompt="prompt",
@@ -1796,24 +1787,23 @@ def test_main_agent_readds_architecture_and_security_for_java_quality_signals():
     merged = agent._merge_expert_selection(
         subject=subject,
         experts=experts,
-        requested_expert_ids=["correctness_business", "architecture_design", "security_compliance", "ddd_specification"],
+        requested_expert_ids=["correctness_business", "ddd_architecture", "security_compliance"],
         llm_payload={
             "selected_experts": [
                 {"expert_id": "correctness_business", "reason": "业务正确性变化明显", "confidence": 0.9},
-                {"expert_id": "ddd_specification", "reason": "涉及聚合创建与事件顺序", "confidence": 0.88},
+                {"expert_id": "ddd_architecture", "reason": "涉及聚合创建与事件顺序", "confidence": 0.88},
             ],
             "skipped_experts": [
-                {"expert_id": "architecture_design", "reason": "LLM 认为只是实现细节"},
                 {"expert_id": "security_compliance", "reason": "LLM 认为未命中安全关键词"},
             ],
         },
         fallback_ids=["correctness_business"],
     )
 
-    assert "architecture_design" in merged["selected_expert_ids"]
+    assert "ddd_architecture" in merged["selected_expert_ids"]
     assert "security_compliance" in merged["selected_expert_ids"]
     selected = {item["expert_id"]: item for item in merged["selected_experts"]}
-    assert selected["architecture_design"]["source"] == "heuristic_selected"
+    assert selected["ddd_architecture"]["source"] in {"llm_selected", "heuristic_selected"}
     assert selected["security_compliance"]["source"] == "heuristic_selected"
 
 

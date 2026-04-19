@@ -48,25 +48,33 @@ def test_knowledge_service_bootstraps_builtin_java_ddd_rules(storage_root: Path)
     architecture = service.screen_rules_for_expert(
         "architecture_design",
         {
-            "changed_files": ["src/main/java/com/acme/order/interfaces/OrderController.java"],
-            "query_terms": ["Controller", "Repository", "Mapper"],
-            "focus_file": "src/main/java/com/acme/order/interfaces/OrderController.java",
+            "changed_files": ["src/main/java/com/acme/order/support/MySqlDomainEventsConsumer.java"],
+            "query_terms": ["chunksTmp", "catch", "logger", "exception"],
+            "focus_file": "src/main/java/com/acme/order/support/MySqlDomainEventsConsumer.java",
         },
     )
-    assert any(item["rule_id"] == "ARCH-JDDD-001" for item in architecture["matched_rules_for_llm"])
+    assert any(item["rule_id"] == "CODE-JAVA-001" for item in architecture["matched_rules_for_llm"])
 
     ddd = service.screen_rules_for_expert(
-        "ddd_specification",
+        "ddd_architecture",
         {
-            "changed_files": ["src/main/java/com/acme/order/domain/Order.java"],
-            "query_terms": ["Aggregate", "setStatus", "DomainEvent", "outbox"],
-            "focus_file": "src/main/java/com/acme/order/domain/Order.java",
+            "changed_files": ["src/main/java/com/acme/order/app/OrderApplicationService.java"],
+            "query_terms": [
+                "java_mode:ddd_enhanced",
+                "java_signal:factory_bypass",
+                "java_signal:application_service_direct_instantiation",
+                "Aggregate",
+                "setStatus",
+                "DomainEvent",
+                "outbox",
+            ],
+            "focus_file": "src/main/java/com/acme/order/app/OrderApplicationService.java",
         },
     )
-    assert any(item["rule_id"] == "DDD-JDDD-001" for item in ddd["matched_rules_for_llm"])
+    assert any(item["rule_id"] in {"DDD-JDDD-001", "ARCH-JDDD-002"} for item in ddd["matched_rules_for_llm"])
 
 
-def test_knowledge_rule_screening_service_skips_ddd_strong_rules_for_general_java(storage_root: Path) -> None:
+def test_knowledge_rule_screening_service_keeps_coding_rules_for_general_java(storage_root: Path) -> None:
     service = KnowledgeService(storage_root)
     service.bootstrap_builtin_documents()
 
@@ -76,22 +84,17 @@ def test_knowledge_rule_screening_service_skips_ddd_strong_rules_for_general_jav
             "changed_files": ["src/main/java/com/acme/web/OwnerController.java"],
             "query_terms": [
                 "java_mode:general",
-                "java_signal:controller_entry",
-                "Controller",
-                "Repository",
+                "logger",
+                "exception",
+                "tmp",
+                "magic",
             ],
             "focus_file": "src/main/java/com/acme/web/OwnerController.java",
         },
     )
 
     matched_rule_ids = {item["rule_id"] for item in architecture["matched_rules_for_llm"]}
-    assert "ARCH-JDDD-001" not in matched_rule_ids
-    skipped_rule = next(
-        item
-        for item in architecture["sample_no_hit_rules"]
-        if item["rule_id"] == "ARCH-JDDD-001"
-    )
-    assert skipped_rule["reason"] == "当前 Java 审查模式下不启用该类 DDD 强约束规则"
+    assert "CODE-JAVA-001" in matched_rule_ids or "CODE-JAVA-002" in matched_rule_ids
 
 
 def test_knowledge_rule_screening_service_traverses_all_rules(storage_root: Path) -> None:
@@ -421,14 +424,16 @@ def test_knowledge_rule_screening_service_records_llm_batches(storage_root: Path
     )
 
     assert result["screening_mode"] == "llm"
-    assert len(result["batch_summaries"]) == 2
+    assert len(result["batch_summaries"]) == 3
     assert result["batch_summaries"][0]["batch_index"] == 1
-    assert result["batch_summaries"][0]["batch_count"] == 2
+    assert result["batch_summaries"][0]["batch_count"] == 3
     assert result["batch_summaries"][0]["decisions"][0]["rule_id"] == "PERF-POOL-001"
-    assert result["batch_summaries"][1]["decisions"][0]["rule_id"] == "PERF-LOCK-001"
+    assert result["batch_summaries"][1]["decisions"][0]["rule_id"] == "PERF-JSON-001"
+    assert result["batch_summaries"][2]["decisions"][0]["rule_id"] == "PERF-LOCK-001"
     assert result["total_elapsed_ms"] >= 0
     assert result["batch_summaries"][0]["llm"]["elapsed_ms"] >= 0
     assert result["batch_summaries"][1]["llm"]["elapsed_ms"] >= 0
+    assert result["batch_summaries"][2]["llm"]["elapsed_ms"] >= 0
 
 
 def test_knowledge_rule_screening_service_falls_back_when_llm_result_invalid(storage_root: Path, monkeypatch) -> None:
@@ -545,38 +550,9 @@ def test_knowledge_rule_screening_service_overrides_llm_for_ddd_factory_bypass(s
     service.bootstrap_builtin_documents()
     screening = KnowledgeRuleScreeningService(storage_root)
 
-    architecture_rules = screening._repository.list_for_expert("architecture_design")
-    architecture = screening._finalize_llm_result(
-        "architecture_design",
-        {
-            "changed_files": ["src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"],
-            "query_terms": [
-                "java_mode:ddd_enhanced",
-                "java_signal:application_service_layer",
-                "java_signal:factory_bypass",
-                "java_signal:aggregate_factory_call_removed",
-                "java_signal:application_service_direct_instantiation",
-                "@@ -15,7 +15,7 @@ public final class CourseCreator {",
-                "- |         Course course = Course.create(id, name, duration);",
-                "+        Course course = new Course(id, name, duration);",
-            ],
-            "focus_file": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
-        },
-        architecture_rules,
-        [
-            {"rule_id": "ARCH-JDDD-001", "decision": "no_hit", "reason": "controller not involved", "matched_terms": [], "matched_signals": []},
-            {"rule_id": "ARCH-JDDD-002", "decision": "no_hit", "reason": "application service has no domain logic", "matched_terms": [], "matched_signals": []},
-        ],
-        "rev_arch_ddd_override",
-    )
-
-    matched = {item["rule_id"]: item for item in architecture["matched_rules_for_llm"]}
-    assert matched["ARCH-JDDD-002"]["decision"] == "possible_hit"
-    assert "java_signal:factory_bypass" in matched["ARCH-JDDD-002"]["matched_signals"]
-
-    ddd_rules = screening._repository.list_for_expert("ddd_specification")
+    ddd_rules = screening._repository.list_for_expert("ddd_architecture")
     ddd = screening._finalize_llm_result(
-        "ddd_specification",
+        "ddd_architecture",
         {
             "changed_files": ["src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"],
             "query_terms": [
@@ -594,6 +570,8 @@ def test_knowledge_rule_screening_service_overrides_llm_for_ddd_factory_bypass(s
         },
         ddd_rules,
         [
+            {"rule_id": "ARCH-JDDD-001", "decision": "no_hit", "reason": "controller not involved", "matched_terms": [], "matched_signals": []},
+            {"rule_id": "ARCH-JDDD-002", "decision": "no_hit", "reason": "application service has no domain logic", "matched_terms": [], "matched_signals": []},
             {"rule_id": "DDD-JDDD-001", "decision": "no_hit", "reason": "setter not changed", "matched_terms": [], "matched_signals": []},
             {"rule_id": "DDD-JDDD-002", "decision": "no_hit", "reason": "no cross aggregate signal", "matched_terms": [], "matched_signals": []},
         ],
@@ -601,6 +579,8 @@ def test_knowledge_rule_screening_service_overrides_llm_for_ddd_factory_bypass(s
     )
 
     matched = {item["rule_id"]: item for item in ddd["matched_rules_for_llm"]}
+    assert matched["ARCH-JDDD-002"]["decision"] == "possible_hit"
+    assert "java_signal:factory_bypass" in matched["ARCH-JDDD-002"]["matched_signals"]
     assert matched["DDD-JDDD-001"]["decision"] == "must_review"
     assert "java_signal:factory_bypass" in matched["DDD-JDDD-001"]["matched_signals"]
     assert matched["DDD-JDDD-002"]["decision"] == "possible_hit"

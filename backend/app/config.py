@@ -23,6 +23,7 @@ class Settings(BaseModel):
         default_factory=lambda: [
             "correctness_business",
             "architecture_design",
+            "ddd_architecture",
             "security_compliance",
             "performance_reliability",
             "maintainability_code_health",

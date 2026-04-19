@@ -1090,10 +1090,10 @@ def test_skill_gateway_auto_adds_java_ddd_runtime_tools(tmp_path: Path):
 
     gateway = ReviewToolGateway(storage_root)
     expert = ExpertProfile(
-        expert_id="architecture_design",
-        name="Architecture",
-        name_zh="架构与设计",
-        role="architecture",
+        expert_id="ddd_architecture",
+        name="DDD Architecture",
+        name_zh="DDD架构",
+        role="ddd architecture",
         enabled=True,
         focus_areas=["DDD", "事务边界"],
         system_prompt="prompt",

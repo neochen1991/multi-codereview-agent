@@ -137,7 +137,7 @@
         }
       ],
       "expected": {
-        "required_experts": ["ddd_specification", "architecture_design"],
+        "required_experts": ["ddd_architecture"],
         "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002"],
         "finding_keywords": ["Course.create", "aggregate", "domain event", "factory"],
         "min_findings": 1,
@@ -160,7 +160,7 @@
         }
       ],
       "expected": {
-        "required_experts": ["performance_reliability", "database_analysis", "ddd_specification"],
+        "required_experts": ["performance_reliability", "database_analysis", "ddd_architecture"],
         "rule_ids_any_of": ["PERF-SQL-001", "PERF-JDDD-002"],
         "finding_keywords": ["LIMIT", "domain_events", "批量", "全表"],
         "min_findings": 1,
@@ -236,7 +236,7 @@
         }
       ],
       "expected": {
-        "required_experts": ["ddd_specification", "architecture_design", "performance_reliability", "database_analysis", "correctness_business", "security_compliance"],
+        "required_experts": ["ddd_architecture", "architecture_design", "performance_reliability", "database_analysis", "correctness_business", "security_compliance"],
         "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002", "PERF-SQL-001", "SEC-JDDD-002"],
         "finding_keywords": ["aggregate", "factory", "domain event", "LIMIT", "like", "catch", "chunksTmp"],
         "problem_markers": [

@@ -1,39 +1,39 @@
 expert_id: architecture_design
 name: architecture-design
-name_zh: 架构与设计专家
-role: 关注模块边界、依赖方向、抽象层级和设计退化
+name_zh: 通用编码规范专家
+role: 参考阿里巴巴 Java 开发手册，关注命名、判空、异常、日志、魔法值和常规工程一致性问题
 enabled: true
 focus_areas:
-  - 模块边界
-  - 依赖方向
-  - 抽象层级
+  - 命名与表达
+  - 判空与异常处理
+  - 日志与常量约束
 activation_hints:
-  - service
-  - module
-  - runtime
-  - api
-  - orchestrator
-  - application
+  - todo
+  - comment
+  - "null"
+  - logger
+  - constant
+  - exception
 required_checks:
-  - 是否出现跨层直连或边界绕过
-  - 是否把流程编排和领域规则揉进同一层
-  - 是否泄漏基础设施实现细节到高层模块
-  - 是否让未来扩展必须改动多个模块
+  - 是否出现弱语义命名、魔法值、硬编码状态值或表达模糊的常量
+  - 是否缺少必要判空、默认值保护、异常语义或关键日志字段
+  - 是否存在明显不符合阿里巴巴 Java 开发手册的通用编码写法
+  - 是否出现容易误用、难排查或团队内风格明显不一致的实现
 out_of_scope:
-  - 不要代替安全专家判断鉴权与注入问题
-  - 不要代替测试专家判断覆盖率是否充足
+  - 不要代替正确性专家判断业务规则和行为是否错误
+  - 不要代替DDD架构专家判断聚合边界、依赖方向和职责分层
+  - 不要代替数据库、性能、安全和测试专家做专项定性
 preferred_artifacts:
   - diff hunk
-  - 调用链
-  - 依赖方向
-  - 模块接口
+  - 函数结构
+  - 条件分支
+  - 常量与日志
 knowledge_sources:
-  - architecture-review-checklist
+  - java-coding-standards-checklist
 tool_bindings:
   - local_diff
 runtime_tool_bindings:
   - diff_inspector
-  - dependency_surface_locator
   - knowledge_search
 agent_bindings:
   - main_agent

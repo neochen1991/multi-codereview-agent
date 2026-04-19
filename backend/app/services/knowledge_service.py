@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import yaml
 
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.runtime_settings import RuntimeSettings
@@ -46,12 +47,16 @@ class KnowledgeService:
         """把仓库内置知识文档导入当前 SQLite，供实际审核链路使用。"""
 
         docs_root = Path(__file__).resolve().parents[1] / "storage" / "knowledge" / "docs"
+        experts_root = Path(__file__).resolve().parents[1] / "builtin_experts"
         if not docs_root.exists():
             return 0
+        enabled_expert_ids = self._load_enabled_builtin_expert_ids(experts_root)
         imported = 0
         for expert_dir in sorted(path for path in docs_root.iterdir() if path.is_dir()):
             expert_id = str(expert_dir.name).strip()
             if not expert_id:
+                continue
+            if enabled_expert_ids and expert_id not in enabled_expert_ids:
                 continue
             for doc_path in sorted(expert_dir.glob("*.md")):
                 content = doc_path.read_text(encoding="utf-8")
@@ -133,3 +138,16 @@ class KnowledgeService:
             if match:
                 return str(match.group(1)).strip()
         return path.stem
+
+    def _load_enabled_builtin_expert_ids(self, root: Path) -> set[str]:
+        if not root.exists():
+            return set()
+        enabled_ids: set[str] = set()
+        for expert_yaml in sorted(root.glob("*/expert.yaml")):
+            payload = yaml.safe_load(expert_yaml.read_text(encoding="utf-8")) or {}
+            expert_id = str(payload.get("expert_id") or "").strip()
+            if not expert_id:
+                continue
+            if bool(payload.get("enabled", True)):
+                enabled_ids.add(expert_id)
+        return enabled_ids

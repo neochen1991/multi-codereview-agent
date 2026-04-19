@@ -3,6 +3,7 @@ name: ddd-specification
 name_zh: DDD规范专家
 role: 关注聚合边界、领域职责、应用服务编排和领域模型纯度
 enabled: true
+enabled: false
 focus_areas:
   - 聚合边界
   - 领域模型

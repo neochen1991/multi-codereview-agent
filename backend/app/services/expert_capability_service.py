@@ -169,7 +169,7 @@ class ExpertCapabilityService:
             "redis_analysis": ["redis", "cache", "ttl", "expire", "setnx", "pipeline"],
             "mq_analysis": ["publish", "consumer", "producer", "queue", "kafka", "rabbit", "retry", "dead letter"],
             "test_verification": ["test", "expect", "assert", "spec", "it(", "describe("],
-            "architecture_design": ["service", "repository", "module", "adapter", "domain", "application"],
+            "architecture_design": ["todo", "comment", "null", "logger", "constant", "exception", "magic", "enum"],
             "correctness_business": [
                 "return",
                 "status",
@@ -185,6 +185,7 @@ class ExpertCapabilityService:
                 "说明",
                 "未实现",
             ],
+            "ddd_architecture": ["aggregate", "domain", "entity", "value object", "repository", "application service"],
             "ddd_specification": ["aggregate", "domain", "entity", "value object", "repository", "application service"],
             "maintainability_code_health": ["todo", "if ", "switch", "else", "dup", "helper", "util"],
         }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from app.services.orchestrator.state import ReviewState
 
 
@@ -53,6 +55,196 @@ FINDING_TYPE_WEIGHTS = {
     "design_concern": 0.55,
 }
 
+SEMANTIC_STOP_TOKENS = {
+    "问题",
+    "风险",
+    "建议",
+    "代码",
+    "当前",
+    "这里",
+    "需要",
+    "应该",
+    "实现",
+    "说明",
+    "修复",
+    "修改",
+    "影响",
+    "导致",
+    "存在",
+    "可能",
+    "相关",
+    "逻辑",
+    "处理",
+    "场景",
+    "this",
+    "that",
+    "issue",
+    "risk",
+    "current",
+    "code",
+    "logic",
+    "change",
+    "changes",
+    "should",
+    "need",
+}
+
+RESPONSIBILITY_TOKEN_HINTS = {
+    "architecture_design": {
+        "命名",
+        "命名约定",
+        "常量",
+        "枚举",
+        "日志",
+        "判空",
+        "空值",
+        "异常",
+        "魔法值",
+        "naming",
+        "logger",
+        "logging",
+        "null",
+        "constant",
+        "enum",
+        "magic",
+    },
+    "ddd_architecture": {
+        "聚合",
+        "领域",
+        "应用服务",
+        "仓储",
+        "不变量",
+        "领域事件",
+        "上下文边界",
+        "aggregate",
+        "domain",
+        "repository",
+        "applicationservice",
+        "domainservice",
+        "domainevent",
+        "bounded",
+        "context",
+    },
+    "correctness_business": {
+        "业务",
+        "状态",
+        "边界条件",
+        "输入",
+        "输出",
+        "注释",
+        "todo",
+        "承诺",
+        "未实现",
+        "行为",
+        "state",
+        "input",
+        "output",
+        "comment",
+        "promise",
+        "implementation",
+    },
+    "database_analysis": {
+        "sql",
+        "索引",
+        "schema",
+        "事务",
+        "迁移",
+        "query",
+        "migration",
+        "transaction",
+        "ddl",
+        "dml",
+        "repository",
+    },
+    "performance_reliability": {
+        "性能",
+        "并发",
+        "线程池",
+        "批处理",
+        "超时",
+        "重试",
+        "背压",
+        "资源",
+        "锁竞争",
+        "reliability",
+        "performance",
+        "batch",
+        "timeout",
+        "retry",
+        "concurrency",
+        "threadpool",
+        "backpressure",
+        "latency",
+    },
+    "security_compliance": {
+        "权限",
+        "鉴权",
+        "授权",
+        "注入",
+        "敏感",
+        "租户",
+        "tenant",
+        "auth",
+        "authorize",
+        "permission",
+        "security",
+        "secret",
+        "token",
+        "xss",
+        "csrf",
+        "sqli",
+    },
+    "test_verification": {
+        "测试",
+        "断言",
+        "覆盖",
+        "回归",
+        "mock",
+        "集成测试",
+        "test",
+        "assert",
+        "coverage",
+        "integration",
+    },
+    "mq_analysis": {
+        "消息",
+        "幂等",
+        "死信",
+        "消费",
+        "生产",
+        "队列",
+        "mq",
+        "message",
+        "consumer",
+        "producer",
+        "idempotent",
+        "deadletter",
+    },
+    "redis_analysis": {
+        "缓存",
+        "ttl",
+        "redis",
+        "热点",
+        "key",
+        "lua",
+        "cache",
+    },
+    "maintainability_code_health": {
+        "复杂度",
+        "重复",
+        "重构",
+        "可维护",
+        "可读性",
+        "抽象",
+        "函数过长",
+        "complexity",
+        "duplication",
+        "maintainability",
+        "readability",
+        "refactor",
+    },
+}
+
 
 def _collect_unique_finding_types(items: list[dict[str, object]]) -> list[str]:
     finding_types: list[str] = []
@@ -92,8 +284,165 @@ def _resolve_issue_filter_config(state: ReviewState) -> dict[str, object]:
     }
 
 
+def _extract_semantic_tokens(value: str) -> list[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return []
+    tokens: list[str] = []
+    for token in re.findall(r"[a-z][a-z0-9_:-]{2,}", raw):
+        normalized = token.strip("-_:")
+        if normalized and normalized not in SEMANTIC_STOP_TOKENS:
+            tokens.append(normalized)
+    for token in re.findall(r"[\u4e00-\u9fff]{2,12}", raw):
+        normalized = token.strip()
+        if normalized and normalized not in SEMANTIC_STOP_TOKENS:
+            tokens.append(normalized)
+    return tokens
+
+
+def _build_problem_token_set(item: dict[str, object]) -> set[str]:
+    parts: list[str] = []
+    for key in ("title", "summary", "rule_based_reasoning"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    for key in ("matched_rules", "violated_guidelines", "evidence", "cross_file_evidence"):
+        parts.extend(str(value).strip() for value in list(item.get(key) or []) if str(value).strip())
+    explicit_type = str(item.get("normalized_issue_type") or "").strip()
+    if explicit_type:
+        parts.append(explicit_type)
+    deduped: list[str] = []
+    for token in _extract_semantic_tokens("\n".join(parts)):
+        if token not in deduped:
+            deduped.append(token)
+    return set(deduped[:12])
+
+
+def _build_normalized_issue_type(items: list[dict[str, object]]) -> str:
+    explicit = [
+        str(item.get("normalized_issue_type") or "").strip()
+        for item in items
+        if str(item.get("normalized_issue_type") or "").strip()
+    ]
+    if explicit:
+        return explicit[0]
+    scored_tokens: dict[str, int] = {}
+    for item in items:
+        for token in _build_problem_token_set(item):
+            scored_tokens[token] = scored_tokens.get(token, 0) + 1
+    if not scored_tokens:
+        return str(items[0].get("finding_type") or "risk_hypothesis").strip() or "risk_hypothesis"
+    ordered = sorted(scored_tokens.items(), key=lambda pair: (-pair[1], -len(pair[0]), pair[0]))
+    return "|".join(token for token, _count in ordered[:3])
+
+
+def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict[str, object]]) -> bool:
+    if not grouped_items:
+        return False
+    explicit_candidate = str(candidate.get("normalized_issue_type") or "").strip()
+    explicit_group = [
+        str(item.get("normalized_issue_type") or "").strip()
+        for item in grouped_items
+        if str(item.get("normalized_issue_type") or "").strip()
+    ]
+    if explicit_candidate and explicit_group and explicit_candidate == explicit_group[0]:
+        return True
+    candidate_title = str(candidate.get("title") or "").strip().lower()
+    for item in grouped_items:
+        grouped_title = str(item.get("title") or "").strip().lower()
+        if candidate_title and grouped_title and candidate_title == grouped_title:
+            return True
+    candidate_tokens = _build_problem_token_set(candidate)
+    if not candidate_tokens:
+        return False
+    for item in grouped_items:
+        if len(candidate_tokens & _build_problem_token_set(item)) >= 2:
+            return True
+    return False
+
+
+def _group_findings_by_problem(findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    grouped_by_location: dict[tuple[str, int], list[dict[str, object]]] = {}
+    for finding in findings:
+        file_path = str(finding.get("file_path", "")).strip() or "unknown"
+        line_start = int(finding.get("line_start", 1) or 1)
+        grouped_by_location.setdefault((file_path, line_start), []).append(finding)
+    grouped_findings: list[list[dict[str, object]]] = []
+    for key in sorted(grouped_by_location.keys()):
+        location_items = grouped_by_location[key]
+        problem_groups: list[list[dict[str, object]]] = []
+        for finding in location_items:
+            matched_group = next(
+                (group for group in problem_groups if _is_same_problem_type(finding, group)),
+                None,
+            )
+            if matched_group is None:
+                problem_groups.append([finding])
+            else:
+                matched_group.append(finding)
+        grouped_findings.extend(problem_groups)
+    return grouped_findings
+
+
+def _select_primary_item(items: list[dict[str, object]], preferred_expert_id: str = "") -> dict[str, object]:
+    def _score(item: dict[str, object]) -> tuple[int, int, float]:
+        severity = str(item.get("severity") or "medium").strip().lower()
+        direct_evidence = 1 if str(item.get("finding_type") or "").strip() == "direct_defect" else 0
+        preferred = 1 if preferred_expert_id and str(item.get("expert_id") or "").strip() == preferred_expert_id else 0
+        return (-preferred, -PRIORITY_ORDER.get(severity, 2), -direct_evidence, -float(item.get("confidence") or 0.0))
+
+    return sorted(items, key=_score)[0]
+
+
+def _select_responsible_expert_id(items: list[dict[str, object]]) -> str:
+    participant_ids = {
+        str(item.get("expert_id") or "").strip()
+        for item in items
+        if str(item.get("expert_id") or "").strip()
+    }
+    if len(participant_ids) <= 1:
+        return next(iter(participant_ids), "")
+    tokens: set[str] = set()
+    for item in items:
+        tokens.update(_build_problem_token_set(item))
+    best_expert_id = ""
+    best_score = 0
+    for expert_id in participant_ids:
+        score = len(tokens & RESPONSIBILITY_TOKEN_HINTS.get(expert_id, set()))
+        if score > best_score:
+            best_score = score
+            best_expert_id = expert_id
+    if best_expert_id:
+        return best_expert_id
+    return _select_primary_item(items).get("expert_id", "")
+
+
+def _build_expert_views(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    views: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        expert_id = str(item.get("expert_id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        dedupe_key = (expert_id, title, summary)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        views.append(
+            {
+                "expert_id": expert_id,
+                "title": title,
+                "summary": summary,
+                "finding_type": str(item.get("finding_type") or "").strip(),
+                "severity": str(item.get("severity") or "").strip(),
+                "normalized_issue_type": _build_normalized_issue_type([item]),
+            }
+        )
+    return views
+
+
 def detect_conflicts(state: ReviewState) -> ReviewState:
-    """将每个 finding 独立升级为 conflict 候选，不再按代码行合并。"""
+    """按问题类型收敛 findings，并为每个问题选出唯一主责专家。"""
 
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
@@ -101,36 +450,39 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     findings = list(next_state.get("findings", []))
     issue_filter_decisions: list[dict[str, object]] = []
     conflicts: list[dict[str, object]] = []
-    for finding in findings:
-        file_path = str(finding.get("file_path", "")).strip() or "unknown"
-        line_start = int(finding.get("line_start", 1) or 1)
-        key = f"{file_path}::{line_start}::{str(finding.get('finding_id') or '').strip() or 'unknown'}"
-        items = [finding]
-        skip_decision = _classify_issue_candidate(items, issue_filter_config)
-        if skip_decision is not None:
-            issue_filter_decisions.append(
-                {
-                    "topic": key,
-                    "rule_code": skip_decision["rule_code"],
-                    "rule_label": skip_decision["rule_label"],
-                    "reason": skip_decision["reason"],
-                    "severity": skip_decision["severity"],
-                    "finding_ids": [item.get("finding_id") for item in items],
-                    "finding_titles": [
-                        str(item.get("title") or "").strip()
-                        for item in items
-                        if str(item.get("title") or "").strip()
-                    ],
-                    "expert_ids": [
-                        str(item.get("expert_id") or "").strip()
-                        for item in items
-                        if str(item.get("expert_id") or "").strip()
-                    ],
-                }
-            )
+    for grouped_items in _group_findings_by_problem(findings):
+        eligible_items: list[dict[str, object]] = []
+        for finding in grouped_items:
+            file_path = str(finding.get("file_path", "")).strip() or "unknown"
+            line_start = int(finding.get("line_start", 1) or 1)
+            key = f"{file_path}::{line_start}::{str(finding.get('finding_id') or '').strip() or 'unknown'}"
+            skip_decision = _classify_issue_candidate([finding], issue_filter_config)
+            if skip_decision is not None:
+                issue_filter_decisions.append(
+                    {
+                        "topic": key,
+                        "rule_code": skip_decision["rule_code"],
+                        "rule_label": skip_decision["rule_label"],
+                        "reason": skip_decision["reason"],
+                        "severity": skip_decision["severity"],
+                        "finding_ids": [finding.get("finding_id")],
+                        "finding_titles": [str(finding.get("title") or "").strip()] if str(finding.get("title") or "").strip() else [],
+                        "expert_ids": [str(finding.get("expert_id") or "").strip()] if str(finding.get("expert_id") or "").strip() else [],
+                    }
+                )
+                continue
+            eligible_items.append(finding)
+
+        if not eligible_items:
             continue
-        eligible_items = items
-        first = eligible_items[0]
+
+        file_path = str(eligible_items[0].get("file_path", "")).strip() or "unknown"
+        line_start = int(eligible_items[0].get("line_start", 1) or 1)
+        normalized_issue_type = _build_normalized_issue_type(eligible_items)
+        key = f"{file_path}::{line_start}::{normalized_issue_type or 'unknown'}"
+        responsible_expert_id = _select_responsible_expert_id(eligible_items)
+        first = _select_primary_item(eligible_items, preferred_expert_id=responsible_expert_id)
+
         highest_severity = "medium"
         if any(str(item.get("severity")) in {"critical", "high"} for item in eligible_items):
             highest_severity = "high"
@@ -159,11 +511,20 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "title": _build_issue_title(aggregated_titles),
                 "summary": _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions),
                 "finding_type": _select_primary_finding_type(eligible_items),
+                "normalized_issue_type": normalized_issue_type,
                 "aggregated_finding_types": aggregated_finding_types,
                 "file_path": first.get("file_path"),
                 "line_start": first.get("line_start"),
                 "finding_ids": [item.get("finding_id") for item in eligible_items],
-                "participant_expert_ids": [item.get("expert_id") for item in eligible_items],
+                "participant_expert_ids": list(
+                    dict.fromkeys(
+                        str(item.get("expert_id") or "").strip()
+                        for item in eligible_items
+                        if str(item.get("expert_id") or "").strip()
+                    )
+                ),
+                "expert_views": _build_expert_views(eligible_items),
+                "primary_expert_id": responsible_expert_id,
                 "aggregated_titles": aggregated_titles,
                 "aggregated_summaries": aggregated_summaries,
                 "aggregated_remediation_strategies": aggregated_remediation_strategies,

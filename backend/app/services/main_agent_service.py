@@ -55,6 +55,14 @@ class MainAgentService:
         )
         target_hunk = dict(target_focus.get("target_hunk") or {})
         target_hunks = [dict(item) for item in list(target_focus.get("target_hunks") or []) if isinstance(item, dict)]
+        if not target_hunk and file_path:
+            best_hunk = self._diff_excerpt_service.find_best_hunk(
+                subject.unified_diff,
+                file_path,
+                line_start or 1,
+            )
+            if best_hunk:
+                target_hunk = dict(best_hunk)
         if not target_hunks and target_hunk:
             target_hunks = [dict(target_hunk)]
         related_files = self._build_expert_related_files(subject, expert, file_path, change_chain["related_files"])
@@ -78,7 +86,12 @@ class MainAgentService:
             routeable = bool(target_focus.get("routeable", True))
             skip_reason = "" if routeable else str(target_focus.get("skip_reason") or "")
         else:
-            routeable, skip_reason = self._should_route_expert(subject, expert, target_focus, file_path)
+            routeable, skip_reason = self._should_route_expert(
+                subject,
+                expert,
+                {**target_focus, "target_hunk": target_hunk},
+                file_path,
+            )
         summary = self._build_command_fallback(
             subject,
             expert,
@@ -490,7 +503,7 @@ class MainAgentService:
             for file_path in changed_files:
                 if any(token in file_path.lower() for token in ["mq", "kafka", "rocketmq", "rabbit", "queue", "consumer", "producer"]):
                     return file_path
-        if expert_id == "ddd_specification":
+        if expert_id in {"ddd_specification", "ddd_architecture"}:
             for file_path in changed_files:
                 if any(token in file_path.lower() for token in ["domain", "aggregate", "entity", "repository", "service", "application"]):
                     return file_path
@@ -686,7 +699,7 @@ class MainAgentService:
         if expert_id == "security_compliance":
             preferred_line = 18
         elif expert_id == "architecture_design":
-            preferred_line = 42
+            preferred_line = 24
         elif expert_id == "performance_reliability":
             preferred_line = 57
         elif expert_id == "database_analysis":
@@ -695,7 +708,7 @@ class MainAgentService:
             preferred_line = 28
         elif expert_id == "mq_analysis":
             preferred_line = 30
-        elif expert_id == "ddd_specification":
+        elif expert_id in {"ddd_specification", "ddd_architecture"}:
             preferred_line = 40
         elif expert_id == "test_verification":
             preferred_line = 73
@@ -816,7 +829,7 @@ class MainAgentService:
             return False, "当前变更未命中安全相关线索"
         if expert_id == "frontend_accessibility" and "frontend" not in lowered:
             return False, "当前变更不属于前端可访问性审查范围"
-        if expert_id in {"ddd_specification", "architecture_design", "maintainability_code_health", "security_compliance"} and import_only:
+        if expert_id in {"ddd_specification", "ddd_architecture", "architecture_design", "maintainability_code_health", "security_compliance"} and import_only:
             return False, "当前 hunk 仅为 import 级调整，缺少足够的结构性审查信号"
         return True, ""
 
@@ -1319,7 +1332,7 @@ class MainAgentService:
             "    }\n"
             "  ],\n"
             '  "skipped_experts": [\n'
-            '    {"expert_id": "ddd_specification", "reason": "未命中领域建模变化"}\n'
+            '    {"expert_id": "ddd_architecture", "reason": "未命中DDD边界变化"}\n'
             "  ]\n"
             "}"
         )
@@ -1646,8 +1659,8 @@ class MainAgentService:
 
         if {"factory_bypass", "event_ordering_risk"} & signal_set:
             _add_if_requested(
-                "architecture_design",
-                "检测到聚合工厂绕过或事件发布顺序风险，系统补入架构与设计专家复核结构边界与事务顺序。",
+                "ddd_architecture",
+                "检测到聚合工厂绕过或事件发布顺序风险，系统补入DDD架构专家复核聚合边界、应用编排和事件顺序。",
                 0.81,
             )
 

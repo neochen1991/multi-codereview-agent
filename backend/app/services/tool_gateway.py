@@ -851,7 +851,11 @@ class ReviewToolGateway:
             "security_compliance": ["controller_entry_guard_inspector", "application_service_boundary_inspector", "transaction_boundary_inspector"],
             "performance_reliability": ["transaction_boundary_inspector", "repository_query_risk_inspector"],
             "database_analysis": ["repository_query_risk_inspector"],
-            "architecture_design": ["application_service_boundary_inspector", "aggregate_invariant_inspector"],
+            "ddd_architecture": [
+                "application_service_boundary_inspector",
+                "aggregate_invariant_inspector",
+                "transaction_boundary_inspector",
+            ],
             "ddd_specification": ["aggregate_invariant_inspector", "transaction_boundary_inspector"],
         }
         return list(mapping.get(expert_id, []))

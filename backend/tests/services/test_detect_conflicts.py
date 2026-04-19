@@ -349,13 +349,15 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 2
-    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
-    assert conflicts_by_id["fdg_weighted_1"]["confidence"] == 0.98
-    assert conflicts_by_id["fdg_weighted_1"]["confidence_breakdown"]["participant_count"] == 1
-    assert conflicts_by_id["fdg_weighted_1"]["confidence_breakdown"]["consensus_bonus"] == 0.0
-    assert conflicts_by_id["fdg_weighted_2"]["confidence"] == 0.74
-    assert conflicts_by_id["fdg_weighted_2"]["confidence_breakdown"]["hypothesis_penalty"] == 0.08
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["finding_ids"] == ["fdg_weighted_1", "fdg_weighted_2"]
+    assert conflict["participant_expert_ids"] == ["security_compliance", "architecture_design"]
+    assert conflict["primary_expert_id"] == "security_compliance"
+    assert conflict["confidence"] == 0.95
+    assert conflict["confidence_breakdown"]["participant_count"] == 2
+    assert conflict["confidence_breakdown"]["consensus_bonus"] == 0.03
+    assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.0
 
 
 def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
@@ -445,7 +447,7 @@ def test_detect_conflicts_splits_findings_on_different_lines():
     assert ("fdg_semantic_name",) in conflict_finding_ids
 
 
-def test_detect_conflicts_keeps_same_line_findings_as_separate_issues():
+def test_detect_conflicts_merges_same_line_same_problem_into_single_issue():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -493,13 +495,23 @@ def test_detect_conflicts_keeps_same_line_findings_as_separate_issues():
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 2
-    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
-    assert conflicts_by_id["fdg_same_1"]["finding_ids"] == ["fdg_same_1"]
-    assert conflicts_by_id["fdg_same_2"]["finding_ids"] == ["fdg_same_2"]
-    assert conflicts_by_id["fdg_same_1"]["aggregated_titles"] == ["权限绕过风险"]
-    assert "在入口层补齐统一鉴权守卫" in conflicts_by_id["fdg_same_2"]["aggregated_remediation_strategies"]
-    assert "补充入口鉴权" in conflicts_by_id["fdg_same_2"]["aggregated_remediation_steps"]
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["finding_ids"] == ["fdg_same_1", "fdg_same_2"]
+    assert conflict["aggregated_titles"] == ["权限绕过风险"]
+    assert conflict["primary_expert_id"] == "security_compliance"
+    assert [view["expert_id"] for view in conflict["expert_views"]] == [
+        "security_compliance",
+        "architecture_design",
+    ]
+    assert [view["title"] for view in conflict["expert_views"]] == ["权限绕过风险", "权限绕过风险"]
+    assert [view["finding_type"] for view in conflict["expert_views"]] == [
+        "direct_defect",
+        "risk_hypothesis",
+    ]
+    assert all(view["normalized_issue_type"] for view in conflict["expert_views"])
+    assert "在入口层补齐统一鉴权守卫" in conflict["aggregated_remediation_strategies"]
+    assert "补充入口鉴权" in conflict["aggregated_remediation_steps"]
 
 
 def test_detect_conflicts_keeps_same_line_different_problems_as_separate_issues():
