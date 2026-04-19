@@ -4394,6 +4394,172 @@ def test_review_runner_system_prompt_uses_matched_sections_from_large_performanc
     assert len(prompt) < len(raw_content) // 4
 
 
+def test_review_runner_light_system_prompt_uses_summary_not_fulltext(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构专家",
+        role="architecture",
+        enabled=True,
+        system_prompt="你是架构专家。",
+        review_spec="# 架构规范\n\n必须关注依赖方向。",
+    )
+    bound_docs = [
+        KnowledgeDocument(
+            title="架构补充规范",
+            expert_id="architecture_design",
+            doc_type="review_rule",
+            content="原始全文第一段。\n原始全文第二段。\n原始全文第三段。",
+            source_filename="architecture-review.md",
+            indexed_outline=["总则", "总则 / 服务层"],
+            matched_sections=[
+                KnowledgeDocumentSection(
+                    node_id="node-1",
+                    doc_id="doc-1",
+                    title="服务层",
+                    path="总则 / 服务层",
+                    summary="服务层禁止直接依赖基础设施实现。",
+                    content="Service 不得直接 new 基础设施实现类。",
+                )
+            ],
+        )
+    ]
+
+    prompt = runner._build_expert_system_prompt(
+        expert,
+        bound_docs,
+        [],
+        {"total_rules": 2, "matched_rules_for_llm": [{"title": "应用层不得承载领域规则", "priority": "P1", "scene_path": "应用层/领域层", "reason": "命中服务边界变更"}]},
+        analysis_mode="light",
+    )
+
+    assert "《专家绑定参考文档摘要》开始" in prompt
+    assert "《规则遍历结果摘要》开始" in prompt
+    assert "Service 不得直接 new 基础设施实现类" not in prompt
+    assert "架构补充规范" in prompt
+
+
+def test_review_runner_light_multi_file_prompt_deduplicates_repository_blocks(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="架构专家",
+        role="architecture",
+        enabled=True,
+        system_prompt="你是架构专家。",
+        review_spec="# 架构规范\n\n必须关注依赖方向。",
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        title="test",
+        changed_files=[
+            "src/main/java/com/example/A.java",
+            "src/main/java/com/example/B.java",
+        ],
+        unified_diff="diff --git a/src/main/java/com/example/A.java b/src/main/java/com/example/A.java",
+    )
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/example/A.java",
+        10,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={
+            "summary": "已补充大量仓库上下文",
+            "primary_context": {"path": "src/main/java/com/example/A.java", "snippet": "line1\nline2\nline3"},
+        },
+        target_hunk={"excerpt": "10 | + change", "changed_lines": [10], "start_line": 10, "end_line": 10},
+        target_hunks=[{"excerpt": "10 | + change", "changed_lines": [10], "start_line": 10, "end_line": 10}],
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=[],
+        active_skills=[],
+        rule_screening={},
+        analysis_mode="light",
+        include_target_file_full_diff=False,
+        include_related_diff_summary=False,
+    )
+
+    assert "详细源码片段已在“多文件联合审查补充”逐文件提供" in prompt
+
+
+def test_review_runner_repository_source_blocks_follow_expert_context_priority(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    base_context = {
+        "prompt_context_section_order": [
+            "persistence_contexts",
+            "transaction_context",
+            "caller_contexts",
+            "current_class_context",
+        ],
+        "primary_context": {
+            "path": "src/main/java/com/example/OrderService.java",
+            "snippet": "line1\nline2",
+        },
+        "current_class_context": {
+            "path": "src/main/java/com/example/OrderService.java",
+            "snippet": "class snippet",
+        },
+        "caller_contexts": [
+            {
+                "path": "src/main/java/com/example/OrderController.java",
+                "symbol": "OrderController#create",
+                "snippet": "caller snippet",
+            }
+        ],
+        "persistence_contexts": [
+            {
+                "path": "src/main/java/com/example/OrderRepository.java",
+                "symbol": "OrderRepository#save",
+                "snippet": "persistence snippet",
+            }
+        ],
+        "transaction_context": {
+            "transactional_path": "src/main/java/com/example/OrderService.java",
+            "transactional_method": "createOrder",
+            "transaction_boundary_snippet": "@Transactional\npublic void createOrder() {}",
+            "call_chain": ["OrderController#create", "OrderService#createOrder"],
+        },
+    }
+
+    source_blocks = runner._build_repository_source_blocks(base_context, [])
+
+    assert source_blocks.index("# 持久化上下文") < source_blocks.index("# 事务边界")
+    assert source_blocks.index("# 事务边界") < source_blocks.index("# 调用方")
+    assert source_blocks.index("# 调用方") < source_blocks.index("# 当前类问题片段")
+
+
+def test_review_runner_light_prompt_context_trim_prioritizes_top_sections(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    repository_context = {
+        "related_contexts": [{"path": f"src/A{i}.java", "snippet": "related"} for i in range(4)],
+        "caller_contexts": [{"path": f"src/C{i}.java", "snippet": "caller"} for i in range(4)],
+        "callee_contexts": [{"path": f"src/D{i}.java", "snippet": "callee"} for i in range(4)],
+        "domain_model_contexts": [{"path": f"src/M{i}.java", "snippet": "domain"} for i in range(4)],
+        "persistence_contexts": [{"path": f"src/P{i}.java", "snippet": "persistence"} for i in range(4)],
+        "symbol_contexts": [{"symbol": f"S{i}", "definitions": [], "references": []} for i in range(4)],
+    }
+
+    trimmed = runner._trim_prompt_repository_context_for_light(
+        repository_context,
+        ["persistence_contexts", "callee_contexts", "caller_contexts", "domain_model_contexts"],
+    )
+
+    assert len(trimmed["persistence_contexts"]) == 3
+    assert len(trimmed["callee_contexts"]) == 3
+    assert len(trimmed["caller_contexts"]) == 3
+    assert len(trimmed["domain_model_contexts"]) == 1
+    assert len(trimmed["related_contexts"]) == 1
+    assert len(trimmed["symbol_contexts"]) == 1
+
+
 def test_review_runner_builds_knowledge_context_metadata(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -4920,3 +5086,55 @@ def test_review_runner_batches_issue_consistency_validation_by_file(storage_root
     assert call_count["value"] == 1
     assert len(validated) == 2
     assert all(item.consistency_check_status == "passed" for item in validated)
+
+
+def test_review_runner_build_issue_consistency_validation_prompt_uses_compact_issue_payload(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_demo",
+        title="批量查询缺失",
+        summary="for 循环里逐条查库",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        status="resolved",
+        severity="high",
+        confidence=0.91,
+        finding_ids=["fdg_demo"],
+        participant_expert_ids=["performance_reliability"],
+        aggregated_titles=["不应出现在校验 prompt 里"],
+        aggregated_summaries=["这类大字段不需要塞给 Judge"],
+        evidence=["e1", "e2"],
+    )
+    finding = ReviewFinding(
+        review_id="rev_demo",
+        expert_id="performance_reliability",
+        finding_id="fdg_demo",
+        title="批量查询缺失",
+        summary="for 循环里逐条查库",
+        finding_type="direct_defect",
+        severity="high",
+        confidence=0.91,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        remediation_strategy="改成批量查询",
+        remediation_suggestion="先收集 ID 再批量查询",
+        remediation_steps=["抽取 IDs", "批量查询"],
+        code_excerpt="for (Long id : ids) { repository.findById(id); }",
+        suggested_code="Map<Long, Order> orders = repository.findAllById(ids);",
+    )
+
+    prompt = runner._build_issue_consistency_validation_prompt(
+        [
+            {
+                "issue": issue,
+                "baseline": runner._build_issue_consistency_baseline(issue, [finding]),
+                "related_findings": [finding],
+            }
+        ]
+    )
+
+    assert '"aggregated_titles"' not in prompt
+    assert '"confidence_breakdown"' not in prompt
+    assert '"issue_id": "iss_demo"' in prompt
+    assert '"finding_ids": [' in prompt

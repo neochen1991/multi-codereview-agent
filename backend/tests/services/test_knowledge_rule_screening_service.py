@@ -699,6 +699,47 @@ def test_knowledge_rule_screening_uses_java_quality_signals_for_general_java_rul
     assert "java_quality:query_semantics_weakened" in matched["PERF-SQL-001"]["matched_signals"]
 
 
+def test_knowledge_rule_screening_compacts_prompt_in_light_mode() -> None:
+    service = KnowledgeRuleScreeningService(Path("/tmp"))
+    rule = KnowledgeDocument(
+        title="安全规则",
+        expert_id="security_compliance",
+        doc_type="review_rule",
+        source_filename="security-rules.md",
+        content=(
+            "## RULE: SEC-JDDD-002 Repository、Mapper 与 Query 组装必须避免动态拼接与越权查询\n\n"
+            "### 一级场景\n仓储层\n\n"
+            "### 二级场景\n持久化层\n\n"
+            "### 三级场景\n数据访问\n\n"
+            "### 描述\n检查 Query 组装是否出现动态拼接和语义放宽。\n\n"
+            "### 语言\njava\n\n"
+            "### 问题级别\nP1\n"
+        ),
+    )
+    parsed_rule = KnowledgeRuleIndexService().build_rules(rule)[0]
+    long_excerpt = "A" * 800
+
+    prompt = service._build_llm_screening_user_prompt(
+        "security_compliance",
+        {
+            "changed_files": ["src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"],
+            "query_terms": [
+                "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+                long_excerpt,
+                long_excerpt,
+                "java_quality:query_semantics_weakened",
+            ],
+            "focus_file": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        },
+        [parsed_rule],
+        analysis_mode="light",
+    )
+
+    assert "...<truncated>" in prompt
+    assert prompt.count(long_excerpt[:200]) <= 1
+    assert "level_three_scene=数据访问" not in prompt
+
+
 def test_knowledge_rule_screening_uses_java_quality_signals_for_unbounded_query(storage_root: Path) -> None:
     ingestion = KnowledgeIngestionService(storage_root)
     ingestion.ingest(

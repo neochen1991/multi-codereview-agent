@@ -1108,3 +1108,102 @@ def test_decode_sse_payload_supports_nested_choice_message_content_blocks():
     message = choices[0].get("message")
     assert isinstance(message, dict)
     assert message.get("content") == '{"status":"repaired"}'
+
+
+def test_llm_chat_uses_choice_text_when_message_content_is_empty(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"finish_reason":"stop","message":{"content":""},"text":"ok from choice.text"}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    result = service.complete_text(
+        system_prompt="sys",
+        user_prompt="user",
+        resolution=service.resolve_main_agent(runtime),
+        fallback_text="fallback",
+        allow_fallback=False,
+    )
+
+    assert result.mode == "live"
+    assert result.text == "ok from choice.text"
+
+
+def test_llm_chat_falls_back_when_completion_is_200_but_empty(monkeypatch, tmp_path: Path):
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+        text = '{"choices":[{"finish_reason":"stop","message":{"content":""}}]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> DummyResponse:
+            return DummyResponse()
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    result = service.complete_text(
+        system_prompt="sys",
+        user_prompt="user",
+        resolution=service.resolve_main_agent(runtime),
+        fallback_text='{"results":[]}',
+        allow_fallback=True,
+    )
+
+    assert result.mode == "fallback"
+    assert result.text == '{"results":[]}'
+    assert "empty_content" in result.error

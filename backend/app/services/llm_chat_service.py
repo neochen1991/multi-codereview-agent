@@ -343,13 +343,12 @@ class LLMChatService:
                 error="empty_choices",
                 allow_fallback=allow_fallback,
             )
-        message = choices[0].get("message") or {}
-        content = self._extract_content(message.get("content")).strip()
+        content = self._extract_payload_text(payload).strip()
         if not content:
             return self._handle_failure(
                 resolution=resolution,
                 fallback_text=fallback_text,
-                error="empty_content",
+                error=f"empty_content:finish_reason={self._extract_finish_reason(payload) or 'unknown'}",
                 allow_fallback=allow_fallback,
             )
         total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
@@ -378,6 +377,27 @@ class LLMChatService:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
         )
+
+    def _extract_payload_text(self, payload: dict[str, object]) -> str:
+        text = self._extract_text_from_chunk(payload).strip()
+        if text:
+            return text
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = choice.get("message") or {}
+        content = self._extract_content((message or {}).get("content")).strip() if isinstance(message, dict) else ""
+        if content:
+            return content
+        return ""
+
+    def _extract_finish_reason(self, payload: dict[str, object]) -> str:
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        return str(choice.get("finish_reason") or "").strip()
 
     def _build_http_timeout(self, timeout_seconds: float) -> httpx.Timeout:
         """针对内网和流式响应构造更稳妥的 httpx 超时参数。"""

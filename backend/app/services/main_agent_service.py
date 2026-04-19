@@ -138,17 +138,6 @@ class MainAgentService:
             for expert in experts
         }
         baseline_routes = self._preserve_selected_expert_routes(experts, baseline_routes)
-        if analysis_mode == "light":
-            for route in baseline_routes.values():
-                route["routing_llm"] = {
-                    "provider": "main-agent-template",
-                    "model": "template",
-                    "base_url": "",
-                    "api_key_env": "",
-                    "mode": "rule_only_light",
-                    "error": "",
-                }
-            return baseline_routes
 
         candidate_hunks = self._build_candidate_hunks(subject, repository_service)
         if not candidate_hunks or not experts:

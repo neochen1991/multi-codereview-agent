@@ -195,11 +195,19 @@ class KnowledgeRuleScreeningService:
         review_id: str,
     ) -> dict[str, object] | None:
         resolution = self._llm.resolve_main_agent(runtime_settings)
-        batch_size = max(4, min(24, int(runtime_settings.rule_screening_batch_size or 12)))
-        timeout_seconds = max(
-            15.0,
-            float(runtime_settings.rule_screening_llm_timeout_seconds or runtime_settings.standard_llm_timeout_seconds or 90),
+        configured_batch_size = max(1, int(runtime_settings.rule_screening_batch_size or 12))
+        batch_cap = 8 if str(analysis_mode).strip().lower() == "light" else 24
+        batch_floor = 2 if str(analysis_mode).strip().lower() == "light" else 4
+        batch_size = max(batch_floor, min(batch_cap, configured_batch_size))
+        configured_timeout = float(
+            runtime_settings.rule_screening_llm_timeout_seconds
+            or runtime_settings.standard_llm_timeout_seconds
+            or 90
         )
+        if str(analysis_mode).strip().lower() == "light":
+            timeout_seconds = max(20.0, min(configured_timeout, 45.0))
+        else:
+            timeout_seconds = max(15.0, configured_timeout)
         screening_started_at = time.perf_counter()
         aggregated_rules: list[dict[str, object]] = []
         all_enabled = [rule for rule in rules if rule.enabled]
@@ -211,7 +219,12 @@ class KnowledgeRuleScreeningService:
             batch_started_at = time.perf_counter()
             llm_result = self._llm.complete_text(
                 system_prompt=self._build_llm_screening_system_prompt(),
-                user_prompt=self._build_llm_screening_user_prompt(expert_id, review_context, batch),
+                user_prompt=self._build_llm_screening_user_prompt(
+                    expert_id,
+                    review_context,
+                    batch,
+                    analysis_mode=analysis_mode,
+                ),
                 resolution=resolution,
                 runtime_settings=runtime_settings,
                 fallback_text='{"rules":[]}',
@@ -501,15 +514,27 @@ class KnowledgeRuleScreeningService:
         expert_id: str,
         review_context: dict[str, object],
         rules: list[KnowledgeReviewRule],
+        *,
+        analysis_mode: str = "standard",
     ) -> str:
-        changed_files = [str(item).strip() for item in list(review_context.get("changed_files", []) or []) if str(item).strip()]
-        query_terms = [str(item).strip() for item in list(review_context.get("query_terms", []) or []) if str(item).strip()]
+        is_light = str(analysis_mode).strip().lower() == "light"
+        changed_files = [
+            self._compact_screening_text(str(item).strip(), 120)
+            for item in list(review_context.get("changed_files", []) or [])[: (8 if is_light else 12)]
+            if str(item).strip()
+        ]
+        raw_query_terms = [str(item).strip() for item in list(review_context.get("query_terms", []) or []) if str(item).strip()]
+        query_terms = self._compact_query_terms_for_prompt(
+            raw_query_terms,
+            max_terms=8 if is_light else 16,
+            max_chars=220 if is_light else 360,
+        )
         focus_file = str(review_context.get("focus_file") or "").strip()
         lines = [
             f"专家: {expert_id}",
             f"聚焦文件: {focus_file or '未提供'}",
-            f"变更文件: {', '.join(changed_files[:12]) or '未提供'}",
-            f"上下文关键词: {', '.join(query_terms[:16]) or '未提供'}",
+            f"变更文件: {', '.join(changed_files) or '未提供'}",
+            f"上下文关键词: {', '.join(query_terms) or '未提供'}",
             "",
             "规则卡列表:",
         ]
@@ -519,12 +544,13 @@ class KnowledgeRuleScreeningService:
             lines.append(f"   priority={rule.priority}")
             if rule.level_one_scene:
                 lines.append(f"   level_one_scene={rule.level_one_scene}")
-            if rule.level_two_scene:
+            if rule.level_two_scene and not is_light:
                 lines.append(f"   level_two_scene={rule.level_two_scene}")
-            if rule.level_three_scene:
+            if rule.level_three_scene and not is_light:
                 lines.append(f"   level_three_scene={rule.level_three_scene}")
             if rule.description or rule.objective:
-                lines.append(f"   description={(rule.description or rule.objective)[:240]}")
+                description_limit = 160 if is_light else 240
+                lines.append(f"   description={self._compact_screening_text((rule.description or rule.objective), description_limit)}")
             if rule.language:
                 lines.append(f"   language={rule.language}")
         lines.extend(
@@ -535,6 +561,37 @@ class KnowledgeRuleScreeningService:
             ]
         )
         return "\n".join(lines)
+
+    def _compact_query_terms_for_prompt(
+        self,
+        query_terms: list[str],
+        *,
+        max_terms: int,
+        max_chars: int,
+    ) -> list[str]:
+        compacted: list[str] = []
+        seen: set[str] = set()
+        for item in query_terms:
+            normalized = self._compact_screening_text(item, max_chars)
+            if not normalized:
+                continue
+            dedupe_key = normalized.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            compacted.append(normalized)
+            if len(compacted) >= max(1, int(max_terms or 0)):
+                break
+        return compacted
+
+    def _compact_screening_text(self, value: str, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        if not text:
+            return ""
+        safe_limit = max(40, int(limit or 0))
+        if len(text) <= safe_limit:
+            return text
+        return text[:safe_limit].rstrip() + "...<truncated>"
 
     def _parse_llm_screening_result(self, text: str) -> list[dict[str, object]] | None:
         raw = str(text or "").replace("\ufeff", "").strip()

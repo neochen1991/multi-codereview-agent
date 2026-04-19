@@ -2848,6 +2848,7 @@ class ReviewRunner:
             list(expected_checks or []),
             active_skills,
             rule_screening,
+            analysis_mode=analysis_mode,
             include_target_file_full_diff=not multi_file_batch,
             include_related_diff_summary=not multi_file_batch,
         )
@@ -2856,7 +2857,7 @@ class ReviewRunner:
         if multi_file_batch:
             user_prompt = (
                 f"{user_prompt}\n\n"
-                f"{self._build_multi_file_prompt_appendix(review.subject, expert, normalized_batch_items)}\n"
+                f"{self._build_multi_file_prompt_appendix(review.subject, expert, normalized_batch_items, analysis_mode=analysis_mode)}\n"
                 "输出补充要求：\n"
                 f"1. 本次允许输出最多 {max_findings_cap} 条 findings；\n"
                 "2. 输出根结构必须是 {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
@@ -2866,7 +2867,13 @@ class ReviewRunner:
                 "5. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
             )
         llm_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
+            system_prompt=self._build_expert_system_prompt(
+                expert,
+                bound_documents,
+                active_skills,
+                rule_screening,
+                analysis_mode=analysis_mode,
+            ),
             user_prompt=user_prompt,
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
             runtime_settings=runtime_settings,
@@ -3259,7 +3266,12 @@ class ReviewRunner:
                     knowledge_context,
                 )
                 llm_result = self.llm_chat_service.complete_text(
-                    system_prompt=self._build_expert_system_prompt(expert, bound_documents, []),
+                    system_prompt=self._build_expert_system_prompt(
+                        expert,
+                        bound_documents,
+                        [],
+                        analysis_mode=analysis_mode,
+                    ),
                     user_prompt=self._build_debate_prompt(
                         review.subject,
                         issue,
@@ -3383,7 +3395,7 @@ class ReviewRunner:
                 resolution=resolution,
                 runtime_settings=runtime_settings,
                 fallback_text=json.dumps({"results": fallback_results}, ensure_ascii=False),
-                allow_fallback=self._allow_llm_fallback(runtime_settings),
+                allow_fallback=True,
                 timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.6),
                 max_attempts=1,
                 log_context={
@@ -4746,6 +4758,7 @@ class ReviewRunner:
         active_skills: list[object],
         rule_screening: dict[str, object] | None = None,
         *,
+        analysis_mode: Literal["standard", "light"] = "standard",
         include_target_file_full_diff: bool = True,
         include_related_diff_summary: bool = True,
     ) -> str:
@@ -4781,6 +4794,12 @@ class ReviewRunner:
             prompt_repository_context["review_observations"] = self._normalize_review_observations(
                 java_quality.get("observations")
             )
+        prompt_repository_context = self._prepare_prompt_repository_context(
+            expert=expert,
+            repository_context=prompt_repository_context,
+            rule_screening=rule_screening or {},
+            analysis_mode=analysis_mode,
+        )
         runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
         repository_context_summary = self._build_repository_context_summary(prompt_repository_context, runtime_tool_results)
         repository_source_blocks = self._build_repository_source_blocks(prompt_repository_context, runtime_tool_results)
@@ -4822,6 +4841,19 @@ class ReviewRunner:
             if has_design_docs
             else "本次未绑定详细设计文档，不要执行设计一致性检查，也不要输出任何 design_* / 设计一致性字段。\n"
         )
+        if analysis_mode == "light":
+            repository_context_summary = self._compact_prompt_block(repository_context_summary, 3600)
+            repository_source_blocks = self._compact_prompt_block(repository_source_blocks, 5200)
+            runtime_tool_summary = self._compact_prompt_block(runtime_tool_summary, 2200)
+            code_excerpt = self._compact_prompt_block(code_excerpt, 1200)
+            hunk_summary = self._compact_prompt_block(hunk_summary, 1400)
+            hunk_batch_summary = self._compact_prompt_block(hunk_batch_summary, 1800)
+            target_file_full_diff = self._compact_prompt_block(target_file_full_diff, 2400)
+            related_diff_summary = self._compact_prompt_block(related_diff_summary, 1800)
+            if not include_target_file_full_diff:
+                repository_source_blocks = "本轮为多文件批量模式，详细源码片段已在“多文件联合审查补充”逐文件提供，此处不重复展开。"
+                related_diff_summary = "本轮为多文件批量模式，其他文件摘要已在附录逐文件提供。"
+                repository_context_summary = self._compact_prompt_block(repository_context_summary, 1800)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"专家: {expert.expert_id} / {expert.name_zh}\n"
@@ -5008,7 +5040,10 @@ class ReviewRunner:
         subject: ReviewSubject,
         expert: ExpertProfile,
         batch_items: list[dict[str, object]],
+        *,
+        analysis_mode: Literal["standard", "light"] = "standard",
     ) -> str:
+        is_light = analysis_mode == "light"
         lines: list[str] = []
         lines.append("【多文件联合审查补充】")
         lines.append(
@@ -5025,15 +5060,16 @@ class ReviewRunner:
             lines.append(f"   重点 hunk:\n{self._build_hunk_summary(target_hunk)}")
             lines.append(f"   同文件 hunk:\n{self._build_hunk_batch_summary(target_hunks)}")
             lines.append(
-                f"   代码仓上下文摘要:\n{self._build_repository_context_summary(repository_context, [])}"
+                f"   代码仓上下文摘要:\n{self._compact_prompt_block(self._build_repository_context_summary(repository_context, []), 1800 if is_light else 3200)}"
             )
             lines.append(
                 f"   结构化观察点:\n{self._build_observation_review_summary(repository_context)}"
             )
-            lines.append(f"   目标文件完整 diff:\n{self._build_target_file_full_diff(subject, file_path)}")
-            lines.append(
-                f"   当前代码片段:\n{self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)}"
-            )
+            if not is_light:
+                lines.append(f"   目标文件完整 diff:\n{self._build_target_file_full_diff(subject, file_path)}")
+                lines.append(
+                    f"   当前代码片段:\n{self._compact_prompt_block(self._build_code_excerpt(subject, file_path, line_start, expert.expert_id), 2200)}"
+                )
         lines.append("JSON 字段补充：每条 finding 都必须包含 file_path（来自上述清单），并给出该文件对应的 line_start/line_end。")
         lines.append("多 hunk 强约束：每条 finding 的 line_start/line_end 必须落在该文件某个 hunk 的 changed_lines/start_line/end_line 范围。")
         lines.append("无法定位到明确 hunk 行号的结论，不要输出。")
@@ -5077,6 +5113,215 @@ class ReviewRunner:
         else:
             lines.append("- 当前未缺失关键输入，可基于规范、规则、变更代码和关联上下文直接审查。")
         return "\n".join(lines)
+
+    def _prepare_prompt_repository_context(
+        self,
+        *,
+        expert: ExpertProfile,
+        repository_context: dict[str, object],
+        rule_screening: dict[str, object],
+        analysis_mode: Literal["standard", "light"],
+    ) -> dict[str, object]:
+        context = dict(repository_context or {})
+        observations = self._normalize_review_observations(context.get("review_observations"))
+        section_order = self._determine_prompt_context_section_order(
+            expert_id=expert.expert_id,
+            rule_screening=rule_screening,
+            observations=observations,
+        )
+        focused_observations = self._prioritize_observations_for_expert(
+            observations,
+            expert_id=expert.expert_id,
+            rule_screening=rule_screening,
+        )
+        context["prompt_context_section_order"] = section_order
+        context["review_observations"] = focused_observations
+        if analysis_mode == "light":
+            context = self._trim_prompt_repository_context_for_light(context, section_order)
+        return context
+
+    def _determine_prompt_context_section_order(
+        self,
+        *,
+        expert_id: str,
+        rule_screening: dict[str, object],
+        observations: list[dict[str, object]],
+    ) -> list[str]:
+        default_order = [
+            "current_class_context",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "transaction_context",
+            "persistence_contexts",
+            "parent_contract_contexts",
+            "related_contexts",
+            "related_source_snippets",
+            "symbol_contexts",
+        ]
+        by_expert: dict[str, list[str]] = {
+            "security_compliance": [
+                "caller_contexts",
+                "callee_contexts",
+                "persistence_contexts",
+                "transaction_context",
+                "current_class_context",
+                "domain_model_contexts",
+            ],
+            "performance_reliability": [
+                "transaction_context",
+                "persistence_contexts",
+                "callee_contexts",
+                "caller_contexts",
+                "current_class_context",
+                "domain_model_contexts",
+            ],
+            "database_analysis": [
+                "persistence_contexts",
+                "transaction_context",
+                "callee_contexts",
+                "current_class_context",
+                "caller_contexts",
+                "domain_model_contexts",
+            ],
+            "architecture_design": [
+                "caller_contexts",
+                "callee_contexts",
+                "domain_model_contexts",
+                "current_class_context",
+                "transaction_context",
+                "parent_contract_contexts",
+            ],
+            "ddd_specification": [
+                "domain_model_contexts",
+                "current_class_context",
+                "caller_contexts",
+                "callee_contexts",
+                "transaction_context",
+                "parent_contract_contexts",
+            ],
+            "correctness_business": [
+                "current_class_context",
+                "caller_contexts",
+                "callee_contexts",
+                "transaction_context",
+                "domain_model_contexts",
+            ],
+            "maintainability_code_health": [
+                "current_class_context",
+                "parent_contract_contexts",
+                "caller_contexts",
+                "callee_contexts",
+                "domain_model_contexts",
+            ],
+        }
+        order = list(by_expert.get(expert_id, default_order))
+        observation_kinds = {str(item.get("kind") or "").strip() for item in observations if str(item.get("kind") or "").strip()}
+        matched_rule_blob = " ".join(
+            [
+                str(item.get("rule_id") or "").strip()
+                + " "
+                + str(item.get("title") or "").strip()
+                + " "
+                + str(item.get("reason") or "").strip()
+                for item in list(rule_screening.get("matched_rules_for_llm") or [])[:8]
+                if isinstance(item, dict)
+            ]
+        ).lower()
+        if observation_kinds & {
+            "query_plan_risk",
+            "query_semantics_changed",
+            "bulk_processing_boundary_missing",
+            "transactional_side_effect",
+        } or any(token in matched_rule_blob for token in ("sql", "query", "transaction", "batch")):
+            for key in ("persistence_contexts", "transaction_context"):
+                if key in order:
+                    order.remove(key)
+                order.insert(0, key)
+        if observation_kinds & {
+            "cross_layer_dependency",
+            "control_flow_with_external_call",
+            "declared_intent_without_implementation",
+        } or any(token in matched_rule_blob for token in ("aggregate", "applicationservice", "controller", "domain")):
+            for key in ("caller_contexts", "callee_contexts", "domain_model_contexts"):
+                if key in order:
+                    order.remove(key)
+                order.insert(0, key)
+        final_order: list[str] = []
+        for key in order + default_order:
+            if key not in final_order:
+                final_order.append(key)
+        return final_order
+
+    def _prioritize_observations_for_expert(
+        self,
+        observations: list[dict[str, object]],
+        *,
+        expert_id: str,
+        rule_screening: dict[str, object],
+    ) -> list[dict[str, object]]:
+        if not observations:
+            return []
+        preferred_kinds: dict[str, set[str]] = {
+            "security_compliance": {"query_semantics_changed", "cross_layer_dependency", "error_semantics_changed"},
+            "performance_reliability": {"control_flow_with_external_call", "bulk_processing_boundary_missing", "query_plan_risk", "transactional_side_effect"},
+            "database_analysis": {"query_plan_risk", "bulk_processing_boundary_missing", "transactional_side_effect", "query_semantics_changed"},
+            "architecture_design": {"cross_layer_dependency", "transactional_side_effect", "control_flow_with_external_call"},
+            "ddd_specification": {"cross_layer_dependency", "transactional_side_effect", "declared_intent_without_implementation"},
+            "correctness_business": {"declared_intent_without_implementation", "error_semantics_changed", "query_semantics_changed"},
+            "maintainability_code_health": {"weak_identifier_signal", "literal_embedded_in_business_logic", "declared_intent_without_implementation"},
+        }
+        matched_rule_blob = " ".join(
+            [
+                str(item.get("rule_id") or "").strip()
+                + " "
+                + str(item.get("title") or "").strip()
+                for item in list(rule_screening.get("matched_rules_for_llm") or [])[:8]
+                if isinstance(item, dict)
+            ]
+        ).lower()
+        preferred = set(preferred_kinds.get(expert_id, set()))
+        if "sql" in matched_rule_blob or "query" in matched_rule_blob:
+            preferred.update({"query_plan_risk", "query_semantics_changed"})
+        if "transaction" in matched_rule_blob:
+            preferred.add("transactional_side_effect")
+        if "aggregate" in matched_rule_blob or "domain" in matched_rule_blob:
+            preferred.update({"cross_layer_dependency", "declared_intent_without_implementation"})
+
+        def _score(item: dict[str, object]) -> tuple[int, int]:
+            kind = str(item.get("kind") or "").strip()
+            score = 3 if kind in preferred else 0
+            score += 1 if float(item.get("confidence") or 0.0) >= 0.75 else 0
+            return (score, -int(item.get("line_start") or 0))
+
+        ordered = sorted(observations, key=_score, reverse=True)
+        return ordered[:8]
+
+    def _trim_prompt_repository_context_for_light(
+        self,
+        repository_context: dict[str, object],
+        section_order: list[str],
+    ) -> dict[str, object]:
+        context = dict(repository_context or {})
+        primary_sections = section_order[:3]
+        per_section_limit = {
+            key: 3 if key in primary_sections else 1
+            for key in (
+                "related_contexts",
+                "related_source_snippets",
+                "caller_contexts",
+                "callee_contexts",
+                "domain_model_contexts",
+                "persistence_contexts",
+                "parent_contract_contexts",
+                "symbol_contexts",
+            )
+        }
+        for key, limit in per_section_limit.items():
+            value = context.get(key)
+            if isinstance(value, list):
+                context[key] = [dict(item) for item in value[:limit] if isinstance(item, dict)]
+        return context
 
     def _build_review_input_completeness(
         self,
@@ -5306,15 +5551,24 @@ class ReviewRunner:
         bound_documents: list[object],
         active_skills: list[object] | None = None,
         rule_screening: dict[str, object] | None = None,
+        *,
+        analysis_mode: Literal["standard", "light"] = "standard",
     ) -> str:
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
-        bound_documents_text = self._build_bound_documents_fulltext(bound_documents)
-        active_skill_text = self._build_active_skill_fulltext(active_skills or [])
-        rule_screening_text = self._build_rule_screening_fulltext(rule_screening or {})
+        if analysis_mode == "light":
+            review_spec_text = self._build_review_spec_summary(str(expert.review_spec or "").strip())
+            bound_documents_text = "《专家绑定参考文档摘要》开始\n" + self._build_bound_documents_summary(bound_documents) + "\n《专家绑定参考文档摘要》结束"
+            active_skill_text = "《已激活 Skills 摘要》开始\n" + self._build_active_skill_summary(active_skills or []) + "\n《已激活 Skills 摘要》结束"
+            rule_screening_text = "《规则遍历结果摘要》开始\n" + self._build_rule_screening_summary(rule_screening or {}) + "\n《规则遍历结果摘要》结束"
+        else:
+            review_spec_text = expert.review_spec or "未提供额外规范文档，请至少遵守专家职责与证据优先原则。"
+            bound_documents_text = self._build_bound_documents_fulltext(bound_documents)
+            active_skill_text = self._build_active_skill_fulltext(active_skills or [])
+            rule_screening_text = self._build_rule_screening_fulltext(rule_screening or {})
         return (
             f"{base_prompt}\n\n"
             f"《审视规范文档》开始\n"
-            f"{expert.review_spec or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
+            f"{review_spec_text}\n"
             f"《审视规范文档》结束\n\n"
             f"{active_skill_text}\n\n"
             f"{bound_documents_text}\n\n"
@@ -5328,6 +5582,15 @@ class ReviewRunner:
             f"6. 必须显式引用命中的规范条款和违反的规范要求。\n"
             f"7. 输出必须遵守 JSON contract。"
         )
+
+    def _compact_prompt_block(self, text: str, limit: int) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        safe_limit = max(400, int(limit or 0))
+        if len(raw) <= safe_limit:
+            return raw
+        return raw[:safe_limit].rstrip() + "\n...<truncated for light mode>"
 
     def _build_active_skill_summary(self, active_skills: list[object]) -> str:
         if not active_skills:
@@ -5557,7 +5820,13 @@ class ReviewRunner:
             max_findings=max_findings,
         )
         followup_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(expert, bound_documents, active_skills, rule_screening),
+            system_prompt=self._build_expert_system_prompt(
+                expert,
+                bound_documents,
+                active_skills,
+                rule_screening,
+                analysis_mode=analysis_mode,
+            ),
             user_prompt=followup_prompt,
             resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
             runtime_settings=runtime_settings,
@@ -6586,50 +6855,136 @@ class ReviewRunner:
                     for line in str(primary_context.get("snippet") or "").splitlines()[:12]
                     if str(line).strip()
                 )
-            related_contexts = repository_context.get("related_contexts")
-            if isinstance(related_contexts, list) and related_contexts:
-                lines.append("- 关联文件源码片段:")
-                for item in related_contexts[:4]:
-                    if not isinstance(item, dict):
-                        continue
-                    related_path = str(item.get("path") or "").strip()
-                    related_snippet = str(item.get("snippet") or "").strip()
-                    if not related_path or not related_snippet:
-                        continue
-                    lines.append(f"  * {related_path}")
-                    lines.extend(f"    {line}" for line in related_snippet.splitlines()[:12])
-            symbol_contexts = repository_context.get("symbol_contexts")
-            if isinstance(symbol_contexts, list) and symbol_contexts:
-                for item in symbol_contexts[:2]:
-                    if not isinstance(item, dict):
-                        continue
-                    symbol = str(item.get("symbol") or "").strip()
-                    definition_count = len(list(item.get("definitions") or []))
-                    reference_count = len(list(item.get("references") or []))
-                    if symbol:
-                        lines.append(f"- 符号上下文: {symbol} · 定义 {definition_count} · 引用 {reference_count}")
-                    definitions = item.get("definitions")
-                    if isinstance(definitions, list) and definitions:
-                        for definition in definitions[:2]:
-                            if not isinstance(definition, dict):
+            section_order = self._resolve_prompt_context_section_order(repository_context)
+            for section_key in section_order:
+                if section_key == "current_class_context":
+                    current_class_context = repository_context.get("current_class_context")
+                    if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
+                        class_name = str(current_class_context.get("class_name") or "").strip()
+                        method_name = str(current_class_context.get("method_name") or "").strip()
+                        path = str(current_class_context.get("path") or "").strip()
+                        title = path or "当前类"
+                        if class_name or method_name:
+                            title += f" · {class_name or 'UnknownClass'}::{method_name or 'unknownMethod'}"
+                        lines.append(f"- 当前类实现片段: {title}")
+                        lines.extend(
+                            f"    {line}"
+                            for line in str(current_class_context.get("snippet") or "").splitlines()[:12]
+                            if str(line).strip()
+                        )
+                if section_key == "transaction_context":
+                    transaction_context = repository_context.get("transaction_context")
+                    if isinstance(transaction_context, dict) and transaction_context:
+                        transaction_path = str(transaction_context.get("transactional_path") or "").strip()
+                        method_name = str(transaction_context.get("transactional_method") or "").strip()
+                        boundary_snippet = str(transaction_context.get("transaction_boundary_snippet") or "").strip()
+                        header = transaction_path or "事务边界"
+                        if method_name:
+                            header += f" · {method_name}"
+                        if boundary_snippet:
+                            lines.append(f"- 事务边界: {header}")
+                            lines.extend(f"    {line}" for line in boundary_snippet.splitlines()[:10] if str(line).strip())
+                        call_chain = [
+                            str(item).strip()
+                            for item in list(transaction_context.get("call_chain") or [])
+                            if str(item).strip()
+                        ]
+                        if call_chain:
+                            lines.append(f"- 事务调用链: {' -> '.join(call_chain[:6])}")
+                if section_key == "related_contexts":
+                    related_contexts = repository_context.get("related_contexts")
+                    if isinstance(related_contexts, list) and related_contexts:
+                        lines.append("- 关联文件源码片段:")
+                        for item in related_contexts[:4]:
+                            if not isinstance(item, dict):
                                 continue
-                            path = str(definition.get("path") or "").strip()
-                            snippet = str(definition.get("snippet") or "").strip()
+                            related_path = str(item.get("path") or "").strip()
+                            related_snippet = str(item.get("snippet") or "").strip()
+                            if not related_path or not related_snippet:
+                                continue
+                            lines.append(f"  * {related_path}")
+                            lines.extend(f"    {line}" for line in related_snippet.splitlines()[:12])
+                if section_key in {
+                    "parent_contract_contexts",
+                    "caller_contexts",
+                    "callee_contexts",
+                    "domain_model_contexts",
+                    "persistence_contexts",
+                }:
+                    section_labels = {
+                        "parent_contract_contexts": "父接口/抽象类",
+                        "caller_contexts": "调用方",
+                        "callee_contexts": "被调方",
+                        "domain_model_contexts": "领域模型",
+                        "persistence_contexts": "持久化上下文",
+                    }
+                    contexts = repository_context.get(section_key)
+                    if isinstance(contexts, list) and contexts:
+                        lines.append(f"- {section_labels[section_key]}:")
+                        for item in contexts[:3]:
+                            if not isinstance(item, dict):
+                                continue
+                            path = str(item.get("path") or "").strip()
+                            snippet = str(item.get("snippet") or "").strip()
+                            symbol = str(item.get("symbol") or "").strip()
                             if not path or not snippet:
                                 continue
-                            lines.append(f"  * 定义: {path}")
-                            lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
-                    references = item.get("references")
-                    if isinstance(references, list) and references:
-                        for reference in references[:2]:
-                            if not isinstance(reference, dict):
+                            header = path
+                            if symbol:
+                                header += f" · {symbol}"
+                            lines.append(f"  * {header}")
+                            lines.extend(f"    {line}" for line in snippet.splitlines()[:10])
+                if section_key == "related_source_snippets":
+                    related_source_snippets = repository_context.get("related_source_snippets")
+                    if isinstance(related_source_snippets, list) and related_source_snippets:
+                        lines.append("- 关联源码片段:")
+                        for snippet_item in related_source_snippets[:3]:
+                            if not isinstance(snippet_item, dict):
                                 continue
-                            path = str(reference.get("path") or "").strip()
-                            snippet = str(reference.get("snippet") or "").strip()
+                            path = str(snippet_item.get("path") or "").strip()
+                            kind = str(snippet_item.get("kind") or "").strip()
+                            symbol = str(snippet_item.get("symbol") or "").strip()
+                            snippet = str(snippet_item.get("snippet") or "").strip()
                             if not path or not snippet:
                                 continue
-                            lines.append(f"  * 引用: {path}")
+                            header = path
+                            if kind or symbol:
+                                header += f"（{kind or 'context'} / {symbol or 'n/a'}）"
+                            lines.append(f"  * {header}")
                             lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
+                if section_key == "symbol_contexts":
+                    symbol_contexts = repository_context.get("symbol_contexts")
+                    if isinstance(symbol_contexts, list) and symbol_contexts:
+                        for item in symbol_contexts[:2]:
+                            if not isinstance(item, dict):
+                                continue
+                            symbol = str(item.get("symbol") or "").strip()
+                            definition_count = len(list(item.get("definitions") or []))
+                            reference_count = len(list(item.get("references") or []))
+                            if symbol:
+                                lines.append(f"- 符号上下文: {symbol} · 定义 {definition_count} · 引用 {reference_count}")
+                            definitions = item.get("definitions")
+                            if isinstance(definitions, list) and definitions:
+                                for definition in definitions[:2]:
+                                    if not isinstance(definition, dict):
+                                        continue
+                                    path = str(definition.get("path") or "").strip()
+                                    snippet = str(definition.get("snippet") or "").strip()
+                                    if not path or not snippet:
+                                        continue
+                                    lines.append(f"  * 定义: {path}")
+                                    lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
+                            references = item.get("references")
+                            if isinstance(references, list) and references:
+                                for reference in references[:2]:
+                                    if not isinstance(reference, dict):
+                                        continue
+                                    path = str(reference.get("path") or "").strip()
+                                    snippet = str(reference.get("snippet") or "").strip()
+                                    if not path or not snippet:
+                                        continue
+                                    lines.append(f"  * 引用: {path}")
+                                    lines.extend(f"    {line}" for line in snippet.splitlines()[:8])
             self._append_java_ddd_context_summary(lines, repository_context)
         for item in runtime_tool_results:
             if str(item.get("tool_name") or "") != "repo_context_search":
@@ -6769,6 +7124,7 @@ class ReviewRunner:
         runtime_tool_results: list[dict[str, object]],
     ) -> str:
         lines: list[str] = []
+        section_order = self._resolve_prompt_context_section_order(repository_context)
         primary_context = repository_context.get("primary_context")
         if isinstance(primary_context, dict):
             path = str(primary_context.get("path") or "").strip()
@@ -6777,23 +7133,56 @@ class ReviewRunner:
                 lines.append(f"# 目标文件源码\n{path}")
                 lines.extend(snippet.splitlines()[:20])
 
-        current_class_context = repository_context.get("current_class_context")
-        if isinstance(current_class_context, dict):
-            path = str(current_class_context.get("path") or "").strip()
-            snippet = str(current_class_context.get("snippet") or "").strip()
-            if path and snippet:
-                if lines:
-                    lines.append("")
-                lines.append(f"# 当前类问题片段\n{path}")
-                lines.extend(snippet.splitlines()[:20])
-
-        for key, label in [
-            ("parent_contract_contexts", "父接口/抽象类"),
-            ("caller_contexts", "调用方"),
-            ("callee_contexts", "被调方"),
-            ("domain_model_contexts", "领域模型"),
-            ("persistence_contexts", "持久化上下文"),
-        ]:
+        section_labels = {
+            "current_class_context": "当前类问题片段",
+            "parent_contract_contexts": "父接口/抽象类",
+            "caller_contexts": "调用方",
+            "callee_contexts": "被调方",
+            "domain_model_contexts": "领域模型",
+            "persistence_contexts": "持久化上下文",
+            "related_contexts": "关联上下文",
+            "related_source_snippets": "关联源码片段",
+            "transaction_context": "事务边界",
+        }
+        for key in section_order:
+            if key == "current_class_context":
+                current_class_context = repository_context.get("current_class_context")
+                if isinstance(current_class_context, dict):
+                    path = str(current_class_context.get("path") or "").strip()
+                    snippet = str(current_class_context.get("snippet") or "").strip()
+                    if path and snippet:
+                        if lines:
+                            lines.append("")
+                        lines.append(f"# {section_labels[key]}\n{path}")
+                        lines.extend(snippet.splitlines()[:20])
+                continue
+            if key == "transaction_context":
+                transaction_context = repository_context.get("transaction_context")
+                if isinstance(transaction_context, dict) and transaction_context:
+                    snippet = str(transaction_context.get("transaction_boundary_snippet") or "").strip()
+                    path = str(transaction_context.get("transactional_path") or "").strip()
+                    method_name = str(transaction_context.get("transactional_method") or "").strip()
+                    call_chain = [
+                        str(item).strip()
+                        for item in list(transaction_context.get("call_chain") or [])
+                        if str(item).strip()
+                    ]
+                    if snippet:
+                        if lines:
+                            lines.append("")
+                        header = f"# {section_labels[key]}\n{path}"
+                        if method_name:
+                            header += f" · {method_name}"
+                        lines.append(header)
+                        lines.extend(snippet.splitlines()[:16])
+                    if call_chain:
+                        lines.append(f"调用链: {' -> '.join(call_chain[:6])}")
+                continue
+            if key == "symbol_contexts":
+                continue
+            if key not in section_labels:
+                continue
+            label = section_labels[key]
             contexts = repository_context.get(key)
             if not isinstance(contexts, list):
                 continue
@@ -6817,27 +7206,6 @@ class ReviewRunner:
             if appended:
                 continue
 
-        transaction_context = repository_context.get("transaction_context")
-        if isinstance(transaction_context, dict) and transaction_context:
-            snippet = str(transaction_context.get("transaction_boundary_snippet") or "").strip()
-            path = str(transaction_context.get("transactional_path") or "").strip()
-            method_name = str(transaction_context.get("transactional_method") or "").strip()
-            if snippet:
-                if lines:
-                    lines.append("")
-                header = f"# 事务边界\n{path}"
-                if method_name:
-                    header += f" · {method_name}"
-                lines.append(header)
-                lines.extend(snippet.splitlines()[:16])
-            call_chain = [
-                str(item).strip()
-                for item in list(transaction_context.get("call_chain") or [])
-                if str(item).strip()
-            ]
-            if call_chain:
-                lines.append(f"调用链: {' -> '.join(call_chain[:6])}")
-
         if not lines:
             for item in runtime_tool_results:
                 if str(item.get("tool_name") or "") != "repo_context_search":
@@ -6851,6 +7219,27 @@ class ReviewRunner:
                         lines.extend(snippet.splitlines()[:20])
                         break
         return "\n".join(lines) if lines else "未补充可直接供大模型阅读的源码上下文。"
+
+    def _resolve_prompt_context_section_order(self, context_payload: dict[str, object]) -> list[str]:
+        section_order = [
+            str(item).strip()
+            for item in list(context_payload.get("prompt_context_section_order") or [])
+            if str(item).strip()
+        ]
+        if section_order:
+            return section_order
+        return [
+            "current_class_context",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "transaction_context",
+            "persistence_contexts",
+            "parent_contract_contexts",
+            "related_contexts",
+            "related_source_snippets",
+            "symbol_contexts",
+        ]
 
     def _append_java_ddd_context_summary(self, lines: list[str], context_payload: dict[str, object]) -> None:
         java_review_mode = str(context_payload.get("java_review_mode") or "").strip()
@@ -6884,45 +7273,54 @@ class ReviewRunner:
                     f"[{str(item.get('kind') or '').strip() or 'signal'}] "
                     f"{str(item.get('summary') or '').strip()}"
                 )
-        current_class_context = context_payload.get("current_class_context")
-        if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
-            lines.append("- Java 当前类问题片段:")
-            lines.append(
-                f"  * {str(current_class_context.get('path') or '').strip()} "
-                f"{str(current_class_context.get('class_name') or '').strip()}::"
-                f"{str(current_class_context.get('method_name') or '').strip()}"
-            )
-            lines.extend(
-                f"    {line}"
-                for line in str(current_class_context.get("snippet") or "").splitlines()[:14]
-                if str(line).strip()
-            )
-        for key, label in [
-            ("parent_contract_contexts", "父接口/抽象类"),
-            ("caller_contexts", "调用方"),
-            ("callee_contexts", "被调方"),
-            ("domain_model_contexts", "领域模型"),
-            ("persistence_contexts", "持久化上下文"),
-        ]:
-            contexts = context_payload.get(key)
-            if not isinstance(contexts, list) or not contexts:
+        for key in self._resolve_prompt_context_section_order(context_payload):
+            if key == "current_class_context":
+                current_class_context = context_payload.get("current_class_context")
+                if isinstance(current_class_context, dict) and current_class_context.get("snippet"):
+                    lines.append("- Java 当前类问题片段:")
+                    lines.append(
+                        f"  * {str(current_class_context.get('path') or '').strip()} "
+                        f"{str(current_class_context.get('class_name') or '').strip()}::"
+                        f"{str(current_class_context.get('method_name') or '').strip()}"
+                    )
+                    lines.extend(
+                        f"    {line}"
+                        for line in str(current_class_context.get("snippet") or "").splitlines()[:14]
+                        if str(line).strip()
+                    )
                 continue
-            lines.append(f"- Java {label}:")
-            for item in contexts[:3]:
-                if not isinstance(item, dict):
+            labels = {
+                "parent_contract_contexts": "父接口/抽象类",
+                "caller_contexts": "调用方",
+                "callee_contexts": "被调方",
+                "domain_model_contexts": "领域模型",
+                "persistence_contexts": "持久化上下文",
+            }
+            if key in labels:
+                label = labels[key]
+                contexts = context_payload.get(key)
+                if not isinstance(contexts, list) or not contexts:
                     continue
-                path = str(item.get("path") or "").strip()
-                snippet = str(item.get("snippet") or "").strip()
-                symbol = str(item.get("symbol") or "").strip()
-                if not path or not snippet:
-                    continue
-                header = path
-                if symbol:
-                    header += f" · {symbol}"
-                lines.append(f"  * {header}")
-                lines.extend(f"    {line}" for line in snippet.splitlines()[:10])
-        transaction_context = context_payload.get("transaction_context")
-        if isinstance(transaction_context, dict) and transaction_context:
+                lines.append(f"- Java {label}:")
+                for item in contexts[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get("path") or "").strip()
+                    snippet = str(item.get("snippet") or "").strip()
+                    symbol = str(item.get("symbol") or "").strip()
+                    if not path or not snippet:
+                        continue
+                    header = path
+                    if symbol:
+                        header += f" · {symbol}"
+                    lines.append(f"  * {header}")
+                    lines.extend(f"    {line}" for line in snippet.splitlines()[:10])
+                continue
+            if key != "transaction_context":
+                continue
+            transaction_context = context_payload.get("transaction_context")
+            if not isinstance(transaction_context, dict) or not transaction_context:
+                continue
             lines.append("- Java 事务边界:")
             method_name = str(transaction_context.get("transactional_method") or "").strip()
             transaction_path = str(transaction_context.get("transactional_path") or "").strip()

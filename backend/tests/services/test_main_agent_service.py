@@ -1065,7 +1065,7 @@ def test_main_agent_build_routing_plan_uses_llm_routes(monkeypatch):
     assert plan["architecture_design"]["file_path"] == "apps/api/orders/order.service.ts"
 
 
-def test_main_agent_light_routing_plan_preserves_selected_security_expert():
+def test_main_agent_light_routing_plan_still_allows_llm_refinement(monkeypatch):
     agent = MainAgentService()
     subject = ReviewSubject(
         subject_type="mr",
@@ -1098,14 +1098,28 @@ def test_main_agent_light_routing_plan_preserves_selected_security_expert():
             system_prompt="prompt",
         )
     ]
+    captured: dict[str, object] = {}
+
+    def fake_complete_text(**kwargs: object) -> LLMTextResult:
+        captured["called"] = True
+        return LLMTextResult(
+            text='{"expert_routes":[{"expert_id":"security_compliance","candidate_id":"src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java:60:60","routeable":true,"reason":"轻量模式下仍由 LLM 细化派工","confidence":0.86}],"skipped_experts":[]}',
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
 
     plan = agent.build_routing_plan(subject, experts, RuntimeSettings(), analysis_mode="light")
 
     route = plan["security_compliance"]
+    assert captured["called"] is True
     assert route["routeable"] is True
-    assert route["routing_source"] == "selected_override"
-    assert "保守执行策略继续审查" in route["routing_reason"]
-    assert route["routing_override_reason"] == "当前变更未命中安全相关线索"
+    assert route["routing_llm"]["mode"] == "live"
+    assert route["routing_source"] in {"llm", "selected_override"}
 
 
 def test_main_agent_routing_plan_overrides_llm_skip_for_selected_expert(monkeypatch):
@@ -1411,7 +1425,7 @@ def test_main_agent_uses_runtime_timeout_for_routing_plan(monkeypatch):
     assert captured["max_attempts"] == 5
 
 
-def test_main_agent_light_mode_skips_llm_routing_plan(monkeypatch):
+def test_main_agent_light_mode_still_uses_llm_routing_plan(monkeypatch):
     agent = MainAgentService()
     subject = ReviewSubject(
         subject_type="mr",
@@ -1439,21 +1453,37 @@ def test_main_agent_light_mode_skips_llm_routing_plan(monkeypatch):
             system_prompt="prompt",
         )
     ]
+    captured: dict[str, object] = {}
 
-    def fail_if_called(**_: object) -> LLMTextResult:
-        raise AssertionError("轻量模式下不应再调用 routing_plan LLM")
+    def fake_complete_text(**kwargs: object) -> LLMTextResult:
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        captured["max_attempts"] = kwargs.get("max_attempts")
+        return LLMTextResult(
+            text='{"expert_routes":[{"expert_id":"correctness_business","candidate_id":"apps/api/orders/order.service.ts:1:1","routeable":true,"reason":"轻量模式下仍由 LLM 细化派工","confidence":0.9}],"skipped_experts":[]}',
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
 
-    monkeypatch.setattr(agent._llm, "complete_text", fail_if_called)
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
 
     plan = agent.build_routing_plan(
         subject,
         experts,
-        RuntimeSettings(allow_llm_fallback=True),
+        RuntimeSettings(
+            allow_llm_fallback=True,
+            light_llm_timeout_seconds=210,
+            light_llm_retry_count=2,
+        ),
         analysis_mode="light",
     )
 
-    assert plan["correctness_business"]["routing_source"] == "rule"
-    assert plan["correctness_business"]["routing_llm"]["mode"] == "rule_only_light"
+    assert plan["correctness_business"]["routing_source"] == "llm"
+    assert plan["correctness_business"]["routing_llm"]["mode"] == "live"
+    assert captured["timeout_seconds"] == 210.0
+    assert captured["max_attempts"] == 3
 
 
 def test_main_agent_command_accepts_route_hint_with_full_business_files():
