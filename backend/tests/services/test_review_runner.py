@@ -731,6 +731,155 @@ def test_review_runner_reads_issue_filter_settings_from_runtime(storage_root: Pa
     runner.run_once(review_id)
 
 
+def test_review_runner_persists_primary_expert_issue_metadata(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["correctness_business"]
+    runner.review_repo.save(review)
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        selected = next(expert for expert in experts if expert.expert_id == "correctness_business")
+        return {
+            "requested_expert_ids": list(requested_expert_ids or []),
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": [selected.expert_id],
+            "selected_experts": [
+                {"expert_id": selected.expert_id, "expert_name": selected.name_zh, "reason": "校验主责专家归因"}
+            ],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_build_routing_plan(subject, experts, runtime_settings, analysis_mode="standard"):
+        expert = next(item for item in experts if item.expert_id == "correctness_business")
+        return {
+            "jobs": [
+                {
+                    "expert": expert,
+                    "review": runner.review_repo.get(review_id),
+                    "command_message": None,
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 42,
+                    "runtime_settings": runtime_settings,
+                    "analysis_mode": analysis_mode,
+                    "llm_request_options": {"timeout_seconds": 1, "max_attempts": 1},
+                    "bound_documents": [],
+                    "knowledge_context": {},
+                    "finding_payloads": [],
+                }
+            ],
+            "summary": {"effective_experts": [{"expert_id": expert.expert_id, "expert_name": expert.name_zh}]},
+            "llm": {"provider": "test", "model": "test", "mode": "mock"},
+        }
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        for job in expert_jobs:
+            job["finding_payloads"].append(
+                {
+                    "finding_id": "fdg_primary_meta",
+                    "expert_id": "correctness_business",
+                    "title": "注释承诺与实现不一致",
+                    "summary": "接口注释承诺了幂等行为，但实现中没有对应保护。",
+                    "finding_type": "direct_defect",
+                    "severity": "high",
+                    "confidence": 0.92,
+                    "verification_needed": False,
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 42,
+                    "evidence": ["注释说明会忽略重复请求，但代码未判断 requestId"],
+                    "cross_file_evidence": [],
+                    "context_files": [],
+                    "matched_rules": [],
+                    "violated_guidelines": [],
+                    "assumptions": [],
+                    "remediation_strategy": "补齐幂等保护",
+                    "remediation_suggestion": "基于 requestId 做重复请求判断",
+                    "remediation_steps": [],
+                    "code_excerpt": "public void createOrder(...)",
+                    "suggested_code": "",
+                    "suggested_code_language": "java",
+                }
+            )
+
+    def _fake_graph_invoke(state):
+        return {
+            "issues": [
+                {
+                    "issue_id": "iss_primary_meta",
+                    "title": "注释承诺与实现不一致",
+                    "summary": "接口注释承诺了幂等行为，但实现中没有对应保护。",
+                    "finding_type": "direct_defect",
+                    "normalized_issue_type": "comment_promise_not_implemented",
+                    "primary_expert_id": "correctness_business",
+                    "file_path": "src/app/service/OrderService.java",
+                    "line_start": 42,
+                    "status": "open",
+                    "severity": "high",
+                    "confidence": 0.93,
+                    "confidence_breakdown": {"source": "test"},
+                    "finding_ids": ["fdg_primary_meta"],
+                    "participant_expert_ids": ["correctness_business", "maintainability_code_health"],
+                    "expert_views": [
+                        {
+                            "expert_id": "correctness_business",
+                            "title": "注释承诺与实现不一致",
+                            "summary": "接口注释承诺了幂等行为，但实现中没有对应保护。",
+                            "severity": "high",
+                            "confidence": 0.93,
+                        }
+                    ],
+                    "aggregated_titles": ["注释承诺与实现不一致"],
+                    "aggregated_summaries": ["接口注释承诺了幂等行为，但实现中没有对应保护。"],
+                    "aggregated_remediation_strategies": ["补齐幂等保护"],
+                    "aggregated_remediation_suggestions": ["基于 requestId 做重复请求判断"],
+                    "aggregated_remediation_steps": [],
+                    "remediation_strategy": "补齐幂等保护",
+                    "remediation_suggestion": "基于 requestId 做重复请求判断",
+                    "remediation_steps": [],
+                    "evidence": ["注释说明会忽略重复请求，但代码未判断 requestId"],
+                    "cross_file_evidence": [],
+                    "assumptions": [],
+                    "context_files": [],
+                    "direct_evidence": True,
+                    "needs_human": False,
+                    "verified": True,
+                    "needs_debate": False,
+                    "tool_verified": False,
+                    "resolution": "accepted",
+                }
+            ],
+            "issue_filter_decisions": [],
+        }
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _fake_build_routing_plan)
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", _fake_graph_invoke)
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts: (
+            "演示总结",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    persisted_issues = runner.issue_repo.list(review_id)
+    assert len(persisted_issues) == 1
+    assert persisted_issues[0].issue_id == "iss_primary_meta"
+    assert persisted_issues[0].normalized_issue_type == "comment_promise_not_implemented"
+    assert persisted_issues[0].primary_expert_id == "correctness_business"
+    assert persisted_issues[0].participant_expert_ids == [
+        "correctness_business",
+        "maintainability_code_health",
+    ]
+    assert persisted_issues[0].expert_views[0]["expert_id"] == "correctness_business"
+
+
 def test_review_runner_parse_expert_analysis_preserves_structured_fields(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     parsed = runner._parse_expert_analysis(
@@ -1073,6 +1222,40 @@ def test_review_runner_detects_uncovered_review_observations(storage_root: Path)
     assert uncovered[0]["observation_id"] == "obs_miss_001"
 
 
+def test_review_runner_keeps_adjacent_different_kind_observation_uncovered(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    candidates = [
+        {
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 19,
+            "title": "循环内逐条远程调用",
+            "claim": "paymentClient.sync(item) 位于循环体内，会放大网络往返。",
+            "observation_ids": ["obs_loop_001"],
+        }
+    ]
+    observations = [
+        {
+            "observation_id": "obs_loop_001",
+            "kind": "control_flow_with_external_call",
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 19,
+            "summary": "循环内存在外部调用",
+        },
+        {
+            "observation_id": "obs_todo_001",
+            "kind": "declared_intent_without_implementation",
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 20,
+            "summary": "TODO 注释承诺的行为没有落地",
+        },
+    ]
+
+    uncovered = runner._find_uncovered_review_observations(candidates, observations)
+
+    assert len(uncovered) == 1
+    assert uncovered[0]["observation_id"] == "obs_todo_001"
+
+
 def test_review_runner_runs_observation_followup_when_first_pass_misses_observation(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -1209,6 +1392,60 @@ def test_review_runner_runs_observation_followup_when_first_pass_misses_observat
     assert followup_finding.file_path == "src/main/java/com/acme/OrderService.java"
     assert any(item.message_type == "expert_observation_followup" for item in messages)
     assert "expert_observation_followup" in llm_calls
+
+
+def test_review_runner_observation_followup_keeps_multiple_distinct_findings(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_observation_multi_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/obs-multi",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/OrderService.java"],
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+
+    merged = runner._merge_expert_analysis_candidates(
+        base_candidates=[
+            {
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "title": "循环内逐条远程调用",
+                "claim": "paymentClient.sync(item) 位于循环体内，会放大网络往返与整体时延",
+                "finding_type": "direct_defect",
+                "line_start": 19,
+                "observation_ids": ["obs_loop_001"],
+            }
+        ],
+        extra_candidates=[
+            {
+                "file_path": "src/main/java/com/acme/OrderService.java",
+                "title": "注释承诺未落地",
+                "claim": "TODO 注释承诺的发布事件逻辑尚未实现",
+                "finding_type": "risk_hypothesis",
+                "line_start": 21,
+                "observation_ids": ["obs_todo_001"],
+            }
+        ],
+        max_findings=8,
+    )
+
+    assert len(merged) == 2
+    assert {item["title"] for item in merged} == {"循环内逐条远程调用", "注释承诺未落地"}
 
 
 def test_review_runner_reanchors_semantically_distinct_findings_to_different_hunks(storage_root: Path, monkeypatch):
@@ -4997,6 +5234,128 @@ def test_review_runner_apply_issue_consistency_validation_downgrades_conflicted_
     assert validated.consistency_check_status == "downgraded"
     assert validated.consistency_conflicts == ["建议代码修的是缓存问题，不是 N+1 查询问题。"]
     assert "当前 issue 内容存在明显冲突" in str(metadata["summary"])
+
+
+def test_review_runner_apply_issue_consistency_validation_filters_misaligned_remediation(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_alignment_demo",
+        title="精确匹配被改成模糊匹配",
+        summary="builder.equal 被改成 builder.like，查询语义被静默放宽。",
+        finding_type="direct_defect",
+        normalized_issue_type="query_semantics_changed",
+        file_path="src/shared/HibernateCriteriaConverter.java",
+        line_start=63,
+        status="resolved",
+        severity="high",
+        confidence=0.93,
+        finding_ids=["fdg_alignment_demo"],
+        participant_expert_ids=["database_analysis", "security_compliance"],
+        expert_views=[
+            {
+                "expert_id": "database_analysis",
+                "title": "精确匹配被改成模糊匹配",
+                "summary": "builder.equal 被改成 builder.like，查询语义被静默放宽。",
+                "normalized_issue_type": "query_semantics_changed",
+            }
+        ],
+    )
+
+    validated, metadata = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline={
+            "title": issue.title,
+            "summary": issue.summary,
+            "file_path": issue.file_path,
+            "line_start": issue.line_start,
+            "normalized_issue_type": issue.normalized_issue_type,
+            "remediation_strategy": "恢复精确匹配语义",
+            "remediation_suggestion": "把 builder.like 改回 builder.equal。",
+            "remediation_steps": ["恢复 equal 条件", "补充语义回归测试"],
+            "current_code": 'return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            "suggested_code": "return builder.equal(root.get(filter.field().value()), filter.value().value());",
+        },
+        payload={
+            "status": "passed",
+            "title": issue.title,
+            "summary": issue.summary,
+            "file_path": issue.file_path,
+            "line_start": issue.line_start,
+            "normalized_issue_type": "query_semantics_changed",
+            "remediation_strategy": "补充权限校验",
+            "remediation_suggestion": "在查询入口增加资源级鉴权和租户隔离校验。",
+            "remediation_steps": ["增加权限判断", "补充鉴权测试"],
+            "current_code": 'return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            "suggested_code": "authorize(user, resource);\nreturn builder.like(root.get(filter.field().value()), escapedValue);",
+            "consistency_conflicts": [],
+            "reason": "Judge 认为 issue 文案一致。",
+        },
+    )
+
+    assert validated.remediation_alignment_status == "misaligned"
+    assert validated.remediation_filtered is True
+    assert validated.remediation_strategy == ""
+    assert validated.remediation_suggestion == ""
+    assert validated.remediation_steps == []
+    assert validated.suggested_code == ""
+    assert any("修复建议" in item for item in validated.remediation_alignment_conflicts)
+    assert "已过滤越界修复建议" in str(metadata["summary"])
+
+
+def test_review_runner_apply_issue_consistency_validation_detects_query_anchor_conflict(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_query_anchor_demo",
+        title="精确匹配被改成模糊匹配",
+        summary="builder.equal 被改成 builder.like，查询语义被静默放宽。",
+        finding_type="direct_defect",
+        normalized_issue_type="query_semantics_changed",
+        file_path="src/shared/HibernateCriteriaConverter.java",
+        line_start=63,
+        status="resolved",
+        severity="high",
+        confidence=0.93,
+        finding_ids=["fdg_query_anchor_demo"],
+        participant_expert_ids=["database_analysis"],
+    )
+
+    validated, metadata = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline={
+            "title": issue.title,
+            "summary": issue.summary,
+            "normalized_issue_type": issue.normalized_issue_type,
+            "file_path": issue.file_path,
+            "line_start": issue.line_start,
+            "remediation_strategy": "恢复精确匹配语义",
+            "remediation_suggestion": "把 builder.like 改回 builder.equal。",
+            "remediation_steps": ["恢复 equal 条件"],
+            "current_code": 'return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            "suggested_code": "return builder.equal(root.get(filter.field().value()), filter.value().value());",
+        },
+        payload={
+            "status": "passed",
+            "title": issue.title,
+            "summary": issue.summary,
+            "normalized_issue_type": issue.normalized_issue_type,
+            "file_path": issue.file_path,
+            "line_start": issue.line_start,
+            "remediation_strategy": "恢复精确匹配语义",
+            "remediation_suggestion": "把 builder.like 改回 builder.equal。",
+            "remediation_steps": ["恢复 equal 条件"],
+            "current_code": "return authService.authorize(user, resource);",
+            "suggested_code": "auditLogger.info(\"authorized\");",
+            "consistency_conflicts": [],
+            "reason": "Judge 认为一致。",
+        },
+    )
+
+    assert validated.status == "needs_human"
+    assert validated.consistency_check_status == "downgraded"
+    assert any("当前代码" in item for item in validated.consistency_conflicts)
+    assert "锚点" in str(metadata["summary"])
 
 
 def test_review_runner_validate_final_issues_with_judge_emits_validation_message(storage_root: Path, monkeypatch):

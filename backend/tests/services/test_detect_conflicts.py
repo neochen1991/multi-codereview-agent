@@ -633,3 +633,55 @@ def test_detect_conflicts_keeps_same_line_secondary_problem_as_separate_issue():
     assert result["conflicts"][0]["finding_ids"] == ["fdg_combo_1"]
     assert len(result["issue_filter_decisions"]) == 1
     assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_combo_2"]
+
+
+def test_detect_conflicts_does_not_merge_same_line_same_title_when_issue_type_differs():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_same_title_1",
+                "expert_id": "database_analysis",
+                "title": "查询条件实现存在问题",
+                "summary": "equal 被改成 like，查询语义被放宽，可能返回错误结果。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_semantics_changed",
+                "severity": "high",
+                "confidence": 0.94,
+                "verification_needed": False,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["builder.equal -> builder.like"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询语义不能静默放宽"],
+            },
+            {
+                "finding_id": "fdg_same_title_2",
+                "expert_id": "security_compliance",
+                "title": "查询条件实现存在问题",
+                "summary": "LIKE 模式未对特殊字符做转义，存在越权查询与注入放大风险。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_input_boundary_risk",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 63,
+                "evidence": ["String.format(\"%%%s%%\", filter.value().value())"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["SEC-JAVA-INPUT-001"],
+                "violated_guidelines": ["外部输入拼接查询条件前必须做边界约束"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 2
+    issue_types = {conflict["normalized_issue_type"] for conflict in result["conflicts"]}
+    assert issue_types == {"query_semantics_changed", "query_input_boundary_risk"}

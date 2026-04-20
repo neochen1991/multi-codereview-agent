@@ -27,6 +27,7 @@ class DebateIssue(BaseModel):
     summary: str
     finding_type: str = "risk_hypothesis"
     normalized_issue_type: str = ""
+    primary_expert_id: str = ""
     aggregated_finding_types: list[str] = Field(default_factory=list)
     file_path: str = ""
     line_start: int = 1

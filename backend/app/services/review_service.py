@@ -1313,6 +1313,8 @@ class ReviewService:
             title=finding.title,
             summary=self._build_issue_summary_from_finding(finding),
             finding_type=finding.finding_type,
+            normalized_issue_type=str(getattr(finding, "normalized_issue_type", "") or ""),
+            primary_expert_id=str(finding.expert_id or ""),
             aggregated_finding_types=[],
             file_path=finding.file_path,
             line_start=int(finding.line_start or 1),
@@ -1322,6 +1324,19 @@ class ReviewService:
             confidence_breakdown=issue_confidence_breakdown,
             finding_ids=[finding.finding_id],
             participant_expert_ids=[finding.expert_id] if str(finding.expert_id or "").strip() else [],
+            expert_views=(
+                [
+                    {
+                        "expert_id": finding.expert_id,
+                        "title": finding.title,
+                        "summary": finding.summary,
+                        "severity": finding.severity,
+                        "confidence": float(finding.confidence or 0.0),
+                    }
+                ]
+                if str(finding.expert_id or "").strip()
+                else []
+            ),
             aggregated_titles=[finding.title] if str(finding.title or "").strip() else [],
             aggregated_summaries=[finding.summary] if str(finding.summary or "").strip() else [],
             aggregated_remediation_strategies=(

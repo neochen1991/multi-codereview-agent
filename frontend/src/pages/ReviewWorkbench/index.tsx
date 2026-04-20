@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Button, Card, Col, Empty, Modal, Popconfirm, Row, Space, Tabs, Tag, Typography } from "antd";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
@@ -969,6 +969,20 @@ const ReviewWorkbenchPage: React.FC = () => {
   const activeHumanIssue = preferredHumanIssue || pendingHumanIssues[0] || null;
   const humanGateUsingFallbackIssue = Boolean(activeHumanIssue && activeHumanIssue !== preferredHumanIssue);
 
+  const resolveLatestPendingHumanIssue = useCallback(async () => {
+    if (!reviewId) return null;
+    const latestIssues = await reviewApi.listIssues(reviewId);
+    setIssues(latestIssues);
+    const latestPendingIssues = latestIssues.filter((item) => item.needs_human && item.status !== "resolved");
+    const currentActiveIssueId = activeHumanIssue?.issue_id || "";
+    const matchedIssue = latestPendingIssues.find((item) => item.issue_id === currentActiveIssueId);
+    const targetIssue = matchedIssue || latestPendingIssues[0] || null;
+    if (targetIssue) {
+      setSelectedIssueId(targetIssue.issue_id);
+    }
+    return targetIssue;
+  }, [activeHumanIssue?.issue_id, reviewId]);
+
   useEffect(() => {
     if (selectedIssue && selectedIssue.issue_id !== selectedIssueId) {
       setSelectedIssueId(selectedIssue.issue_id);
@@ -1473,10 +1487,15 @@ const ReviewWorkbenchPage: React.FC = () => {
                       submitting={submittingDecision}
                       onDecisionCommentChange={setDecisionComment}
                       onApprove={async () => {
-                        const targetIssue = activeHumanIssue;
+                        let targetIssue = activeHumanIssue;
                         if (!reviewId || !targetIssue) return;
                         setSubmittingDecision(true);
                         try {
+                          targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
+                          if (!targetIssue) {
+                            message.warning("当前没有待人工裁决的议题，已刷新列表");
+                            return;
+                          }
                           await reviewApi.submitHumanDecision(reviewId, {
                             issue_id: targetIssue.issue_id,
                             decision: "approved",
@@ -1486,16 +1505,21 @@ const ReviewWorkbenchPage: React.FC = () => {
                           setDecisionComment("");
                           message.success("已记录人工批准结论");
                         } catch (error: any) {
-                          message.error(error?.message || "提交人工结论失败");
+                          message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
                         } finally {
                           setSubmittingDecision(false);
                         }
                       }}
                       onReject={async () => {
-                        const targetIssue = activeHumanIssue;
+                        let targetIssue = activeHumanIssue;
                         if (!reviewId || !targetIssue) return;
                         setSubmittingDecision(true);
                         try {
+                          targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
+                          if (!targetIssue) {
+                            message.warning("当前没有待人工裁决的议题，已刷新列表");
+                            return;
+                          }
                           await reviewApi.submitHumanDecision(reviewId, {
                             issue_id: targetIssue.issue_id,
                             decision: "rejected",
@@ -1505,7 +1529,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                           setDecisionComment("");
                           message.success("已记录人工驳回结论");
                         } catch (error: any) {
-                          message.error(error?.message || "提交人工结论失败");
+                          message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
                         } finally {
                           setSubmittingDecision(false);
                         }

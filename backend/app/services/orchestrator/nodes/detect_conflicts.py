@@ -336,16 +336,44 @@ def _build_normalized_issue_type(items: list[dict[str, object]]) -> str:
     return "|".join(token for token, _count in ordered[:3])
 
 
+def _build_single_problem_type(item: dict[str, object]) -> str:
+    explicit = str(item.get("normalized_issue_type") or "").strip()
+    if explicit:
+        return explicit
+    matched_rule = next(
+        (
+            str(value).strip().lower()
+            for value in list(item.get("matched_rules") or [])
+            if str(value).strip()
+        ),
+        "",
+    )
+    title = str(item.get("title") or "").strip().lower()
+    title_tokens = _extract_semantic_tokens(title)
+    title_key = "|".join(title_tokens[:4]) if title_tokens else re.sub(r"\s+", "_", title)[:80]
+    parts: list[str] = []
+    if matched_rule:
+        parts.append(matched_rule)
+    if title_key:
+        parts.append(title_key)
+    if parts:
+        return "::".join(parts)
+    return str(item.get("finding_type") or "risk_hypothesis").strip() or "risk_hypothesis"
+
+
 def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict[str, object]]) -> bool:
     if not grouped_items:
         return False
-    explicit_candidate = str(candidate.get("normalized_issue_type") or "").strip()
-    explicit_group = [
+    candidate_explicit = str(candidate.get("normalized_issue_type") or "").strip()
+    grouped_explicit = [
         str(item.get("normalized_issue_type") or "").strip()
         for item in grouped_items
         if str(item.get("normalized_issue_type") or "").strip()
     ]
-    if explicit_candidate and explicit_group and explicit_candidate == explicit_group[0]:
+    if candidate_explicit and grouped_explicit:
+        return any(candidate_explicit == item for item in grouped_explicit)
+    candidate_type = _build_single_problem_type(candidate)
+    if any(candidate_type == _build_single_problem_type(item) for item in grouped_items):
         return True
     candidate_title = str(candidate.get("title") or "").strip().lower()
     for item in grouped_items:
@@ -478,10 +506,10 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
 
         file_path = str(eligible_items[0].get("file_path", "")).strip() or "unknown"
         line_start = int(eligible_items[0].get("line_start", 1) or 1)
-        normalized_issue_type = _build_normalized_issue_type(eligible_items)
-        key = f"{file_path}::{line_start}::{normalized_issue_type or 'unknown'}"
         responsible_expert_id = _select_responsible_expert_id(eligible_items)
         first = _select_primary_item(eligible_items, preferred_expert_id=responsible_expert_id)
+        normalized_issue_type = _build_single_problem_type(first)
+        key = f"{file_path}::{line_start}::{normalized_issue_type or 'unknown'}"
 
         highest_severity = "medium"
         if any(str(item.get("severity")) in {"critical", "high"} for item in eligible_items):

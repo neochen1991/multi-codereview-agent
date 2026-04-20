@@ -860,6 +860,8 @@ class ReviewRunner:
                 title=str(item.get("title") or "待裁决议题"),
                 summary=str(item.get("summary") or ""),
                 finding_type=str(item.get("finding_type") or "risk_hypothesis"),
+                normalized_issue_type=str(item.get("normalized_issue_type") or ""),
+                primary_expert_id=str(item.get("primary_expert_id") or ""),
                 file_path=str(item.get("file_path") or ""),
                 line_start=int(item.get("line_start") or 1),
                 status=str(item.get("status") or "open"),
@@ -868,6 +870,7 @@ class ReviewRunner:
                 confidence_breakdown=dict(item.get("confidence_breakdown") or {}),
                 finding_ids=[str(value) for value in item.get("finding_ids", [])],
                 participant_expert_ids=[str(value) for value in item.get("participant_expert_ids", [])],
+                expert_views=[dict(value) for value in item.get("expert_views", []) if isinstance(value, dict)],
                 aggregated_titles=[str(value) for value in item.get("aggregated_titles", [])],
                 aggregated_summaries=[str(value) for value in item.get("aggregated_summaries", [])],
                 aggregated_remediation_strategies=[
@@ -899,6 +902,11 @@ class ReviewRunner:
                 consistency_check_status=str(item.get("consistency_check_status") or "unchecked"),
                 consistency_check_summary=str(item.get("consistency_check_summary") or ""),
                 consistency_conflicts=[str(value) for value in item.get("consistency_conflicts", [])],
+                remediation_alignment_status=str(item.get("remediation_alignment_status") or "unchecked"),
+                remediation_alignment_conflicts=[
+                    str(value) for value in item.get("remediation_alignment_conflicts", [])
+                ],
+                remediation_filtered=bool(item.get("remediation_filtered")),
             )
             for item in graph_result.get("issues", [])
         ]
@@ -935,6 +943,8 @@ class ReviewRunner:
                     title=fallback_title,
                     summary=fallback_summary,
                     finding_type=str(fallback_source.get("finding_type") or "risk_hypothesis"),
+                    normalized_issue_type=str(fallback_source.get("normalized_issue_type") or ""),
+                    primary_expert_id=fallback_expert,
                     file_path=fallback_file,
                     line_start=int(fallback_source.get("line_start") or 1),
                     status=fallback_status,
@@ -943,6 +953,19 @@ class ReviewRunner:
                     confidence_breakdown={"source": "fallback_when_no_issue"},
                     finding_ids=[fallback_finding_id],
                     participant_expert_ids=[fallback_expert] if fallback_expert else [],
+                    expert_views=(
+                        [
+                            {
+                                "expert_id": fallback_expert,
+                                "title": fallback_title,
+                                "summary": fallback_summary,
+                                "severity": fallback_severity,
+                                "confidence": float(fallback_source.get("confidence") or 0.0),
+                            }
+                        ]
+                        if fallback_expert
+                        else []
+                    ),
                     aggregated_titles=[fallback_title],
                     aggregated_summaries=[fallback_summary] if fallback_summary else [],
                     aggregated_remediation_strategies=[],
@@ -3569,6 +3592,7 @@ class ReviewRunner:
         return {
             "title": str(issue.title or "").strip(),
             "summary": summary,
+            "normalized_issue_type": str(issue.normalized_issue_type or "").strip(),
             "file_path": file_path,
             "line_start": line_start,
             "remediation_strategy": remediation_strategy,
@@ -3686,6 +3710,7 @@ class ReviewRunner:
             '"status":"passed|repaired|downgraded",'
             '"title":"",'
             '"summary":"",'
+            '"normalized_issue_type":"",'
             '"file_path":"",'
             '"line_start":1,'
             '"remediation_strategy":"",'
@@ -3708,6 +3733,7 @@ class ReviewRunner:
             "issue_id": issue.issue_id,
             "title": str(issue.title or "").strip(),
             "summary": str(issue.summary or "").strip(),
+            "normalized_issue_type": str(issue.normalized_issue_type or "").strip(),
             "file_path": str(issue.file_path or "").strip(),
             "line_start": int(issue.line_start or 1),
             "status": str(issue.status or "").strip(),
@@ -3747,6 +3773,7 @@ class ReviewRunner:
         next_issue = issue.model_copy(deep=True)
         previous_fields = {
             "summary": str(issue.summary or "").strip(),
+            "normalized_issue_type": str(issue.normalized_issue_type or "").strip(),
             "file_path": str(issue.file_path or "").strip(),
             "line_start": int(issue.line_start or 1),
             "remediation_strategy": str(issue.remediation_strategy or "").strip(),
@@ -3759,6 +3786,9 @@ class ReviewRunner:
             status = "validator_failed"
         next_issue.title = str(payload.get("title") or baseline["title"] or issue.title).strip() or issue.title
         next_issue.summary = str(payload.get("summary") or baseline["summary"] or issue.summary).strip() or issue.summary
+        next_issue.normalized_issue_type = str(
+            payload.get("normalized_issue_type") or baseline.get("normalized_issue_type") or issue.normalized_issue_type
+        ).strip()
         next_issue.file_path = str(payload.get("file_path") or baseline["file_path"] or issue.file_path).strip() or issue.file_path
         next_issue.line_start = self._normalize_line_start(
             payload.get("line_start"),
@@ -3797,12 +3827,24 @@ class ReviewRunner:
             next_issue.needs_human = True
             next_issue.resolution = "consistency_validation_failed"
             next_issue.verified = False
+        remediation_alignment = self._filter_issue_remediation_scope(next_issue)
+        anchor_conflicts = self._detect_issue_anchor_conflicts(next_issue)
+        if anchor_conflicts and status != "downgraded":
+            next_issue.status = "needs_human"
+            next_issue.needs_human = True
+            next_issue.resolution = "consistency_validation_failed"
+            next_issue.verified = False
+            next_issue.consistency_check_status = "downgraded"
+            next_issue.consistency_conflicts = list(
+                dict.fromkeys([*next_issue.consistency_conflicts, *anchor_conflicts])
+            )
         next_issue.updated_at = datetime.now(UTC)
         updated_fields = [
             field
             for field, old_value in previous_fields.items()
             if old_value != {
                 "summary": next_issue.summary,
+                "normalized_issue_type": next_issue.normalized_issue_type,
                 "file_path": next_issue.file_path,
                 "line_start": next_issue.line_start,
                 "remediation_strategy": next_issue.remediation_strategy,
@@ -3812,9 +3854,128 @@ class ReviewRunner:
             }[field]
         ]
         summary = next_issue.consistency_check_summary
+        if str(remediation_alignment.get("summary_suffix") or "").strip():
+            summary = f"{summary} {str(remediation_alignment.get('summary_suffix') or '').strip()}".strip()
         if next_issue.consistency_conflicts:
             summary = f"{summary} 冲突: {'；'.join(next_issue.consistency_conflicts[:3])}"
         return next_issue, {"updated_fields": updated_fields, "summary": summary}
+
+    def _detect_issue_anchor_conflicts(self, issue: DebateIssue) -> list[str]:
+        issue_type = str(issue.normalized_issue_type or "").strip().lower()
+        current_code = str(issue.current_code or "").strip().lower()
+        suggested_code = str(issue.suggested_code or "").strip().lower()
+        conflicts: list[str] = []
+        if not issue_type:
+            return conflicts
+
+        if "query_semantics" in issue_type or "query_plan_risk" in issue_type:
+            query_tokens = {"builder.like", "builder.equal", " like", " equal", "predicate", "filter", "query", "sql"}
+            if current_code and not any(token in current_code for token in query_tokens):
+                conflicts.append("当前代码与查询语义问题的关键锚点不一致。")
+            if suggested_code and not any(token in suggested_code for token in query_tokens):
+                conflicts.append("建议修改代码与查询语义修复动作的关键锚点不一致。")
+
+        if "control_flow_with_external_call" in issue_type or "loop_call" in issue_type or "bulk_processing" in issue_type:
+            loop_tokens = {"for (", "foreach", ".foreach", "while (", "stream()", "batch", "bulk"}
+            if current_code and not any(token in current_code for token in loop_tokens):
+                conflicts.append("当前代码与循环/批处理问题的关键锚点不一致。")
+            if suggested_code and not any(token in suggested_code for token in {"batch", "bulk", "collect", "map(", "findall", "syncbatch"}):
+                conflicts.append("建议修改代码与循环/批处理修复动作的关键锚点不一致。")
+
+        if "comment_promise" in issue_type or "declared_intent_without_implementation" in issue_type:
+            intent_tokens = {"todo", "//", "/*", "unsupportedoperationexception", "notimplemented", "comment"}
+            if current_code and not any(token in current_code for token in intent_tokens):
+                conflicts.append("当前代码与注释/承诺未实现问题的关键锚点不一致。")
+
+        return conflicts
+
+    def _filter_issue_remediation_scope(self, issue: DebateIssue) -> dict[str, object]:
+        remediation_text_blob = "\n".join(
+            item
+            for item in [
+                str(issue.remediation_strategy or "").strip(),
+                str(issue.remediation_suggestion or "").strip(),
+                *[str(item).strip() for item in list(issue.remediation_steps or []) if str(item).strip()],
+            ]
+            if item
+        ).lower()
+        remediation_blob = "\n".join(
+            item
+            for item in [
+                remediation_text_blob,
+                str(issue.suggested_code or "").strip().lower(),
+            ]
+            if item
+        )
+        if not remediation_blob:
+            issue.remediation_alignment_status = "aligned"
+            issue.remediation_alignment_conflicts = []
+            issue.remediation_filtered = False
+            return {"filtered": False, "summary_suffix": ""}
+
+        issue_blob = "\n".join(
+            item
+            for item in [
+                str(issue.normalized_issue_type or "").strip(),
+                str(issue.title or "").strip(),
+                str(issue.summary or "").strip(),
+                str(issue.current_code or "").strip(),
+                *[
+                    str(view.get("normalized_issue_type") or "").strip()
+                    for view in list(issue.expert_views or [])
+                    if isinstance(view, dict)
+                ],
+            ]
+            if item
+        ).lower()
+        scope_tokens = {
+            "query": {"query", "sql", "like", "equal", "predicate", "filter", "where", "索引", "查询", "模糊", "精确匹配"},
+            "security": {"auth", "authorize", "permission", "security", "tenant", "token", "鉴权", "权限", "租户", "注入", "越权"},
+            "architecture": {"aggregate", "domain", "repository", "factory", "applicationservice", "domainevent", "聚合", "领域", "工厂", "分层", "领域事件"},
+            "performance": {"loop", "batch", "n+1", "latency", "bulk", "performance", "循环", "批量", "超时", "查库", "全表扫描"},
+            "maintainability": {"naming", "constant", "magic", "readability", "tmp", "命名", "常量", "魔法值", "可读性", "日志", "判空"},
+            "correctness": {"todo", "comment", "promise", "implementation", "exception", "catch", "state", "注释", "承诺", "未实现", "异常", "吞异常", "幂等"},
+        }
+        issue_domain_scores = {
+            label: sum(1 for token in tokens if token in issue_blob)
+            for label, tokens in scope_tokens.items()
+        }
+        remediation_domain_scores = {
+            label: sum(1 for token in tokens if token in remediation_text_blob)
+            for label, tokens in scope_tokens.items()
+        }
+        issue_domains = {label for label, score in issue_domain_scores.items() if score > 0}
+        remediation_domains = {label for label, score in remediation_domain_scores.items() if score > 0}
+        issue_primary_score = max(issue_domain_scores.values(), default=0)
+        issue_primary_domains = {
+            label for label, score in issue_domain_scores.items() if score > 0 and score == issue_primary_score
+        }
+        remediation_primary_issue_score = max(
+            [remediation_domain_scores.get(label, 0) for label in issue_primary_domains] or [0]
+        )
+        foreign_domain_scores = {
+            label: score
+            for label, score in remediation_domain_scores.items()
+            if label not in issue_primary_domains and score > 0
+        }
+        if foreign_domain_scores and max(foreign_domain_scores.values()) >= max(2, remediation_primary_issue_score + 1):
+            conflict = (
+                f"修复建议与问题类型不一致：当前问题属于 {','.join(sorted(issue_domains))}，"
+                f"但修复建议落在 {','.join(sorted(remediation_domains))}。"
+            )
+            issue.remediation_alignment_status = "misaligned"
+            issue.remediation_alignment_conflicts = [conflict]
+            issue.remediation_filtered = True
+            issue.remediation_strategy = ""
+            issue.remediation_suggestion = ""
+            issue.remediation_steps = []
+            issue.suggested_code = ""
+            return {"filtered": True, "summary_suffix": "已过滤越界修复建议。"}
+
+        issue.remediation_alignment_status = "aligned"
+        issue.remediation_alignment_conflicts = []
+        issue.remediation_filtered = False
+        return {"filtered": False, "summary_suffix": ""}
 
     def _expert_llm_metadata(self, expert: ExpertProfile, runtime_settings) -> dict[str, object]:
         resolution = self.llm_chat_service.resolve_expert(expert, runtime_settings)
@@ -6473,7 +6634,7 @@ class ReviewRunner:
             observation_file_path = str(item.get("file_path") or "").strip()
             observation_line = self._normalize_optional_line_value(item.get("line_start"))
             if observation_file_path and observation_line is not None:
-                if any(abs(int(observation_line) - line) <= 1 for line in covered_lines.get(observation_file_path, set())):
+                if int(observation_line) in covered_lines.get(observation_file_path, set()):
                     continue
             uncovered.append(dict(item))
         return uncovered[:8]
