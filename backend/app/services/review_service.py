@@ -1228,11 +1228,14 @@ class ReviewService:
                 continue
             return issue.model_copy(
                 update={
+                    "canonical_issue_id": str(issue.canonical_issue_id or issue.issue_id or "").strip(),
                     "file_path": finding.file_path,
                     "line_start": int(finding.line_start or 1),
                 }
             )
-        return issue
+        if str(issue.canonical_issue_id or "").strip():
+            return issue
+        return issue.model_copy(update={"canonical_issue_id": str(issue.issue_id or "").strip()})
 
     def _issues_require_finding_rehydration(self, issues: list[DebateIssue]) -> bool:
         for issue in issues:
@@ -1310,6 +1313,7 @@ class ReviewService:
         return DebateIssue(
             review_id=review_id,
             issue_id=finding.finding_id,
+            canonical_issue_id=str(persisted_issue.issue_id or finding.finding_id).strip() if persisted_issue else finding.finding_id,
             title=finding.title,
             summary=self._build_issue_summary_from_finding(finding),
             finding_type=finding.finding_type,
@@ -1399,6 +1403,7 @@ class ReviewService:
 
     def _build_light_report_issue(self, issue: DebateIssue) -> DebateIssue:
         payload = issue.model_dump(mode="json")
+        payload["canonical_issue_id"] = str(payload.get("canonical_issue_id") or payload.get("issue_id") or "").strip()
         payload["evidence"] = list(payload.get("evidence") or [])[:6]
         payload["cross_file_evidence"] = list(payload.get("cross_file_evidence") or [])[:6]
         payload["assumptions"] = list(payload.get("assumptions") or [])[:6]

@@ -61,6 +61,36 @@ def test_detect_conflicts_keeps_high_risk_runtime_findings():
     assert result["conflicts"][0]["title"] == "线程池容量扩大可能导致请求风暴"
 
 
+def test_detect_conflicts_keeps_comment_contract_mismatch_even_if_text_contains_comment_tokens():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_contract_1",
+                "expert_id": "correctness_business",
+                "title": "订单创建逻辑（承诺未落地）",
+                "summary": "注释或 TODO 承诺了扣减库存并发送事件，但当前实现没有对应动作。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/OrderService.java",
+                "line_start": 21,
+                "evidence": ["检测到注释/待办承诺未实现：// TODO: 扣减库存并发送事件"],
+                "cross_file_evidence": [],
+                "context_files": ["src/main/java/com/example/OrderService.java"],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            }
+        ]
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["title"] == "订单创建逻辑（承诺未落地）"
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_respects_disabled_issue_filter():
     state = {
         "issue_filter_config": {

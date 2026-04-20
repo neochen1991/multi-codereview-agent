@@ -3222,9 +3222,14 @@ def test_review_runner_strengthens_comment_contract_unimplemented_for_correctnes
     assert "承诺未落地" in str(stabilized["title"])
     assert "create 逻辑存在实现缺口" in str(stabilized["summary"])
     assert any("注释/待办承诺未实现" in item for item in list(stabilized["evidence"]))
+    assert stabilized["finding_type"] == "direct_defect"
+    assert stabilized["verification_needed"] is False
+    assert stabilized["direct_evidence"] is True
+    assert stabilized["severity"] == "high"
+    assert float(stabilized["confidence"]) >= 0.88
 
 
-def test_review_runner_keeps_comment_contract_unimplemented_risk_as_verifiable(storage_root: Path):
+def test_review_runner_promotes_comment_contract_unimplemented_to_direct_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
         {
@@ -3246,9 +3251,44 @@ def test_review_runner_keeps_comment_contract_unimplemented_risk_as_verifiable(s
         input_completeness={},
     )
 
-    assert result["verification_needed"] is True
+    assert result["verification_needed"] is False
+    assert result["finding_type"] == "direct_defect"
+    assert result["direct_evidence"] is True
+    assert result["severity"] == "high"
+    assert float(result["confidence"]) >= 0.88
     assert "承诺未落地" in str(result["title"])
     assert any("注释/待办承诺未实现" in item for item in list(result["evidence"]))
+
+
+def test_review_runner_promotes_loop_amplification_to_direct_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "批量处理性能风险",
+            "claim": "当前实现可能在循环里逐条调用仓储，批量场景会被放大。",
+            "summary": "存在循环内外部调用。",
+            "evidence": [],
+            "signal_terms": {"loop_call_amplification": ["orderRepository.findByOrderNo", "forEach"]},
+            "confidence": 0.41,
+            "severity": "medium",
+            "finding_type": "risk_hypothesis",
+            "verification_needed": True,
+        },
+        "performance_reliability",
+        "src/main/java/com/example/OrderBatchService.java",
+        41,
+        {"excerpt": "+    items.forEach(item -> orderRepository.findByOrderNo(item.getOrderNo()));"},
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["finding_type"] == "direct_defect"
+    assert result["verification_needed"] is False
+    assert result["direct_evidence"] is True
+    assert result["severity"] == "high"
+    assert float(result["confidence"]) >= 0.86
+    assert "循环调用放大" in str(result["title"])
+    assert any("检测到循环内调用放大" in item for item in list(result["evidence"]))
 
 
 def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):

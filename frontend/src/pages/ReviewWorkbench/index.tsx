@@ -975,7 +975,12 @@ const ReviewWorkbenchPage: React.FC = () => {
     setIssues(latestIssues);
     const latestPendingIssues = latestIssues.filter((item) => item.needs_human && item.status !== "resolved");
     const currentActiveIssueId = activeHumanIssue?.issue_id || "";
-    const matchedIssue = latestPendingIssues.find((item) => item.issue_id === currentActiveIssueId);
+    const currentCanonicalIssueId = activeHumanIssue?.canonical_issue_id || currentActiveIssueId;
+    const matchedIssue = latestPendingIssues.find(
+      (item) =>
+        item.issue_id === currentActiveIssueId ||
+        (item.canonical_issue_id || item.issue_id) === currentCanonicalIssueId,
+    );
     const targetIssue = matchedIssue || latestPendingIssues[0] || null;
     if (targetIssue) {
       setSelectedIssueId(targetIssue.issue_id);
@@ -1497,7 +1502,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                             return;
                           }
                           await reviewApi.submitHumanDecision(reviewId, {
-                            issue_id: targetIssue.issue_id,
+                            issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
                             decision: "approved",
                             comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
                           });
@@ -1521,7 +1526,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                             return;
                           }
                           await reviewApi.submitHumanDecision(reviewId, {
-                            issue_id: targetIssue.issue_id,
+                            issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
                             decision: "rejected",
                             comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
                           });

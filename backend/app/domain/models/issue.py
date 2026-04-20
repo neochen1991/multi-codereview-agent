@@ -22,6 +22,7 @@ class DebateIssue(BaseModel):
     """表示多个 finding 收敛后的争议议题或待裁决问题。"""
 
     issue_id: str = Field(default_factory=build_issue_id)
+    canonical_issue_id: str = ""
     review_id: str
     title: str
     summary: str

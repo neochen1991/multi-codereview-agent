@@ -180,6 +180,7 @@ export interface FindingCodeContext {
 
 export interface DebateIssue {
   issue_id: string;
+  canonical_issue_id?: string;
   review_id: string;
   title: string;
   summary: string;

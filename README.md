@@ -52,6 +52,174 @@
 
 - [专家 Agent 职责边界手册](/Users/neochen/multi-codereview-agent/docs/architecture/2026-04-19-expert-agent-boundary-handbook.md)
 
+## 审核状态节点
+
+当前系统里和“状态”相关的概念有两层，建议分开理解：
+
+- `LangGraph 编排节点`
+  - 表示审核流程在 orchestrator 里的执行步骤
+- `ReviewTask.status / phase / human_review_status`
+  - 表示一条审核任务当前对外展示的生命周期状态
+
+### 1. LangGraph 编排节点
+
+状态图定义在：
+
+- [graph.py](/Users/neochen/multi-codereview-agent/backend/app/services/orchestrator/graph.py)
+
+共享状态结构定义在：
+
+- [state.py](/Users/neochen/multi-codereview-agent/backend/app/services/orchestrator/state.py)
+
+当前图中的节点顺序如下：
+
+1. `ingest_subject`
+   - 装载审核输入，初始化图状态
+   - 对应 `phase = ingest`
+2. `slice_change`
+   - 把 `changed_files` 切成最小变更片段 `change_slices`
+   - 对应 `phase = slice_change`
+3. `expand_context`
+   - 从文件名和变更范围提取高层风险提示 `risk_hints`
+   - 对应 `phase = expand_context`
+4. `route_experts`
+   - 基于风险提示补充必要专家
+   - 对应 `phase = route_experts`
+5. `run_independent_reviews`
+   - 表示进入专家独立审查阶段
+   - 对应 `phase = expert_review`
+6. `detect_conflicts`
+   - 对 findings 做冲突检测、同类聚合、问题归并
+   - 对应 `phase = detect_conflicts`
+7. `run_targeted_debate`
+   - 针对多专家冲突或低置信问题组织定向辩论
+   - 对应 `phase = run_targeted_debate`
+8. `evidence_verification`
+   - 根据 issue 类型选择 verifier，对证据做本地核验
+   - 对应 `phase = evidence_verification`
+9. `judge_and_merge`
+   - 基于证据强度、严重级别、人工门禁要求做最终裁决收敛
+   - 对应 `phase = judge_and_merge`
+10. `human_gate`
+    - 判断是否需要人工裁决
+    - 对应 `phase = human_gate`
+11. `publish_report`
+    - 生成报告摘要与结果产物摘要
+    - 对应 `phase = publish_report`
+12. `persist_feedback`
+    - 为反馈学习与后续治理保留统一出口
+    - 对应 `phase = persist_feedback`
+
+说明：
+
+- 这条图主要负责“findings -> conflicts -> issues -> human gate -> report”这条后半段编排链路
+- 专家实际跑 LLM、拼装上下文、调用运行时 tools/skills，主要仍由 `ReviewRunner` 主控
+
+### 2. ReviewTask 生命周期状态
+
+任务模型定义在：
+
+- [review.py](/Users/neochen/multi-codereview-agent/backend/app/domain/models/review.py)
+
+#### `status`
+
+`status` 表示任务对外展示的主状态，当前主要有：
+
+- `pending`
+  - 任务已创建，但还没开始执行
+- `running`
+  - 审核执行中
+- `waiting_human`
+  - 自动审核已收敛完成，但仍有 issue 需要人工裁决
+- `completed`
+  - 审核完全结束，不再等待人工处理
+- `failed`
+  - 审核失败
+- `closed`
+  - 被用户强制结束
+
+#### `phase`
+
+`phase` 表示任务当前所处的内部阶段，既可能来自主执行链，也可能来自图节点。当前常见值包括：
+
+- `pending`
+- `queued`
+- `intake`
+- `coordination`
+- `expert_review`
+- `human_gate`
+- `completed`
+- `failed`
+- `ingest`
+- `slice_change`
+- `expand_context`
+- `route_experts`
+- `detect_conflicts`
+- `run_targeted_debate`
+- `evidence_verification`
+- `judge_and_merge`
+- `publish_report`
+- `persist_feedback`
+
+理解上可以把它看成“比 status 更细的执行阶段”。
+
+#### `human_review_status`
+
+`human_review_status` 表示人工裁决子流程状态，当前主要有：
+
+- `not_required`
+  - 当前任务不需要人工裁决
+- `requested`
+  - 已进入人工裁决队列
+- `approved`
+  - 人工已确认问题成立
+- `rejected`
+  - 人工已判定为误报或暂不采纳
+
+### 3. 一次完整审核的大致状态流转
+
+典型流转顺序可以概括为：
+
+```text
+pending
+-> queued
+-> running / expert_review
+-> ingest
+-> slice_change
+-> expand_context
+-> route_experts
+-> expert_review
+-> detect_conflicts
+-> run_targeted_debate
+-> evidence_verification
+-> judge_and_merge
+-> human_gate
+-> publish_report
+-> persist_feedback
+-> completed
+```
+
+如果存在高风险议题需要人工确认，则会变成：
+
+```text
+pending
+-> queued
+-> running
+-> ...
+-> judge_and_merge
+-> human_gate
+-> waiting_human
+-> human reviewer approve / reject
+-> completed
+```
+
+如果执行中断或失败，则可能进入：
+
+```text
+running -> failed
+running -> closed
+```
+
 ## 目录
 
 ```text

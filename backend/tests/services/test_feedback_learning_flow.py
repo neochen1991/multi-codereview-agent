@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.repositories.fs import read_json
 
@@ -130,3 +131,76 @@ def test_human_decision_can_continue_with_remaining_pending_issues(storage_root:
     issue_b = next(item for item in refreshed_issues if item.issue_id == pending_b.issue_id)
     assert issue_a.status == "resolved"
     assert issue_b.status == "needs_human"
+
+
+def test_rehydrated_issue_preserves_canonical_issue_id_for_human_decision(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/rehydrated-human-gate",
+            "target_ref": "main",
+            "title": "rehydrated issue keeps canonical id",
+            "changed_files": ["backend/app/security/authz.py"],
+        }
+    )
+    persisted_issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_persisted_human_gate",
+        title="同一代码点的多视角问题",
+        summary="需要人工确认。",
+        file_path="backend/app/security/authz.py",
+        line_start=12,
+        status="needs_human",
+        severity="high",
+        confidence=0.91,
+        finding_ids=["fdg_a", "fdg_b"],
+        participant_expert_ids=["security_compliance", "correctness_business"],
+        needs_human=True,
+    )
+    service.issue_repo.save_all(review.review_id, [persisted_issue])
+    service.finding_repo.save_many(
+        review.review_id,
+        [
+            ReviewFinding(
+                review_id=review.review_id,
+                finding_id="fdg_a",
+                expert_id="security_compliance",
+                title="问题 A",
+                summary="问题 A",
+                file_path="backend/app/security/authz.py",
+                line_start=12,
+            ),
+            ReviewFinding(
+                review_id=review.review_id,
+                finding_id="fdg_b",
+                expert_id="correctness_business",
+                title="问题 B",
+                summary="问题 B",
+                file_path="backend/app/security/authz.py",
+                line_start=12,
+            ),
+        ],
+    )
+    review.status = "waiting_human"
+    review.phase = "human_gate"
+    review.human_review_status = "requested"
+    review.pending_human_issue_ids = [persisted_issue.issue_id]
+    service.review_repo.save(review)
+
+    listed_issues = service.list_issues(review.review_id)
+
+    assert len(listed_issues) == 2
+    assert {item.issue_id for item in listed_issues} == {"fdg_a", "fdg_b"}
+    assert {item.canonical_issue_id for item in listed_issues} == {persisted_issue.issue_id}
+
+    updated = service.record_human_decision(
+        review.review_id,
+        listed_issues[0].canonical_issue_id,
+        "approved",
+        "人工确认问题成立",
+    )
+
+    assert updated.status == "completed"

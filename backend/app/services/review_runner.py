@@ -7265,6 +7265,16 @@ class ReviewRunner:
             evidence_phrase = f"检测到循环内调用放大：{loop_display}"
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
+            if expert_id == "performance_reliability":
+                result["finding_type"] = "direct_defect"
+                result["verification_needed"] = False
+                result["direct_evidence"] = True
+                result["severity"] = (
+                    "high"
+                    if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
+                    else result.get("severity")
+                )
+                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.86)
 
         if "comment_contract_unimplemented" in signal_set and expert_id in {"correctness_business", "maintainability_code_health"}:
             contract_terms = [term for term in list(signal_terms.get("comment_contract_unimplemented") or []) if term]
@@ -7279,6 +7289,16 @@ class ReviewRunner:
             evidence_phrase = f"检测到注释/待办承诺未实现：{contract_display}"
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
+            if expert_id == "correctness_business":
+                result["finding_type"] = "direct_defect"
+                result["verification_needed"] = False
+                result["direct_evidence"] = True
+                result["severity"] = (
+                    "high"
+                    if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
+                    else result.get("severity")
+                )
+                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.88)
 
         result["title"] = title
         if summary_parts:

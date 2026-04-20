@@ -22,6 +22,14 @@ LOW_RISK_HINT_TOKENS = {
     "代码健康",
 }
 
+HIGH_VALUE_CONTRACT_MISMATCH_TOKENS = {
+    "承诺未落地",
+    "待办承诺未实现",
+    "注释/待办承诺未实现",
+    "declared_intent_without_implementation",
+    "comment_contract_unimplemented",
+}
+
 NON_CODE_REVIEW_SCOPE_TOKENS = {
     "业务背景不清晰",
     "业务背景不明确",
@@ -679,6 +687,7 @@ def _classify_issue_candidate(
         ]
     ).lower()
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
+    high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
 
     if non_code_review_scope and not direct_evidence:
@@ -727,6 +736,7 @@ def _classify_issue_candidate(
         and average_confidence < float(config.get("hint_issue_confidence_threshold", 0.85) or 0.85)
         and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
         and hint_like
+        and not high_value_contract_mismatch
     ):
         return {
             "rule_code": "hint_like_medium",

@@ -91,3 +91,28 @@ def test_human_review_decision_rejects_repeat_submit_on_resolved_issue(client):
     )
     assert second_submit.status_code == 409
     assert second_submit.json()["detail"] == "issue is not pending human decision"
+
+
+def test_human_review_issues_include_canonical_issue_id(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/migration-guard",
+            "target_ref": "main",
+            "title": "security migration review",
+            "changed_files": [
+                "backend/db/migrations/20260312_add_payment_table.sql",
+                "backend/app/security/authz.py",
+            ],
+        },
+    ).json()
+
+    client.post(f"/api/reviews/{created['review_id']}/start")
+
+    issues = client.get(f"/api/reviews/{created['review_id']}/issues").json()
+    target_issue = next(item for item in issues if item["needs_human"])
+
+    assert target_issue["canonical_issue_id"] == target_issue["issue_id"]
