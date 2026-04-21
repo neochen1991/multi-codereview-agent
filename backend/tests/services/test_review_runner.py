@@ -2734,6 +2734,43 @@ def test_review_runner_rewrites_user_confirmation_language(storage_root: Path):
     assert "系统将自动补齐关联上下文并复核" in str(stabilized.get("verification_plan") or "")
 
 
+def test_review_runner_downgrades_conditional_conclusion_language(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stabilized = runner._stabilize_expert_analysis(
+        {
+            "title": "批量更新存在锁竞争风险",
+            "claim": "如果这段逻辑运行在高并发路径上，可能导致锁竞争进一步放大。",
+            "summary": "前提是该事务与其他写路径并发执行。",
+            "finding_type": "direct_defect",
+            "severity": "critical",
+            "confidence": 0.9,
+            "evidence": ["批量更新 orders 与 order_items"],
+            "cross_file_evidence": [],
+            "assumptions": [],
+            "context_files": ["sql/migration/V42__backfill_orders.sql"],
+            "verification_needed": False,
+        },
+        "performance_reliability",
+        "sql/migration/V42__backfill_orders.sql",
+        12,
+        {
+            "excerpt": (
+                "12 | BEGIN;\n"
+                "13 | UPDATE orders SET status = 'DONE' WHERE status = 'PENDING';\n"
+                "14 | UPDATE order_items SET status = 'DONE' WHERE status = 'PENDING';\n"
+                "15 | COMMIT;\n"
+            )
+        },
+    )
+
+    assert stabilized["finding_type"] == "risk_hypothesis"
+    assert stabilized["verification_needed"] is True
+    assert stabilized["severity"] == "high"
+    assert float(stabilized["confidence"]) <= 0.78
+    assert any("依赖额外条件或前提判断" in item for item in stabilized["assumptions"])
+
+
 def test_review_runner_builds_fallback_finding_when_expert_fails_with_matched_rules(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
@@ -3158,6 +3195,42 @@ def test_review_runner_refines_same_hunk_findings_to_semantic_changed_lines(stor
     assert naming_line == 23
     assert sql_line == 40
     assert exception_line == 56
+
+
+def test_review_runner_detects_findings_that_only_target_removed_code(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "hunk_header": "@@ -20,7 +20,7 @@",
+        "start_line": 20,
+        "end_line": 60,
+        "changed_lines": [23, 40],
+        "excerpt": (
+            '-        legacyValidator.validate(command);\n'
+            '+        currentValidator.validate(command);\n'
+            '-        // TODO: notify audit service after save\n'
+            '+        repository.save(entity);\n'
+        ),
+    }
+
+    removed_only = runner._finding_targets_removed_code(
+        {
+            "title": "仍然依赖 legacyValidator",
+            "claim": "legacyValidator.validate(command) 这段逻辑有兼容性风险。",
+            "evidence": ["legacyValidator.validate(command)"],
+        },
+        target_hunk,
+    )
+    added_code = runner._finding_targets_removed_code(
+        {
+            "title": "持久化后缺少审计动作",
+            "claim": "repository.save(entity) 之后没有对应的审计补偿。",
+            "evidence": ["repository.save(entity)"],
+        },
+        target_hunk,
+    )
+
+    assert removed_only is True
+    assert added_code is False
 
 
 def test_review_runner_prefers_explicit_line_number_mentioned_in_problem_description(storage_root: Path):

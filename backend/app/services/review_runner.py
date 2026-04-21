@@ -3075,6 +3075,23 @@ class ReviewRunner:
             parsed_line_start = self._refine_line_start_within_hunk(parsed, matched_target_hunk, parsed_line_start)
             if not self._line_in_target_hunks(parsed_line_start, per_file_target_hunks):
                 parsed_line_start = int(matched_hunk_line_start or parsed_line_start or 1)
+            if self._finding_targets_removed_code(parsed, matched_target_hunk):
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_dropped_removed_code",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 返回的 finding 主要指向待删除代码，已丢弃。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "file_path": finding_file_path,
+                            "line_start": parsed_line_start,
+                            "title": str(parsed.get("title") or "").strip(),
+                        },
+                    )
+                )
+                continue
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -7146,6 +7163,7 @@ class ReviewRunner:
         )
         result = self._apply_input_quality_gate(result, input_completeness or {})
         result = self._sanitize_user_confirmation_language(result)
+        result = self._downgrade_conditional_conclusion(result)
         return result
 
     def _apply_input_quality_gate(
@@ -7270,6 +7288,62 @@ class ReviewRunner:
             if marker not in assumptions:
                 assumptions.append(marker)
             result["assumptions"] = assumptions
+        return result
+
+    def _downgrade_conditional_conclusion(self, parsed: dict[str, object]) -> dict[str, object]:
+        result = dict(parsed)
+        conditional_tokens = {
+            "如果",
+            "若",
+            "取决于",
+            "前提是",
+            "前提条件",
+            "需满足",
+            "满足以下条件",
+            "需要满足",
+            "还要确认",
+            "仍需确认",
+            "仍要确认",
+            "需要进一步确认",
+            "依赖于",
+            "视具体情况",
+            "unless",
+            "depends on",
+            "depending on",
+            "only if",
+            "provided that",
+            "subject to",
+        }
+        text_blob = "\n".join(
+            [
+                str(result.get("claim") or ""),
+                str(result.get("summary") or ""),
+                str(result.get("why_it_matters") or ""),
+                str(result.get("rule_based_reasoning") or ""),
+            ]
+        ).lower()
+        has_conditional_language = any(token.lower() in text_blob for token in conditional_tokens)
+        if not has_conditional_language:
+            return result
+
+        result["finding_type"] = "risk_hypothesis"
+        result["verification_needed"] = True
+        result["direct_evidence"] = bool(result.get("direct_evidence", False))
+        result["confidence"] = min(float(result.get("confidence") or 0.0), 0.78)
+        if str(result.get("severity") or "").lower() in {"blocker", "critical"}:
+            result["severity"] = "high"
+
+        assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+        marker = "当前结论仍依赖额外条件或前提判断，系统先保留为待验证风险，不直接升级为最终有效问题。"
+        if marker not in assumptions:
+            assumptions.append(marker)
+        result["assumptions"] = assumptions
+
+        existing_plan = str(result.get("verification_plan") or "").strip()
+        if existing_plan:
+            result["verification_plan"] = existing_plan
+        else:
+            result["verification_plan"] = "系统将补齐相关前提条件、调用链或运行时上下文后再自动复核该问题。"
         return result
 
     def _enrich_java_domain_finding_language(
@@ -7571,6 +7645,117 @@ class ReviewRunner:
             elif raw_line.startswith("-") and (not next_line.startswith("+")) and changed_index < len(changed_lines) - 1:
                 changed_index += 1
         return line_candidates
+
+    def _finding_targets_removed_code(
+        self,
+        parsed: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> bool:
+        entries = self._extract_hunk_semantic_entries(target_hunk)
+        if not entries:
+            return False
+
+        semantic_parts: list[str] = []
+        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "assumptions", "matched_rules", "violated_guidelines", "change_steps"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        if not finding_tokens:
+            return False
+
+        removed_best = 0
+        retained_best = 0
+        removed_phrase_match = False
+        retained_phrase_match = False
+        for entry in entries:
+            entry_text = str(entry.get("text") or "").strip()
+            if not entry_text:
+                continue
+            lowered_text = entry_text.lower()
+            phrase_match = False
+            for phrase in semantic_parts:
+                normalized_phrase = phrase.lower().strip()
+                if normalized_phrase and len(normalized_phrase) >= 6 and normalized_phrase in lowered_text:
+                    phrase_match = True
+                    break
+            score = self._score_hunk_entry_against_finding(entry_text, semantic_parts, finding_tokens)
+            if score <= 0:
+                continue
+            if str(entry.get("change_type") or "") == "removed":
+                removed_best = max(removed_best, score)
+                removed_phrase_match = removed_phrase_match or phrase_match
+            else:
+                retained_best = max(retained_best, score)
+                retained_phrase_match = retained_phrase_match or phrase_match
+        if removed_phrase_match and not retained_phrase_match:
+            return True
+        return removed_best > 0 and retained_best == 0
+
+    def _extract_hunk_semantic_entries(self, target_hunk: dict[str, object]) -> list[dict[str, object]]:
+        excerpt = str(target_hunk.get("excerpt") or "")
+        if not excerpt:
+            return []
+
+        entries: list[dict[str, object]] = []
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        changed_index = 0
+        numbered_pattern = re.compile(r"^\s*(\d+)\s*\|\s*([+\- ])(.*)$")
+        removed_numberless_pattern = re.compile(r"^\s*-\s*\|\s*(.*)$")
+
+        for raw_line in excerpt.splitlines():
+            if not raw_line or raw_line.startswith("#"):
+                continue
+            match = numbered_pattern.match(raw_line)
+            if match:
+                marker = match.group(2)
+                entries.append(
+                    {
+                        "change_type": "added" if marker == "+" else "removed" if marker == "-" else "context",
+                        "line_start": self._normalize_optional_line_value(match.group(1)),
+                        "text": match.group(3).strip(),
+                    }
+                )
+                continue
+            match = removed_numberless_pattern.match(raw_line)
+            if match:
+                entries.append({"change_type": "removed", "line_start": None, "text": match.group(1).strip()})
+                continue
+            if raw_line.startswith("+++") or raw_line.startswith("---") or raw_line.startswith("@@"):
+                continue
+            if raw_line.startswith("+"):
+                assigned_line = changed_lines[min(changed_index, len(changed_lines) - 1)] if changed_lines else None
+                entries.append({"change_type": "added", "line_start": assigned_line, "text": raw_line[1:].strip()})
+                if changed_index < len(changed_lines) - 1:
+                    changed_index += 1
+                continue
+            if raw_line.startswith("-"):
+                entries.append({"change_type": "removed", "line_start": None, "text": raw_line[1:].strip()})
+                continue
+            if raw_line.startswith(" "):
+                entries.append({"change_type": "context", "line_start": None, "text": raw_line[1:].strip()})
+        return [entry for entry in entries if str(entry.get("text") or "").strip()]
+
+    def _score_hunk_entry_against_finding(
+        self,
+        entry_text: str,
+        semantic_parts: list[str],
+        finding_tokens: set[str],
+    ) -> int:
+        candidate_tokens = self._extract_anchor_tokens(entry_text)
+        overlap = finding_tokens & candidate_tokens
+        score = 0
+        for token in overlap:
+            score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+        lowered_text = entry_text.lower()
+        for phrase in semantic_parts:
+            normalized_phrase = phrase.lower()
+            if normalized_phrase and len(normalized_phrase) >= 6 and normalized_phrase in lowered_text:
+                score += 4
+        return score
 
     def _normalize_changed_line_values(self, values: object) -> list[int]:
         normalized: list[int] = []

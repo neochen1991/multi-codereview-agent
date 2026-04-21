@@ -689,6 +689,15 @@ def _classify_issue_candidate(
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
     high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
+    all_conditional = all(_has_conditional_conclusion(item) for item in items)
+
+    if all_conditional:
+        return {
+            "rule_code": "conditional_conclusion",
+            "rule_label": "条件化结论保留为 finding",
+            "reason": "当前问题结论仍依赖额外条件、前提或运行时场景判断，先保留为 finding，不升级为有效问题。",
+            "severity": highest_severity,
+        }
 
     if non_code_review_scope and not direct_evidence:
         return {
@@ -865,6 +874,40 @@ def _collect_issue_evidence_signals(items: list[dict[str, object]]) -> set[str]:
                 if value:
                     signals.add(value)
     return signals
+
+
+def _has_conditional_conclusion(item: dict[str, object]) -> bool:
+    conditional_tokens = {
+        "如果",
+        "若",
+        "取决于",
+        "前提是",
+        "前提条件",
+        "需满足",
+        "满足以下条件",
+        "需要满足",
+        "还要确认",
+        "仍需确认",
+        "仍要确认",
+        "需要进一步确认",
+        "依赖于",
+        "视具体情况",
+        "unless",
+        "depends on",
+        "depending on",
+        "only if",
+        "provided that",
+        "subject to",
+    }
+    text_blob = "\n".join(
+        [
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            str(item.get("rule_based_reasoning") or ""),
+            str(item.get("verification_plan") or ""),
+        ]
+    ).lower()
+    return any(token.lower() in text_blob for token in conditional_tokens)
 
 
 def _coerce_confidence(value: object) -> float:

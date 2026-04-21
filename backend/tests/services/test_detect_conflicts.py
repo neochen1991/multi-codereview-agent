@@ -334,6 +334,36 @@ def test_detect_conflicts_skips_non_code_review_scope_findings():
     assert result["issue_filter_decisions"][0]["rule_code"] == "non_code_review_scope"
 
 
+def test_detect_conflicts_skips_conditional_conclusion_findings():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_conditional_1",
+                "expert_id": "performance_reliability",
+                "title": "批量更新存在锁竞争风险",
+                "summary": "如果这段逻辑运行在高并发路径上，可能导致锁竞争进一步放大。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": True,
+                "verification_plan": "系统将补齐相关前提条件、调用链或运行时上下文后再自动复核该问题。",
+                "file_path": "sql/migration/V42__backfill_orders.sql",
+                "line_start": 12,
+                "evidence": ["批量更新 orders 与 order_items"],
+                "cross_file_evidence": [],
+                "context_files": ["sql/migration/V42__backfill_orders.sql"],
+                "matched_rules": ["批量更新需分批提交"],
+                "violated_guidelines": ["数据库回填需控制事务范围"],
+            }
+        ]
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+
+
 def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_bonus():
     state = {
         "issue_filter_config": {
