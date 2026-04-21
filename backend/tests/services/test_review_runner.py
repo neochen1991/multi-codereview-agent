@@ -1394,6 +1394,112 @@ def test_review_runner_runs_observation_followup_when_first_pass_misses_observat
     assert "expert_observation_followup" in llm_calls
 
 
+def test_review_runner_forces_loop_finding_when_llm_misses_observation(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_observation_force_loop_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/obs-force",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/OrderService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/acme/OrderService.java b/src/main/java/com/acme/OrderService.java\n"
+                "--- a/src/main/java/com/acme/OrderService.java\n"
+                "+++ b/src/main/java/com/acme/OrderService.java\n"
+                "@@ -18,2 +18,4 @@\n"
+                "+ items.forEach(item -> orderRepository.findByOrderNo(item.getOrderNo()));\n"
+            ),
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请审查本段变更",
+        metadata={
+            "file_path": "src/main/java/com/acme/OrderService.java",
+            "line_start": 18,
+            "target_hunk": {
+                "hunk_header": "@@ -18,2 +18,4 @@",
+                "excerpt": "+ items.forEach(item -> orderRepository.findByOrderNo(item.getOrderNo()));",
+            },
+            "repository_context": {
+                "routing_reason": "关键路径改动",
+                "review_observations": [
+                    {
+                        "observation_id": "obs_loop_001",
+                        "kind": "control_flow_with_external_call",
+                        "file_path": "src/main/java/com/acme/OrderService.java",
+                        "line_start": 18,
+                        "line_end": 18,
+                        "summary": "循环体内存在外部调用",
+                        "evidence": ["orderRepository.findByOrderNo(item.getOrderNo()) 位于 forEach 内"],
+                        "risk_hints": ["可能导致逐条查库放大"],
+                        "related_symbols": ["orderRepository.findByOrderNo", "forEach"],
+                        "confidence": 0.86,
+                    }
+                ],
+            },
+        },
+    )
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text='{"findings":[]}',
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/com/acme/OrderService.java",
+        line_start=18,
+        repository_context=dict(command_message.metadata.get("repository_context") or {}),
+        target_hunk=dict(command_message.metadata.get("target_hunk") or {}),
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={},
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].title == "循环调用放大"
+    assert findings[0].expert_id == "performance_reliability"
+    assert findings[0].finding_type == "direct_defect"
+
+
 def test_review_runner_observation_followup_keeps_multiple_distinct_findings(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -3289,6 +3395,78 @@ def test_review_runner_promotes_loop_amplification_to_direct_finding(storage_roo
     assert float(result["confidence"]) >= 0.86
     assert "循环调用放大" in str(result["title"])
     assert any("检测到循环内调用放大" in item for item in list(result["evidence"]))
+
+
+def test_review_runner_builds_forced_loop_observation_candidate(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能专家",
+        role="performance",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_loop_001",
+                "kind": "control_flow_with_external_call",
+                "file_path": "src/main/java/com/example/OrderBatchService.java",
+                "line_start": 41,
+                "summary": "循环体内存在外部调用",
+                "evidence": ["orderRepository.findByOrderNo(item.getOrderNo()) 位于 forEach 内"],
+                "related_symbols": ["orderRepository.findByOrderNo", "forEach"],
+                "confidence": 0.86,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "循环调用放大"
+    assert forced[0]["finding_type"] == "direct_defect"
+    assert forced[0]["verification_needed"] is False
+    assert forced[0]["severity"] == "high"
+    assert float(forced[0]["confidence"]) >= 0.86
+
+
+def test_review_runner_builds_forced_comment_contract_candidate(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_todo_001",
+                "kind": "declared_intent_without_implementation",
+                "file_path": "src/main/java/com/example/OrderService.java",
+                "line_start": 21,
+                "summary": "TODO 注释承诺的行为没有落地",
+                "evidence": ["// TODO: 创建订单后自动扣减库存并发送事件"],
+                "related_symbols": ["// TODO: 创建订单后自动扣减库存并发送事件"],
+                "confidence": 0.84,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "承诺未落地"
+    assert forced[0]["finding_type"] == "direct_defect"
+    assert forced[0]["verification_needed"] is False
+    assert forced[0]["severity"] == "high"
+    assert float(forced[0]["confidence"]) >= 0.88
 
 
 def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):

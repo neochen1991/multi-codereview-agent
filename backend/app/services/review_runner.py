@@ -6433,15 +6433,18 @@ class ReviewRunner:
     ) -> list[dict[str, object]]:
         payload = self._parse_json_payload(text)
         candidates: list[dict[str, object]] = []
+        explicit_empty_findings = False
         if isinstance(payload, list):
             candidates = [item for item in payload if isinstance(item, dict)]
         elif isinstance(payload, dict):
+            has_findings_key = "findings" in payload
             nested = payload.get("findings")
             if isinstance(nested, list):
                 candidates = [item for item in nested if isinstance(item, dict)]
-            if not candidates:
+                explicit_empty_findings = has_findings_key and not candidates
+            if not candidates and not has_findings_key:
                 candidates = [payload]
-        if not candidates:
+        if not candidates and not explicit_empty_findings:
             candidates = [
                 self._parse_expert_analysis(
                     text,
@@ -6577,8 +6580,26 @@ class ReviewRunner:
             max_findings=max(1, int(max_findings or 1)),
         )
         if not followup_candidates:
-            return list(initial_candidates)
-        return self._merge_expert_analysis_candidates(initial_candidates, followup_candidates, max_findings=max_findings)
+            merged_candidates = list(initial_candidates)
+        else:
+            merged_candidates = self._merge_expert_analysis_candidates(
+                initial_candidates,
+                followup_candidates,
+                max_findings=max_findings,
+            )
+        still_uncovered = self._find_uncovered_review_observations(merged_candidates, uncovered_observations)
+        fallback_candidates = self._build_forced_observation_candidates(
+            expert=expert,
+            uncovered_observations=still_uncovered,
+            max_findings=max_findings,
+        )
+        if not fallback_candidates:
+            return merged_candidates
+        return self._merge_expert_analysis_candidates(
+            merged_candidates,
+            fallback_candidates,
+            max_findings=max_findings,
+        )
 
     def _collect_batch_review_observations(
         self,
@@ -6648,22 +6669,59 @@ class ReviewRunner:
     ) -> list[dict[str, object]]:
         merged: list[dict[str, object]] = []
         seen: set[tuple[str, str, int, str]] = set()
+        signal_titles = {"循环调用放大", "承诺未落地"}
+        signal_best_by_anchor: dict[tuple[str, str, int], dict[str, object]] = {}
         for item in list(base_candidates) + list(extra_candidates):
             if not isinstance(item, dict):
                 continue
+            file_key = str(item.get("file_path") or "").strip().lower()
+            title_key = str(item.get("title") or "").strip()
+            line_key = int(self._normalize_optional_line_value(item.get("line_start")) or 0)
+            if title_key in signal_titles:
+                signal_anchor = (file_key, title_key.lower(), line_key)
+                incumbent = signal_best_by_anchor.get(signal_anchor)
+                if incumbent is None or self._candidate_strength_score(item) > self._candidate_strength_score(incumbent):
+                    signal_best_by_anchor[signal_anchor] = dict(item)
+                continue
             key = (
-                str(item.get("file_path") or "").strip().lower(),
-                str(item.get("title") or "").strip().lower(),
-                int(self._normalize_optional_line_value(item.get("line_start")) or 0),
+                file_key,
+                title_key.lower(),
+                line_key,
                 str(item.get("claim") or "").strip().lower(),
             )
             if key in seen:
                 continue
             seen.add(key)
             merged.append(dict(item))
-            if len(merged) >= max(1, int(max_findings or 1)):
-                break
-        return merged
+        merged.extend(signal_best_by_anchor.values())
+        merged.sort(
+            key=lambda item: (
+                str(item.get("file_path") or "").strip().lower(),
+                int(self._normalize_optional_line_value(item.get("line_start")) or 0),
+                -self._candidate_strength_score(item),
+            )
+        )
+        return merged[: max(1, int(max_findings or 1))]
+
+    def _candidate_strength_score(self, candidate: dict[str, object]) -> float:
+        finding_type = str(candidate.get("finding_type") or "").strip().lower()
+        severity = str(candidate.get("severity") or "").strip().lower()
+        observation_count = len(self._normalize_text_list(candidate.get("observation_ids"), []))
+        confidence = float(candidate.get("confidence") or 0.0)
+        score = confidence
+        if finding_type == "direct_defect":
+            score += 1.0
+        elif finding_type == "test_gap":
+            score += 0.5
+        if severity in {"blocker", "critical", "high"}:
+            score += 0.6
+        elif severity == "medium":
+            score += 0.2
+        if observation_count:
+            score += 0.3
+        if bool(candidate.get("direct_evidence")):
+            score += 0.3
+        return score
 
     def _build_observation_followup_prompt(
         self,
@@ -6734,6 +6792,89 @@ class ReviewRunner:
             ]
         )
         return "\n".join(lines)
+
+    def _build_forced_observation_candidates(
+        self,
+        *,
+        expert: ExpertProfile,
+        uncovered_observations: list[dict[str, object]],
+        max_findings: int,
+    ) -> list[dict[str, object]]:
+        if not uncovered_observations or max(1, int(max_findings or 1)) <= 0:
+            return []
+
+        forced: list[dict[str, object]] = []
+        for item in uncovered_observations:
+            kind = str(item.get("kind") or "").strip()
+            file_path = str(item.get("file_path") or "").strip()
+            line_start = int(self._normalize_optional_line_value(item.get("line_start")) or 1)
+            observation_id = str(item.get("observation_id") or "").strip()
+            evidence = [str(value).strip() for value in list(item.get("evidence") or []) if str(value).strip()]
+            summary = str(item.get("summary") or "").strip()
+            related_symbols = [str(value).strip() for value in list(item.get("related_symbols") or []) if str(value).strip()]
+            symbol_display = " / ".join(related_symbols[:2]) if related_symbols else "当前调用"
+
+            if expert.expert_id == "performance_reliability" and kind == "control_flow_with_external_call":
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "循环调用放大",
+                        "finding_type": "direct_defect",
+                        "claim": f"当前实现把外部依赖调用放进循环路径（{symbol_display}），批量场景会线性放大数据库/网络往返与整体时延。",
+                        "severity": "high",
+                        "matched_rules": [],
+                        "violated_guidelines": [],
+                        "rule_based_reasoning": "循环体内逐条调用仓储、远程服务或消息发送，会把单次调用成本放大到批量路径，属于需要直接修正的性能缺陷。",
+                        "evidence": evidence[:3] or [summary or "检测到循环体中的外部依赖调用。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "把循环内逐条外部调用改成批量查询、批量远程接口或先聚合后统一处理。",
+                        "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
+                        "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
+                        "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.86),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
+            elif expert.expert_id == "correctness_business" and kind == "declared_intent_without_implementation":
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "承诺未落地",
+                        "finding_type": "direct_defect",
+                        "claim": f"注释、TODO 或方法意图已经承诺了行为（{symbol_display}），但当前实现没有对应动作，调用方会误以为能力已经落地。",
+                        "severity": "high",
+                        "matched_rules": [],
+                        "violated_guidelines": [],
+                        "rule_based_reasoning": "注释、接口说明或 TODO 对外表达的是代码语义承诺；如果实现中没有对应动作，属于直接的业务正确性缺口，不应仅作为提示保留。",
+                        "evidence": evidence[:3] or [summary or "检测到注释、TODO 或方法意图与实现不一致。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "要么补齐承诺中的行为，要么删除会误导调用方的注释、TODO 或命名表达。",
+                        "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
+                        "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
+                        "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.88),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
+
+            if len(forced) >= max(1, int(max_findings or 1)):
+                break
+
+        return forced
 
     def _looks_like_concrete_suggested_code(self, value: object, *, file_path: str) -> bool:
         code = str(value or "").strip()
@@ -6955,6 +7096,10 @@ class ReviewRunner:
                 "cache",
                 "timeout",
                 "retry",
+                "循环",
+                "foreach",
+                ".foreach",
+                "批量路径",
             ]
             has_perf_signal = any(token.lower() in text_blob.lower() for token in perf_tokens)
             if not has_perf_signal:
@@ -7009,6 +7154,25 @@ class ReviewRunner:
         input_completeness: dict[str, object],
     ) -> dict[str, object]:
         result = dict(parsed)
+        text_blob = "\n".join(
+            [
+                str(result.get("title") or ""),
+                str(result.get("claim") or ""),
+                str(result.get("summary") or ""),
+                *[str(item) for item in list(result.get("evidence") or [])],
+            ]
+        ).lower()
+        has_strong_java_signal = any(
+            token in text_blob
+            for token in {
+                "循环调用放大",
+                "循环内调用放大",
+                "承诺未落地",
+                "注释/待办承诺未实现",
+                "comment_contract_unimplemented",
+                "loop_call_amplification",
+            }
+        )
         missing_sections = [
             str(item).strip()
             for item in list(input_completeness.get("missing_sections") or [])
@@ -7022,7 +7186,7 @@ class ReviewRunner:
         strong_missing = {"专家规范", "语言通用规范提示", "变更代码原文"}
         has_strong_missing = any(item in strong_missing for item in missing_required)
 
-        if has_strong_missing:
+        if has_strong_missing and not has_strong_java_signal:
             # 缺失规范/变更原文时执行强降级，避免在关键输入缺失时给出“确定性结论”。
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
@@ -7034,7 +7198,7 @@ class ReviewRunner:
             # 仅缺失源码上下文时保留原始 finding 类型/置信度，避免把有效问题整体降为“提示性”导致 issue 为空。
             has_evidence = bool(result.get("evidence") or result.get("cross_file_evidence"))
             result["finding_type"] = str(result.get("finding_type") or "risk_hypothesis")
-            result["verification_needed"] = bool(result.get("verification_needed", False))
+            result["verification_needed"] = bool(result.get("verification_needed", False)) and not has_strong_java_signal
             result["direct_evidence"] = bool(has_evidence)
             result["confidence"] = float(result.get("confidence") or 0.0)
             if (not has_evidence) and str(result.get("severity") or "").lower() in {"blocker", "critical"}:
