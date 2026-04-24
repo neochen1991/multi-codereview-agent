@@ -10,6 +10,7 @@ from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.issue import DebateIssue
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.code_observation_extractor import CodeObservationExtractor
@@ -80,7 +81,9 @@ class MainAgentService:
             file_path,
             line_start,
             related_files,
+            list(subject.changed_files or []),
             dict(target_focus.get("repo_hits") or {}),
+            str(target_hunk.get("excerpt") or ""),
         )
         if route_hint is not None:
             routeable = bool(target_focus.get("routeable", True))
@@ -918,7 +921,9 @@ class MainAgentService:
         file_path: str,
         line_start: int,
         related_files: list[str],
+        changed_files: list[str],
         repo_hits: dict[str, object] | None = None,
+        target_hunk_excerpt: str = "",
     ) -> dict[str, object]:
         if not str(file_path).strip():
             return {
@@ -973,6 +978,15 @@ class MainAgentService:
             "search_matches": repo_hit_matches,
             "symbol_contexts": list((repo_hits or {}).get("symbol_contexts", []) or []),
             "context_files": context_files,
+            "changed_files": [str(item).strip() for item in list(changed_files or []) if str(item).strip()],
+            "target_hunk_excerpt": str(target_hunk_excerpt or "").strip(),
+            "cross_file_impact_hints": build_cross_file_impact_hints(
+                file_path=file_path,
+                related_files=related_files,
+                repo_hits=repo_hits,
+                changed_files=changed_files,
+                target_hunk_excerpt=target_hunk_excerpt,
+            ),
         }
 
     def _candidate_changed_files(self, subject: ReviewSubject, expert_id: str) -> list[str]:
@@ -1150,6 +1164,12 @@ class MainAgentService:
                         "import_only": bool(item["import_only"]),
                         "format_only": bool(item["format_only"]),
                         "repo_hits": repo_hits,
+                        "cross_file_impact_hints": build_cross_file_impact_hints(
+                            file_path=file_path,
+                            related_files=[],
+                            repo_hits=repo_hits,
+                            changed_files=list(subject.changed_files or []),
+                        ),
                     }
                 )
         return candidates
@@ -1294,6 +1314,11 @@ class MainAgentService:
             )
         candidate_sections = []
         for item in candidate_hunks:
+            cross_file_impact_hints = [
+                str(value).strip()
+                for value in list(item.get("cross_file_impact_hints") or [])
+                if str(value).strip()
+            ]
             candidate_sections.append(
                 "\n".join(
                     [
@@ -1303,6 +1328,7 @@ class MainAgentService:
                         f"  hunk_header: {item['hunk_header']}",
                         f"  excerpt: {str(item['excerpt'])[:700]}",
                         f"  repo_context: {self._format_repo_matches(dict(item.get('repo_hits') or {}))[:500]}",
+                        f"  cross_file_impact: {' / '.join(cross_file_impact_hints[:3]) or '未识别到明确跨文件传播线索'}",
                     ]
                 )
             )
@@ -1392,6 +1418,11 @@ class MainAgentService:
         language_general_guidance = self._build_language_general_guidance_summary(
             business_changed_files or [str(item) for item in list(subject.changed_files or [])]
         )
+        selection_cross_file_hints = build_cross_file_impact_hints(
+            file_path=primary_file_path,
+            related_files=business_changed_files[1:],
+            changed_files=business_changed_files,
+        )
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"MR 链接: {subject.mr_url}\n"
@@ -1402,7 +1433,8 @@ class MainAgentService:
             f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
             f"业务变更文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
-            f"Java 质量信号摘要:\n{java_quality_summary}\n\n"
+            f"通用质量信号摘要:\n{java_quality_summary}\n\n"
+            f"跨文件影响提示:\n{chr(10).join(f'- {item}' for item in selection_cross_file_hints) or '- 当前未识别到明确的跨文件传播线索'}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
             "主责专家速查：\n"
             "- correctness_business: 业务规则、状态流转、注释或接口承诺未实现\n"
@@ -1427,7 +1459,7 @@ class MainAgentService:
         signals = [str(item).strip() for item in list(java_quality.get("signals") or []) if str(item).strip()]
         matched_terms = [str(item).strip() for item in list(java_quality.get("matched_terms") or []) if str(item).strip()]
         if not signals and not matched_terms:
-            return "当前变更未提取到额外的 Java 质量信号。"
+            return "当前变更未提取到额外的语言通用质量信号。"
         lines: list[str] = []
         if signals:
             lines.append(f"- signals: {', '.join(signals)}")
@@ -1636,8 +1668,6 @@ class MainAgentService:
         signals: list[str] = []
         matched_terms: list[str] = []
         for file_path in list(subject.changed_files or []):
-            if Path(str(file_path or "")).suffix.lower() != ".java":
-                continue
             file_diff = self._diff_excerpt_service.extract_file_diff(str(subject.unified_diff or ""), str(file_path))
             if not file_diff.strip():
                 continue
@@ -1713,18 +1743,41 @@ class MainAgentService:
                 0.79,
             )
 
-        if {"query_semantics_weakened", "exception_swallowed"} & signal_set:
+        if {"query_semantics_weakened", "exception_swallowed", "go_unchecked_error_return"} & signal_set:
             _add_if_requested(
                 "security_compliance",
                 "检测到查询语义放宽或异常处理退化，系统补入安全与合规专家复核数据访问面与错误处理边界。",
                 0.76,
             )
 
-        if {"naming_convention_violation", "magic_value_literal", "exception_swallowed", "comment_contract_unimplemented"} & signal_set:
+        if {
+            "naming_convention_violation",
+            "magic_value_literal",
+            "exception_swallowed",
+            "comment_contract_unimplemented",
+            "python_mutable_default_arg",
+            "go_unchecked_error_return",
+            "typescript_any_type",
+            "typescript_non_null_assertion",
+        } & signal_set:
             _add_if_requested(
                 "maintainability_code_health",
                 "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
                 0.72,
+            )
+
+        if {"python_mutable_default_arg", "go_unchecked_error_return", "typescript_non_null_assertion"} & signal_set:
+            _add_if_requested(
+                "correctness_business",
+                "检测到可变默认参数、错误返回被忽略或非空断言等正确性风险，系统补入正确性与业务专家复核运行时行为。",
+                0.77,
+            )
+
+        if {"go_goroutine_leak_risk"} & signal_set:
+            _add_if_requested(
+                "performance_reliability",
+                "检测到 goroutine 生命周期控制不足，系统补入性能与可靠性专家复核资源释放和退出路径。",
+                0.79,
             )
 
         selected_set = set(selected_ids)

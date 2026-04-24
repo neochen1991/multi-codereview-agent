@@ -46,7 +46,7 @@ class RuntimeSettings(BaseModel):
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
     database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
-    tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
+    tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff", "static_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
     runtime_tool_allowlist: list[str] = Field(
         default_factory=lambda: [
@@ -66,15 +66,24 @@ class RuntimeSettings(BaseModel):
     )
     agent_allowlist: list[str] = Field(default_factory=list)
     allow_human_gate: bool = True
+    # issue_filter_enabled=false 时，findings 不再受 issue 升级规则约束，所有 findings 都可进入 issue 收敛。
     issue_filter_enabled: bool = True
+    # issue_min_priority_level 定义 findings 升级为有效 issue 的最低 P 级门槛。
     issue_min_priority_level: Literal["P0", "P1", "P2", "P3"] = "P2"
+    # 以下阈值控制各 P 级 findings 升级为 issue 时所需的最低有效置信度。
     issue_confidence_threshold_p0: float = 0.95
     issue_confidence_threshold_p1: float = 0.85
     issue_confidence_threshold_p2: float = 0.8
     issue_confidence_threshold_p3: float = 0.7
+    # suppress_low_risk_hint_issues=true 时，偏提示性、证据弱、风险低的问题只保留为 finding。
     suppress_low_risk_hint_issues: bool = True
     hint_issue_confidence_threshold: float = 0.85
     hint_issue_evidence_cap: int = 2
+    enable_llm_issue_judge: bool = False
+    llm_issue_judge_confidence_threshold: float = 0.78
+    llm_issue_judge_timeout_seconds: int = 45
+    enable_llm_targeted_debate: bool = False
+    llm_targeted_debate_timeout_seconds: int = 60
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150
@@ -82,8 +91,8 @@ class RuntimeSettings(BaseModel):
     standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3
     standard_max_parallel_experts: int = 4
-    light_llm_timeout_seconds: int = 210
-    light_llm_retry_count: int = 2
+    light_llm_timeout_seconds: int = 90
+    light_llm_retry_count: int = 1
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
     light_llm_max_prompt_chars: int = 95000

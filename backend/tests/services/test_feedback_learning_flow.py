@@ -5,6 +5,33 @@ from app.domain.models.issue import DebateIssue
 from app.repositories.fs import read_json
 
 from app.services.review_service import ReviewService
+from app.services.feedback_learner_service import FeedbackLearnerService
+
+
+def _seed_pending_human_issue(service: ReviewService, review_id: str) -> DebateIssue:
+    issue = DebateIssue(
+        review_id=review_id,
+        issue_id="iss_seeded_human",
+        title="高风险权限问题",
+        summary="需要人工确认。",
+        file_path="backend/app/security/authz.py",
+        line_start=12,
+        status="needs_human",
+        severity="high",
+        confidence=0.9,
+        finding_ids=["fdg_seeded"],
+        participant_expert_ids=["security_compliance"],
+        needs_human=True,
+    )
+    service.issue_repo.save_all(review_id, [issue])
+    review = service.get_review(review_id)
+    assert review is not None
+    review.status = "waiting_human"
+    review.phase = "human_gate"
+    review.human_review_status = "requested"
+    review.pending_human_issue_ids = [issue.issue_id]
+    service.review_repo.save(review)
+    return issue
 
 
 def test_human_decision_persists_feedback_label(storage_root: Path):
@@ -21,16 +48,98 @@ def test_human_decision_persists_feedback_label(storage_root: Path):
                 "backend/db/migrations/20260312_add_payment_table.sql",
                 "backend/app/security/authz.py",
             ],
-        }
-    )
-    service.start_review(review.review_id)
-    issue = next(item for item in service.list_issues(review.review_id) if item.needs_human)
+            }
+        )
+    issue = _seed_pending_human_issue(service, review.review_id)
 
     service.record_human_decision(review.review_id, issue.issue_id, "rejected", "误报")
     labels = service.list_feedback_labels(review.review_id)
 
     assert labels
     assert labels[0].label == "false_positive"
+
+
+def test_feedback_learner_builds_quality_profiles(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    learner = FeedbackLearnerService(storage_root)
+
+    for index in range(3):
+        review = service.create_review(
+            {
+                "subject_type": "mr",
+                "repo_id": f"repo_{index}",
+                "project_id": f"proj_{index}",
+                "source_ref": f"feature/{index}",
+                "target_ref": "main",
+                "title": f"quality profile review {index}",
+                "changed_files": ["backend/app/security/authz.py"],
+            }
+        )
+        issue = DebateIssue(
+            review_id=review.review_id,
+            issue_id=f"iss_profile_{index}",
+            title="权限校验问题",
+            summary="需要人工确认。",
+            file_path="backend/app/security/authz.py",
+            line_start=12,
+            status="needs_human",
+            severity="high",
+            confidence=0.9,
+            participant_expert_ids=["security_compliance"],
+            primary_expert_id="security_compliance",
+            normalized_issue_type="missing_auth_check",
+            needs_human=True,
+        )
+        service.issue_repo.save_all(review.review_id, [issue])
+        review.status = "waiting_human"
+        review.phase = "human_gate"
+        review.human_review_status = "requested"
+        review.pending_human_issue_ids = [issue.issue_id]
+        service.review_repo.save(review)
+        service.record_human_decision(review.review_id, issue.issue_id, "rejected", "误报")
+
+    profiles = learner.build_quality_profiles()
+
+    expert_profile = profiles["experts"]["security_compliance"]
+    issue_type_profile = profiles["issue_types"]["missing_auth_check"]
+    assert expert_profile["sample_count"] == 3
+    assert expert_profile["false_positive_rate"] == 1.0
+    assert expert_profile["confidence_penalty"] > 0
+    assert expert_profile["prefer_needs_verification"] is True
+    assert issue_type_profile["sample_count"] == 3
+    assert issue_type_profile["false_positive_rate"] == 1.0
+
+
+def test_feedback_learner_builds_runtime_threshold_recommendations(storage_root: Path):
+    learner = FeedbackLearnerService(storage_root)
+
+    recommendations = learner.build_runtime_threshold_recommendations(
+        {
+            "issue_confidence_threshold_p1": 0.85,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+            "hint_issue_confidence_threshold": 0.85,
+        },
+        quality_profiles={
+            "experts": {
+                "correctness_business": {
+                    "sample_count": 5,
+                    "false_positive_rate": 0.6,
+                }
+            },
+            "issue_types": {
+                "naming_violation": {
+                    "sample_count": 4,
+                    "false_positive_rate": 0.75,
+                }
+            },
+        },
+    )
+
+    assert recommendations["should_tighten"] is True
+    assert recommendations["recommended_thresholds"]["issue_confidence_threshold_p2"] == 0.85
+    assert recommendations["recommended_thresholds"]["hint_issue_confidence_threshold"] == 0.9
+    assert recommendations["applied"] is False
 
 
 def test_human_decision_refreshes_report_summary_and_artifacts(storage_root: Path):
@@ -47,10 +156,9 @@ def test_human_decision_refreshes_report_summary_and_artifacts(storage_root: Pat
                 "backend/db/migrations/20260312_add_payment_table.sql",
                 "backend/app/security/authz.py",
             ],
-        }
-    )
-    service.start_review(review.review_id)
-    issue = next(item for item in service.list_issues(review.review_id) if item.needs_human)
+            }
+        )
+    issue = _seed_pending_human_issue(service, review.review_id)
 
     service.record_human_decision(
         review.review_id,

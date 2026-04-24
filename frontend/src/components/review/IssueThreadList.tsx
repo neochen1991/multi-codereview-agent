@@ -73,7 +73,9 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
                         </Paragraph>
                       ) : null}
                       <Text type="secondary">
-                        {item.participant_expert_ids.join(" · ") || "暂无参与专家"} · 置信度{" "}
+                        {`主责 ${item.primary_expert_id || item.participant_expert_ids[0] || "-"} · 参与 ${
+                          item.participant_expert_ids.join(" · ") || "暂无参与专家"
+                        } · 置信度 `}
                         {(item.confidence * 100).toFixed(0)}%
                       </Text>
                     </>

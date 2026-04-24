@@ -76,12 +76,17 @@ class RuntimeConfig(BaseModel):
     storage_pg_password: str = ""
     allow_llm_fallback: bool = False
     allow_human_gate: bool = True
+    enable_llm_issue_judge: bool = False
+    llm_issue_judge_confidence_threshold: float = 0.78
+    llm_issue_judge_timeout_seconds: int = 45
+    enable_llm_targeted_debate: bool = False
+    llm_targeted_debate_timeout_seconds: int = 60
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 60
     standard_llm_retry_count: int = 3
     standard_max_parallel_experts: int = 4
-    light_llm_timeout_seconds: int = 120
-    light_llm_retry_count: int = 2
+    light_llm_timeout_seconds: int = 90
+    light_llm_retry_count: int = 1
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
     light_llm_max_prompt_chars: int = 95000
@@ -101,7 +106,7 @@ class NetworkConfig(BaseModel):
 class AllowlistConfig(BaseModel):
     """定义审核运行时允许使用的工具和代理白名单。"""
 
-    tools: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff"])
+    tools: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff", "static_diff"])
     runtime_tools: list[str] = Field(
         default_factory=lambda: [
             "knowledge_search",
@@ -179,6 +184,11 @@ class AppConfig(BaseModel):
                 storage_pg_password=runtime.storage_pg_password,
                 allow_llm_fallback=runtime.allow_llm_fallback,
                 allow_human_gate=runtime.allow_human_gate,
+                enable_llm_issue_judge=runtime.enable_llm_issue_judge,
+                llm_issue_judge_confidence_threshold=runtime.llm_issue_judge_confidence_threshold,
+                llm_issue_judge_timeout_seconds=runtime.llm_issue_judge_timeout_seconds,
+                enable_llm_targeted_debate=runtime.enable_llm_targeted_debate,
+                llm_targeted_debate_timeout_seconds=runtime.llm_targeted_debate_timeout_seconds,
                 default_max_debate_rounds=runtime.default_max_debate_rounds,
                 standard_llm_timeout_seconds=runtime.standard_llm_timeout_seconds,
                 standard_llm_retry_count=runtime.standard_llm_retry_count,
@@ -240,6 +250,11 @@ class AppConfig(BaseModel):
             runtime_tool_allowlist=list(self.allowlist.runtime_tools),
             agent_allowlist=list(self.allowlist.agents),
             allow_human_gate=self.runtime.allow_human_gate,
+            enable_llm_issue_judge=self.runtime.enable_llm_issue_judge,
+            llm_issue_judge_confidence_threshold=self.runtime.llm_issue_judge_confidence_threshold,
+            llm_issue_judge_timeout_seconds=self.runtime.llm_issue_judge_timeout_seconds,
+            enable_llm_targeted_debate=self.runtime.enable_llm_targeted_debate,
+            llm_targeted_debate_timeout_seconds=self.runtime.llm_targeted_debate_timeout_seconds,
             default_max_debate_rounds=self.runtime.default_max_debate_rounds,
             standard_llm_timeout_seconds=self.runtime.standard_llm_timeout_seconds,
             standard_llm_retry_count=self.runtime.standard_llm_retry_count,

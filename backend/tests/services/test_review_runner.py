@@ -592,14 +592,14 @@ def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_find
     monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _fake_build_routing_plan)
     monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
     monkeypatch.setattr(runner.graph, "invoke", _fake_graph_invoke)
-    monkeypatch.setattr(
-        runner.main_agent_service,
-        "build_final_summary",
-        lambda review, issues, runtime_settings, timeout_seconds, max_attempts: (
-            "演示总结",
-            {"provider": "test", "model": "test", "mode": "mock"},
-        ),
-    )
+    def _fake_build_final_summary(*_args, **_kwargs):
+        saved_review = runner.review_repo.get(review_id)
+        assert saved_review is not None
+        assert saved_review.status == "completed"
+        assert runner.issue_repo.list(review_id) == []
+        return "演示总结", {"provider": "test", "model": "test", "mode": "mock"}
+
+    monkeypatch.setattr(runner.main_agent_service, "build_final_summary", _fake_build_final_summary)
 
     runner.run_once(review_id)
 
@@ -610,6 +610,7 @@ def test_review_runner_emits_issue_filter_message_when_findings_are_kept_as_find
     decisions = issue_filter_message.metadata.get("issue_filter_decisions", [])
     assert isinstance(decisions, list) and decisions
     assert decisions[0]["rule_code"] == "hint_like_medium"
+    assert runner.issue_repo.list(review_id) == []
 
 
 def test_review_runner_reads_issue_filter_settings_from_runtime(storage_root: Path, monkeypatch):
@@ -2827,6 +2828,120 @@ def test_review_runner_builds_fallback_finding_when_expert_fails_with_matched_ru
     assert "专家执行失败" in finding.evidence[0]
 
 
+def test_review_runner_uses_forced_ddd_observation_when_expert_fails(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_forced_ddd_fallback",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/ddd",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/CourseCreator.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/example/CourseCreator.java b/src/main/java/com/example/CourseCreator.java\n"
+                "--- a/src/main/java/com/example/CourseCreator.java\n"
+                "+++ b/src/main/java/com/example/CourseCreator.java\n"
+                "@@ -18,1 +18,1 @@\n"
+                "-        Course course = Course.create(id, name, duration);\n"
+                "+        Course course = new Course(id, name, duration);\n"
+            ),
+        ),
+        selected_experts=["ddd_architecture"],
+    )
+    expert = ExpertProfile(
+        expert_id="ddd_architecture",
+        name="DDD Architecture",
+        name_zh="DDD架构专家",
+        role="ddd architecture",
+        enabled=True,
+        focus_areas=["聚合边界"],
+        system_prompt="prompt",
+        review_spec="聚合必须在聚合根内守护不变量",
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="command",
+        metadata={
+            "repository_context": {
+                "review_observations": [
+                    {
+                        "observation_id": "obs_factory_001",
+                        "kind": "construction_path_changed",
+                        "file_path": "src/main/java/com/example/CourseCreator.java",
+                        "line_start": 18,
+                        "summary": "Course.create() 被替换为 new Course()",
+                        "evidence": [
+                            "- Course course = Course.create(id, name, duration);",
+                            "+ Course course = new Course(id, name, duration);",
+                            "eventBus.publish(course.pullDomainEvents())",
+                        ],
+                        "related_symbols": ["Course.create", "new Course"],
+                        "confidence": 0.73,
+                    }
+                ],
+                "primary_context": {
+                    "path": "src/main/java/com/example/CourseCreator.java",
+                    "snippet": "18 | Course course = new Course(id, name, duration);",
+                },
+            },
+            "target_hunk": {
+                "file_path": "src/main/java/com/example/CourseCreator.java",
+                "hunk_header": "@@ -18,1 +18,1 @@",
+                "start_line": 18,
+                "end_line": 18,
+                "changed_lines": [18],
+                "excerpt": (
+                    "-        Course course = Course.create(id, name, duration);\n"
+                    "+        Course course = new Course(id, name, duration);"
+                ),
+            },
+        },
+    )
+
+    finding = runner._build_failed_expert_fallback_finding(
+        {
+            "review": review,
+            "expert": expert,
+            "command_message": command_message,
+            "file_path": "src/main/java/com/example/CourseCreator.java",
+            "line_start": 18,
+            "bound_documents": [],
+            "rule_screening": {
+                "enabled_rules": 2,
+                "matched_rules_for_llm": [
+                    {
+                        "rule_id": "DDD-JDDD-001",
+                        "title": "Aggregate 必须在聚合根内守护不变量，禁止外部裸改状态",
+                        "priority": "P1",
+                        "decision": "must_review",
+                        "reason": "直接 new Course 可能绕过工厂和领域事件录制。",
+                    }
+                ],
+                "must_review_count": 1,
+                "possible_hit_count": 0,
+            },
+        },
+        "request_timeout:The read operation timed out",
+    )
+
+    assert finding is not None
+    assert finding.finding_type == "direct_defect"
+    assert finding.severity == "blocker"
+    assert finding.verification_needed is False
+    assert finding.confidence >= 0.9
+    assert finding.assumptions == []
+    assert "聚合工厂绕过" in finding.title
+    assert "DDD-JDDD-001" in finding.matched_rules
+    assert (finding.code_context or {}).get("observation_ids") == ["obs_factory_001"]
+
+
 def test_review_runner_builds_signal_aware_fallback_finding_when_expert_fails(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
@@ -3397,6 +3512,83 @@ def test_review_runner_promotes_loop_amplification_to_direct_finding(storage_roo
     assert any("检测到循环内调用放大" in item for item in list(result["evidence"]))
 
 
+def test_review_runner_promotes_exception_swallowed_to_direct_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "订单消费异常处理退化",
+            "claim": "当前 catch 里的错误处理被移除，后续失败会更难定位。",
+            "summary": "异常处理被削弱。",
+            "evidence": [],
+            "signal_terms": {"exception_swallowed": ["catch", "printStackTrace", "logger"]},
+            "confidence": 0.42,
+            "severity": "medium",
+            "finding_type": "risk_hypothesis",
+            "verification_needed": True,
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderEventConsumer.java",
+        56,
+        {
+            "excerpt": (
+                "-        } catch (Exception ex) {\n"
+                "-            ex.printStackTrace();\n"
+                "+        } catch (Exception ex) {\n"
+                "+        }\n"
+            )
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["finding_type"] == "direct_defect"
+    assert result["verification_needed"] is False
+    assert result["direct_evidence"] is True
+    assert result["severity"] == "high"
+    assert float(result["confidence"]) >= 0.87
+    assert "静默吞掉异常" in str(result["title"])
+    assert any("静默吞掉异常" in item for item in list(result["evidence"]))
+
+
+def test_review_runner_promotes_exception_semantics_weakened_to_direct_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "订单处理异常语义退化",
+            "claim": "当前异常分支返回默认值，调用方可能误以为处理成功。",
+            "summary": "异常后的返回语义被弱化。",
+            "evidence": [],
+            "signal_terms": {"exception_semantics_weakened": ["catch", "null"]},
+            "confidence": 0.46,
+            "severity": "medium",
+            "finding_type": "risk_hypothesis",
+            "verification_needed": True,
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderFacade.java",
+        72,
+        {
+            "excerpt": (
+                " try {\n"
+                "   return orderGateway.submit(command);\n"
+                " } catch (Exception ex) {\n"
+                "   return null;\n"
+                " }\n"
+            )
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["finding_type"] == "direct_defect"
+    assert result["verification_needed"] is False
+    assert result["direct_evidence"] is True
+    assert result["severity"] == "high"
+    assert float(result["confidence"]) >= 0.88
+    assert "异常返回语义被弱化" in str(result["title"])
+    assert any("返回语义被弱化" in item for item in list(result["evidence"]))
+
+
 def test_review_runner_builds_forced_loop_observation_candidate(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -3469,6 +3661,48 @@ def test_review_runner_builds_forced_comment_contract_candidate(storage_root: Pa
     assert float(forced[0]["confidence"]) >= 0.88
 
 
+def test_review_runner_builds_forced_ddd_factory_bypass_candidate(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="ddd_architecture",
+        name="DDD",
+        name_zh="DDD架构专家",
+        role="architecture",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_factory_001",
+                "kind": "construction_path_changed",
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+                "line_start": 18,
+                "summary": "Course.create() 被替换为 new Course()",
+                "evidence": [
+                    "- Course course = Course.create(id, name, duration);",
+                    "+ Course course = new Course(id, name, duration);",
+                    "eventBus.publish(course.pullDomainEvents())",
+                ],
+                "related_symbols": ["Course.create", "new Course"],
+                "confidence": 0.73,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "聚合工厂绕过"
+    assert forced[0]["finding_type"] == "direct_defect"
+    assert forced[0]["verification_needed"] is False
+    assert forced[0]["severity"] == "blocker"
+    assert float(forced[0]["confidence"]) >= 0.9
+    assert "DDD-JDDD-001" in forced[0]["matched_rules"]
+    assert forced[0]["observation_ids"] == ["obs_factory_001"]
+
+
 def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
@@ -3493,6 +3727,70 @@ def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(stora
     )
 
     assert result["observation_ids"] == ["obs_loop_001"]
+
+
+def test_review_runner_schema_gate_downgrades_unstructured_direct_defect(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "疑似风险",
+            "claim": "这里有问题",
+            "finding_type": "direct_defect",
+            "severity": "urgent",
+            "confidence": 0.95,
+            "evidence": [],
+            "matched_rules": [],
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderService.java",
+        12,
+        {
+            "excerpt": "+    return order;",
+            "changed_lines": [12],
+            "start_line": 12,
+            "end_line": 12,
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["severity"] == "medium"
+    assert result["confidence"] <= 0.69
+    assert result["verification_needed"] is True
+    assert "direct_defect_without_evidence" in result["schema_validation_errors"]
+    assert result["normalized_issue_type"]
+
+
+def test_review_runner_schema_gate_hard_rejects_empty_expert_payload(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    result = runner._stabilize_expert_analysis(
+        {
+            "finding_type": "direct_defect",
+            "severity": "blocker",
+            "confidence": 0.96,
+            "evidence": [],
+            "matched_rules": [],
+        },
+        "correctness_business",
+        "src/main/java/com/example/OrderService.java",
+        12,
+        {
+            "excerpt": "",
+            "changed_lines": [],
+            "start_line": 12,
+            "end_line": 12,
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["schema_rejected"] is True
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["confidence"] <= 0.35
+    assert "irrecoverable_empty_payload" in result["schema_validation_errors"]
 
 
 def test_review_runner_normalize_review_observations_preserves_language_and_tags(storage_root: Path):
@@ -4712,7 +5010,8 @@ def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
     llm_options = runner._build_llm_request_options(runtime, "light")
 
     assert effective.default_max_debate_rounds == 1
-    assert llm_options["timeout_seconds"] >= 120
+    assert llm_options["timeout_seconds"] <= 90
+    assert llm_options["max_attempts"] == 1
     assert runner._max_parallel_experts(runtime, "light") == 1
 
 
@@ -4744,6 +5043,26 @@ def test_review_runner_system_prompt_includes_review_spec(storage_root: Path):
     assert "必须检查索引与 migration 风险" in prompt
     assert "《专家绑定参考文档》开始" in prompt
     assert "数据库迁移补充规范" in prompt
+    assert "结构化审查步骤" in prompt
+    assert "只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃" in prompt
+    assert "置信度口径" in prompt
+    assert "normalized_issue_type" in prompt
+
+
+def test_review_runner_infers_normalized_issue_type(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    issue_type = runner._normalize_issue_type(
+        {
+            "title": "循环内逐条调用仓储导致放大",
+            "claim": "for 循环里每个元素都执行 repository 查询，存在 N+1 风险",
+            "matched_rules": ["PERF-LOOP-001"],
+            "evidence": ["for (Order item : orders) { repository.findById(item.id()); }"],
+        },
+        "performance_reliability",
+    )
+
+    assert issue_type == "loop_call_amplification"
 
 
 def test_review_runner_system_prompt_prefers_matched_sections_over_full_document(storage_root: Path):
@@ -5247,7 +5566,19 @@ def test_review_runner_build_expert_prompt_requests_comment_and_implementation_c
         20,
         tool_evidence=[],
         runtime_tool_results=[],
-        repository_context={"routing_reason": "注释承诺了库存扣减行为，需要核对是否真正落地"},
+        repository_context={
+            "routing_reason": "注释承诺了库存扣减行为，需要核对是否真正落地",
+            "primary_context": {
+                "path": "src/main/java/com/example/OrderService.java",
+                "snippet": "20 | // 创建订单后自动扣减库存\n21 | return orderRepository.save(order);",
+            },
+            "related_contexts": [
+                {
+                    "path": "src/main/java/com/example/InventoryService.java",
+                    "snippet": "33 | inventoryService.reserve(order.getSku(), order.getQuantity());",
+                }
+            ],
+        },
         target_hunk={
             "hunk_header": "@@ -20,1 +20,2 @@",
             "excerpt": "+ // 创建订单后自动扣减库存\n+ return orderRepository.save(order);",
@@ -5264,6 +5595,9 @@ def test_review_runner_build_expert_prompt_requests_comment_and_implementation_c
     assert "阿里巴巴 Java 开发手册" in prompt
     assert "结构化观察点" in prompt
     assert "observation_ids" in prompt
+    assert "跨文件影响提示" in prompt
+    assert "审查阶段说明" in prompt
+    assert "规则阶段" in prompt
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):
@@ -5318,6 +5652,18 @@ def test_review_runner_build_finding_code_context_includes_input_trace(storage_r
                     "snippet": "  20 | List<UserRecord> findByStatus(String status);",
                 }
             ],
+            "caller_contexts": [
+                {
+                    "path": "src/main/java/com/example/UserController.java",
+                    "snippet": "  10 | userService.findByStatuses(statuses);",
+                }
+            ],
+            "callee_contexts": [
+                {
+                    "path": "src/main/java/com/example/UserGateway.java",
+                    "snippet": "  18 | gateway.fetch(status);",
+                }
+            ],
             "context_files": [
                 "src/main/java/com/example/UserService.java",
                 "src/main/java/com/example/UserRepository.java",
@@ -5336,12 +5682,18 @@ def test_review_runner_build_finding_code_context_includes_input_trace(storage_r
     assert context["input_completeness"]["review_spec_present"] is True
     assert context["input_completeness"]["language_guidance_present"] is True
     assert context["input_completeness"]["matched_rule_count"] == 1
-    assert context["input_completeness"]["related_context_count"] == 1
+    assert context["input_completeness"]["related_context_count"] == 3
     assert context["review_inputs"]["expert_id"] == "performance_reliability"
     assert context["review_inputs"]["language_guidance_language"] == "java"
     assert context["review_inputs"]["language_guidance_present"] is True
     assert "事务与副作用" in context["review_inputs"]["language_guidance_topics"]
     assert context["review_inputs"]["matched_rules"][0]["rule_id"] == "PERF-JAVA-001"
+    assert context["review_inputs"]["cross_file_impact_hints"]
+    assert any("关联文件" in item or "调用链" in item for item in context["review_inputs"]["cross_file_impact_hints"])
+    assert any("调用方入参" in item for item in context["review_inputs"]["cross_file_impact_hints"])
+    assert any("调用方未随本次改动一起修改" in item for item in context["review_inputs"]["cross_file_impact_hints"])
+    assert context["review_inputs"]["analysis_stages"]["rule_stage"]
+    assert context["review_inputs"]["analysis_stages"]["llm_stage"]
     observations = context["review_observations"]
     assert isinstance(observations, list) and observations
     assert observations[0]["kind"] == "control_flow_with_external_call"

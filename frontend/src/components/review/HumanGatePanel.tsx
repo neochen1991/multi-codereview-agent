@@ -59,7 +59,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
               </div>
               <Paragraph style={{ marginBottom: 8 }}>{selectedIssue.summary}</Paragraph>
               <Text type="secondary">
-                当前状态 {selectedIssue.status} · 参与专家 {selectedIssue.participant_expert_ids.join("、") || "-"}
+                当前状态 {selectedIssue.status} · 主责专家 {selectedIssue.primary_expert_id || selectedIssue.participant_expert_ids[0] || "-"} · 参与专家 {selectedIssue.participant_expert_ids.join("、") || "-"}
               </Text>
             </div>
             <Input.TextArea

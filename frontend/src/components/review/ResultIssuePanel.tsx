@@ -118,6 +118,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         const metaSummaryParts = [
           "议题聚合",
           `关联发现 ${issue.finding_ids.length}`,
+          `主责专家 ${issue.primary_expert_id || issue.participant_expert_ids[0] || "-"}`,
           `参与专家 ${issue.participant_expert_ids.length}`,
         ];
         if ((issue.aggregated_titles || []).length > 1) {
@@ -147,7 +148,13 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           finding_type_labels: buildIssueTypeLabels(issue, relatedFindings),
           severity: issue.severity,
           confidence: issue.confidence,
-          expert_labels: issue.participant_expert_ids || [],
+          expert_labels: Array.from(
+            new Set(
+              [issue.primary_expert_id, ...(issue.participant_expert_ids || [])]
+                .map((item) => String(item || "").trim())
+                .filter(Boolean),
+            ),
+          ),
           mergeImpact: getMergeImpact(issue),
           priority: getPriority(issue.severity),
           issueStatus: issue.status,

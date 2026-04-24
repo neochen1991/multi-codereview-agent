@@ -194,6 +194,7 @@ export interface DebateIssue {
   confidence: number;
   confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
+  primary_expert_id?: string;
   participant_expert_ids: string[];
   expert_views?: Array<Record<string, unknown>>;
   aggregated_titles?: string[];
@@ -456,6 +457,8 @@ export interface RuntimeSettings {
   rule_screening_mode: "heuristic" | "llm";
   rule_screening_batch_size: number;
   rule_screening_llm_timeout_seconds: number;
+  enable_llm_targeted_debate: boolean;
+  llm_targeted_debate_timeout_seconds: number;
   default_max_debate_rounds: number;
   standard_llm_timeout_seconds: number;
   standard_llm_retry_count: number;

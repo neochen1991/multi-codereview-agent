@@ -15,6 +15,8 @@ class ReviewState(TypedDict, total=False):
     selected_experts: list[str]
     issue_filter_config: dict[str, Any]
     issue_filter_decisions: list[dict[str, Any]]
+    feedback_quality_profiles: dict[str, Any]
+    runtime_settings: Any
     findings: list[dict[str, Any]]
     conflicts: list[dict[str, Any]]
     issues: list[dict[str, Any]]

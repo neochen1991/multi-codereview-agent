@@ -148,6 +148,39 @@ def test_knowledge_rule_screening_service_traverses_all_rules(storage_root: Path
     assert matched_rules and matched_rules[0]["rule_id"] == "PERF-POOL-001"
 
 
+def test_knowledge_rule_screening_service_builds_signal_payload_with_deterministic_and_contextual_quality_signals(
+    storage_root: Path,
+) -> None:
+    service = KnowledgeRuleScreeningService(storage_root)
+
+    payload = service._build_signal_payload(
+        {
+            "changed_files": ["src/main/java/com/acme/order/OrderBatchService.java"],
+            "query_terms": [
+                "@@ + items.forEach(item -> orderRepository.findByOrderNo(item.getOrderNo()));",
+                "@@ + // TODO: 创建订单后自动扣减库存并发送事件",
+                "@@ + applicationService.publish(order.pullDomainEvents());",
+                "java_quality:query_semantics_weakened",
+            ],
+            "focus_file": "src/main/java/com/acme/order/OrderBatchService.java",
+        }
+    )
+
+    deterministic = set(payload["java_deterministic_quality_signals"])
+    contextual = set(payload["java_contextual_quality_signals"])
+    strengths = dict(payload["java_quality_signal_strengths"])
+    analysis_stages = dict(payload["java_quality_analysis_stages"])
+
+    assert "loop_call_amplification" in deterministic
+    assert "comment_contract_unimplemented" in deterministic
+    assert "query_semantics_weakened" in deterministic
+    assert strengths["loop_call_amplification"] == "deterministic"
+    assert "transactional_side_effect" not in deterministic.intersection(contextual)
+    assert "rule_stage" in analysis_stages
+    assert "observation_stage" in analysis_stages
+    assert "llm_stage" in analysis_stages
+
+
 def test_knowledge_rule_screening_service_logs_summary(storage_root: Path, caplog) -> None:
     ingestion = KnowledgeIngestionService(storage_root)
     ingestion.ingest(

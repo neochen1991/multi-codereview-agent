@@ -747,17 +747,21 @@ class KnowledgeRuleScreeningService:
                 normalized = token.strip()
                 if len(normalized) >= 3:
                     terms.add(normalized)
-        quality_signals = self._extract_java_quality_signals(raw_values)
+        quality_signal_payload = self._extract_java_quality_payload(raw_values)
         return {
             "combined_text": combined,
             "terms": terms,
             "languages": languages,
             "java_mode": java_mode,
             "java_signals": self._extract_java_signal_terms(raw_values, combined),
-            "java_quality_signals": quality_signals,
+            "java_quality_signals": quality_signal_payload["signals"],
+            "java_deterministic_quality_signals": quality_signal_payload["deterministic_signals"],
+            "java_contextual_quality_signals": quality_signal_payload["contextual_signals"],
+            "java_quality_signal_strengths": quality_signal_payload["signal_strengths"],
+            "java_quality_analysis_stages": dict(quality_signal_payload.get("analysis_stages") or {}),
         }
 
-    def _extract_java_quality_signals(self, raw_values: list[str]) -> set[str]:
+    def _extract_java_quality_payload(self, raw_values: list[str]) -> dict[str, object]:
         explicit = {
             value.split(":", 1)[1].strip().lower()
             for value in raw_values
@@ -780,7 +784,37 @@ class KnowledgeRuleScreeningService:
             for value in list(payload.get("signals") or [])
             if str(value).strip()
         }
-        return explicit.union(extracted)
+        deterministic = {
+            str(value).strip().lower()
+            for value in list(payload.get("deterministic_signals") or [])
+            if str(value).strip()
+        }
+        contextual = {
+            str(value).strip().lower()
+            for value in list(payload.get("contextual_signals") or [])
+            if str(value).strip()
+        }
+        strengths = {
+            str(key).strip().lower(): str(value).strip().lower()
+            for key, value in dict(payload.get("signal_strengths") or {}).items()
+            if str(key).strip()
+        }
+        for signal in explicit:
+            strengths.setdefault(signal, "deterministic")
+        all_signals = explicit.union(extracted)
+        deterministic = deterministic.union(explicit)
+        contextual = {signal for signal in contextual if signal not in deterministic}
+        return {
+            "signals": all_signals,
+            "deterministic_signals": deterministic,
+            "contextual_signals": contextual,
+            "signal_strengths": strengths,
+            "analysis_stages": {
+                str(key).strip(): str(value).strip()
+                for key, value in dict(payload.get("analysis_stages") or {}).items()
+                if str(key).strip() and str(value).strip()
+            },
+        }
 
     def _extract_java_signal_terms(self, raw_values: list[str], combined: str) -> set[str]:
         signals: set[str] = set()

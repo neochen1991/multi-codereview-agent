@@ -400,11 +400,16 @@ class LLMChatService:
         return str(choice.get("finish_reason") or "").strip()
 
     def _build_http_timeout(self, timeout_seconds: float) -> httpx.Timeout:
-        """针对内网和流式响应构造更稳妥的 httpx 超时参数。"""
+        """构造和业务超时一致的 httpx 超时参数。
+
+        之前 read timeout 会按业务超时放大，导致 light 模式表面配置 120 秒，
+        实际一次请求可能等待 180 秒以上。这里让 timeout_seconds 成为真实的
+        单次请求等待上限，避免审核任务长时间停在 running。
+        """
 
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
-        connect_timeout = min(60.0, max(20.0, round(safe_timeout / 3, 2)))
-        read_timeout = round(max(safe_timeout * 1.5, safe_timeout + connect_timeout + 15.0), 2)
+        connect_timeout = min(30.0, max(10.0, round(safe_timeout / 3, 2)))
+        read_timeout = safe_timeout
         write_timeout = connect_timeout
         pool_timeout = connect_timeout
         return httpx.Timeout(

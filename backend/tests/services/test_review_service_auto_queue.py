@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from app.domain.models.event import ReviewEvent
@@ -68,7 +69,8 @@ def test_create_review_defaults_to_empty_selected_experts(tmp_path: Path):
     assert review.selected_experts == []
 
 
-def test_start_next_pending_review_recovers_interrupted_running_review(tmp_path: Path):
+def test_start_next_pending_review_recovers_interrupted_running_review(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REVIEW_RECOVERY_STALE_SECONDS", "0")
     service = ReviewService(tmp_path / "storage")
     service.platform_adapter.normalize = lambda subject, runtime_settings=None: subject.model_copy(  # type: ignore[method-assign]
         update={
@@ -131,6 +133,61 @@ def test_start_next_pending_review_recovers_interrupted_running_review(tmp_path:
     assert any(item.event_type == "review_recovered" for item in events)
     queue_ids = [item.review_id for item in service.list_pending_queue()]
     assert next_pending.review_id in queue_ids
+
+
+def test_recover_interrupted_reviews_keeps_running_review_when_worker_pid_is_alive(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REVIEW_RECOVERY_STALE_SECONDS", "0")
+    service = ReviewService(tmp_path / "storage")
+    running = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "projectname",
+            "project_id": "FND",
+            "source_ref": "feature/running-worker",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/12",
+            "title": "running worker review",
+            "metadata": {"worker_pid": os.getpid(), "execution_mode": "subprocess"},
+        }
+    )
+    running.status = "running"
+    running.phase = "expert_review"
+    service.review_repo.save(running)
+
+    recovered = service.recover_interrupted_reviews()
+
+    assert recovered == []
+    refreshed = service.get_review(running.review_id)
+    assert refreshed is not None
+    assert refreshed.status == "running"
+    assert not any(item.event_type == "review_recovered" for item in service.list_events(running.review_id))
+
+
+def test_recover_interrupted_reviews_keeps_recent_running_review_inside_stale_window(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("REVIEW_RECOVERY_STALE_SECONDS", "600")
+    service = ReviewService(tmp_path / "storage")
+    running = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "projectname",
+            "project_id": "FND",
+            "source_ref": "feature/recent-running",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/13",
+            "title": "recent running review",
+        }
+    )
+    running.status = "running"
+    running.phase = "expert_review"
+    service.review_repo.save(running)
+
+    recovered = service.recover_interrupted_reviews()
+
+    assert recovered == []
+    refreshed = service.get_review(running.review_id)
+    assert refreshed is not None
+    assert refreshed.status == "running"
+    assert not any(item.event_type == "review_recovered" for item in service.list_events(running.review_id))
 
 
 def test_rerun_failed_review_clears_previous_runtime_outputs_before_restart(tmp_path: Path):

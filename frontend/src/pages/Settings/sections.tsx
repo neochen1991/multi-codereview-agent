@@ -1,0 +1,912 @@
+import React from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  Collapse,
+  Descriptions,
+  Form,
+  Input,
+  InputNumber,
+  Row,
+  Select,
+  Space,
+  Switch,
+  Tabs,
+  Tag,
+  Typography,
+  message,
+  type FormInstance,
+  type CollapseProps,
+} from "antd";
+
+import { expertApi, settingsApi, type ExpertProfile, type ExtensionSkill, type ExtensionTool, type RuntimeSettings } from "@/services/api";
+
+import {
+  defaultSkillFormValues,
+  defaultToolFormValues,
+  parseDatabaseSources,
+  parseJsonObject,
+  parseList,
+  stringifyJson,
+  stringifyList,
+  toSkillFormValues,
+  toToolFormValues,
+  type SkillFormValues,
+  type ToolFormValues,
+} from "./utils";
+
+const { Paragraph } = Typography;
+
+const collapseExpandIconPosition = "end" as const;
+
+const ConfiguredNotice: React.FC<{
+  form: FormInstance<RuntimeSettings>;
+  configuredField: keyof RuntimeSettings;
+  alertMessage: string;
+  alertDescription: string;
+}> = ({ form, configuredField, alertMessage, alertDescription }) => (
+  <Form.Item noStyle shouldUpdate>
+    {() =>
+      Boolean(form.getFieldValue(configuredField)) ? (
+        <Alert
+          type="success"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={alertMessage}
+          description={alertDescription}
+        />
+      ) : null
+    }
+  </Form.Item>
+);
+
+export const RuntimeOverview: React.FC<{ form: FormInstance<RuntimeSettings> }> = ({ form }) => (
+  <Form.Item noStyle shouldUpdate>
+    {() => {
+      const mode = String(form.getFieldValue("default_analysis_mode") || "standard");
+      const targetBranch = String(form.getFieldValue("default_target_branch") || "main");
+      const repoUrl = String(form.getFieldValue("code_repo_clone_url") || "").trim();
+      const autoReviewEnabled = Boolean(form.getFieldValue("auto_review_enabled"));
+      const priorityThreshold = String(form.getFieldValue("issue_min_priority_level") || "P2");
+      return (
+        <div className="settings-summary-grid">
+          <div className="settings-summary-card">
+            <span className="settings-summary-label">默认审核模式</span>
+            <strong>{mode === "light" ? "轻量模式" : "标准模式"}</strong>
+            <span className="settings-summary-meta">{`目标分支 ${targetBranch}`}</span>
+          </div>
+          <div className="settings-summary-card">
+            <span className="settings-summary-label">代码仓</span>
+            <strong>{repoUrl ? "已配置" : "未配置"}</strong>
+            <span className="settings-summary-meta" title={repoUrl || "尚未配置代码仓地址"}>
+              {repoUrl || "尚未配置代码仓地址"}
+            </span>
+          </div>
+          <div className="settings-summary-card">
+            <span className="settings-summary-label">自动审核</span>
+            <strong>{autoReviewEnabled ? "已启用" : "未启用"}</strong>
+            <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
+          </div>
+          <div className="settings-summary-card">
+            <span className="settings-summary-label">Issue 阈值</span>
+            <strong>{priorityThreshold}</strong>
+            <span className="settings-summary-meta">低于该级别只保留为 finding</span>
+          </div>
+        </div>
+      );
+    }}
+  </Form.Item>
+);
+
+export const CurrentImplementationStatusCard: React.FC = () => (
+  <Card className="module-card" title="当前实现状态" style={{ marginTop: 16 }}>
+    <Descriptions column={1}>
+      <Descriptions.Item label="日志落盘">前后端日志统一输出到项目根目录 logs/</Descriptions.Item>
+      <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
+      <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
+      <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
+      <Descriptions.Item label="Issue 治理">低风险、提示性、常见建议类问题可只保留在 findings，不升级为 issue / debate</Descriptions.Item>
+    </Descriptions>
+  </Card>
+);
+
+const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["items"] => [
+  {
+    key: "basic",
+    label: "核心设置",
+    extra: <Tag color="processing">最常用</Tag>,
+    children: (
+      <div className="settings-collapse-content">
+        <Paragraph className="settings-section-tip">
+          先完成这里的代码仓、默认模式和自动审核配置，系统就能正常启动审核任务。
+        </Paragraph>
+        <Row gutter={[16, 0]}>
+          <Col xs={24} xl={12}>
+            <Form.Item name="default_target_branch" label="默认目标分支">
+              <Input placeholder="main" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="default_analysis_mode" label="默认审核模式">
+              <Select options={[{ label: "标准模式", value: "standard" }, { label: "轻量模式", value: "light" }]} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="storage_backend" label="底层存储后端">
+              <Select options={[{ label: "SQLite（默认）", value: "sqlite" }, { label: "PostgreSQL", value: "postgres" }]} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="storage_pg_url" label="PG 连接 URL">
+              <Input placeholder="postgresql://127.0.0.1:5432/review_db" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="storage_pg_schema" label="PG Schema">
+              <Input placeholder="public" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="storage_pg_user" label="PG 用户">
+              <Input placeholder="review_user" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="storage_pg_password" label="PG 密码">
+              <Input.Password placeholder="留空则保持当前已配置的 PG 密码" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="storage_pg_password_configured"
+              alertMessage="PG 密码已配置"
+              alertDescription="未填写新密码时，系统会继续使用当前已保存的 PG 密码。"
+            />
+          </Col>
+          <Col xs={24}>
+            <Form.Item name="code_repo_clone_url" label="代码仓 Git 地址">
+              <Input placeholder="https://github.com/org/repo.git" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="code_repo_local_path" label="本地代码仓目录">
+              <Input placeholder="/Users/neochen/code/repo" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="code_repo_default_branch" label="代码仓默认分支">
+              <Input placeholder="main" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="code_repo_auto_sync" label="自动同步代码仓" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="auto_review_enabled" label="启用自动审核队列" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="allow_human_gate" label="允许人工 Gate" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="自动审核会直接复用上面的代码仓地址"
+              description="系统启动后拉取开放中的 MR/PR 时，不再单独维护自动审核仓库地址，统一使用 config.json 中已经配置的代码仓地址。"
+            />
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="auto_review_poll_interval_seconds" label="自动拉取轮询间隔（秒）">
+              <InputNumber min={15} max={3600} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Form.Item
+              name="database_sources"
+              label="按代码仓绑定 PostgreSQL 数据源"
+              getValueProps={(value) => ({ value: stringifyJson(value) })}
+              extra="数据库分析专家会按代码仓 URL 匹配数据源，并只读拉取命中表的结构、约束、索引与轻量统计信息。建议使用 JSON 数组格式配置。"
+            >
+              <Input.TextArea
+                rows={10}
+                placeholder={`[\n  {\n    "repo_url": "https://github.com/org/repo.git",\n    "provider": "postgres",\n    "enabled": true,\n    "host": "127.0.0.1",\n    "port": 5432,\n    "database": "review_db",\n    "user": "review_user",\n    "password_env": "PG_REVIEW_PASSWORD",\n    "schema_allowlist": ["public"],\n    "ssl_mode": "prefer",\n    "connect_timeout_seconds": 5,\n    "statement_timeout_ms": 3000\n  }\n]`}
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+      </div>
+    ),
+  },
+  {
+    key: "credentials",
+    label: "平台凭证",
+    extra: <Tag>按需配置</Tag>,
+    children: (
+      <div className="settings-collapse-content">
+        <Row gutter={[16, 0]}>
+          <Col xs={24}>
+            <Form.Item name="code_repo_access_token" label="代码仓 Access Token">
+              <Input.Password placeholder="留空则保持当前已配置的代码仓 token" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="code_repo_access_token_configured"
+              alertMessage="当前已在配置文件中保存代码仓 Access Token"
+              alertDescription="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+            />
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="github_access_token" label="GitHub Token">
+              <Input.Password placeholder="优先用于 github.com 链接" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="github_access_token_configured"
+              alertMessage="当前已在配置文件中保存 GitHub Token"
+              alertDescription="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+            />
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="gitlab_access_token" label="GitLab Token">
+              <Input.Password placeholder="优先用于 gitlab 链接" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="gitlab_access_token_configured"
+              alertMessage="当前已在配置文件中保存 GitLab Token"
+              alertDescription="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+            />
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="codehub_access_token" label="CodeHub Token">
+              <Input.Password placeholder="优先用于 codehub 链接" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="codehub_access_token_configured"
+              alertMessage="当前已在配置文件中保存 CodeHub Token"
+              alertDescription="已保存的 token 不会在页面回显；留空保存会保留现有配置。"
+            />
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="default_llm_api_key" label="默认 API Key">
+              <Input.Password placeholder="留空则保持当前已配置的 API Key" />
+            </Form.Item>
+            <ConfiguredNotice
+              form={form}
+              configuredField="default_llm_api_key_configured"
+              alertMessage="当前已在配置文件中保存默认 API Key"
+              alertDescription="出于安全考虑，已保存的 API Key 不会在页面回显；留空保存会保留现有配置。"
+            />
+          </Col>
+        </Row>
+      </div>
+    ),
+  },
+  {
+    key: "governance",
+    label: "审核治理",
+    extra: <Tag color="gold">建议优先配置</Tag>,
+    children: (
+      <div className="settings-collapse-content">
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="Issue 过滤治理说明"
+          description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值和每个 P 级单独置信度阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
+        />
+        <Row gutter={[16, 0]}>
+          <Col xs={24} xl={8}>
+            <Form.Item name="issue_filter_enabled" label="启用 Issue 过滤治理" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="issue_min_priority_level" label="Issue 升级最低 P 级阈值" extra="只有达到该优先级及以上的问题才进入 issue / debate。">
+              <Select
+                options={[
+                  { label: "P0（仅 blocker）", value: "P0" },
+                  { label: "P1（high / critical 及以上）", value: "P1" },
+                  { label: "P2（medium 及以上）", value: "P2" },
+                  { label: "P3（low 及以上）", value: "P3" },
+                ]}
+              />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="default_max_debate_rounds" label="默认辩论轮次">
+              <InputNumber min={1} max={6} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="issue_confidence_threshold_p0" label="P0 Issue 置信度阈值" extra="blocker 级问题至少达到该置信度才升级为 issue。">
+              <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="issue_confidence_threshold_p1" label="P1 Issue 置信度阈值" extra="high / critical 级问题至少达到该置信度才升级为 issue。">
+              <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="issue_confidence_threshold_p2" label="P2 Issue 置信度阈值" extra="medium 级问题至少达到该置信度才升级为 issue。">
+              <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={6}>
+            <Form.Item name="issue_confidence_threshold_p3" label="P3 Issue 置信度阈值" extra="low 级问题至少达到该置信度才升级为 issue。">
+              <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="suppress_low_risk_hint_issues" label="压制低风险提示类 Issue" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="hint_issue_confidence_threshold" label="提示类 Issue 置信度阈值">
+              <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="hint_issue_evidence_cap" label="提示类 Issue 最大证据条数">
+              <InputNumber min={0} max={10} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="rule_screening_mode" label="规则筛选模式" extra="LLM 模式会先做语义筛选，失败时自动回退到启发式。">
+              <Select options={[{ label: "LLM 语义筛选", value: "llm" }, { label: "启发式筛选", value: "heuristic" }]} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="rule_screening_batch_size" label="规则筛选批大小">
+              <InputNumber min={4} max={24} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="rule_screening_llm_timeout_seconds" label="规则筛选 LLM 超时（秒）">
+              <InputNumber min={15} max={300} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item
+              name="enable_llm_targeted_debate"
+              label="启用 LLM 定向辩论裁判"
+              valuePropName="checked"
+              extra="开启后，多专家存在分歧或低置信时，会先让模型裁判观点再进入收敛；失败会自动回退本地规则。"
+            >
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="llm_targeted_debate_timeout_seconds" label="LLM 辩论裁判超时（秒）">
+              <InputNumber min={15} max={300} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+        </Row>
+      </div>
+    ),
+  },
+  {
+    key: "llm",
+    label: "模型与执行策略",
+    children: (
+      <div className="settings-collapse-content">
+        <Row gutter={[16, 0]}>
+          <Col xs={24} xl={8}>
+            <Form.Item name="standard_llm_timeout_seconds" label="标准模式 LLM 超时（秒）">
+              <InputNumber min={10} max={300} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="standard_llm_retry_count" label="标准模式 LLM 重试次数">
+              <InputNumber min={1} max={5} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="standard_max_parallel_experts" label="标准模式最大并发专家数">
+              <InputNumber min={1} max={8} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_llm_timeout_seconds" label="轻量模式 LLM 超时（秒）">
+              <InputNumber min={10} max={600} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_llm_retry_count" label="轻量模式 LLM 重试次数">
+              <InputNumber min={1} max={5} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_max_parallel_experts" label="轻量模式最大并发专家数">
+              <InputNumber min={1} max={4} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_max_debate_rounds" label="轻量模式最大辩论轮次">
+              <InputNumber min={1} max={3} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_llm_max_input_tokens" label="轻量模式上下文 token 上限" extra="智能压缩会以这个预算为准，超过时优先保留规则、变更代码和关键上下文。">
+              <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="light_llm_max_prompt_chars" label="轻量模式提示字符上限" extra="作为字符级兜底预算，防止混合中英文场景下提示过长。">
+              <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="llm_log_truncate_enabled" label="截断 LLM 日志预览" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="llm_log_preview_limit" label="LLM 日志预览长度" extra="仅影响日志预览，不影响实际发送给模型的内容。">
+              <InputNumber min={200} max={20000} step={200} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="default_llm_provider" label="默认 LLM Provider">
+              <Input placeholder="dashscope-openai-compatible" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="default_llm_model" label="默认模型">
+              <Input placeholder="kimi-k2.5" />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Form.Item name="default_llm_base_url" label="默认 LLM Base URL">
+              <Input placeholder="https://coding.dashscope.aliyuncs.com/v1" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="allow_llm_fallback" label="允许 LLM Fallback" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+        </Row>
+      </div>
+    ),
+  },
+  {
+    key: "advanced",
+    label: "高级网络与白名单",
+    children: (
+      <div className="settings-collapse-content">
+        <Row gutter={[16, 0]}>
+          <Col xs={24}>
+            <Form.Item name="tool_allowlist" label="全局工具白名单" getValueProps={(value) => ({ value: stringifyList(value as string[]) })}>
+              <Input placeholder="local_diff, schema_diff, coverage_diff" />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Form.Item
+              name="runtime_tool_allowlist"
+              label="全局运行时工具白名单"
+              getValueProps={(value) => ({ value: stringifyList(value as string[]) })}
+            >
+              <Input placeholder="knowledge_search, diff_inspector, test_surface_locator, dependency_surface_locator, repo_context_search" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="mcp_allowlist" label="MCP 白名单" getValueProps={(value) => ({ value: stringifyList(value as string[]) })}>
+              <Input placeholder="github.diff, playwright.snapshot" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={12}>
+            <Form.Item name="agent_allowlist" label="Agent 白名单" getValueProps={(value) => ({ value: stringifyList(value as string[]) })}>
+              <Input placeholder="judge, main_agent" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={4}>
+            <Form.Item name="verify_ssl" label="启用 HTTPS 证书校验" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={4}>
+            <Form.Item name="use_system_trust_store" label="优先使用系统证书库" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={16}>
+            <Form.Item name="ca_bundle_path" label="自定义 CA Bundle 路径">
+              <Input placeholder="C:\\certs\\corp-ca.pem" />
+            </Form.Item>
+          </Col>
+        </Row>
+      </div>
+    ),
+  },
+];
+
+export const RuntimeSettingsCard: React.FC<{
+  form: FormInstance<RuntimeSettings>;
+  loading: boolean;
+  saving: boolean;
+  onSubmit: (values: RuntimeSettings) => Promise<void>;
+}> = ({ form, loading, saving, onSubmit }) => (
+  <Card className="module-card" title="运行时设置" style={{ marginTop: 16 }} loading={loading}>
+    <Form form={form} layout="vertical" onFinish={onSubmit}>
+      <Collapse
+        className="settings-collapse"
+        defaultActiveKey={["basic", "governance"]}
+        expandIconPosition={collapseExpandIconPosition}
+        items={buildRuntimeItems(form)}
+      />
+      <div className="settings-actions">
+        <Button type="primary" htmlType="submit" loading={saving}>
+          保存运行时设置
+        </Button>
+      </div>
+    </Form>
+  </Card>
+);
+
+export const ExpertBindingsCard: React.FC<{
+  experts: ExpertProfile[];
+  loading: boolean;
+  savingExpertId: string;
+  loadPage: () => Promise<void>;
+  setSavingExpertId: (value: string) => void;
+}> = ({ experts, loading, savingExpertId, loadPage, setSavingExpertId }) => (
+  <Card className="module-card" title="专家 Tool / Skill / 知识源配置" style={{ marginTop: 16 }} loading={loading}>
+    <Paragraph className="settings-section-tip">
+      每个专家的知识源、工具绑定和运行时工具绑定收拢到单独折叠项里，避免整页展开时信息过载。
+    </Paragraph>
+    <Collapse
+      className="settings-collapse settings-expert-collapse"
+      expandIconPosition={collapseExpandIconPosition}
+      items={experts.map((expert) => ({
+        key: expert.expert_id,
+        label: (
+          <div className="settings-expert-header">
+            <div className="settings-expert-title">
+              <strong>{expert.name_zh}</strong>
+              <span>{expert.expert_id}</span>
+            </div>
+            <Space wrap size={[8, 8]}>
+              <Tag>{`知识 ${expert.knowledge_sources.length}`}</Tag>
+              <Tag color="blue">{`工具 ${expert.tool_bindings.length}`}</Tag>
+              <Tag color="geekblue">{`运行时工具 ${expert.runtime_tool_bindings.length}`}</Tag>
+            </Space>
+          </div>
+        ),
+        children: (
+          <Form
+            layout="vertical"
+            initialValues={{
+              knowledge_sources: stringifyList(expert.knowledge_sources),
+              tool_bindings: stringifyList(expert.tool_bindings),
+              runtime_tool_bindings: stringifyList(expert.runtime_tool_bindings),
+            }}
+            onFinish={async (values) => {
+              setSavingExpertId(expert.expert_id);
+              try {
+                await expertApi.update(expert.expert_id, {
+                  ...expert,
+                  knowledge_sources: parseList(values.knowledge_sources || ""),
+                  tool_bindings: parseList(values.tool_bindings || ""),
+                  runtime_tool_bindings: parseList(values.runtime_tool_bindings || ""),
+                });
+                message.success(`${expert.name_zh} 配置已更新`);
+                await loadPage();
+              } catch (error: any) {
+                message.error(error?.message || "更新专家配置失败");
+              } finally {
+                setSavingExpertId("");
+              }
+            }}
+          >
+            <Row gutter={[16, 0]}>
+              <Col xs={24}>
+                <Form.Item name="knowledge_sources" label="知识源绑定">
+                  <Input placeholder="security-review-checklist, auth-guideline" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} xl={12}>
+                <Form.Item name="tool_bindings" label="工具绑定">
+                  <Input placeholder="local_diff, schema_diff" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} xl={12}>
+                <Form.Item name="runtime_tool_bindings" label="运行时工具绑定">
+                  <Input placeholder="knowledge_search, diff_inspector" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Button type="primary" htmlType="submit" loading={savingExpertId === expert.expert_id}>
+              保存该专家配置
+            </Button>
+          </Form>
+        ),
+      }))}
+    />
+  </Card>
+);
+
+export const ExtensionEditorsCard: React.FC<{
+  loading: boolean;
+  extensionSkills: ExtensionSkill[];
+  extensionTools: ExtensionTool[];
+  skillForm: FormInstance<SkillFormValues>;
+  toolForm: FormInstance<ToolFormValues>;
+  savingSkill: boolean;
+  savingTool: boolean;
+  loadPage: () => Promise<void>;
+  setSavingSkill: (value: boolean) => void;
+  setSavingTool: (value: boolean) => void;
+}> = ({
+  loading,
+  extensionSkills,
+  extensionTools,
+  skillForm,
+  toolForm,
+  savingSkill,
+  savingTool,
+  loadPage,
+  setSavingSkill,
+  setSavingTool,
+}) => (
+  <Card className="module-card" title="扩展 Skill / Tool 编辑（extensions）" style={{ marginTop: 16 }} loading={loading}>
+    <Paragraph className="settings-section-tip">
+      扩展编辑保留页签结构，但只聚焦 skill / tool 本身，和上面的运行时设置、专家绑定分层展示。
+    </Paragraph>
+    <Tabs
+      defaultActiveKey="skills"
+      items={[
+        {
+          key: "skills",
+          label: "Skill 编辑",
+          children: (
+            <Form
+              form={skillForm}
+              layout="vertical"
+              onFinish={async (values) => {
+                const skillId = String(values.skill_id || "").trim();
+                if (!skillId) {
+                  message.warning("请先填写 skill_id");
+                  return;
+                }
+                setSavingSkill(true);
+                try {
+                  await settingsApi.upsertExtensionSkill(skillId, {
+                    skill_id: skillId,
+                    name: String(values.name || skillId).trim(),
+                    description: String(values.description || "").trim(),
+                    bound_experts: parseList(String(values.bound_experts_text || "")),
+                    applicable_experts: [],
+                    required_tools: parseList(String(values.required_tools_text || "")),
+                    required_doc_types: [],
+                    activation_hints: parseList(String(values.activation_hints_text || "")),
+                    required_context: ["diff"],
+                    allowed_modes:
+                      Array.isArray(values.allowed_modes) && values.allowed_modes.length > 0 ? values.allowed_modes : ["standard", "light"],
+                    output_contract: {},
+                    prompt_body: String(values.prompt_body || ""),
+                  });
+                  message.success(`Skill ${skillId} 已保存`);
+                  await loadPage();
+                } catch (error: any) {
+                  message.error(error?.message || "保存 Skill 失败");
+                } finally {
+                  setSavingSkill(false);
+                }
+              }}
+            >
+              <Form.Item label="加载已有 Skill">
+                <Select
+                  allowClear
+                  placeholder="选择一个已有 skill 加载到编辑器"
+                  options={extensionSkills.map((item) => ({ label: `${item.name} (${item.skill_id})`, value: item.skill_id }))}
+                  onChange={(value) => {
+                    const selected = extensionSkills.find((item) => item.skill_id === value);
+                    if (!selected) {
+                      skillForm.resetFields();
+                      skillForm.setFieldsValue(defaultSkillFormValues());
+                      return;
+                    }
+                    skillForm.setFieldsValue(toSkillFormValues(selected));
+                  }}
+                />
+              </Form.Item>
+              <Form.Item name="skill_id" label="skill_id" rules={[{ required: true, message: "请输入 skill_id" }]}>
+                <Input placeholder="design-consistency-check" />
+              </Form.Item>
+              <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+                <Input placeholder="详细设计一致性检查" />
+              </Form.Item>
+              <Form.Item name="description" label="说明">
+                <Input placeholder="该 skill 在专家审查中的职责说明" />
+              </Form.Item>
+              <Form.Item name="bound_experts_text" label="绑定专家（逗号分隔 expert_id）">
+                <Input placeholder="correctness_business, architecture_design" />
+              </Form.Item>
+              <Form.Item name="required_tools_text" label="依赖工具（逗号分隔 tool_id）">
+                <Input placeholder="design_spec_alignment, repo_context_search" />
+              </Form.Item>
+              <Form.Item name="activation_hints_text" label="激活提示词（逗号分隔）">
+                <Input placeholder="design, api, schema" />
+              </Form.Item>
+              <Form.Item name="allowed_modes" label="可用模式">
+                <Select mode="multiple" options={[{ label: "standard", value: "standard" }, { label: "light", value: "light" }]} />
+              </Form.Item>
+              <Form.Item name="prompt_body" label="SKILL.md 内容">
+                <Input.TextArea rows={14} placeholder="在这里编辑 SKILL.md 内容" />
+              </Form.Item>
+              <Button type="primary" htmlType="submit" loading={savingSkill}>
+                保存 Skill
+              </Button>
+            </Form>
+          ),
+        },
+        {
+          key: "tools",
+          label: "Tool 编辑",
+          children: (
+            <Form
+              form={toolForm}
+              layout="vertical"
+              onFinish={async (values) => {
+                const toolId = String(values.tool_id || "").trim();
+                if (!toolId) {
+                  message.warning("请先填写 tool_id");
+                  return;
+                }
+                setSavingTool(true);
+                try {
+                  await settingsApi.upsertExtensionTool(toolId, {
+                    tool_id: toolId,
+                    name: String(values.name || toolId).trim(),
+                    description: String(values.description || "").trim(),
+                    runtime: String(values.runtime || "python").trim() || "python",
+                    entry: String(values.entry || "run.py").trim() || "run.py",
+                    timeout_seconds: Number(values.timeout_seconds || 60),
+                    allowed_experts: parseList(String(values.allowed_experts_text || "")),
+                    bound_skills: parseList(String(values.bound_skills_text || "")),
+                    input_schema: parseJsonObject(String(values.input_schema_text || "")),
+                    output_schema: parseJsonObject(String(values.output_schema_text || "")),
+                    run_script: String(values.run_script || ""),
+                  });
+                  message.success(`Tool ${toolId} 已保存`);
+                  await loadPage();
+                } catch (error: any) {
+                  message.error(error?.message || "保存 Tool 失败");
+                } finally {
+                  setSavingTool(false);
+                }
+              }}
+            >
+              <Form.Item label="加载已有 Tool">
+                <Select
+                  allowClear
+                  placeholder="选择一个已有 tool 加载到编辑器"
+                  options={extensionTools.map((item) => ({ label: `${item.name} (${item.tool_id})`, value: item.tool_id }))}
+                  onChange={(value) => {
+                    const selected = extensionTools.find((item) => item.tool_id === value);
+                    if (!selected) {
+                      toolForm.resetFields();
+                      toolForm.setFieldsValue(defaultToolFormValues());
+                      return;
+                    }
+                    toolForm.setFieldsValue(toToolFormValues(selected));
+                  }}
+                />
+              </Form.Item>
+              <Form.Item name="tool_id" label="tool_id" rules={[{ required: true, message: "请输入 tool_id" }]}>
+                <Input placeholder="design_spec_alignment" />
+              </Form.Item>
+              <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
+                <Input placeholder="详细设计一致性检查工具" />
+              </Form.Item>
+              <Form.Item name="description" label="说明">
+                <Input placeholder="该 tool 的执行目的与输出说明" />
+              </Form.Item>
+              <Form.Item name="runtime" label="运行时">
+                <Input placeholder="python" />
+              </Form.Item>
+              <Form.Item name="entry" label="入口文件">
+                <Input placeholder="run.py" />
+              </Form.Item>
+              <Form.Item name="timeout_seconds" label="超时（秒）">
+                <InputNumber min={5} max={600} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item name="allowed_experts_text" label="允许专家（逗号分隔 expert_id）">
+                <Input placeholder="correctness_business" />
+              </Form.Item>
+              <Form.Item name="bound_skills_text" label="绑定 Skill（逗号分隔 skill_id）">
+                <Input placeholder="design-consistency-check" />
+              </Form.Item>
+              <Form.Item name="input_schema_text" label="输入 Schema（JSON）">
+                <Input.TextArea rows={6} placeholder='{"type":"object","properties":{}}' />
+              </Form.Item>
+              <Form.Item name="output_schema_text" label="输出 Schema（JSON）">
+                <Input.TextArea rows={6} placeholder='{"type":"object","properties":{}}' />
+              </Form.Item>
+              <Form.Item name="run_script" label="入口脚本内容">
+                <Input.TextArea rows={14} placeholder="在这里编辑 run.py 内容" />
+              </Form.Item>
+              <Button type="primary" htmlType="submit" loading={savingTool}>
+                保存 Tool
+              </Button>
+            </Form>
+          ),
+        },
+      ]}
+    />
+  </Card>
+);
+
+export const sanitizeRuntimeSettingsPayload = (values: RuntimeSettings): Partial<RuntimeSettings> => ({
+  default_target_branch: values.default_target_branch,
+  default_analysis_mode: values.default_analysis_mode || "standard",
+  storage_backend: values.storage_backend || "sqlite",
+  storage_pg_url: values.storage_pg_url || "",
+  storage_pg_schema: values.storage_pg_schema || "public",
+  storage_pg_user: values.storage_pg_user || "",
+  storage_pg_password: String(values.storage_pg_password || "").trim() || undefined,
+  code_repo_clone_url: values.code_repo_clone_url || "",
+  code_repo_local_path: values.code_repo_local_path || "",
+  code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
+  code_repo_access_token: String(values.code_repo_access_token || "").trim() || undefined,
+  github_access_token: String(values.github_access_token || "").trim() || undefined,
+  gitlab_access_token: String(values.gitlab_access_token || "").trim() || undefined,
+  codehub_access_token: String(values.codehub_access_token || "").trim() || undefined,
+  code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
+  auto_review_enabled: Boolean(values.auto_review_enabled),
+  auto_review_repo_url: values.code_repo_clone_url || "",
+  auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
+  database_sources: parseDatabaseSources(String(values.database_sources || "")),
+  tool_allowlist: parseList(String(values.tool_allowlist || "")),
+  mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
+  runtime_tool_allowlist: parseList(String(values.runtime_tool_allowlist || "")),
+  agent_allowlist: parseList(String(values.agent_allowlist || "")),
+  allow_human_gate: Boolean(values.allow_human_gate),
+  issue_filter_enabled: Boolean(values.issue_filter_enabled),
+  issue_min_priority_level: values.issue_min_priority_level || "P2",
+  issue_confidence_threshold_p0: Number(values.issue_confidence_threshold_p0 ?? 0.95),
+  issue_confidence_threshold_p1: Number(values.issue_confidence_threshold_p1 ?? 0.85),
+  issue_confidence_threshold_p2: Number(values.issue_confidence_threshold_p2 ?? 0.8),
+  issue_confidence_threshold_p3: Number(values.issue_confidence_threshold_p3 ?? 0.7),
+  suppress_low_risk_hint_issues: Boolean(values.suppress_low_risk_hint_issues),
+  hint_issue_confidence_threshold: Number(values.hint_issue_confidence_threshold || 0.85),
+  hint_issue_evidence_cap: Number(values.hint_issue_evidence_cap || 2),
+  rule_screening_mode: values.rule_screening_mode || "llm",
+  rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
+  rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
+  enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
+  llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
+  default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
+  standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
+  standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
+  standard_max_parallel_experts: Number(values.standard_max_parallel_experts || 4),
+  light_llm_timeout_seconds: Number(values.light_llm_timeout_seconds || 90),
+  light_llm_retry_count: Number(values.light_llm_retry_count || 1),
+  light_max_parallel_experts: Number(values.light_max_parallel_experts || 1),
+  light_max_debate_rounds: Number(values.light_max_debate_rounds || 1),
+  light_llm_max_prompt_chars: Number(values.light_llm_max_prompt_chars || 95000),
+  light_llm_max_input_tokens: Number(values.light_llm_max_input_tokens || 110000),
+  llm_log_truncate_enabled: Boolean(values.llm_log_truncate_enabled),
+  llm_log_preview_limit: Number(values.llm_log_preview_limit || 1600),
+  default_llm_provider: values.default_llm_provider || "dashscope-openai-compatible",
+  default_llm_base_url: values.default_llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
+  default_llm_model: values.default_llm_model || "kimi-k2.5",
+  default_llm_api_key_env: String(values.default_llm_api_key_env || "").trim() || undefined,
+  default_llm_api_key: String(values.default_llm_api_key || "").trim() || undefined,
+  allow_llm_fallback: Boolean(values.allow_llm_fallback),
+  verify_ssl: Boolean(values.verify_ssl),
+  use_system_trust_store: Boolean(values.use_system_trust_store),
+  ca_bundle_path: values.ca_bundle_path || "",
+});

@@ -52,6 +52,30 @@
 
 - [专家 Agent 职责边界手册](/Users/neochen/multi-codereview-agent/docs/architecture/2026-04-19-expert-agent-boundary-handbook.md)
 
+## 结果页语义约定
+
+为了让研发同学一眼看懂结果，当前结果页统一按下面三层表达：
+
+| 结果层级 | 含义 | 会展示什么 |
+|---|---|---|
+| 审核发现 | 专家提出的原始 finding，允许保留待验证风险 | 专家、证据、代码位置、摘要 |
+| 有效问题 | 已通过当前 issue 过滤规则，可以直接进入整改或人工裁决的问题 | 主责专家、参与专家、严重度、置信度、修复建议 |
+| 被过滤的问题 | 仍保留在结果里，但不会升级为有效问题 | 过滤规则、过滤原因、原始 expert、文件和行号 |
+
+当前会明确展示的几类过滤原因包括：
+
+- `below_issue_priority_threshold`
+- `below_priority_confidence_threshold`
+- `conditional_conclusion`
+- `removed_line_only`
+
+其中：
+
+- `conditional_conclusion` 表示这条结论还依赖额外条件或上下文确认，只能保留为 finding
+- `removed_line_only` 表示问题只命中了待删除代码，属于无效问题
+
+同时，所有进入“有效问题清单”的 issue 都会带一个唯一的 `primary_expert_id`，表示这条问题最终归属于哪个主责专家。
+
 ## 审核状态节点
 
 当前系统里和“状态”相关的概念有两层，建议分开理解：

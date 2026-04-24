@@ -2,10 +2,11 @@ from pathlib import Path
 
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
+from app.domain.models.event import ReviewEvent
 from app.services.review_service import ReviewService
 
 
-def test_start_review_creates_debate_issue_and_human_gate(storage_root: Path):
+def test_start_review_keeps_weak_fallback_risks_as_findings(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
         {
@@ -25,10 +26,11 @@ def test_start_review_creates_debate_issue_and_human_gate(storage_root: Path):
     updated = service.start_review(review.review_id)
     issues = service.list_issues(review.review_id)
 
+    findings = service.list_findings(review.review_id)
+
     assert updated.human_review_status == "not_required"
-    assert issues
-    assert all(issue.status in {"resolved", "needs_verification", "comment"} for issue in issues)
-    assert all(issue.issue_id for issue in issues)
+    assert findings
+    assert issues == []
 
 
 def test_list_issues_realigns_issue_location_from_linked_finding(storage_root: Path):
@@ -137,3 +139,96 @@ def test_list_issues_rehydrates_legacy_merged_issue_into_individual_findings(sto
     assert issues[1].finding_ids == ["fdg_split_b"]
     assert report.issue_count == 2
     assert [item.issue_id for item in report.issues] == ["fdg_split_a", "fdg_split_b"]
+
+
+def test_build_report_exposes_llm_judge_stats(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_4",
+            "project_id": "proj_4",
+            "source_ref": "feature/llm-judge",
+            "target_ref": "main",
+            "title": "llm judge stats",
+        }
+    )
+    finding = ReviewFinding(
+        review_id=review.review_id,
+        finding_id="fdg_llm_judge_1",
+        expert_id="correctness_business",
+        title="跨文件契约可能未同步",
+        summary="方法签名变更后调用点可能仍沿用旧形态。",
+        finding_type="risk_hypothesis",
+        file_path="src/main/java/com/example/OwnerRepository.java",
+        line_start=10,
+    )
+    service.finding_repo.save(review.review_id, finding)
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_llm_judge_1",
+                title="跨文件契约可能未同步",
+                summary="签名变化需要继续验证。",
+                finding_type="risk_hypothesis",
+                file_path="src/main/java/com/example/OwnerRepository.java",
+                line_start=10,
+                finding_ids=["fdg_llm_judge_1"],
+                llm_judge_result={
+                    "final_verdict": "needs_verification",
+                    "trigger_reason": "low_confidence<=0.78,cross_file_contract",
+                    "reason": "跨文件证据存在，但调用方上下文还不完整",
+                },
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.issues[0].llm_judge_result["final_verdict"] == "needs_verification"
+    assert report.confidence_summary.llm_judged_issue_count == 1
+    assert report.confidence_summary.llm_judge_needs_verification_count == 1
+    assert report.confidence_summary.llm_judge_accepted_count == 0
+
+
+def test_build_report_exposes_llm_judge_rejected_filter_stats(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_5",
+            "project_id": "proj_5",
+            "source_ref": "feature/llm-judge-reject",
+            "target_ref": "main",
+            "title": "llm judge rejected stats",
+        }
+    )
+    service.event_repo.append(
+        ReviewEvent(
+            review_id=review.review_id,
+            event_type="issue_filter_applied",
+            phase="coordination",
+            message="LLM Judge filtered issue",
+            payload={
+                "issue_filter_decisions": [
+                    {
+                        "topic": "iss_rejected",
+                        "rule_code": "llm_judge_rejected",
+                        "rule_label": "LLM Judge 拒绝",
+                        "reason": "证据不足，结论依赖推测",
+                        "severity": "medium",
+                        "finding_ids": ["fdg_rejected"],
+                        "finding_titles": ["需要确认是否有并发问题"],
+                        "expert_ids": ["correctness_business"],
+                    }
+                ]
+            },
+        )
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.confidence_summary.llm_judge_rejected_count == 1
+    assert report.confidence_summary.quality_filtered_issue_count == 1

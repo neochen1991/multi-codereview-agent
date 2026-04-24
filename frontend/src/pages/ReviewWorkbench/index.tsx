@@ -996,7 +996,7 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   useEffect(() => {
     // 右侧知识引用面板跟随当前选中的 issue 专家动态刷新。
-    const expertId = selectedIssue?.participant_expert_ids?.[0];
+    const expertId = selectedIssue?.primary_expert_id || selectedIssue?.participant_expert_ids?.[0];
     const changedFiles = review?.subject.changed_files || [];
     if (!expertId || changedFiles.length === 0) {
       setKnowledgeDocs([]);

@@ -32,7 +32,7 @@ def test_detect_conflicts_skips_low_risk_hint_like_findings():
     assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
-def test_detect_conflicts_keeps_high_risk_runtime_findings():
+def test_detect_conflicts_keeps_high_risk_runtime_findings_as_findings_when_verification_is_required():
     state = {
         "findings": [
             {
@@ -57,8 +57,10 @@ def test_detect_conflicts_keeps_high_risk_runtime_findings():
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["title"] == "线程池容量扩大可能导致请求风暴"
+    assert result["conflicts"] == []
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+    assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
 def test_detect_conflicts_keeps_comment_contract_mismatch_even_if_text_contains_comment_tokens():
@@ -201,12 +203,11 @@ def test_detect_conflicts_respects_per_priority_confidence_thresholds():
     result = detect_conflicts(state)
 
     assert result["conflicts"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
-    assert "P1" in result["issue_filter_decisions"][0]["reason"]
-    assert "0.95" in result["issue_filter_decisions"][0]["reason"]
+    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+    assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
-def test_detect_conflicts_keeps_issue_when_priority_confidence_threshold_is_met():
+def test_detect_conflicts_keeps_verification_required_finding_out_of_issues_even_when_priority_confidence_threshold_is_met():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": True,
@@ -242,11 +243,100 @@ def test_detect_conflicts_keeps_issue_when_priority_confidence_threshold_is_met(
 
     result = detect_conflicts(state)
 
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+
+
+def test_detect_conflicts_filters_verification_required_findings_even_when_confidence_is_high():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.85,
+            "issue_confidence_threshold_p2": 0.75,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_verify_only_1",
+                "expert_id": "correctness_business",
+                "title": "注释承诺的分支可能未完全落地",
+                "summary": "如果调用链确实走到该分支，则当前实现缺少注释承诺的补偿逻辑，仍需结合上游入口确认。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": True,
+                "file_path": "src/app/service/OrderService.java",
+                "line_start": 88,
+                "evidence": ["TODO: 成功后补发通知"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["承诺行为需落地"],
+                "violated_guidelines": ["接口承诺不可悬空"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+
+
+def test_detect_conflicts_promotes_strong_direct_ddd_factory_bypass_even_when_verification_is_requested():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.95,
+            "issue_confidence_threshold_p1": 0.85,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_factory_bypass",
+                "expert_id": "ddd_architecture",
+                "title": "聚合根创建绕过工厂方法导致领域事件丢失 (Aggregate factory bypass)",
+                "summary": "CourseCreator 将 Course.create() 改为 new Course()，绕过聚合工厂方法，导致 CourseCreatedDomainEvent 不再被记录。",
+                "finding_type": "direct_defect",
+                "severity": "blocker",
+                "confidence": 0.95,
+                "verification_needed": True,
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+                "line_start": 18,
+                "evidence": [
+                    "CourseCreator.java第18行直接使用 new Course(id, name, duration)",
+                    "Course.java第25-31行 Course.create() 内部调用 record(new CourseCreatedDomainEvent(...))",
+                    "CourseCreator.java第21行仍调用 eventBus.publish(course.pullDomainEvents())",
+                ],
+                "cross_file_evidence": ["Course.java 证明工厂方法负责领域事件注册"],
+                "context_files": [
+                    "src/mooc/main/tv/codely/mooc/courses/domain/Course.java",
+                    "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+                ],
+                "matched_rules": ["ARCH-JDDD-002"],
+                "violated_guidelines": ["聚合根应通过工厂方法封装领域事件注册逻辑"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
     assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["title"] == "大事务批量更新缺少分批提交"
+    assert result["conflicts"][0]["issue_id"] == "fdg_factory_bypass"
+    assert result["issue_filter_decisions"] == []
 
 
-def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue():
+def test_detect_conflicts_keeps_verification_required_group_as_findings_even_when_one_item_has_stronger_confidence():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": True,
@@ -299,10 +389,13 @@ def test_detect_conflicts_filters_low_confidence_finding_before_grouping_issue()
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 1
-    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_high"]
-    assert len(result["issue_filter_decisions"]) == 1
-    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_group_low"]
+    assert result["conflicts"] == []
+    assert len(result["issue_filter_decisions"]) == 2
+    assert {item["rule_code"] for item in result["issue_filter_decisions"]} == {"conditional_conclusion"}
+    assert {tuple(item["finding_ids"]) for item in result["issue_filter_decisions"]} == {
+        ("fdg_group_low",),
+        ("fdg_group_high",),
+    }
 
 
 def test_detect_conflicts_skips_non_code_review_scope_findings():
@@ -540,8 +633,59 @@ def test_detect_conflicts_merges_same_line_same_problem_into_single_issue():
         "risk_hypothesis",
     ]
     assert all(view["normalized_issue_type"] for view in conflict["expert_views"])
-    assert "在入口层补齐统一鉴权守卫" in conflict["aggregated_remediation_strategies"]
-    assert "补充入口鉴权" in conflict["aggregated_remediation_steps"]
+
+
+def test_detect_conflicts_merges_nearby_lines_for_same_normalized_issue_type():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_near_1",
+                "expert_id": "performance_reliability",
+                "title": "循环内逐条查库导致放大",
+                "summary": "for 循环中逐条查询仓储，批量路径会放大。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "loop_call_amplification",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/BatchService.java",
+                "line_start": 42,
+                "evidence": ["for (OrderItem item : items)", "orderRepository.findById(item.id())"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-LOOP-001"],
+                "violated_guidelines": ["循环体内避免逐条外部调用"],
+            },
+            {
+                "finding_id": "fdg_near_2",
+                "expert_id": "database_analysis",
+                "title": "循环内逐条查库导致放大",
+                "summary": "同一段批处理逻辑在循环里逐条访问 repository，存在 N+1 风险。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "loop_call_amplification",
+                "severity": "high",
+                "confidence": 0.82,
+                "verification_needed": True,
+                "file_path": "src/main/java/com/example/BatchService.java",
+                "line_start": 43,
+                "evidence": ["orderRepository.findById(item.id())"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["批量查询需避免 N+1"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["finding_ids"] == ["fdg_near_1", "fdg_near_2"]
+    assert conflict["normalized_issue_type"] == "loop_call_amplification"
 
 
 def test_detect_conflicts_keeps_same_line_different_problems_as_separate_issues():
@@ -715,3 +859,100 @@ def test_detect_conflicts_does_not_merge_same_line_same_title_when_issue_type_di
     assert len(result["conflicts"]) == 2
     issue_types = {conflict["normalized_issue_type"] for conflict in result["conflicts"]}
     assert issue_types == {"query_semantics_changed", "query_input_boundary_risk"}
+
+
+def test_detect_conflicts_merges_same_line_synonym_problem_types():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_null_1",
+                "expert_id": "correctness_business",
+                "title": "空指针风险",
+                "summary": "新增分支直接访问 request.user.name，缺少空值保护。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": False,
+                "file_path": "src/app/UserService.java",
+                "line_start": 32,
+                "evidence": ["request.user.name 直接解引用"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["CORR-NULL-001"],
+                "violated_guidelines": ["入口对象必须做空值保护"],
+            },
+            {
+                "finding_id": "fdg_null_2",
+                "expert_id": "maintainability_code_health",
+                "title": "NPE risk",
+                "summary": "The new code may throw NullPointerException when request.user is null.",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.82,
+                "verification_needed": False,
+                "file_path": "src/app/UserService.java",
+                "line_start": 32,
+                "evidence": ["NullPointerException on request.user.name"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["CORR-NULL-001"],
+                "violated_guidelines": ["Null values must be guarded"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert set(result["conflicts"][0]["finding_ids"]) == {"fdg_null_1", "fdg_null_2"}
+
+
+def test_detect_conflicts_does_not_merge_when_severity_gap_is_large():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_high",
+                "expert_id": "security_compliance",
+                "title": "权限绕过风险",
+                "summary": "资源级鉴权被绕过。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": False,
+                "file_path": "src/app/OrderController.java",
+                "line_start": 18,
+                "evidence": ["未授权路径可达"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["高风险接口必须鉴权"],
+            },
+            {
+                "finding_id": "fdg_low",
+                "expert_id": "maintainability_code_health",
+                "title": "权限绕过风险",
+                "summary": "注释表述可以更清晰。",
+                "finding_type": "design_concern",
+                "severity": "low",
+                "confidence": 0.86,
+                "verification_needed": True,
+                "file_path": "src/app/OrderController.java",
+                "line_start": 18,
+                "evidence": ["注释中提到权限"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["DOC-001"],
+                "violated_guidelines": ["注释需清晰"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 2

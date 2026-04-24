@@ -7,6 +7,7 @@ from app.services.capability_gateway import CapabilityGateway
 from app.services.tools.coverage_diff_tool import coverage_diff_tool
 from app.services.tools.local_diff_tool import local_diff_tool
 from app.services.tools.schema_diff_tool import schema_diff_tool
+from app.services.tools.static_diff_tool import static_diff_tool
 
 
 class EvidenceVerifierService:
@@ -39,6 +40,7 @@ class EvidenceVerifierService:
             "local_diff": local_diff_tool,
             "coverage_diff": coverage_diff_tool,
             "schema_diff": schema_diff_tool,
+            "static_diff": static_diff_tool,
         }.items():
             if not self.gateway.has_tool(name):
                 self.gateway.register_tool(name, tool)

@@ -3,15 +3,15 @@ from pathlib import Path
 from app.services.review_runner import ReviewRunner
 
 
-def test_review_runner_persists_debate_messages_for_conflicted_issue(storage_root: Path):
+def test_review_runner_skips_debate_messages_when_no_issue_survives_filtering(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
 
     runner.run_once(review_id)
 
     messages = runner.message_repo.list(review_id)
-    assert any(item.message_type == "debate_message" for item in messages)
-    assert any(item.expert_id == "judge" for item in messages)
+    assert not any(item.message_type == "debate_message" for item in messages)
+    assert not any(item.expert_id == "judge" for item in messages)
 
 
 def test_review_runner_persists_main_agent_coordination_messages(storage_root: Path):

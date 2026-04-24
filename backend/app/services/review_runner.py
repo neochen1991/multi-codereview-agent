@@ -27,7 +27,9 @@ from app.services.context_priority_policy import priority_for_block_type
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
+from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.code_observation_extractor import CodeObservationExtractor
+from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.knowledge_service import KnowledgeService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
@@ -80,6 +82,7 @@ class ReviewRunner:
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
+        self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.knowledge_service.bootstrap_builtin_documents()
         self.graph = build_review_graph()
@@ -850,8 +853,22 @@ class ReviewRunner:
                     ),
                 },
                 "findings": finding_payloads,
+                "feedback_quality_profiles": self.feedback_learner_service.build_quality_profiles(),
+                "runtime_settings": effective_runtime_settings,
             }
         )
+
+        issue_filter_decisions = [
+            item
+            for item in list(graph_result.get("issue_filter_decisions", []))
+            if isinstance(item, dict)
+        ]
+        filtered_finding_ids = {
+            str(finding_id)
+            for decision in issue_filter_decisions
+            for finding_id in list(decision.get("finding_ids") or [])
+            if str(finding_id).strip()
+        }
 
         issues = [
             DebateIssue(
@@ -910,9 +927,14 @@ class ReviewRunner:
             )
             for item in graph_result.get("issues", [])
         ]
-        if not issues and finding_payloads:
+        fallback_candidates = [
+            item
+            for item in finding_payloads
+            if str(item.get("finding_id") or "").strip() not in filtered_finding_ids
+        ]
+        if not issues and fallback_candidates:
             fallback_source = sorted(
-                finding_payloads,
+                fallback_candidates,
                 key=lambda item: (
                     {"blocker": 4, "critical": 3, "high": 3, "medium": 2, "low": 1}.get(
                         str(item.get("severity") or "medium").lower(),
@@ -1009,11 +1031,13 @@ class ReviewRunner:
                 fallback_finding_id,
                 needs_human,
             )
-        issue_filter_decisions = [
-            item
-            for item in list(graph_result.get("issue_filter_decisions", []))
-            if isinstance(item, dict)
-        ]
+        elif not issues and filtered_finding_ids:
+            logger.info(
+                "issue fallback skipped because all findings were filtered review_id=%s finding_count=%s filtered_count=%s",
+                review_id,
+                len(finding_payloads),
+                len(filtered_finding_ids),
+            )
         if issue_filter_decisions:
             self.message_repo.append(
                 ConversationMessage(
@@ -1107,6 +1131,8 @@ class ReviewRunner:
             pending_human_count=len(pending_human_issue_ids),
             partial_failure_count=len(expert_failures),
         )
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
         self._abort_if_closed(review_id)
         try:
             final_summary, final_llm = self.main_agent_service.build_final_summary(
@@ -1303,6 +1329,62 @@ class ReviewRunner:
         command_metadata = dict(getattr(command_message, "metadata", {}) or {})
         repository_context = dict(job.get("repository_context") or command_metadata.get("repository_context") or {})
         target_hunk = dict(job.get("target_hunk") or command_metadata.get("target_hunk") or {})
+        forced_candidates = self._build_forced_observation_candidates(
+            expert=expert,
+            uncovered_observations=self._normalize_review_observations(repository_context.get("review_observations")),
+            max_findings=1,
+        )
+        if forced_candidates:
+            candidate = forced_candidates[0]
+            forced_line_start = self._normalize_line_start(candidate.get("line_start"), line_start)
+            evidence = [str(item).strip() for item in list(candidate.get("evidence") or []) if str(item).strip()]
+            finding = ReviewFinding(
+                review_id=review.review_id,
+                expert_id=expert.expert_id,
+                title=str(candidate.get("title") or f"{expert.name_zh} 规则兜底发现"),
+                summary=str(candidate.get("claim") or candidate.get("summary") or ""),
+                finding_type=str(candidate.get("finding_type") or "direct_defect"),
+                severity=self._normalize_severity(candidate.get("severity"), "high"),
+                confidence=self._normalize_confidence(candidate.get("confidence"), 0.86),
+                file_path=str(candidate.get("file_path") or file_path),
+                line_start=forced_line_start,
+                evidence=evidence,
+                cross_file_evidence=[str(item).strip() for item in list(candidate.get("cross_file_evidence") or []) if str(item).strip()],
+                assumptions=[],
+                context_files=self._merge_context_files(candidate.get("context_files", []), repository_context, []),
+                matched_rules=self._normalize_text_list(candidate.get("matched_rules"), matched_rules),
+                violated_guidelines=self._normalize_text_list(candidate.get("violated_guidelines"), matched_rules),
+                rule_based_reasoning=str(candidate.get("rule_based_reasoning") or ""),
+                verification_needed=False,
+                verification_plan="",
+                remediation_strategy=str(candidate.get("fix_strategy") or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)),
+                remediation_suggestion=str(candidate.get("suggested_fix") or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)),
+                remediation_steps=self._normalize_text_list(
+                    candidate.get("change_steps"),
+                    self._build_remediation_steps(review.subject, expert.expert_id, file_path),
+                ),
+                code_excerpt=self._build_code_excerpt(review.subject, file_path, forced_line_start, expert.expert_id),
+                code_context=self._build_finding_code_context(
+                    review.subject,
+                    file_path,
+                    forced_line_start,
+                    target_hunk,
+                    repository_context,
+                    expert=expert,
+                    bound_documents=list(job.get("bound_documents") or []),
+                    rule_screening=rule_screening,
+                ),
+                suggested_code=str(candidate.get("suggested_code") or self._build_suggested_code(review.subject, file_path, forced_line_start, expert.expert_id)).strip(),
+                suggested_code_language=self._infer_code_language(file_path),
+            )
+            observation_ids = self._normalize_text_list(candidate.get("observation_ids"), [])
+            if observation_ids:
+                code_context = dict(finding.code_context or {})
+                code_context["observation_ids"] = observation_ids
+                code_context["fallback_generated_from_observation"] = True
+                code_context["failure_reason"] = error_text
+                finding.code_context = code_context
+            return finding
         must_review_count = int(rule_screening.get("must_review_count") or 0)
         possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
         top_rule = next((item for item in list(rule_screening.get("matched_rules_for_llm") or []) if isinstance(item, dict)), {})
@@ -3056,6 +3138,8 @@ class ReviewRunner:
                 repository_context=per_file_repository_context,
                 input_completeness=input_completeness,
             )
+            if bool(parsed.get("schema_rejected")):
+                continue
             suggested_code = str(parsed.get("suggested_code") or "").strip()
             if not self._looks_like_concrete_suggested_code(suggested_code, file_path=finding_file_path):
                 suggested_code = self._repair_missing_suggested_code(
@@ -3091,6 +3175,7 @@ class ReviewRunner:
                 title=str(parsed.get("title") or self._build_finding_title(expert)),
                 summary=str(parsed.get("claim") or self._build_finding_summary(review.subject, expert.expert_id)),
                 finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
+                normalized_issue_type=self._normalize_issue_type(parsed, expert.expert_id),
                 severity=severity,
                 confidence=confidence,
                 file_path=finding_file_path,
@@ -4566,11 +4651,19 @@ class ReviewRunner:
             repository_context=repository_context,
             full_diff=self._build_target_file_full_diff(subject, file_path),
         )
+        enriched_repository_context = dict(repository_context)
+        if dict(java_quality.get("analysis_stages") or {}):
+            enriched_repository_context["analysis_stages"] = dict(java_quality.get("analysis_stages") or {})
+        enriched_repository_context["changed_files"] = [
+            str(item).strip()
+            for item in list(subject.changed_files or [])[:20]
+            if str(item).strip()
+        ]
         input_completeness = self._build_review_input_completeness(
             subject,
             file_path,
             line_start,
-            repository_context,
+            enriched_repository_context,
             expert=expert,
             bound_documents=bound_documents or [],
             rule_screening=rule_screening or {},
@@ -4656,13 +4749,18 @@ class ReviewRunner:
                 for item in list(repository_context.get("context_files") or [])[:10]
                 if str(item).strip()
             ],
+            "changed_files": [
+                str(item).strip()
+                for item in list(subject.changed_files or [])[:20]
+                if str(item).strip()
+            ],
             "routing_reason": str(repository_context.get("routing_reason") or "").strip(),
             "input_completeness": input_completeness,
             "review_inputs": self._build_review_input_trace(
                 expert=expert,
                 bound_documents=bound_documents or [],
                 rule_screening=rule_screening or {},
-                repository_context=repository_context,
+                repository_context=enriched_repository_context,
                 language=language,
             ),
         }
@@ -5019,6 +5117,8 @@ class ReviewRunner:
             prompt_repository_context["review_observations"] = self._normalize_review_observations(
                 java_quality.get("observations")
             )
+        if dict(java_quality.get("analysis_stages") or {}):
+            prompt_repository_context["analysis_stages"] = dict(java_quality.get("analysis_stages") or {})
         prompt_repository_context = self._prepare_prompt_repository_context(
             expert=expert,
             repository_context=prompt_repository_context,
@@ -5123,6 +5223,7 @@ class ReviewRunner:
             f"已激活技能:\n{active_skill_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
             f"规则遍历结果:\n{rule_screening_summary}\n"
+            f"审查阶段说明:\n{self._build_analysis_stage_summary(prompt_repository_context)}\n"
             f"输入完整性校验:\n{input_completeness_summary}\n"
             f"语言通用规范提示:\n{language_general_guidance or '当前目标文件未命中已配置的语言通用规范提示，请仅依据专家规范、规则和代码证据审查。'}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
@@ -5149,7 +5250,7 @@ class ReviewRunner:
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _normalize_expert_batch_items(
@@ -5909,6 +6010,10 @@ class ReviewRunner:
             title = str(getattr(item, "title", "") or "").strip()
             if title:
                 bound_doc_titles.append(title)
+        cross_file_impact_hints = build_cross_file_impact_hints(
+            file_path=str((repository_context.get("primary_context") or {}).get("path") or ""),
+            repository_context=repository_context,
+        )
         return {
             "expert_id": str(getattr(expert, "expert_id", "") or "").strip(),
             "review_spec_present": bool(str(getattr(expert, "review_spec", "") or "").strip()),
@@ -5922,7 +6027,33 @@ class ReviewRunner:
                 for item in list(repository_context.get("context_files") or [])[:10]
                 if str(item).strip()
             ],
+            "cross_file_impact_hints": cross_file_impact_hints,
+            "analysis_stages": {
+                str(key).strip(): str(value).strip()
+                for key, value in dict(repository_context.get("analysis_stages") or {}).items()
+                if str(key).strip() and str(value).strip()
+            },
         }
+
+    def _build_analysis_stage_summary(self, repository_context: dict[str, object]) -> str:
+        stages = {
+            str(key).strip(): str(value).strip()
+            for key, value in dict(repository_context.get("analysis_stages") or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        if not stages:
+            return "当前未提供显式阶段化提示，请按规则、上下文和 observation 逐层审查。"
+        lines = []
+        labels = {
+            "rule_stage": "规则阶段",
+            "observation_stage": "观察点阶段",
+            "llm_stage": "LLM 深审阶段",
+        }
+        for key in ("rule_stage", "observation_stage", "llm_stage"):
+            value = stages.get(key)
+            if value:
+                lines.append(f"- {labels.get(key, key)}: {value}")
+        return "\n".join(lines) if lines else "当前未提供显式阶段化提示，请按规则、上下文和 observation 逐层审查。"
 
     def _build_language_guidance_topics(self, language: str) -> list[str]:
         normalized = str(language or "").strip().lower()
@@ -6068,7 +6199,23 @@ class ReviewRunner:
             f"4. 修复建议必须可执行，不能只写“建议优化”。\n"
             f"5. 必须讲清楚怎么改，并给出建议修改后的完整代码片段。\n"
             f"6. 必须显式引用命中的规范条款和违反的规范要求。\n"
-            f"7. 输出必须遵守 JSON contract。"
+            f"7. 输出必须遵守 JSON contract。\n"
+            f"8. 每条 finding 必须填写 matched_rules 和 normalized_issue_type；不确定时也要给出稳定英文短语，便于后续去重和阈值过滤。\n\n"
+            f"结构化审查步骤：\n"
+            f"1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 findings，不要顺手评论其他专家负责的问题。\n"
+            f"2. 对每个候选问题先找代码锚点：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"
+            f"3. 再判断问题是否由本次 diff 引入或暴露；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
+            f"4. 如果结论依赖“调用方可能传空、配置可能缺失、线上流量可能很大”等外部条件，必须降级为 needs_verification，不能写成确定 issue。\n"
+            f"5. 最后输出修复建议：说明为什么错、怎么改、改完后的关键代码形态。\n\n"
+            f"置信度口径：\n"
+            f"- 0.90-1.00: diff 中有直接代码证据，且不依赖外部条件。\n"
+            f"- 0.75-0.89: 有明确代码锚点，但需要少量上下文补充。\n"
+            f"- 0.50-0.74: 只是合理风险假设，应标记 needs_verification。\n"
+            f"- 低于 0.50: 不要输出为 issue。\n\n"
+            f"反例约束：\n"
+            f"- 不要输出“可能存在、建议确认、需结合实际场景判断”但没有代码证据的问题。\n"
+            f"- 不要把通用命名、格式、日志文案问题跨专家重复提出；这些只属于通用编码规范/可维护性职责。\n"
+            f"- 不要为了凑数量输出低价值意见；没有高价值发现时返回空 findings。"
         )
 
     def _compact_prompt_block(self, text: str, limit: int) -> str:
@@ -6394,6 +6541,7 @@ class ReviewRunner:
             "claim": self._extract_structured_field(text, "风险结论")
             or self._build_finding_summary(subject, expert.expert_id),
             "finding_type": "risk_hypothesis",
+            "normalized_issue_type": "",
             "severity": "",
             "line_start": line_start,
             "line_end": line_start,
@@ -6842,6 +6990,34 @@ class ReviewRunner:
                         "direct_evidence": True,
                     }
                 )
+            elif expert.expert_id == "ddd_architecture" and kind == "construction_path_changed":
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "聚合工厂绕过",
+                        "finding_type": "direct_defect",
+                        "claim": f"当前变更把原本的工厂创建路径替换成直接构造（{symbol_display}），可能绕过聚合根内的不变量和领域事件记录。",
+                        "severity": "blocker",
+                        "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
+                        "violated_guidelines": ["聚合根必须在领域层内守护不变量", "ApplicationService 只能编排流程，不应绕过聚合工厂"],
+                        "rule_based_reasoning": "从 diff 可直接看到工厂方法调用被删除并改为 new 构造；在 DDD 代码中，聚合工厂通常承载不变量检查和领域事件记录，应用层绕过它属于确定性架构缺陷。",
+                        "evidence": evidence[:3] or [summary or "检测到工厂方法调用被直接构造替代。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "恢复通过聚合根工厂方法创建对象，保证不变量和领域事件仍在领域层内完成。",
+                        "suggested_fix": "把直接 new 聚合根的代码改回调用原有 create 工厂方法；如工厂方法被删除，应在聚合根内恢复该工厂方法并保留领域事件记录。",
+                        "change_steps": ["定位被替换的工厂方法调用", "恢复调用聚合根工厂方法", "确认工厂方法内仍记录必要领域事件"],
+                        "suggested_code": "// TODO: 恢复为 Course.create(...) 这类聚合工厂调用，避免绕过领域事件记录",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.9),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
             elif expert.expert_id == "correctness_business" and kind == "declared_intent_without_implementation":
                 forced.append(
                     {
@@ -7144,9 +7320,114 @@ class ReviewRunner:
             target_hunk,
             repository_context or {},
         )
+        result = self._enforce_expert_output_schema(result, expert_id)
         result = self._apply_input_quality_gate(result, input_completeness or {})
         result = self._sanitize_user_confirmation_language(result)
         return result
+
+    def _enforce_expert_output_schema(self, parsed: dict[str, object], expert_id: str) -> dict[str, object]:
+        """对专家 JSON 做最低限度的 schema 约束，避免弱结构输出直接升级成 issue。"""
+
+        result = dict(parsed)
+        errors: list[str] = []
+        allowed_finding_types = {"direct_defect", "direct_code_issue", "test_gap", "risk_hypothesis", "design_concern"}
+        allowed_severities = {"blocker", "critical", "high", "medium", "low"}
+
+        finding_type = str(result.get("finding_type") or "").strip().lower()
+        if finding_type not in allowed_finding_types:
+            errors.append("finding_type_invalid_or_missing")
+            result["finding_type"] = "risk_hypothesis"
+
+        severity = str(result.get("severity") or "").strip().lower()
+        if severity not in allowed_severities:
+            errors.append("severity_invalid_or_missing")
+            result["severity"] = "medium"
+
+        if not str(result.get("title") or "").strip():
+            errors.append("title_missing")
+            result["title"] = self._build_finding_title_by_expert_id(expert_id)
+
+        if not str(result.get("claim") or result.get("summary") or "").strip():
+            errors.append("claim_missing")
+            result["claim"] = "专家输出缺少明确结论，系统已降级为待复核风险。"
+
+        if not str(result.get("normalized_issue_type") or "").strip():
+            inferred_type = self._normalize_issue_type(result, expert_id)
+            result["normalized_issue_type"] = inferred_type
+
+        evidence = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        cross_file_evidence = [
+            str(item).strip() for item in list(result.get("cross_file_evidence") or []) if str(item).strip()
+        ]
+        observation_ids = [
+            str(item).strip() for item in list(result.get("observation_ids") or []) if str(item).strip()
+        ]
+        result["evidence"] = evidence
+        result["cross_file_evidence"] = cross_file_evidence
+        result["observation_ids"] = observation_ids
+
+        matched_rules = [str(item).strip() for item in list(result.get("matched_rules") or []) if str(item).strip()]
+        result["matched_rules"] = matched_rules
+        signal_terms = {
+            str(key).strip(): value
+            for key, value in dict(result.get("signal_terms") or {}).items()
+            if str(key).strip()
+        }
+        has_deterministic_signal = bool(observation_ids or signal_terms)
+        if not matched_rules and not (evidence or cross_file_evidence or has_deterministic_signal):
+            errors.append("matched_rules_missing")
+
+        strong_finding = str(result.get("finding_type") or "").strip().lower() in {"direct_defect", "direct_code_issue"}
+        if strong_finding and not (evidence or cross_file_evidence or observation_ids or has_deterministic_signal):
+            errors.append("direct_defect_without_evidence")
+            result["finding_type"] = "risk_hypothesis"
+            result["direct_evidence"] = False
+
+        if errors:
+            irrecoverable_empty_payload = (
+                "title_missing" in errors
+                and "claim_missing" in errors
+                and not (evidence or cross_file_evidence or observation_ids or has_deterministic_signal or matched_rules)
+            )
+            if irrecoverable_empty_payload:
+                errors.append("irrecoverable_empty_payload")
+                result["schema_rejected"] = True
+                result["finding_type"] = "risk_hypothesis"
+                result["direct_evidence"] = False
+            result["schema_validation_errors"] = errors
+            result["verification_needed"] = True
+            result["confidence"] = min(
+                self._normalize_confidence(result.get("confidence"), 0.5),
+                0.35 if irrecoverable_empty_payload else 0.69,
+            )
+            assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
+            marker = (
+                "专家输出缺少标题、结论和证据，系统已硬拒收为无效结构化输出。"
+                if irrecoverable_empty_payload
+                else f"专家输出结构不完整: {' / '.join(errors[:5])}，系统已降级并自动复核。"
+            )
+            if marker not in assumptions:
+                assumptions.append(marker)
+            result["assumptions"] = assumptions
+            if not str(result.get("verification_plan") or "").strip():
+                result["verification_plan"] = "系统将补齐结构化字段、代码证据和规范命中后再自动复核该结论。"
+        return result
+
+    def _build_finding_title_by_expert_id(self, expert_id: str) -> str:
+        names = {
+            "database_analysis": "数据库访问风险",
+            "performance_reliability": "性能与可靠性风险",
+            "security_compliance": "安全与合规风险",
+            "redis_analysis": "缓存一致性风险",
+            "mq_analysis": "消息可靠性风险",
+            "frontend_accessibility": "前端交互风险",
+            "test_verification": "测试覆盖风险",
+            "ddd_architecture": "DDD 架构边界风险",
+            "ddd_specification": "DDD 规范一致性风险",
+            "maintainability_code_health": "通用编码规范风险",
+            "correctness_business": "业务正确性风险",
+        }
+        return names.get(expert_id, "代码检视风险")
 
     def _apply_input_quality_gate(
         self,
@@ -7211,10 +7492,13 @@ class ReviewRunner:
         result["assumptions"] = assumptions
 
         existing_plan = str(result.get("verification_plan") or "").strip()
-        if existing_plan:
+        missing_input_plan = f"系统先补齐 {' / '.join(missing_required[:5])}，再自动复核该问题是否成立。"
+        if has_strong_missing:
+            result["verification_plan"] = missing_input_plan
+        elif existing_plan:
             result["verification_plan"] = existing_plan
         else:
-            result["verification_plan"] = f"系统先补齐 {' / '.join(missing_required[:5])}，再自动复核该问题是否成立。"
+            result["verification_plan"] = missing_input_plan
         return result
 
     def _sanitize_user_confirmation_language(self, parsed: dict[str, object]) -> dict[str, object]:
@@ -7415,6 +7699,43 @@ class ReviewRunner:
                 summary_parts.append(swallow_summary)
             if swallow_phrase not in evidence:
                 evidence.append(swallow_phrase)
+            if expert_id in {"correctness_business", "performance_reliability"}:
+                if "静默吞掉异常" not in title:
+                    title = f"{title}（静默吞掉异常）" if title else "静默吞掉异常"
+                result["finding_type"] = "direct_defect"
+                result["verification_needed"] = False
+                result["direct_evidence"] = True
+                result["severity"] = (
+                    "high"
+                    if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
+                    else result.get("severity")
+                )
+                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.87)
+
+        if "exception_semantics_weakened" in signal_set and "伪装成成功" not in claim_blob and "返回语义" not in claim_blob:
+            semantics_terms = [term for term in list(signal_terms.get("exception_semantics_weakened") or []) if term]
+            semantics_display = " / ".join(semantics_terms[:2]) if semantics_terms else "fallback_return"
+            semantics_phrase = f"当前异常路径把失败语义弱化成成功或兜底返回（{semantics_display}）"
+            semantics_summary = "异常被吞掉后继续返回默认值、空值或成功态，会让上游误以为流程成功，补偿和回滚判断也会失真。"
+            if "返回语义" not in title and "伪装成成功" not in title:
+                title = f"{title}（异常返回语义被弱化）" if title else "异常返回语义被弱化"
+            if "异常路径" not in claim and "返回语义" not in claim:
+                claim = f"{claim.rstrip('。')}；{semantics_phrase}。".strip("；")
+            if semantics_summary not in summary_parts:
+                summary_parts.append(semantics_summary)
+            evidence_phrase = f"检测到异常后返回语义被弱化：{semantics_display}"
+            if evidence_phrase not in evidence:
+                evidence.append(evidence_phrase)
+            if expert_id in {"correctness_business", "performance_reliability"}:
+                result["finding_type"] = "direct_defect"
+                result["verification_needed"] = False
+                result["direct_evidence"] = True
+                result["severity"] = (
+                    "high"
+                    if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
+                    else result.get("severity")
+                )
+                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.88)
 
         if "loop_call_amplification" in signal_set and expert_id in {"performance_reliability", "database_analysis"}:
             loop_terms = [term for term in list(signal_terms.get("loop_call_amplification") or []) if term]
@@ -8167,10 +8488,18 @@ class ReviewRunner:
             if str(item).strip()
         ]
         if java_quality_signals:
-            lines.append(f"- Java 通用质量信号: {' / '.join(java_quality_signals[:8])}")
+            lines.append(f"- 语言通用质量信号: {' / '.join(java_quality_signals[:8])}")
         java_quality_signal_summary = str(context_payload.get("java_quality_signal_summary") or "").strip()
         if java_quality_signal_summary:
-            lines.append(f"- Java 通用质量摘要: {java_quality_signal_summary}")
+            lines.append(f"- 语言通用质量摘要: {java_quality_signal_summary}")
+        cross_file_impact_hints = build_cross_file_impact_hints(
+            file_path=str((context_payload.get("primary_context") or {}).get("path") or ""),
+            repository_context=context_payload,
+        )
+        if cross_file_impact_hints:
+            lines.append("- 跨文件影响提示:")
+            for item in cross_file_impact_hints[:4]:
+                lines.append(f"  * {item}")
         review_observations = self._normalize_review_observations(context_payload.get("review_observations"))
         if review_observations:
             lines.append("- 结构化观察点:")
@@ -8275,14 +8604,17 @@ class ReviewRunner:
             normalized = str(signal).strip()
             if normalized:
                 query_terms.append(f"java_signal:{normalized}")
+        is_java_file = Path(str(file_path or "")).suffix.lower() == ".java"
+        quality_prefix = "java_quality" if is_java_file else "quality"
+        term_prefix = "java_term" if is_java_file else "quality_term"
         for signal in list(java_quality.get("signals") or [])[:8]:
             normalized = str(signal).strip()
             if normalized:
-                query_terms.append(f"java_quality:{normalized}")
+                query_terms.append(f"{quality_prefix}:{normalized}")
         for term in list(java_quality.get("matched_terms") or [])[:8]:
             normalized = str(term).strip()
             if normalized:
-                query_terms.append(f"java_term:{normalized}")
+                query_terms.append(f"{term_prefix}:{normalized}")
         return {
             "changed_files": list(subject.changed_files),
             "query_terms": query_terms,
@@ -8534,6 +8866,10 @@ class ReviewRunner:
                 for item in list(repository_context.get("context_files") or [])[:8]
                 if str(item).strip()
             ],
+            "cross_file_impact_hints": build_cross_file_impact_hints(
+                file_path=str((repository_context.get("primary_context") or {}).get("path") or ""),
+                repository_context=repository_context,
+            ),
         }
 
         def _compact_entries(key: str, *, symbol_key: str = "symbol") -> list[dict[str, object]]:
@@ -9546,6 +9882,52 @@ class ReviewRunner:
             return fallback
         return min(0.99, max(0.01, parsed))
 
+    def _normalize_issue_type(self, parsed: dict[str, object], expert_id: str) -> str:
+        explicit = str(parsed.get("normalized_issue_type") or "").strip().lower()
+        if explicit:
+            return explicit.replace(" ", "_").replace("-", "_")
+        text_blob = "\n".join(
+            [
+                str(parsed.get("title") or ""),
+                str(parsed.get("claim") or ""),
+                str(parsed.get("summary") or ""),
+                *[str(item) for item in list(parsed.get("matched_rules") or [])],
+                *[str(item) for item in list(parsed.get("evidence") or [])],
+            ]
+        ).lower()
+        keyword_types: list[tuple[str, tuple[str, ...]]] = [
+            ("comment_contract_unimplemented", ("注释", "todo", "fixme", "comment", "未实现", "没有实现", "contract")),
+            ("loop_call_amplification", ("循环", "for ", "foreach", "while ", "stream", "批量", "逐条", "n+1", "n + 1")),
+            ("lock_contention_risk", ("锁", "synchronized", "lock", "deadlock", "竞态", "并发")),
+            ("aggregate_factory_bypass", ("聚合工厂", "factory bypass", "直接构造聚合", "new course", "course.create")),
+            ("domain_event_missing", ("领域事件", "domain event", "event", "事件丢失", "未发布事件")),
+            ("query_boundary_missing", ("limit", "分页", "全量扫描", "无上限", "大结果集", "select *")),
+            ("exception_swallowed", ("吞异常", "catch", "except", "printstacktrace", "只记录日志")),
+            ("missing_auth_check", ("鉴权", "权限", "auth", "permission", "role", "token")),
+            ("cache_consistency_risk", ("redis", "cache", "缓存", "ttl", "expire")),
+            ("message_idempotency_risk", ("mq", "kafka", "consumer", "producer", "消息", "幂等", "重复消费")),
+            ("missing_test", ("测试", "test", "spec", "覆盖")),
+            ("naming_violation", ("命名", "naming", "变量名", "方法名")),
+            ("magic_value", ("魔法值", "magic", "硬编码", "常量")),
+        ]
+        for issue_type, keywords in keyword_types:
+            if any(keyword in text_blob for keyword in keywords):
+                return issue_type
+        expert_defaults = {
+            "database_analysis": "database_risk",
+            "performance_reliability": "performance_reliability_risk",
+            "security_compliance": "security_risk",
+            "redis_analysis": "cache_consistency_risk",
+            "mq_analysis": "message_reliability_risk",
+            "frontend_accessibility": "frontend_accessibility_risk",
+            "test_verification": "missing_test",
+            "ddd_architecture": "ddd_boundary_risk",
+            "ddd_specification": "ddd_specification_risk",
+            "maintainability_code_health": "maintainability_risk",
+            "correctness_business": "business_correctness_risk",
+        }
+        return expert_defaults.get(expert_id, "general_code_review_risk")
+
     def _normalize_text_list(self, value: object, fallback: list[str]) -> list[str]:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
@@ -9597,9 +9979,13 @@ class ReviewRunner:
         analysis_mode: Literal["standard", "light"],
     ) -> dict[str, int | float]:
         if analysis_mode == "light":
+            configured_timeout = int(getattr(runtime_settings, "light_llm_timeout_seconds", 90) or 90)
+            timeout_cap = max(30, int(os.getenv("REVIEW_LIGHT_LLM_TIMEOUT_CAP_SECONDS", "90") or 90))
+            configured_attempts = int(getattr(runtime_settings, "light_llm_retry_count", 1) or 1)
+            attempt_cap = max(1, int(os.getenv("REVIEW_LIGHT_LLM_RETRY_CAP", "1") or 1))
             return {
-                "timeout_seconds": max(30, int(getattr(runtime_settings, "light_llm_timeout_seconds", 120) or 120)),
-                "max_attempts": max(1, int(getattr(runtime_settings, "light_llm_retry_count", 2) or 2)),
+                "timeout_seconds": min(max(30, configured_timeout), timeout_cap),
+                "max_attempts": min(max(1, configured_attempts), attempt_cap),
             }
         return {
             "timeout_seconds": max(20, int(getattr(runtime_settings, "standard_llm_timeout_seconds", 60) or 60)),

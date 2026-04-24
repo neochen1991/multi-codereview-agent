@@ -9,6 +9,15 @@ from typing import Any
 class JavaQualitySignalExtractor:
     """提取 Java 通用质量信号。"""
 
+    DETERMINISTIC_SIGNALS = {
+        "query_semantics_weakened",
+        "unbounded_query_risk",
+        "exception_swallowed",
+        "event_ordering_risk",
+        "loop_call_amplification",
+        "comment_contract_unimplemented",
+    }
+
     def extract(
         self,
         *,
@@ -163,9 +172,32 @@ class JavaQualitySignalExtractor:
             signal_terms=signal_terms,
         )
 
+        deduped_signals = self._dedupe(signals)
         return {
             "language": "java",
-            "signals": self._dedupe(signals),
+            "signals": deduped_signals,
+            "deterministic_signals": [
+                signal for signal in deduped_signals if signal in self.DETERMINISTIC_SIGNALS
+            ],
+            "contextual_signals": [
+                signal for signal in deduped_signals if signal not in self.DETERMINISTIC_SIGNALS
+            ],
+            "signal_strengths": {
+                signal: ("deterministic" if signal in self.DETERMINISTIC_SIGNALS else "contextual")
+                for signal in deduped_signals
+            },
+            "analysis_stages": {
+                "rule_stage": (
+                    f"已命中 {len([signal for signal in deduped_signals if signal in self.DETERMINISTIC_SIGNALS])} 个确定性信号，"
+                    "可优先形成 observation 或直接兜底 finding"
+                ),
+                "observation_stage": (
+                    f"已生成 {len(observations)} 个结构化观察点，供专家逐条复核和引用"
+                    if observations
+                    else "当前未生成结构化观察点，后续主要依赖规则、上下文和 LLM 深审"
+                ),
+                "llm_stage": "LLM 负责结合规则、源码上下文和 observation 做最终专业判断，而不是重复发现确定性信号",
+            },
             "summary": "；".join(summary_parts),
             "matched_terms": self._dedupe(matched_terms)[:12],
             "signal_terms": {key: self._dedupe(value)[:8] for key, value in signal_terms.items()},

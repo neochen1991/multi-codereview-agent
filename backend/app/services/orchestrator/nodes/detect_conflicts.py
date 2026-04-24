@@ -30,6 +30,19 @@ HIGH_VALUE_CONTRACT_MISMATCH_TOKENS = {
     "comment_contract_unimplemented",
 }
 
+HIGH_VALUE_DIRECT_DEFECT_TOKENS = {
+    "aggregate factory bypass",
+    "factory bypass",
+    "聚合工厂绕过",
+    "聚合根创建绕过",
+    "绕过聚合工厂",
+    "绕过工厂方法",
+    "领域事件丢失",
+    "domain event",
+    "domainevent",
+    "事件不再被记录",
+}
+
 NON_CODE_REVIEW_SCOPE_TOKENS = {
     "业务背景不清晰",
     "业务背景不明确",
@@ -95,6 +108,33 @@ SEMANTIC_STOP_TOKENS = {
     "changes",
     "should",
     "need",
+}
+
+SEMANTIC_SYNONYMS = {
+    "npe": "null_pointer",
+    "nullpointerexception": "null_pointer",
+    "null_pointer_exception": "null_pointer",
+    "空指针": "null_pointer",
+    "空值": "null_pointer",
+    "null": "null_pointer",
+    "unauthorized": "auth_bypass",
+    "authorization": "auth_bypass",
+    "permission": "auth_bypass",
+    "权限绕过": "auth_bypass",
+    "未授权": "auth_bypass",
+    "越权": "auth_bypass",
+    "n+1": "n_plus_one",
+    "n + 1": "n_plus_one",
+    "逐条查询": "n_plus_one",
+    "循环查询": "n_plus_one",
+    "批量无上限": "query_boundary_missing",
+    "缺少limit": "query_boundary_missing",
+    "无分页": "query_boundary_missing",
+    "领域事件": "domain_event",
+    "domain event": "domain_event",
+    "domainevent": "domain_event",
+    "聚合工厂": "aggregate_factory",
+    "factory bypass": "aggregate_factory",
 }
 
 RESPONSIBILITY_TOKEN_HINTS = {
@@ -297,14 +337,18 @@ def _extract_semantic_tokens(value: str) -> list[str]:
     if not raw:
         return []
     tokens: list[str] = []
+    compact_raw = raw.replace(" ", "")
+    for synonym, canonical in SEMANTIC_SYNONYMS.items():
+        if synonym in raw or synonym.replace(" ", "") in compact_raw:
+            tokens.append(canonical)
     for token in re.findall(r"[a-z][a-z0-9_:-]{2,}", raw):
         normalized = token.strip("-_:")
         if normalized and normalized not in SEMANTIC_STOP_TOKENS:
-            tokens.append(normalized)
+            tokens.append(SEMANTIC_SYNONYMS.get(normalized, normalized))
     for token in re.findall(r"[\u4e00-\u9fff]{2,12}", raw):
         normalized = token.strip()
         if normalized and normalized not in SEMANTIC_STOP_TOKENS:
-            tokens.append(normalized)
+            tokens.append(SEMANTIC_SYNONYMS.get(normalized, normalized))
     return tokens
 
 
@@ -380,6 +424,13 @@ def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict
     ]
     if candidate_explicit and grouped_explicit:
         return any(candidate_explicit == item for item in grouped_explicit)
+    candidate_severity_rank = PRIORITY_ORDER.get(str(candidate.get("severity") or "medium").lower(), 2)
+    grouped_severity_ranks = [
+        PRIORITY_ORDER.get(str(item.get("severity") or "medium").lower(), 2)
+        for item in grouped_items
+    ]
+    if grouped_severity_ranks and min(abs(candidate_severity_rank - rank) for rank in grouped_severity_ranks) >= 2:
+        return False
     candidate_type = _build_single_problem_type(candidate)
     if any(candidate_type == _build_single_problem_type(item) for item in grouped_items):
         return True
@@ -398,18 +449,28 @@ def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict
 
 
 def _group_findings_by_problem(findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:
-    grouped_by_location: dict[tuple[str, int], list[dict[str, object]]] = {}
+    grouped_by_file: dict[str, list[dict[str, object]]] = {}
     for finding in findings:
         file_path = str(finding.get("file_path", "")).strip() or "unknown"
-        line_start = int(finding.get("line_start", 1) or 1)
-        grouped_by_location.setdefault((file_path, line_start), []).append(finding)
+        grouped_by_file.setdefault(file_path, []).append(finding)
     grouped_findings: list[list[dict[str, object]]] = []
-    for key in sorted(grouped_by_location.keys()):
-        location_items = grouped_by_location[key]
+    for file_path in sorted(grouped_by_file.keys()):
+        location_items = sorted(
+            grouped_by_file[file_path],
+            key=lambda item: (
+                int(item.get("line_start", 1) or 1),
+                str(item.get("normalized_issue_type") or "").strip(),
+                str(item.get("title") or "").strip(),
+            ),
+        )
         problem_groups: list[list[dict[str, object]]] = []
         for finding in location_items:
             matched_group = next(
-                (group for group in problem_groups if _is_same_problem_type(finding, group)),
+                (
+                    group
+                    for group in problem_groups
+                    if _is_location_compatible(finding, group) and _is_same_problem_type(finding, group)
+                ),
                 None,
             )
             if matched_group is None:
@@ -418,6 +479,42 @@ def _group_findings_by_problem(findings: list[dict[str, object]]) -> list[list[d
                 matched_group.append(finding)
         grouped_findings.extend(problem_groups)
     return grouped_findings
+
+
+def _is_location_compatible(candidate: dict[str, object], grouped_items: list[dict[str, object]]) -> bool:
+    if not grouped_items:
+        return False
+    candidate_path = str(candidate.get("file_path") or "").strip() or "unknown"
+    candidate_line = int(candidate.get("line_start", 1) or 1)
+    grouped_paths = {
+        str(item.get("file_path") or "").strip() or "unknown"
+        for item in grouped_items
+    }
+    if grouped_paths != {candidate_path}:
+        return False
+    grouped_lines = [int(item.get("line_start", 1) or 1) for item in grouped_items]
+    if not grouped_lines:
+        return False
+    if min(abs(candidate_line - line) for line in grouped_lines) == 0:
+        return True
+    candidate_type = str(candidate.get("normalized_issue_type") or "").strip()
+    grouped_types = {
+        str(item.get("normalized_issue_type") or "").strip()
+        for item in grouped_items
+        if str(item.get("normalized_issue_type") or "").strip()
+    }
+    nearby_window = 2
+    if candidate_type and candidate_type in grouped_types:
+        return min(abs(candidate_line - line) for line in grouped_lines) <= nearby_window
+    candidate_title = str(candidate.get("title") or "").strip().lower()
+    grouped_titles = {
+        str(item.get("title") or "").strip().lower()
+        for item in grouped_items
+        if str(item.get("title") or "").strip()
+    }
+    if candidate_title and candidate_title in grouped_titles:
+        return min(abs(candidate_line - line) for line in grouped_lines) <= nearby_window
+    return False
 
 
 def _select_primary_item(items: list[dict[str, object]], preferred_expert_id: str = "") -> dict[str, object]:
@@ -688,6 +785,7 @@ def _classify_issue_candidate(
     ).lower()
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
     high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
+    high_value_direct_defect = any(token in text_blob for token in HIGH_VALUE_DIRECT_DEFECT_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
 
     if non_code_review_scope and not direct_evidence:
@@ -750,6 +848,22 @@ def _classify_issue_candidate(
 
     priority_label = _severity_to_priority_label(highest_severity)
     priority_confidence_threshold = _priority_confidence_threshold(config, priority_label)
+    strong_direct_code_issue = (
+        direct_evidence
+        and highest_severity in {"blocker", "critical", "high"}
+        and effective_confidence >= priority_confidence_threshold
+        and evidence_strength >= 4
+        and (high_value_contract_mismatch or high_value_direct_defect)
+    )
+
+    if all_need_verification and not strong_direct_code_issue:
+        return {
+            "rule_code": "conditional_conclusion",
+            "rule_label": "待验证结论保留为 finding",
+            "reason": "当前问题仍依赖额外条件或上下文确认，暂不升级为有效 issue，仅保留为 finding。",
+            "severity": highest_severity,
+        }
+
     if effective_confidence < priority_confidence_threshold:
         return {
             "rule_code": "below_priority_confidence_threshold",

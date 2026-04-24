@@ -256,12 +256,14 @@ const SettingsPage: React.FC = () => {
                 rule_screening_mode: values.rule_screening_mode || "llm",
                 rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
                 rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
+                enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
+                llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
                 standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
                 standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
                 standard_max_parallel_experts: Number(values.standard_max_parallel_experts || 4),
-                light_llm_timeout_seconds: Number(values.light_llm_timeout_seconds || 120),
-                light_llm_retry_count: Number(values.light_llm_retry_count || 2),
+                light_llm_timeout_seconds: Number(values.light_llm_timeout_seconds || 90),
+                light_llm_retry_count: Number(values.light_llm_retry_count || 1),
                 light_max_parallel_experts: Number(values.light_max_parallel_experts || 1),
                 light_max_debate_rounds: Number(values.light_max_debate_rounds || 1),
                 light_llm_max_prompt_chars: Number(values.light_llm_max_prompt_chars || 95000),
@@ -490,7 +492,7 @@ const SettingsPage: React.FC = () => {
                       showIcon
                       style={{ marginBottom: 16 }}
                       message="Issue 过滤治理说明"
-                      description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值和每个 P 级单独置信度阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
+                      description="这组开关只影响问题是否升级为有效问题，不会丢掉原始 findings。当前系统会把结果分成三层：审核发现、有效问题、被过滤问题。被过滤的常见原因包括 P 级阈值不足、结论仍带条件前提，以及问题只命中了待删除代码。规则筛选也支持切换为 LLM 语义筛选。"
                     />
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
@@ -595,6 +597,21 @@ const SettingsPage: React.FC = () => {
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item name="rule_screening_llm_timeout_seconds" label="规则筛选 LLM 超时（秒）">
+                          <InputNumber min={15} max={300} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_llm_targeted_debate"
+                          label="启用 LLM 定向辩论裁判"
+                          valuePropName="checked"
+                          extra="开启后，多专家存在分歧或低置信时，会先让模型裁判观点再进入收敛；失败会自动回退本地规则。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_targeted_debate_timeout_seconds" label="LLM 辩论裁判超时（秒）">
                           <InputNumber min={15} max={300} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>

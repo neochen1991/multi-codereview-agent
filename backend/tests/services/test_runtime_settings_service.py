@@ -118,7 +118,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert config_runtime.database_sources[0].database == "repo_db"
     assert config_runtime.default_analysis_mode == "standard"
     assert config_runtime.standard_llm_timeout_seconds == 120
-    assert config_runtime.light_llm_timeout_seconds == 210
+    assert config_runtime.light_llm_timeout_seconds == 90
     assert config_runtime.light_llm_max_prompt_chars == 95000
     assert config_runtime.light_llm_max_input_tokens == 110000
     assert config_runtime.rule_screening_llm_timeout_seconds == 150

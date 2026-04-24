@@ -862,6 +862,19 @@ class ReviewService:
                 continue
             if review.review_id in active_ids:
                 continue
+            if not self._review_recovery_stale_window_elapsed(review):
+                logger.info(
+                    "skip recovering running review because it is still within stale window review_id=%s",
+                    review.review_id,
+                )
+                continue
+            if self._review_worker_process_alive(review):
+                logger.info(
+                    "skip recovering running review because worker process is still alive review_id=%s pid=%s",
+                    review.review_id,
+                    (review.subject.metadata or {}).get("worker_pid"),
+                )
+                continue
             review.status = "pending"
             review.phase = "pending"
             review.failure_reason = ""
@@ -877,6 +890,40 @@ class ReviewService:
             )
             recovered.append(review)
         return recovered
+
+    def _review_recovery_stale_window_elapsed(self, review: ReviewTask) -> bool:
+        raw = str(os.getenv("REVIEW_RECOVERY_STALE_SECONDS", "")).strip()
+        try:
+            stale_seconds = max(0, int(raw)) if raw else 600
+        except ValueError:
+            stale_seconds = 600
+        if stale_seconds <= 0:
+            return True
+        updated_at = review.updated_at
+        if updated_at is None:
+            return True
+        safe_updated_at = updated_at if updated_at.tzinfo is not None else updated_at.replace(tzinfo=UTC)
+        return (datetime.now(UTC) - safe_updated_at).total_seconds() >= float(stale_seconds)
+
+    def _review_worker_process_alive(self, review: ReviewTask) -> bool:
+        """Best-effort guard so recovery does not duplicate an active subprocess review."""
+
+        metadata = dict(review.subject.metadata or {})
+        try:
+            pid = int(metadata.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
     def list_events(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ReviewEvent]:
         since_text = str(since or "").strip()
@@ -1189,6 +1236,7 @@ class ReviewService:
             f"覆盖 {len(review.selected_experts)} 个专家视角，"
             f"当前状态为 {review.status}。"
         )
+        llm_judged_issues = [item for item in issues if item.llm_judge_result]
         return ReviewReport(
             review_id=review_id,
             status=review.status,
@@ -1214,6 +1262,20 @@ class ReviewService:
                 "risk_hypothesis_count": len([item for item in findings if item.finding_type == "risk_hypothesis"]),
                 "test_gap_count": len([item for item in findings if item.finding_type == "test_gap"]),
                 "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
+                "llm_judged_issue_count": len(llm_judged_issues),
+                "llm_judge_accepted_count": len(
+                    [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "accept"]
+                ),
+                "llm_judge_needs_verification_count": len(
+                    [
+                        item
+                        for item in llm_judged_issues
+                        if str(item.llm_judge_result.get("final_verdict") or "") == "needs_verification"
+                    ]
+                ),
+                "llm_judge_needs_human_count": len(
+                    [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
+                ),
             },
         )
 
@@ -1408,6 +1470,7 @@ class ReviewService:
         payload["cross_file_evidence"] = list(payload.get("cross_file_evidence") or [])[:6]
         payload["assumptions"] = list(payload.get("assumptions") or [])[:6]
         payload["context_files"] = list(payload.get("context_files") or [])[:10]
+        payload["llm_judge_result"] = dict(payload.get("llm_judge_result") or {})
         payload["aggregated_titles"] = list(payload.get("aggregated_titles") or [])[:10]
         payload["aggregated_summaries"] = list(payload.get("aggregated_summaries") or [])[:10]
         payload["aggregated_remediation_strategies"] = list(payload.get("aggregated_remediation_strategies") or [])[:10]

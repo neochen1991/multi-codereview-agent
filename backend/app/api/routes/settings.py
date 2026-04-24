@@ -50,6 +50,11 @@ class RuntimeSettingsRequest(BaseModel):
     suppress_low_risk_hint_issues: bool = True
     hint_issue_confidence_threshold: float = 0.85
     hint_issue_evidence_cap: int = 2
+    enable_llm_issue_judge: bool = False
+    llm_issue_judge_confidence_threshold: float = 0.78
+    llm_issue_judge_timeout_seconds: int = 45
+    enable_llm_targeted_debate: bool = False
+    llm_targeted_debate_timeout_seconds: int = 60
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150
@@ -57,8 +62,8 @@ class RuntimeSettingsRequest(BaseModel):
     standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3
     standard_max_parallel_experts: int = 4
-    light_llm_timeout_seconds: int = 210
-    light_llm_retry_count: int = 2
+    light_llm_timeout_seconds: int = 90
+    light_llm_retry_count: int = 1
     light_max_parallel_experts: int = 1
     light_max_debate_rounds: int = 1
     light_llm_max_prompt_chars: int = 95000

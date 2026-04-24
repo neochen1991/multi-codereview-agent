@@ -321,6 +321,12 @@ def submit_case(
     replay = request_json("GET", f"{api_base}/reviews/{review_id}/replay")
     findings = report.get("findings", []) if isinstance(report, dict) else []
     issues = report.get("issues", []) if isinstance(report, dict) else []
+    issue_filter_decisions = report.get("issue_filter_decisions", []) if isinstance(report, dict) else []
+    filtered_rule_codes = [
+        str(item.get("rule_code") or "")
+        for item in issue_filter_decisions
+        if isinstance(item, dict) and str(item.get("rule_code") or "").strip()
+    ]
     score = evaluate_case_result(materialized.case, report if isinstance(report, dict) else {}, replay if isinstance(replay, dict) else {})
     return {
         "case_id": materialized.case.case_id,
@@ -329,15 +335,31 @@ def submit_case(
         "phase": latest_review.get("phase", ""),
         "finding_count": len(findings) if isinstance(findings, list) else 0,
         "issue_count": len(issues) if isinstance(issues, list) else 0,
+        "filtered_count": sum(
+            len(item.get("finding_ids") or [])
+            for item in issue_filter_decisions
+            if isinstance(item, dict)
+        ),
+        "filtered_rule_codes": filtered_rule_codes,
         "matched_issue_titles": [
             str(item.get("title") or "")
             for item in issues
             if isinstance(item, dict) and str(item.get("title") or "").strip()
         ],
+        "matched_issue_primary_experts": [
+            str(item.get("primary_expert_id") or "")
+            for item in issues
+            if isinstance(item, dict) and str(item.get("primary_expert_id") or "").strip()
+        ],
         "matched_finding_titles": [
             str(item.get("title") or "")
             for item in findings
             if isinstance(item, dict) and str(item.get("title") or "").strip()
+        ],
+        "matched_finding_experts": [
+            str(item.get("expert_id") or "")
+            for item in findings
+            if isinstance(item, dict) and str(item.get("expert_id") or "").strip()
         ],
         "replay_message_count": len(replay.get("messages", [])) if isinstance(replay, dict) else 0,
         "score": {

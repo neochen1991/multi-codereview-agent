@@ -1,3 +1,5 @@
+from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.llm_chat_service import LLMTextResult
 from app.services.orchestrator.nodes.judge_and_merge import judge_and_merge
 
 
@@ -181,3 +183,262 @@ def test_judge_drops_non_issue_formatting_entries():
     result = judge_and_merge(state)
 
     assert result["issues"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "llm_judge_rejected"
+    assert result["issue_filter_decisions"][0]["rule_label"] == "LLM Judge 拒绝"
+
+
+def test_judge_uses_feedback_profile_to_tighten_risk_hypothesis():
+    state = {
+        "feedback_quality_profiles": {
+            "experts": {
+                "security_compliance": {
+                    "sample_count": 4,
+                    "false_positive_rate": 0.75,
+                    "confidence_penalty": 0.12,
+                    "needs_human_confidence": 0.9,
+                    "prefer_needs_verification": True,
+                }
+            },
+            "issue_types": {
+                "missing_auth_check": {
+                    "sample_count": 3,
+                    "false_positive_rate": 0.67,
+                    "confidence_penalty": 0.07,
+                    "needs_human_confidence": 0.85,
+                    "prefer_needs_verification": True,
+                }
+            },
+        },
+        "issues": [
+            {
+                "issue_id": "iss_feedback_profile",
+                "primary_expert_id": "security_compliance",
+                "normalized_issue_type": "missing_auth_check",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.88,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["鉴权分支看起来被删除"],
+                "cross_file_evidence": ["controller -> service"],
+                "context_files": ["authz.py", "service.py"],
+                "assumptions": [],
+                "participant_expert_ids": ["security_compliance"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["confidence"] == 0.7
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "feedback_profile_requires_more_evidence"
+    assert issue["confidence_breakdown"]["feedback_profile"]["applied"] is True
+
+
+def test_judge_uses_llm_judge_to_reject_low_confidence_issue(monkeypatch):
+    def _fake_complete_text(_self, **_kwargs):
+        return LLMTextResult(
+            text='{"final_verdict":"reject","confidence_adjustment":-0.12,"reason":"证据不足，结论依赖推测"}',
+            mode="live",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "issues": [
+            {
+                "issue_id": "iss_llm_reject",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.72,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["可能存在并发冲突，但当前 diff 没直接体现"],
+                "assumptions": ["需要依赖运行时并发条件才会触发"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    assert result["issues"] == []
+
+
+def test_judge_llm_judge_failure_falls_back_to_existing_rules(monkeypatch):
+    def _fake_complete_text(_self, **_kwargs):
+        return LLMTextResult(
+            text="not-json-response",
+            mode="fallback",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+            error="mock failure",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "issues": [
+            {
+                "issue_id": "iss_llm_fallback",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.7,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["如果下游没跟着改，可能有兼容性风险"],
+                "assumptions": ["需要确认调用方行为"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "needs_verification"
+    assert issue["llm_judge_result"]["final_verdict"] == "abstain"
+    assert issue["confidence_breakdown"]["llm_judge"]["applied"] is True
+
+
+def test_judge_uses_llm_judge_for_cross_file_contract_even_above_threshold(monkeypatch):
+    def _fake_complete_text(_self, **_kwargs):
+        return LLMTextResult(
+            text='{"final_verdict":"needs_verification","confidence_adjustment":-0.08,"reason":"跨文件契约证据存在，但调用方上下文不完整"}',
+            mode="live",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "issues": [
+            {
+                "issue_id": "iss_cross_file_judge",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.84,
+                "verified": True,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["方法签名已变更"],
+                "cross_file_evidence": ["OwnerRepository -> OwnerController"],
+                "assumptions": [],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["llm_judge_result"]["final_verdict"] == "needs_verification"
+    assert "cross_file_contract" in issue["llm_judge_result"]["trigger_reason"]
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "llm_judge_needs_verification"
+
+
+def test_judge_uses_feedback_profile_to_expand_llm_judge_trigger(monkeypatch):
+    def _fake_complete_text(_self, **_kwargs):
+        return LLMTextResult(
+            text='{"final_verdict":"needs_verification","confidence_adjustment":-0.05,"reason":"该专家历史误报偏高，当前证据仍偏薄"}',
+            mode="live",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "feedback_quality_profiles": {
+            "experts": {
+                "security_compliance": {
+                    "sample_count": 4,
+                    "false_positive_rate": 0.75,
+                    "confidence_penalty": 0.12,
+                    "needs_human_confidence": 0.9,
+                    "prefer_needs_verification": True,
+                }
+            },
+            "issue_types": {},
+        },
+        "issues": [
+            {
+                "issue_id": "iss_feedback_judge",
+                "primary_expert_id": "security_compliance",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.8,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["权限判断分支看起来被放宽"],
+                "assumptions": [],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["llm_judge_result"]["final_verdict"] == "needs_verification"
+    assert "feedback_profile" in issue["llm_judge_result"]["trigger_reason"]
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "llm_judge_needs_verification"

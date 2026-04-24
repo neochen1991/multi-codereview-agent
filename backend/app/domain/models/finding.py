@@ -27,6 +27,7 @@ class ReviewFinding(BaseModel):
     title: str
     summary: str
     finding_type: str = "risk_hypothesis"
+    normalized_issue_type: str = ""
     severity: str = "medium"
     confidence: float = 0.72
     file_path: str = "src/example.ts"

@@ -446,10 +446,10 @@ def test_llm_chat_uses_intranet_friendly_httpx_timeouts(monkeypatch, tmp_path: P
 
     timeout = captured["timeout"]
     assert isinstance(timeout, httpx.Timeout)
-    assert timeout.connect == 40.0
-    assert timeout.read == 180.0
-    assert timeout.write == 40.0
-    assert timeout.pool == 40.0
+    assert timeout.connect == 30.0
+    assert timeout.read == 120.0
+    assert timeout.write == 30.0
+    assert timeout.pool == 30.0
     assert result.mode == "live"
 
 

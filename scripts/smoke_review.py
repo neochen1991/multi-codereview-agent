@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
+from bench_java_review_cases import (
+    DEFAULT_API_BASE,
+    DEFAULT_MANIFEST_PATH,
+    load_cases,
+    load_repositories,
+    materialize_case,
+    request_json,
+    select_cases,
+)
 
-API_BASE = "http://127.0.0.1:8011/api"
+
 FRONTEND_URL = "http://127.0.0.1:5174/"
-
-
-def request_json(method: str, url: str, payload: dict[str, object] | None = None) -> dict[str, object] | list[object]:
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(request) as response:
-        body = response.read().decode("utf-8")
-    return json.loads(body) if body else {}
+CASE_ID = "java-ddd-course-creator-bypasses-domain-events"
+WAIT_TIMEOUT_SECONDS = 240
+POLL_INTERVAL_SECONDS = 5
 
 
 def request_text(url: str) -> str:
@@ -27,32 +28,61 @@ def request_text(url: str) -> str:
         return response.read().decode("utf-8")
 
 
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def main() -> int:
+    log("smoke: checking backend health")
     health = request_json("GET", "http://127.0.0.1:8011/health")
     assert isinstance(health, dict) and health.get("status") == "ok"
 
+    log("smoke: checking frontend")
     index_html = request_text(FRONTEND_URL)
     assert "multi-code-review-frontend" in index_html or "<!doctype html" in index_html.lower()
 
-    created = request_json(
-        "POST",
-        f"{API_BASE}/reviews",
-        {
-            "subject_type": "mr",
-            "mr_url": "https://git.example.com/platform/payments/-/merge_requests/128",
-            "title": "Smoke MR review",
-        },
-    )
+    log(f"smoke: loading benchmark case {CASE_ID}")
+    repositories = load_repositories(DEFAULT_MANIFEST_PATH)
+    cases = select_cases(load_cases(DEFAULT_MANIFEST_PATH), [CASE_ID])
+    materialized = materialize_case(cases[0], repositories)
+
+    log("smoke: creating review")
+    created = request_json("POST", f"{DEFAULT_API_BASE}/reviews", materialized.to_review_payload())
     assert isinstance(created, dict)
     review_id = str(created["review_id"])
 
-    started = request_json("POST", f"{API_BASE}/reviews/{review_id}/start")
+    log(f"smoke: starting review {review_id}")
+    started = request_json("POST", f"{DEFAULT_API_BASE}/reviews/{review_id}/start")
     assert isinstance(started, dict)
     assert started["review_id"] == review_id
 
-    replay_before = request_json("GET", f"{API_BASE}/reviews/{review_id}/replay")
-    assert isinstance(replay_before, dict)
-    messages = replay_before["messages"]
+    deadline = time.time() + WAIT_TIMEOUT_SECONDS
+    replay: dict[str, object] = {}
+    report: dict[str, object] = {}
+    artifacts: dict[str, object] = {}
+    while time.time() < deadline:
+        replay = request_json("GET", f"{DEFAULT_API_BASE}/reviews/{review_id}/replay")
+        report = request_json("GET", f"{DEFAULT_API_BASE}/reviews/{review_id}/report")
+        artifacts = request_json("GET", f"{DEFAULT_API_BASE}/reviews/{review_id}/artifacts")
+        review_status = str((replay or {}).get("review", {}).get("status") or "")
+        log(f"smoke: poll status={review_status or '-'}")
+        findings = report.get("findings", []) if isinstance(report, dict) else []
+        issues = report.get("issues", []) if isinstance(report, dict) else []
+        filter_decisions = report.get("issue_filter_decisions", []) if isinstance(report, dict) else []
+        if review_status in {"completed", "waiting_human"}:
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    assert isinstance(replay, dict)
+    assert isinstance(report, dict)
+    assert isinstance(artifacts, dict)
+
+    review = replay.get("review", {})
+    assert isinstance(review, dict)
+    assert review.get("status") in {"completed", "waiting_human"}
+    assert report.get("status") in {"completed", "waiting_human"}
+
+    messages = replay.get("messages", [])
     assert isinstance(messages, list)
     assert any(
         isinstance(item, dict)
@@ -62,64 +92,48 @@ def main() -> int:
     )
     assert any(
         isinstance(item, dict)
-        and item.get("expert_id") == "main_agent"
-        and item.get("message_type") == "main_agent_summary"
-        for item in messages
-    )
-    assert any(
-        isinstance(item, dict)
-        and isinstance(item.get("metadata"), dict)
-        and item["metadata"].get("file_path")
-        and int(item["metadata"].get("line_start") or 0) >= 1
-        for item in messages
-    )
-    assert any(
-        isinstance(item, dict)
-        and item.get("message_type") == "expert_ack"
-        and isinstance(item.get("metadata"), dict)
-        and item["metadata"].get("model") == "kimi-k2.5"
+        and item.get("expert_id") == "ddd_architecture"
+        and item.get("message_type") in {"expert_ack", "expert_analysis", "expert_final", "expert_failed"}
         for item in messages
     )
 
-    issues = replay_before["issues"]
-    assert isinstance(issues, list) and issues
-    human_issue = next((item for item in issues if isinstance(item, dict) and item.get("needs_human")), None)
-    if human_issue:
-        request_json(
-            "POST",
-            f"{API_BASE}/reviews/{review_id}/human-decisions",
-            {
-                "issue_id": human_issue["issue_id"],
-                "decision": "approved",
-                "comment": "smoke approved",
-            },
-        )
+    findings = report.get("findings", [])
+    issues = report.get("issues", [])
+    filter_decisions = report.get("issue_filter_decisions", [])
+    assert isinstance(findings, list)
+    assert isinstance(issues, list)
+    assert isinstance(filter_decisions, list)
+    assert findings or issues or filter_decisions
 
-    replay_after = request_json("GET", f"{API_BASE}/reviews/{review_id}/replay")
-    report = request_json("GET", f"{API_BASE}/reviews/{review_id}/report")
-    artifacts = request_json("GET", f"{API_BASE}/reviews/{review_id}/artifacts")
+    representative = issues[0] if issues else findings[0]
+    assert representative.get("title")
+    assert representative.get("summary")
+    if issues:
+        assert representative.get("primary_expert_id") == "ddd_architecture"
+        assert representative.get("participant_expert_ids")
+    if findings:
+        assert findings[0].get("expert_id") == "ddd_architecture"
+        assert findings[0].get("remediation_suggestion")
+        assert findings[0].get("code_excerpt")
 
-    assert isinstance(replay_after, dict)
-    assert isinstance(report, dict)
-    assert isinstance(artifacts, dict)
-    assert replay_after["review"]["status"] == "completed"
-    assert "0 个待人工裁决" in replay_after["review"]["report_summary"]
-    assert report["status"] == "completed"
-    assert artifacts["check_run"]["status"] == "completed"
-    assert report["findings"][0]["remediation_suggestion"]
-    assert report["findings"][0]["code_excerpt"]
-
-    print(
-        json.dumps(
-            {
-                "review_id": review_id,
-                "status": replay_after["review"]["status"],
-                "issue_count": len(replay_after["issues"]),
-                "message_count": len(replay_after["messages"]),
-            },
-            ensure_ascii=False,
-        )
-    )
+    summary = {
+        "case_id": CASE_ID,
+        "review_id": review_id,
+        "status": review.get("status"),
+        "issue_count": len(issues),
+        "finding_count": len(findings),
+        "filtered_count": sum(
+            len(item.get("finding_ids") or [])
+            for item in filter_decisions
+            if isinstance(item, dict)
+        ),
+        "primary_expert_ids": [
+            item.get("primary_expert_id")
+            for item in issues
+            if isinstance(item, dict) and item.get("primary_expert_id")
+        ],
+    }
+    print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 

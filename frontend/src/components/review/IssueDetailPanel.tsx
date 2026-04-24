@@ -14,7 +14,7 @@ type IssueDetailPanelProps = {
   findingDetailsError?: string;
 };
 
-// 议题详情卡主要展示当前选中 issue 的摘要和参与专家。
+// 议题详情卡主要展示当前选中 issue 的摘要、主责专家和参与专家。
 const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   issue,
   finding,
@@ -44,12 +44,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
     : aggregatedSteps.length
       ? aggregatedSteps
       : uniqueList(finding?.remediation_steps);
+  const primaryExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || "").trim();
+  const participantExperts = uniqueList(issue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
       <div className="process-card-scroll">
         {!issue ? (
-          <Empty description="选择一个议题后，这里会展示裁决信息、证据和参与专家。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="选择一个议题后，这里会展示裁决信息、主责专家、证据和参与专家。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
             {findingDetailsLoading && finding && !hasFullFindingDetails ? (
@@ -102,8 +104,11 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题位置">
                 {issue.file_path ? `${issue.file_path}:${issue.line_start || 1}` : "-"}
               </Descriptions.Item>
+              <Descriptions.Item label="主责专家">
+                {primaryExpertId || "-"}
+              </Descriptions.Item>
               <Descriptions.Item label="参与专家">
-                {issue.participant_expert_ids.join("、") || "-"}
+                {participantExperts.join("、") || (primaryExpertId ? "仅主责专家参与" : "-")}
               </Descriptions.Item>
               <Descriptions.Item label="证据">
                 {issue.evidence.join("、") || "-"}

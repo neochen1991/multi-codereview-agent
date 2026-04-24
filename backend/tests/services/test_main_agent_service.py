@@ -413,6 +413,10 @@ def test_main_agent_repository_context_includes_repo_search_hit_files(tmp_path: 
     assert any(path.endswith("output.service.ts") for path in command["repository_context"]["context_files"])
     assert command["repository_context"]["search_matches"]
     assert command["repository_context"]["symbol_contexts"]
+    assert command["repository_context"]["cross_file_impact_hints"]
+    assert any("调用链" in item or "关联文件" in item for item in command["repository_context"]["cross_file_impact_hints"])
+    assert any("类型假设" in item or "引用" in item for item in command["repository_context"]["cross_file_impact_hints"])
+    assert any("调用方未随本次改动一起修改" in item for item in command["repository_context"]["cross_file_impact_hints"])
 
 
 def test_main_agent_repository_context_filters_git_noise(tmp_path: Path):
@@ -1657,7 +1661,7 @@ def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
     assert "业务变更文件完整 diff" in prompt
     assert "validateOrder(payload);" in prompt
     assert "authGuard" in prompt
-    assert "Java 质量信号摘要" in prompt
+    assert "通用质量信号摘要" in prompt
     assert "变更源码与关联上下文" not in prompt
     assert "语言通用规范提示" in prompt
     assert "JavaScript / TypeScript 通用代码规范" in prompt
@@ -1807,6 +1811,65 @@ def test_main_agent_readds_ddd_architecture_and_security_for_java_quality_signal
     assert selected["security_compliance"]["source"] == "heuristic_selected"
 
 
+def test_main_agent_readds_correctness_for_typescript_comment_contract_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务规则"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="通用编码规范专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["代码健康"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/ts-contract",
+        target_ref="main",
+        changed_files=["frontend/src/order/submitOrder.ts"],
+        unified_diff=(
+            "diff --git a/frontend/src/order/submitOrder.ts b/frontend/src/order/submitOrder.ts\n"
+            "--- a/frontend/src/order/submitOrder.ts\n"
+            "+++ b/frontend/src/order/submitOrder.ts\n"
+            "@@ -12,0 +12,2 @@\n"
+            "+// 创建订单后发送通知\n"
+            "+return orderRepository.save(order);\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "maintainability_code_health", "reason": "仅看代码健康", "confidence": 0.8}
+            ],
+            "skipped_experts": [
+                {"expert_id": "correctness_business", "reason": "LLM 未识别业务正确性风险"}
+            ],
+        },
+        fallback_ids=["maintainability_code_health"],
+    )
+
+    assert "correctness_business" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["correctness_business"]["source"] == "heuristic_selected"
+
+
 def test_main_agent_readds_maintainability_for_magic_value_and_naming_signals():
     agent = MainAgentService()
     experts = [
@@ -1866,3 +1929,60 @@ def test_main_agent_readds_maintainability_for_magic_value_and_naming_signals():
     assert "maintainability_code_health" in merged["selected_expert_ids"]
     selected = {item["expert_id"]: item for item in merged["selected_experts"]}
     assert selected["maintainability_code_health"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_correctness_and_maintainability_for_typescript_non_null_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["运行时正确性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="可维护性与代码健康专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["类型安全"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/ts-null",
+        target_ref="main",
+        changed_files=["frontend/src/user/profile.ts"],
+        unified_diff=(
+            "diff --git a/frontend/src/user/profile.ts b/frontend/src/user/profile.ts\n"
+            "--- a/frontend/src/user/profile.ts\n"
+            "+++ b/frontend/src/user/profile.ts\n"
+            "@@ -18,0 +18,2 @@\n"
+            "+const payload: any = response.data;\n"
+            "+return payload.user!.name;\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [],
+            "skipped_experts": [
+                {"expert_id": "correctness_business", "reason": "LLM 未识别空值风险"},
+                {"expert_id": "maintainability_code_health", "reason": "LLM 未识别类型逃逸"},
+            ],
+        },
+        fallback_ids=[],
+    )
+
+    assert "correctness_business" in merged["selected_expert_ids"]
+    assert "maintainability_code_health" in merged["selected_expert_ids"]

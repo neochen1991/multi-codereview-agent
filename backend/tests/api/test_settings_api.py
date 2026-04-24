@@ -50,6 +50,8 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "rule_screening_mode": "llm",
             "rule_screening_batch_size": 10,
             "rule_screening_llm_timeout_seconds": 150,
+            "enable_llm_targeted_debate": True,
+            "llm_targeted_debate_timeout_seconds": 80,
             "default_max_debate_rounds": 3,
             "standard_llm_timeout_seconds": 75,
             "standard_llm_retry_count": 4,
@@ -102,6 +104,8 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["rule_screening_mode"] == "llm"
     assert payload["rule_screening_batch_size"] == 10
     assert payload["rule_screening_llm_timeout_seconds"] == 150
+    assert payload["enable_llm_targeted_debate"] is True
+    assert payload["llm_targeted_debate_timeout_seconds"] == 80
     assert payload["standard_llm_timeout_seconds"] == 75
     assert payload["standard_llm_retry_count"] == 4
     assert payload["standard_max_parallel_experts"] == 3

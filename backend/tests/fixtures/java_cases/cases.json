@@ -191,6 +191,29 @@
       }
     },
     {
+      "case_id": "java-ddd-course-creator-comment-contract-unimplemented",
+      "repo_key": "java-ddd-example",
+      "category": "correctness",
+      "scenario": "Course creator adds a TODO-style contract but leaves the promised behavior unimplemented",
+      "business_context": "应用层为了先把主流程上线，在创建课程时先写下“持久化后同步发送审计事件”的 TODO 注释，但实际代码并没有对应动作。",
+      "tags": ["ddd", "comment-contract", "todo", "application-service"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Add a TODO contract that promises an extra side effect but does not implement it.",
+          "search": "        repository.save(course);\n        eventBus.publish(course.pullDomainEvents());",
+          "replace": "        // TODO 持久化后同步发送审计事件\n        repository.save(course);\n        eventBus.publish(course.pullDomainEvents());"
+        }
+      ],
+      "expected": {
+        "required_experts": ["correctness_business"],
+        "rule_ids_any_of": ["CORR-JDDD-001"],
+        "finding_keywords": ["TODO", "审计事件", "未实现"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
       "case_id": "java-ddd-composite-quality-regression",
       "repo_key": "java-ddd-example",
       "category": "composite",

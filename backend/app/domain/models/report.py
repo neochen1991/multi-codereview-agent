@@ -18,6 +18,10 @@ class ConfidenceSummary(BaseModel):
     risk_hypothesis_count: int = 0
     test_gap_count: int = 0
     design_concern_count: int = 0
+    llm_judged_issue_count: int = 0
+    llm_judge_accepted_count: int = 0
+    llm_judge_needs_verification_count: int = 0
+    llm_judge_needs_human_count: int = 0
 
 
 class LlmUsageSummary(BaseModel):

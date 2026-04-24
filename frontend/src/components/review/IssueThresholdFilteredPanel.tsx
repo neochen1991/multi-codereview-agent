@@ -16,6 +16,7 @@ type ThresholdFilteredRow = {
   expert_id: string;
   threshold_label: string;
   threshold_reason: string;
+  rule_code: string;
 };
 
 type IssueThresholdFilteredPanelProps = {
@@ -24,9 +25,11 @@ type IssueThresholdFilteredPanelProps = {
   onSelectFinding?: (findingId: string) => void;
 };
 
-const THRESHOLD_RULE_CODES = new Set([
+const FILTER_RULE_CODES = new Set([
   "below_issue_priority_threshold",
   "below_priority_confidence_threshold",
+  "conditional_conclusion",
+  "removed_line_only",
 ]);
 
 const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = ({
@@ -45,7 +48,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
   const rows = useMemo<ThresholdFilteredRow[]>(() => {
     const result: ThresholdFilteredRow[] = [];
     for (const decision of issueFilterDecisions) {
-      if (!THRESHOLD_RULE_CODES.has(decision.rule_code)) continue;
+      if (!FILTER_RULE_CODES.has(decision.rule_code)) continue;
       for (const findingId of decision.finding_ids || []) {
         const finding = findingById.get(findingId);
         if (!finding) continue;
@@ -60,6 +63,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
           expert_id: finding.expert_id,
           threshold_label: decision.rule_label,
           threshold_reason: decision.reason,
+          rule_code: decision.rule_code,
         });
       }
     }
@@ -71,8 +75,8 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
   return (
     <Card
       className="module-card review-threshold-filter-card"
-      title={`被阈值过滤的发现清单 (${rows.length})`}
-      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为正式议题</Text>}
+      title={`被过滤的问题清单 (${rows.length})`}
+      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为有效问题，常见原因包括阈值不足、条件化结论或仅命中删除代码。</Text>}
     >
       <Table<ThresholdFilteredRow>
         rowKey="finding_id"
@@ -121,11 +125,11 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             render: (value: number) => `${(value * 100).toFixed(0)}%`,
           },
           {
-            title: "阈值规则",
+            title: "过滤规则",
             dataIndex: "threshold_label",
             key: "threshold_label",
             width: 220,
-            render: (value: string) => <Tag color="default">{value}</Tag>,
+            render: (value: string, row: ThresholdFilteredRow) => <Tag color={row.rule_code === "removed_line_only" ? "red" : row.rule_code === "conditional_conclusion" ? "gold" : "default"}>{value}</Tag>,
           },
           {
             title: "问题摘要",
