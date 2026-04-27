@@ -21,6 +21,7 @@
 - `extensions/skills` + `extensions/tools` 可插拔扩展机制
 - 审核启动页可上传本次审核专属的详细设计文档（Markdown）
 - 正确性与业务专家可通过 `design-consistency-check` 检查代码与详细设计是否一致
+- 每个 MR 都会输出关联影响报告；GitNexus 图谱可用时使用图谱结果，不可用时使用 diff/路径规则降级生成测试范围建议
 
 ## 专家体系与职责边界
 
@@ -40,6 +41,7 @@
 | `performance_reliability` | 热点路径、并发稳定性、资源效率、超时重试、失败恢复 | 批处理过大、锁竞争放大、同步阻塞、资源泄漏、超时重试缺口、局部故障放大成系统压力 | 不主提索引设计和 SQL 字段问题，不主提命名和风格问题 |
 | `security_compliance` | 鉴权授权、输入校验、敏感数据、合规边界 | 权限绕过、输入校验绕过、敏感信息泄露、合规风险 | 不主提一般边界条件问题，不判断普通性能瓶颈，不评论可读性 |
 | `test_verification` | 自动化测试覆盖、断言质量、回归保护、验证步骤 | 缺测试、断言太弱、风险路径无保护、缺集成测试、缺回归脚本或人工验证清单 | 不判断业务规则本身是否正确，不评论命名风格，不主提架构边界问题 |
+| `change_impact_analysis` | 本次 MR 的影响范围、调用链影响、建议测试范围 | 识别直接变更文件、候选受影响文件、入口点、数据访问路径、必须回归的测试范围；GitNexus 不可用时说明降级边界 | 不裁决业务逻辑是否正确，不判断 SQL 性能/事务问题是否成立，不评价测试断言质量 |
 | `frontend_accessibility` | 前端 a11y、关键交互可达性、基础渲染可达性 | a11y 回归、关键交互不可达、基础渲染或可达性退化 | 不看后端业务逻辑，不看数据库、中间件，不评论通用 Java 编码规范 |
 
 理解这张表时，可以先按这个顺序判断问题归属：
@@ -75,6 +77,246 @@
 - `removed_line_only` 表示问题只命中了待删除代码，属于无效问题
 
 同时，所有进入“有效问题清单”的 issue 都会带一个唯一的 `primary_expert_id`，表示这条问题最终归属于哪个主责专家。
+
+## GitNexus 关联影响分析
+
+### 这个能力解决什么问题
+
+普通 code review 更关注“这几行代码有没有问题”。关联影响分析更关注另一件事：
+
+```text
+这次 MR 改了这些文件以后，可能波及哪些入口、模块、调用链，以及应该回归哪些测试？
+```
+
+本项目为此新增了 `change_impact_analysis` 专家。它不会替代正确性、数据库、性能或测试专家报缺陷，而是为每个 MR 输出一份 `impact_report`，帮助研发同学快速确认影响范围和测试范围。
+
+当前报告会展示在结果页的“关联影响报告”区域，也会进入后端 `ReviewReport.impact_report` 字段和 artifact 快照。
+
+### GitNexus 在这里怎么用
+
+[GitNexus](https://github.com/abhigyanpatwari/GitNexus) 是代码图谱/影响分析工具。它的定位是提前把代码仓建成图谱，MR 审核时再基于图谱回答“改动会影响哪些调用方、被调用方和测试范围”。
+
+本项目把 GitNexus 接成两段，并且运行顺序是固定的：
+
+| 阶段 | 谁负责 | 什么时候执行 | 输出 |
+|---|---|---|---|
+| 后台建图 | `GitNexusIndexScheduler` | 定时对配置的本地代码仓执行 | `.gitnexus/` 图谱和 `index_status.json` |
+| MR 影响报告 | `GitNexusImpactService` + `change_impact_analysis` 专家 | 每个 MR 请求都执行 | 基于图谱的 `impact_report` |
+
+设计原则是：后台先把配置仓库建好图谱；每次 MR 关联影响分析必须先尝试使用这份图谱。只有图谱未就绪、MCP 调用失败或本地仓未配置时，才会退回到 diff/路径规则，并在 `limitations` 里写明原因。
+
+### 默认行为：先保证每个 MR 有报告
+
+如果 GitNexus 图谱不可用，系统会自动降级：
+
+- 从 `changed_files` 和 `unified_diff` 识别直接变更文件
+- 从 diff 中提取新增/修改的类、方法、函数等符号
+- 按路径规则识别 Controller/API、Repository/Mapper/DAO、SQL/Migration、Job/Consumer 等入口或数据访问面
+- 推导候选测试文件和建议测试范围
+- 在报告里明确写出 `graph_status = fallback`
+
+这份降级报告不声称自己有完整调用链，只用于给研发同学一个最低限度的影响范围和测试范围提示。
+
+### 开启 GitNexus 后台建图
+
+后台建图默认关闭。需要接入 GitNexus 时，先确保公共机器上可以执行：
+
+```bash
+npx gitnexus analyze
+```
+
+然后在启动后端前设置环境变量：
+
+```bash
+export GITNEXUS_INDEX_ENABLED=true
+export GITNEXUS_INDEX_INTERVAL_SECONDS=3600
+export GITNEXUS_INDEX_TIMEOUT_SECONDS=900
+```
+
+同时在 `config.json` 或设置页里配置本地代码仓路径：
+
+```json
+{
+  "code_repo": {
+    "local_path": "/data/repos/your-project",
+    "default_branch": "main"
+  }
+}
+```
+
+后端启动后，`GitNexusIndexScheduler` 会按间隔在该仓库目录执行：
+
+```bash
+npx gitnexus analyze
+```
+
+建图状态会写到：
+
+```text
+backend/app/storage/gitnexus/index_status.json
+```
+
+建图成功时，状态文件会包含：
+
+```json
+{
+  "state": "ready",
+  "repo_path": "/data/repos/your-project",
+  "repo_name": "your-project",
+  "indexed_at": "2026-04-27T00:00:00+00:00",
+  "commit": "当前仓库 HEAD commit",
+  "graph_dir": "/data/repos/your-project/.gitnexus",
+  "graph_dir_exists": true
+}
+```
+
+如果没有配置 `code_repo.local_path`、机器上没有 `npx`、或者 GitNexus 执行失败，调度器只记录 `skipped / failed` 状态，不影响 MR 审核。
+
+### MR 审核时如何使用 GitNexus 结果
+
+审核执行时，`GitNexusImpactService` 会按下面的顺序执行：
+
+```text
+读取 review.subject.metadata.gitnexus_impact_report
+  -> 如果已有外部预计算结果，直接使用
+否则读取 backend/app/storage/gitnexus/index_status.json
+  -> state=ready 且本地仓存在 .gitnexus/，继续
+  -> 否则 fallback
+使用 GitNexus MCP 查询图谱
+  -> detect_changes：识别整体变更影响
+  -> impact：对 diff 中提取出的变更类/方法/函数做符号级影响分析
+标准化为 ReviewReport.impact_report
+  -> graph_status=ready
+MCP 调用失败
+  -> graph_status=fallback，并在 limitations 写明失败原因
+```
+
+也就是说，每次 MR 请求都会先尝试使用后台建好的 GitNexus 图谱。不是等专家自由发挥，也不是只看文件路径。
+
+当前代码默认使用 GitNexus MCP stdio server：
+
+```bash
+npx -y gitnexus@latest mcp
+```
+
+如需改成本地固定命令，可以设置：
+
+```bash
+export GITNEXUS_MCP_COMMAND="npx -y gitnexus@latest mcp"
+export GITNEXUS_MCP_TIMEOUT_SECONDS=45
+```
+
+### 如何做一条真实链路 smoke test
+
+仓库里带了一条可直接运行的 smoke 脚本：
+
+- [smoke_gitnexus_impact_demo.py](/Users/neochen/multi-codereview-agent/scripts/smoke_gitnexus_impact_demo.py)
+
+这条脚本不会只测单个 helper，而是会走一条接近真实的后端链路：
+
+```text
+ReviewService.create_review
+-> ReviewService.build_report
+-> GitNexusImpactService.analyze
+-> ReviewReport.impact_report
+```
+
+脚本会自动：
+
+1. 创建一个最小可运行的本地 Java git 仓
+2. 伪造一条真实感较强的 MR diff
+3. 写入 `index_status.json`，模拟“后台图谱已经 ready”
+4. 跑两组对照用例：
+   - 图谱 ready，GitNexus 查询成功
+   - 图谱 ready，但 GitNexus MCP 查询失败
+
+运行方式：
+
+```bash
+PYTHONPATH=backend .venv/bin/python scripts/smoke_gitnexus_impact_demo.py
+```
+
+预期你会看到两组 JSON 结果：
+
+- `graph_ready_success`
+  - `graph_status = ready`
+  - 有 `impact_paths`
+  - `impacted_files` 中能看到图谱识别出的上游/下游文件
+  - `recommended_test_scope` 中能看到图谱给出的测试建议
+- `graph_ready_but_mcp_failed`
+  - `graph_status = fallback`
+  - `limitations` 第一条会明确写出 GitNexus MCP 调用失败原因
+
+这条 smoke test 的价值是：
+
+- 验证“后台图谱 ready 时，MR 是否优先走 GitNexus”
+- 验证“查询失败时，系统是否明确降级而不是静默退回”
+- 验证结果页和 `ReviewReport.impact_report` 使用的是同一份标准化结构
+
+注意：
+
+- 这条脚本默认不依赖真实外网 GitNexus 服务，而是用 fake client 模拟图谱成功/失败结果，适合本地和 CI 快速回归
+- 如果要验证真实 `npx gitnexus analyze` 和真实 MCP，请在能访问 npm/GitHub 的机器上再跑一轮完整环境测试
+
+审核流程里有两个入口会消费这份分析结果：
+
+1. `ReviewRunner`
+   - 在任务收尾阶段调用 `GitNexusImpactService`
+   - 把报告写入 `review.subject.metadata.impact_report`
+   - artifact 快照也会带上 `impact_report`
+2. `change_impact_analysis` 专家
+   - 通过运行时工具 `gitnexus_impact_analysis` 获取同一份报告
+   - 专家只围绕影响范围和测试范围输出，不和其他专家重复报缺陷
+
+如果后续在平台侧预先调用 GitNexus MCP，并把结果随 MR 一起传入，只需要把 GitNexus 输出标准化写入：
+
+```text
+review.subject.metadata.gitnexus_impact_report
+```
+
+`GitNexusImpactService` 会优先读取这份预计算结果。前端、报告模型和专家工具都不需要再改。
+
+### 配置白名单
+
+`gitnexus_impact_analysis` 是系统必需的内置运行时工具。为了兼容旧配置，后端会自动把它补进 `runtime_tool_allowlist`。
+
+如果手工维护 `config.json`，建议也显式加入：
+
+```json
+{
+  "allowlist": {
+    "runtime_tools": [
+      "knowledge_search",
+      "diff_inspector",
+      "test_surface_locator",
+      "dependency_surface_locator",
+      "repo_context_search",
+      "gitnexus_impact_analysis"
+    ]
+  }
+}
+```
+
+### 结果页怎么看
+
+结果页“关联影响报告”主要看这几项：
+
+| 字段 | 含义 |
+|---|---|
+| `graph_status` | `ready` 表示使用图谱；`fallback` 表示降级分析 |
+| `risk_level` | 根据变更文件、入口类型、数据访问面、符号数量估算的影响风险 |
+| `changed_files` | 本次 MR 直接修改的文件 |
+| `impacted_files` | 直接变更文件和候选受影响文件，包括候选测试文件 |
+| `impacted_modules` | 按路径推导的受影响模块 |
+| `recommended_test_scope` | 建议研发回归的测试范围 |
+| `must_run_tests` | 建议执行的测试命令或测试类型 |
+| `limitations` | 图谱状态和降级分析边界说明 |
+
+判断口径很简单：
+
+- `graph_status = ready` 时，可以把报告当成图谱增强后的影响分析来看
+- `graph_status = fallback` 时，说明本次没有成功使用图谱，只能当成保守提示，需要研发结合业务场景确认
+- 任何情况下，它都不是“缺陷清单”，缺陷是否成立仍看有效问题清单
 
 ## 审核状态节点
 
@@ -361,7 +603,8 @@ Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `http
       "diff_inspector",
       "test_surface_locator",
       "dependency_surface_locator",
-      "repo_context_search"
+      "repo_context_search",
+      "gitnexus_impact_analysis"
     ],
     "mcp": [],
     "agents": []
@@ -835,9 +1078,13 @@ npm run dev
 ```bash
 .venv/bin/pytest backend/tests -q
 cd frontend && npm run build
+PYTHONPATH=backend .venv/bin/python scripts/smoke_gitnexus_impact_demo.py
+.venv/bin/python -m pytest backend/tests/services/test_gitnexus_impact_service.py backend/tests/services/test_gitnexus_index_scheduler.py -q
 ```
 
 当前结果：
 
 - 后端测试：`17 passed`
 - 前端构建：`vite build` 通过
+- GitNexus 关联影响 smoke：可稳定复现 `graph_status = ready` 和 `graph_status = fallback` 两条路径
+- GitNexus 相关聚焦测试：`5 passed`

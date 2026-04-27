@@ -12,6 +12,7 @@ def test_expert_registry_loads_builtin_experts(storage_root: Path):
     architecture = next(expert for expert in experts if expert.expert_id == "architecture_design")
     ddd_architecture = next(expert for expert in experts if expert.expert_id == "ddd_architecture")
     security = next(expert for expert in experts if expert.expert_id == "security_compliance")
+    impact = next(expert for expert in experts if expert.expert_id == "change_impact_analysis")
     assert architecture.activation_hints
     assert architecture.required_checks
     assert architecture.tool_bindings == ["local_diff"]
@@ -24,6 +25,8 @@ def test_expert_registry_loads_builtin_experts(storage_root: Path):
     correctness = next(expert for expert in experts if expert.expert_id == "correctness_business")
     assert "todo" in correctness.activation_hints
     assert any("行为是否真正落地" in item for item in correctness.required_checks)
+    assert "gitnexus_impact_analysis" in impact.runtime_tool_bindings
+    assert "影响范围" in impact.system_prompt
 
 
 def test_file_expert_repository_preserves_builtin_review_spec_when_user_override_has_no_spec(storage_root: Path):

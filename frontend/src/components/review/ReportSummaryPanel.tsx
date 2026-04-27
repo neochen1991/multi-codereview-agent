@@ -81,6 +81,13 @@ const getPriority = (finding: ReviewFinding): string => {
   return "P3";
 };
 
+const riskColor = (value?: string): string => {
+  if (value === "high" || value === "critical") return "error";
+  if (value === "medium") return "warning";
+  if (value === "low") return "success";
+  return "default";
+};
+
 const getFindingMergeImpact = (finding: ReviewFinding, needsHumanCount: number): string => {
   if (needsHumanCount > 0 && ["blocker", "critical", "high"].includes(finding.severity)) return "Blocking";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "Should fix before merge";
@@ -221,6 +228,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
     completion_tokens: 0,
     total_tokens: 0,
   };
+  const impactReport = report?.impact_report || null;
   const typeCounts = findings.reduce<Record<string, number>>((acc, item) => {
     const key = item.finding_type || "risk_hypothesis";
     acc[key] = (acc[key] || 0) + 1;
@@ -280,6 +288,85 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
           <Tag key={key}>{`${findingTypeLabel(key)} ${count}`}</Tag>
         ))}
       </Space>
+      <Card
+        size="small"
+        className="module-card"
+        title="Judge 质量收敛"
+        style={{ marginTop: 16 }}
+      >
+        <Row gutter={[12, 12]}>
+          <Col xs={12} xl={4}>
+            <Statistic title="Judge 处理" value={report?.confidence_summary.llm_judged_issue_count || 0} />
+          </Col>
+          <Col xs={12} xl={4}>
+            <Statistic title="Judge 保留" value={report?.confidence_summary.llm_judge_accepted_count || 0} />
+          </Col>
+          <Col xs={12} xl={4}>
+            <Statistic title="转待验证" value={report?.confidence_summary.llm_judge_needs_verification_count || 0} />
+          </Col>
+          <Col xs={12} xl={4}>
+            <Statistic title="转人工" value={report?.confidence_summary.llm_judge_needs_human_count || 0} />
+          </Col>
+          <Col xs={12} xl={4}>
+            <Statistic title="Judge 拒绝" value={report?.confidence_summary.llm_judge_rejected_count || 0} />
+          </Col>
+          <Col xs={12} xl={4}>
+            <Statistic title="质量过滤" value={report?.confidence_summary.quality_filtered_issue_count || 0} />
+          </Col>
+        </Row>
+      </Card>
+      <Card
+        size="small"
+        className="module-card"
+        title="关联影响报告"
+        style={{ marginTop: 16 }}
+      >
+        {impactReport ? (
+          <>
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Tag color={riskColor(impactReport.risk_level)}>{`风险 ${impactReport.risk_level}`}</Tag>
+              <Tag color={impactReport.graph_status === "ready" ? "success" : "warning"}>
+                {impactReport.graph_status === "ready" ? "GitNexus 图谱" : "降级分析"}
+              </Tag>
+              <Tag>{`变更文件 ${impactReport.changed_files.length}`}</Tag>
+              <Tag>{`影响文件 ${impactReport.impacted_files.length}`}</Tag>
+              <Tag>{`测试建议 ${impactReport.recommended_test_scope.length}`}</Tag>
+            </Space>
+            <Descriptions
+              size="small"
+              column={1}
+              items={[
+                {
+                  key: "modules",
+                  label: "影响模块",
+                  children: impactReport.impacted_modules.length ? impactReport.impacted_modules.slice(0, 8).join("、") : "暂无",
+                },
+                {
+                  key: "tests",
+                  label: "建议测试范围",
+                  children: impactReport.recommended_test_scope.length
+                    ? impactReport.recommended_test_scope.slice(0, 4).map((item) => item.scope).join("、")
+                    : "暂无",
+                },
+                {
+                  key: "commands",
+                  label: "建议执行",
+                  children: impactReport.must_run_tests.length ? impactReport.must_run_tests.slice(0, 6).join("、") : "按业务场景补充回归",
+                },
+                {
+                  key: "limits",
+                  label: "边界说明",
+                  children: impactReport.limitations[0] || "暂无",
+                },
+              ]}
+            />
+          </>
+        ) : (
+          <Paragraph style={{ marginBottom: 0 }}>
+            暂无关联影响报告。任务完成后会展示本次变更的影响范围和建议测试范围。
+          </Paragraph>
+        )}
+      </Card>
       <Descriptions
         column={2}
         size="small"

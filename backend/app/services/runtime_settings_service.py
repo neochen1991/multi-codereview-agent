@@ -11,6 +11,8 @@ from app.repositories.storage_factory import StorageRepositoryFactory, resolve_c
 class RuntimeSettingsService:
     """负责读取和更新项目统一运行时配置。"""
 
+    REQUIRED_RUNTIME_TOOLS = frozenset({"gitnexus_impact_analysis"})
+
     CONFIG_MANAGED_FIELDS = frozenset(
         {
             "storage_backend",
@@ -58,6 +60,12 @@ class RuntimeSettingsService:
             "suppress_low_risk_hint_issues",
             "hint_issue_confidence_threshold",
             "hint_issue_evidence_cap",
+            "enable_llm_evidence_filter",
+            "llm_evidence_filter_confidence_threshold",
+            "llm_evidence_filter_timeout_seconds",
+            "enable_llm_issue_judge",
+            "llm_issue_judge_confidence_threshold",
+            "llm_issue_judge_timeout_seconds",
             "rule_screening_mode",
             "rule_screening_batch_size",
             "rule_screening_llm_timeout_seconds",
@@ -98,8 +106,11 @@ class RuntimeSettingsService:
             # 清理旧版本误写入 SQLite 的系统级配置，只保留设置页治理项。
             self._storage_repository.save_payload(sqlite_overrides)
         if not sqlite_overrides:
-            return config_settings
+            config_payload = config_settings.model_dump(mode="json")
+            self._ensure_required_runtime_tools(config_payload)
+            return RuntimeSettings.model_validate(config_payload)
         merged_payload = self._merge_runtime_payload(config_settings.model_dump(mode="json"), sqlite_overrides)
+        self._ensure_required_runtime_tools(merged_payload)
         return RuntimeSettings.model_validate(merged_payload)
 
     def update(self, payload: dict[str, object]) -> RuntimeSettings:
@@ -160,7 +171,19 @@ class RuntimeSettingsService:
             if isinstance(storage_value, list) and not storage_value and isinstance(config_value, list) and config_value:
                 continue
             merged[key] = storage_value
+        self._ensure_required_runtime_tools(merged)
         return merged
+
+    def _ensure_required_runtime_tools(self, payload: dict[str, object]) -> None:
+        """补齐系统必需的内置运行时工具，避免旧 allowlist 阻断新能力。"""
+
+        values = [str(item).strip() for item in list(payload.get("runtime_tool_allowlist") or []) if str(item).strip()]
+        if not values:
+            return
+        for tool_name in sorted(self.REQUIRED_RUNTIME_TOOLS):
+            if tool_name not in values:
+                values.append(tool_name)
+        payload["runtime_tool_allowlist"] = values
 
     def _save_config_managed_fields(self, runtime: RuntimeSettings) -> None:
         """把系统启动必需的配置持久化到 config.json。"""

@@ -55,3 +55,32 @@ class ReviewFinding(BaseModel):
     suggested_code: str = ""
     suggested_code_language: str = ""
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ExpertFindingPayload(BaseModel):
+    """专家 LLM 输出的 finding JSON 契约，用于进入领域模型前做轻量校验。"""
+
+    title: str
+    claim: str = ""
+    summary: str = ""
+    finding_type: str
+    normalized_issue_type: str = ""
+    severity: str
+    confidence: float = 0.0
+    file_path: str = ""
+    line_start: int = 1
+    line_end: int | None = None
+    evidence: list[str] = Field(default_factory=list)
+    cross_file_evidence: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    context_files: list[str] = Field(default_factory=list)
+    matched_rules: list[str] = Field(default_factory=list)
+    violated_guidelines: list[str] = Field(default_factory=list)
+    rule_based_reasoning: str = ""
+    verification_needed: bool = False
+    verification_plan: str = ""
+    why_it_matters: str = ""
+    fix_strategy: str = ""
+    suggested_fix: str = ""
+    change_steps: list[str] = Field(default_factory=list)
+    suggested_code: str = ""

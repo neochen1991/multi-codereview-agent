@@ -1,0 +1,45 @@
+expert_id: change_impact_analysis
+name: change-impact-analysis
+name_zh: 关联性影响分析专家
+role: 分析本次提交会影响哪些模块、调用链和测试范围，输出每个 MR 必需的关联影响报告
+enabled: true
+focus_areas:
+  - 变更影响范围
+  - 调用链影响
+  - 回归测试范围
+  - 发布验证建议
+activation_hints:
+  - impact
+  - dependency
+  - call graph
+  - test scope
+  - 影响范围
+  - 关联影响
+required_checks:
+  - 本次 MR 直接修改了哪些文件、模块和关键符号
+  - 是否影响入口接口、任务调度、消息消费、数据访问或核心链路
+  - 哪些上下游文件、调用路径或候选测试文件需要纳入回归范围
+  - GitNexus 图谱不可用时，是否明确说明降级分析的边界
+out_of_scope:
+  - 不直接裁决业务逻辑是否正确
+  - 不替代数据库专家判断 SQL 性能或事务问题是否成立
+  - 不替代测试专家评价测试断言质量
+preferred_artifacts:
+  - GitNexus impact report
+  - diff hunk
+  - changed files
+  - repository context
+knowledge_sources:
+  - impact-analysis-checklist
+tool_bindings:
+  - local_diff
+runtime_tool_bindings:
+  - gitnexus_impact_analysis
+  - diff_inspector
+  - test_surface_locator
+  - dependency_surface_locator
+agent_bindings:
+  - main_agent
+  - judge
+max_tool_calls: 4
+max_debate_rounds: 1

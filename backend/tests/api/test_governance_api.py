@@ -14,3 +14,13 @@ def test_governance_endpoint_returns_llm_timeout_metrics(client):
     payload = response.json()
     assert "timeout_count" in payload
     assert "recent_timeouts" in payload
+
+
+def test_governance_endpoint_returns_runtime_threshold_recommendations(client):
+    response = client.get("/api/governance/runtime-threshold-recommendations")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["applied"] is False
+    assert "recommended_thresholds" in payload
+    assert "issue_confidence_threshold_p2" in payload["recommended_thresholds"]

@@ -183,8 +183,8 @@ def test_judge_drops_non_issue_formatting_entries():
     result = judge_and_merge(state)
 
     assert result["issues"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "llm_judge_rejected"
-    assert result["issue_filter_decisions"][0]["rule_label"] == "LLM Judge 拒绝"
+    assert result["issue_filter_decisions"][0]["rule_code"] == "non_issue_formatting_or_no_risk"
+    assert result["issue_filter_decisions"][0]["rule_label"] == "非问题类条目过滤"
 
 
 def test_judge_uses_feedback_profile_to_tighten_risk_hypothesis():

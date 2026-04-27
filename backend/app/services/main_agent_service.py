@@ -15,6 +15,7 @@ from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
+from app.services.repo_review_instruction_service import RepoReviewInstructionService
 from app.services.repository_context_service import RepositoryContextService
 
 
@@ -35,6 +36,7 @@ class MainAgentService:
         self._diff_excerpt_service = DiffExcerptService()
         self._capability_service = ExpertCapabilityService()
         self._java_quality_signal_extractor = CodeObservationExtractor()
+        self._repo_review_instruction_service = RepoReviewInstructionService()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
     def build_command(
@@ -980,6 +982,10 @@ class MainAgentService:
             "context_files": context_files,
             "changed_files": [str(item).strip() for item in list(changed_files or []) if str(item).strip()],
             "target_hunk_excerpt": str(target_hunk_excerpt or "").strip(),
+            "repo_review_instructions": self._repo_review_instruction_service.load_for_file(
+                service.local_path,
+                file_path,
+            ),
             "cross_file_impact_hints": build_cross_file_impact_hints(
                 file_path=file_path,
                 related_files=related_files,
@@ -1151,6 +1157,16 @@ class MainAgentService:
                 changed_lines = [int(item) for item in list(hunk.get("changed_lines") or []) if isinstance(item, int)]
                 line_start = changed_lines[0] if changed_lines else int(hunk.get("start_line") or 1)
                 repo_hits = self._search_related_repo_context(repository_service, file_path, hunk)
+                observation_payload = self._java_quality_signal_extractor.extract(
+                    file_path=file_path,
+                    target_hunk=hunk,
+                    full_diff=str(hunk.get("excerpt") or ""),
+                )
+                hunk_risk_signals = [
+                    str(item).strip()
+                    for item in list(observation_payload.get("signals") or [])
+                    if str(item).strip()
+                ]
                 candidates.append(
                     {
                         "candidate_id": f"{file_path}:{line_start}:{index}",
@@ -1163,6 +1179,7 @@ class MainAgentService:
                         "excerpt": str(hunk.get("excerpt") or ""),
                         "import_only": bool(item["import_only"]),
                         "format_only": bool(item["format_only"]),
+                        "risk_signals": hunk_risk_signals,
                         "repo_hits": repo_hits,
                         "cross_file_impact_hints": build_cross_file_impact_hints(
                             file_path=file_path,
@@ -1221,7 +1238,8 @@ class MainAgentService:
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
             "SQL、事务、schema、索引 -> database_analysis；"
-            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability。"
+            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+            "影响范围、调用链、测试范围 -> change_impact_analysis。"
         )
 
     def _build_expert_selection_system_prompt(self) -> str:
@@ -1242,7 +1260,8 @@ class MainAgentService:
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
             "SQL、事务、schema、索引 -> database_analysis；"
-            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability。"
+            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+            "影响范围、调用链、测试范围 -> change_impact_analysis。"
         )
 
     def _infer_code_language(self, file_path: str) -> str:
@@ -1366,7 +1385,8 @@ class MainAgentService:
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
             "- database_analysis: SQL、事务、schema、索引\n"
-            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n\n"
+            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+            "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
             f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
             f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
             "请输出 JSON，格式为：\n"
@@ -1442,7 +1462,8 @@ class MainAgentService:
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
             "- database_analysis: SQL、事务、schema、索引\n"
-            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n\n"
+            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+            "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
             f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
             "请输出 JSON，格式为：\n"
             "{\n"
@@ -1701,7 +1722,7 @@ class MainAgentService:
             return selected_ids, selected_entries, skipped_entries
 
         def _add_if_requested(expert_id: str, reason: str, confidence: float) -> None:
-            if expert_id not in requested_expert_ids or expert_id in selected_ids:
+            if expert_id in selected_ids:
                 return
             expert = experts_by_id.get(expert_id)
             if expert is None:
@@ -1743,11 +1764,18 @@ class MainAgentService:
                 0.79,
             )
 
-        if {"query_semantics_weakened", "exception_swallowed", "go_unchecked_error_return"} & signal_set:
+        if {"query_semantics_weakened", "exception_swallowed", "go_unchecked_error_return", "security_guard_removed"} & signal_set:
             _add_if_requested(
                 "security_compliance",
-                "检测到查询语义放宽或异常处理退化，系统补入安全与合规专家复核数据访问面与错误处理边界。",
-                0.76,
+                "检测到查询语义放宽、异常处理退化或入口保护删除，系统补入安全与合规专家复核数据访问面与安全边界。",
+                0.82 if "security_guard_removed" in signal_set else 0.76,
+            )
+
+        if {"idempotency_guard_removed", "lock_guard_removed", "bulk_processing_risk", "transactional_side_effect"} & signal_set:
+            _add_if_requested(
+                "performance_reliability",
+                "检测到幂等/锁/批量/事务副作用风险，系统补入性能与可靠性专家复核并发、超时和失败语义。",
+                0.82,
             )
 
         if {

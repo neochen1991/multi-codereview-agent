@@ -50,6 +50,9 @@ class RuntimeSettingsRequest(BaseModel):
     suppress_low_risk_hint_issues: bool = True
     hint_issue_confidence_threshold: float = 0.85
     hint_issue_evidence_cap: int = 2
+    enable_llm_evidence_filter: bool = False
+    llm_evidence_filter_confidence_threshold: float = 0.72
+    llm_evidence_filter_timeout_seconds: int = 35
     enable_llm_issue_judge: bool = False
     llm_issue_judge_confidence_threshold: float = 0.78
     llm_issue_judge_timeout_seconds: int = 45

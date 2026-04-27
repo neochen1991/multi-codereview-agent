@@ -150,6 +150,7 @@ def test_main_agent_command_includes_repository_context_when_repo_is_ready(tmp_p
     target = repo_root / "packages" / "lib" / "schedules" / "getScheduleListItemData.ts"
     target.parent.mkdir(parents=True)
     target.write_text("export const mapSchedule = (input) => input?.startTime ?? null\n", encoding="utf-8")
+    (repo_root / "REVIEW.md").write_text("仓库规则：输出映射必须保持字段语义兼容。", encoding="utf-8")
 
     agent = MainAgentService()
     subject = ReviewSubject(
@@ -183,6 +184,8 @@ def test_main_agent_command_includes_repository_context_when_repo_is_ready(tmp_p
 
     assert command["repository_context"]["context_files"]
     assert "已补充" in command["repository_context"]["summary"]
+    assert "repo_review_instructions" in command["repository_context"]
+    assert "字段语义兼容" in command["repository_context"]["repo_review_instructions"]["summary"]
 
 
 def test_main_agent_command_includes_target_hunk_excerpt():
@@ -261,6 +264,57 @@ def test_main_agent_prefers_security_hunk_for_security_expert():
 
     assert command["file_path"] == "backend/app/security/authz.py"
     assert "PermissionError" in command["target_hunk"]["excerpt"]
+
+
+def test_main_agent_auto_adds_experts_for_high_confidence_java_signals():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        changed_files=["src/main/java/app/OwnerController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/app/OwnerController.java b/src/main/java/app/OwnerController.java\n"
+            "--- a/src/main/java/app/OwnerController.java\n"
+            "+++ b/src/main/java/app/OwnerController.java\n"
+            "@@ -18,7 +18,7 @@ public class OwnerController {\n"
+            "-    public String create(@Valid Owner owner, BindingResult result) {\n"
+            "+    public String create(Owner owner, BindingResult result) {\n"
+            "         return save(owner);\n"
+        ),
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="可维护性专家",
+            role="maintainability",
+            enabled=True,
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            system_prompt="prompt",
+        ),
+    ]
+
+    result = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["maintainability_code_health"],
+        llm_payload={"selected_experts": [{"expert_id": "maintainability_code_health", "reason": "user", "confidence": 0.8}]},
+        fallback_ids=["maintainability_code_health"],
+    )
+
+    assert result["selected_expert_ids"] == ["maintainability_code_health", "security_compliance"]
+    security_entry = next(item for item in result["selected_experts"] if item["expert_id"] == "security_compliance")
+    assert security_entry["source"] == "heuristic_selected"
 
 
 def test_main_agent_final_summary_marks_partial_failures_as_inconclusive():

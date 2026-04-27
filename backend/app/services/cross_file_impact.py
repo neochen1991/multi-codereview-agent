@@ -67,6 +67,9 @@ def build_cross_file_impact_hints(
         signature_summary = str(signature_change.get("summary") or "").strip()
         if signature_summary:
             hints.append(f"检测到签名级变更：{signature_summary}，需要重点核对调用方入参、返回值或异常契约是否仍兼容")
+        contract_hint = _build_signature_contract_hint(signature_change)
+        if contract_hint:
+            hints.append(contract_hint)
         callsite_mismatch = _detect_callsite_mismatch(signature_change=signature_change, context_payload=context_payload)
         if callsite_mismatch:
             hints.append(callsite_mismatch)
@@ -141,7 +144,7 @@ def build_cross_file_impact_hints(
         suffix = " 等" if len(match_paths) > 3 else ""
         hints.append(f"代码仓检索还命中了关联实现：{preview}{suffix}")
 
-    return hints[:4]
+    return _prioritize_hints(hints)
 
 
 def _collect_context_paths(context_payload: dict[str, Any], *, keys: tuple[str, ...]) -> list[str]:
@@ -249,6 +252,10 @@ def _detect_signature_change(
         "new_name": _extract_symbol_name(added_signatures[0]) if added_signatures else "",
         "old_param_count": _extract_parameter_count(removed_signatures[0]) if removed_signatures else 0,
         "new_param_count": _extract_parameter_count(added_signatures[0]) if added_signatures else 0,
+        "old_return_type": _extract_return_type(removed_signatures[0]) if removed_signatures else "",
+        "new_return_type": _extract_return_type(added_signatures[0]) if added_signatures else "",
+        "old_throws_clause": _extract_throws_clause(removed_signatures[0]) if removed_signatures else "",
+        "new_throws_clause": _extract_throws_clause(added_signatures[0]) if added_signatures else "",
     }
 
 
@@ -314,7 +321,7 @@ def _extract_parameter_count(signature: str) -> int:
     raw_params = match.group(1).strip()
     if not raw_params:
         return 0
-    return len([item for item in raw_params.split(",") if str(item).strip()])
+    return len(_split_top_level_csv(raw_params))
 
 
 def _extract_return_type(signature: str) -> str:
@@ -393,4 +400,115 @@ def _extract_call_argument_count(snippet: str, symbol_name: str) -> int | None:
     raw = str(match.group(1) or "").strip()
     if not raw:
         return 0
-    return len([item for item in raw.split(",") if str(item).strip()])
+    return len(_split_top_level_csv(raw))
+
+
+def _split_top_level_csv(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    current: list[str] = []
+    depth_angle = 0
+    depth_paren = 0
+    depth_bracket = 0
+    in_string = ""
+    escaped = False
+    for char in text:
+        if in_string:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == in_string:
+                in_string = ""
+            continue
+        if char in {"'", '"'}:
+            in_string = char
+            current.append(char)
+            continue
+        if char == "<":
+            depth_angle += 1
+        elif char == ">" and depth_angle > 0:
+            depth_angle -= 1
+        elif char == "(":
+            depth_paren += 1
+        elif char == ")" and depth_paren > 0:
+            depth_paren -= 1
+        elif char == "[":
+            depth_bracket += 1
+        elif char == "]" and depth_bracket > 0:
+            depth_bracket -= 1
+        if char == "," and depth_angle == 0 and depth_paren == 0 and depth_bracket == 0:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(char)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _build_signature_contract_hint(signature_change: dict[str, object]) -> str:
+    old_return = str(signature_change.get("old_return_type") or "").strip()
+    new_return = str(signature_change.get("new_return_type") or "").strip()
+    old_throws = str(signature_change.get("old_throws_clause") or "").strip()
+    new_throws = str(signature_change.get("new_throws_clause") or "").strip()
+    details: list[str] = []
+    if old_return and new_return:
+        old_base = _base_type_name(old_return)
+        new_base = _base_type_name(new_return)
+        if old_base != new_base:
+            if old_base in {"Page", "Slice"} and new_base in {"List", "Collection", "Iterable"}:
+                details.append("分页返回对象变成集合返回，调用方可能丢失总数、分页边界或排序语义")
+            elif old_base == "Optional" and new_base != "Optional":
+                details.append("Optional 返回被改成普通对象，调用方空值处理语义可能失效")
+            elif old_base != "void" and new_base == "void":
+                details.append("原本有返回值的方法改成 void，调用方依赖返回结果的逻辑需要同步调整")
+            elif old_base == "boolean" and new_base != "boolean":
+                details.append("布尔返回契约发生变化，调用方条件判断可能仍按旧语义执行")
+    if old_throws != new_throws:
+        if old_throws and not new_throws:
+            details.append("显式异常声明被移除，需要确认调用方是否仍依赖该异常分支做补偿或回滚")
+        elif not old_throws and new_throws:
+            details.append("新增显式异常声明，需要确认调用方是否补齐异常处理")
+        elif old_throws and new_throws:
+            details.append("异常类型声明发生变化，需要确认调用方 catch 分支是否仍能覆盖")
+    if not details:
+        return ""
+    return "签名契约风险：" + "；".join(details)
+
+
+def _base_type_name(type_name: str) -> str:
+    normalized = str(type_name or "").strip()
+    normalized = re.sub(r"^java\.util\.", "", normalized)
+    normalized = re.sub(r"<.*$", "", normalized)
+    normalized = normalized.rstrip("[]").strip()
+    return normalized.split(".")[-1]
+
+
+def _prioritize_hints(hints: list[str]) -> list[str]:
+    def score(item: str) -> int:
+        text = str(item or "")
+        if "调用点仍保留旧调用形态" in text:
+            return 100
+        if "调用方未随这次签名变更一起修改" in text:
+            return 95
+        if "签名契约风险" in text:
+            return 90
+        if "签名级变更" in text:
+            return 85
+        if "调用链" in text:
+            return 70
+        if "类型契约" in text:
+            return 65
+        return 50
+
+    indexed = list(enumerate(hints))
+    indexed.sort(key=lambda pair: (-score(pair[1]), pair[0]))
+    selected = sorted(index for index, _ in indexed[:4])
+    return [hints[index] for index in selected]

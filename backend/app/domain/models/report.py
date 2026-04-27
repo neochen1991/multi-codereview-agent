@@ -22,6 +22,8 @@ class ConfidenceSummary(BaseModel):
     llm_judge_accepted_count: int = 0
     llm_judge_needs_verification_count: int = 0
     llm_judge_needs_human_count: int = 0
+    llm_judge_rejected_count: int = 0
+    quality_filtered_issue_count: int = 0
 
 
 class LlmUsageSummary(BaseModel):
@@ -46,6 +48,66 @@ class IssueFilterDecision(BaseModel):
     expert_ids: list[str] = Field(default_factory=list)
 
 
+class ImpactSymbol(BaseModel):
+    """一次变更中被影响的代码符号。"""
+
+    file_path: str = ""
+    symbol: str = ""
+    kind: str = ""
+    line_start: int = 0
+
+
+class ImpactFile(BaseModel):
+    """关联影响分析识别出的受影响文件。"""
+
+    file_path: str = ""
+    relationship: str = ""
+    reason: str = ""
+    risk_level: str = "low"
+
+
+class ImpactPath(BaseModel):
+    """从变更点到受影响对象的调用/依赖路径。"""
+
+    source: str = ""
+    target: str = ""
+    path: list[str] = Field(default_factory=list)
+    depth: int = 0
+    risk: str = ""
+
+
+class TestScopeRecommendation(BaseModel):
+    """关联影响报告给出的测试范围建议。"""
+
+    scope: str = ""
+    reason: str = ""
+    paths: list[str] = Field(default_factory=list)
+    priority: str = "medium"
+
+
+class ImpactReport(BaseModel):
+    """面向每个 MR 输出的关联影响报告。
+
+    GitNexus 图谱可用时填充符号、路径和跨文件影响；不可用时仍输出基于 diff
+    与路径规则的降级报告，保证结果页和产物里始终有测试范围建议。
+    """
+
+    graph_status: str = "missing"
+    graph_indexed_at: str = ""
+    graph_commit: str = ""
+    changed_files: list[str] = Field(default_factory=list)
+    changed_symbols: list[ImpactSymbol] = Field(default_factory=list)
+    impacted_files: list[ImpactFile] = Field(default_factory=list)
+    impacted_modules: list[str] = Field(default_factory=list)
+    impact_paths: list[ImpactPath] = Field(default_factory=list)
+    external_entrypoints: list[str] = Field(default_factory=list)
+    risk_level: str = "low"
+    recommended_test_scope: list[TestScopeRecommendation] = Field(default_factory=list)
+    must_run_tests: list[str] = Field(default_factory=list)
+    manual_verification: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class ReviewReport(BaseModel):
     """面向前端结果页输出的最终 Code Review 报告模型。"""
 
@@ -61,3 +123,4 @@ class ReviewReport(BaseModel):
     llm_usage_summary: LlmUsageSummary = Field(default_factory=LlmUsageSummary)
     human_review_status: str = "not_required"
     issue_filter_decisions: list[IssueFilterDecision] = Field(default_factory=list)
+    impact_report: ImpactReport | None = None

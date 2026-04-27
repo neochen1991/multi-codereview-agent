@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.evidence_false_positive_filter_service import EvidenceFalsePositiveFilterService
 from app.services.evidence_verifier_service import EvidenceVerifierService
 from app.services.orchestrator.state import ReviewState
 
@@ -53,6 +55,8 @@ def evidence_verification(state: ReviewState) -> ReviewState:
     next_state = dict(state)
     next_state["phase"] = "evidence_verification"
     verifier = EvidenceVerifierService()
+    false_positive_filter = EvidenceFalsePositiveFilterService()
+    runtime_settings = _coerce_runtime_settings(next_state.get("runtime_settings"))
     verified_issues: list[dict[str, object]] = []
     risk_hints = set(next_state.get("risk_hints", []))
     for issue in next_state.get("issues", []):
@@ -79,6 +83,40 @@ def evidence_verification(state: ReviewState) -> ReviewState:
             confidence = min(confidence, 0.49)
         elif evidence_quality["false_positive_risk"] == "medium" and not verified:
             confidence = min(confidence, 0.69)
+        filter_result: dict[str, object] | None = None
+        if false_positive_filter.should_filter(issue, runtime_settings, evidence_quality):
+            filter_result = false_positive_filter.filter_issue(
+                issue,
+                runtime_settings,
+                evidence_quality,
+                str(next_state.get("unified_diff") or ""),
+            )
+            verdict = str(filter_result.get("verdict") or "abstain")
+            confidence = _apply_confidence_adjustment(
+                confidence,
+                float(filter_result.get("confidence_adjustment") or 0.0),
+            )
+            if verdict == "false_positive":
+                verified = False
+                confidence = min(confidence, 0.39)
+                evidence_quality = dict(evidence_quality)
+                evidence_quality["false_positive_risk"] = "high"
+                evidence_quality.setdefault("reasons", [])
+                reasons = [str(item) for item in list(evidence_quality.get("reasons") or [])]
+                if "llm_false_positive_filter" not in reasons:
+                    reasons.append("llm_false_positive_filter")
+                evidence_quality["reasons"] = reasons
+            elif verdict == "needs_verification":
+                verified = False
+                confidence = min(confidence, 0.69)
+                evidence_quality = dict(evidence_quality)
+                evidence_quality.setdefault("reasons", [])
+                reasons = [str(item) for item in list(evidence_quality.get("reasons") or [])]
+                if "llm_needs_verification" not in reasons:
+                    reasons.append("llm_needs_verification")
+                evidence_quality["reasons"] = reasons
+            elif verdict == "true_positive":
+                confidence = min(0.98, max(confidence, 0.72))
         needs_human = False
         severity = str(issue.get("severity", "medium"))
         if topic == "security" and "security_surface" in risk_hints:
@@ -95,6 +133,8 @@ def evidence_verification(state: ReviewState) -> ReviewState:
         next_issue["tool_name"] = verification_result["tool_name"]
         next_issue["tool_verified"] = verification_result["tool_verified"]
         next_issue["evidence_quality"] = evidence_quality
+        if filter_result is not None:
+            next_issue["false_positive_filter"] = filter_result
         static_signals = list(evidence_quality.get("static_analysis_signals") or [])
         if static_signals:
             next_issue["direct_evidence"] = True
@@ -108,6 +148,18 @@ def evidence_verification(state: ReviewState) -> ReviewState:
         verified_issues.append(next_issue)
     next_state["issues"] = verified_issues
     return next_state
+
+
+def _coerce_runtime_settings(raw_runtime_settings: object) -> RuntimeSettings:
+    if isinstance(raw_runtime_settings, RuntimeSettings):
+        return raw_runtime_settings
+    if isinstance(raw_runtime_settings, dict):
+        return RuntimeSettings.model_validate(raw_runtime_settings)
+    return RuntimeSettings()
+
+
+def _apply_confidence_adjustment(confidence: float, adjustment: float) -> float:
+    return max(0.0, min(0.98, round(float(confidence) + float(adjustment), 2)))
 
 
 def _pick_verification_strategy(issue: dict[str, object]) -> str:
@@ -156,6 +208,27 @@ def _should_use_static_diff(issue: dict[str, object], state: ReviewState) -> boo
             "n_plus_one",
             "循环",
             "逐条",
+            "query_bound_removed",
+            "query_boundary_missing",
+            "unbounded_query_risk",
+            "limit",
+            "分页",
+            "全量",
+            "security_guard_removed",
+            "input_validation_removed",
+            "missing_auth_check",
+            "@valid",
+            "权限",
+            "鉴权",
+            "校验",
+            "idempotency_guard_removed",
+            "duplicate_processing_risk",
+            "幂等",
+            "重复",
+            "lock_guard_removed",
+            "concurrency_guard_removed",
+            "锁",
+            "并发",
             "comment_contract_unimplemented",
             "注释",
             "todo",

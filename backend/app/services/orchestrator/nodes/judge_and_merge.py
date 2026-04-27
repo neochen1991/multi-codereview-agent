@@ -15,6 +15,11 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
     issue_judge = IssueJudgeService()
     pending_human_issue_ids: list[str] = []
     merged_issues: list[dict[str, object]] = []
+    issue_filter_decisions = [
+        dict(item)
+        for item in list(next_state.get("issue_filter_decisions") or [])
+        if isinstance(item, dict)
+    ]
     for issue in next_state.get("issues", []):
         next_issue = dict(issue)
         if str(issue.get("status") or "") == "rejected_after_debate":
@@ -41,6 +46,12 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
                 "format only",
             ]
         ):
+            issue_filter_decisions.append(_build_rule_filter_decision(
+                next_issue,
+                rule_code="non_issue_formatting_or_no_risk",
+                rule_label="非问题类条目过滤",
+                reason="条目描述为格式化调整或明确无风险，不进入有效问题清单。",
+            ))
             continue
         finding_type = str(issue.get("finding_type") or "risk_hypothesis")
         direct_evidence = bool(issue.get("direct_evidence"))
@@ -89,6 +100,7 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
             }
             verdict = str(llm_judge_result.get("final_verdict") or "abstain")
             if verdict == "reject":
+                issue_filter_decisions.append(_build_llm_reject_filter_decision(next_issue, llm_judge_result))
                 continue
             if verdict == "needs_verification":
                 next_issue["status"] = "needs_verification"
@@ -153,6 +165,7 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         merged_issues.append(next_issue)
     next_state["issues"] = merged_issues
     next_state["pending_human_issue_ids"] = pending_human_issue_ids
+    next_state["issue_filter_decisions"] = issue_filter_decisions
     return next_state
 
 
@@ -166,6 +179,49 @@ def _coerce_runtime_settings(raw_runtime_settings: object) -> RuntimeSettings:
 
 def _apply_llm_judge_adjustment(confidence: float, adjustment: float) -> float:
     return round(min(0.99, max(0.01, confidence + adjustment)), 2)
+
+
+def _build_llm_reject_filter_decision(
+    issue: dict[str, object],
+    llm_judge_result: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "topic": str(issue.get("issue_id") or issue.get("topic") or ""),
+        "rule_code": "llm_judge_rejected",
+        "rule_label": "LLM Judge 拒绝",
+        "reason": str(llm_judge_result.get("reason") or "LLM Judge 判定证据不足，未进入有效问题清单。"),
+        "severity": str(issue.get("severity") or ""),
+        "finding_ids": [str(item) for item in list(issue.get("finding_ids") or []) if str(item).strip()],
+        "finding_titles": [str(issue.get("title") or "")] if str(issue.get("title") or "").strip() else [],
+        "expert_ids": [
+            str(item)
+            for item in list(issue.get("participant_expert_ids") or [])
+            if str(item).strip()
+        ],
+    }
+
+
+def _build_rule_filter_decision(
+    issue: dict[str, object],
+    *,
+    rule_code: str,
+    rule_label: str,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "topic": str(issue.get("issue_id") or issue.get("topic") or ""),
+        "rule_code": rule_code,
+        "rule_label": rule_label,
+        "reason": reason,
+        "severity": str(issue.get("severity") or ""),
+        "finding_ids": [str(item) for item in list(issue.get("finding_ids") or []) if str(item).strip()],
+        "finding_titles": [str(issue.get("title") or "")] if str(issue.get("title") or "").strip() else [],
+        "expert_ids": [
+            str(item)
+            for item in list(issue.get("participant_expert_ids") or [])
+            if str(item).strip()
+        ],
+    }
 
 
 def _apply_feedback_quality_profile(

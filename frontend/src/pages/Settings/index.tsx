@@ -253,6 +253,12 @@ const SettingsPage: React.FC = () => {
                 suppress_low_risk_hint_issues: Boolean(values.suppress_low_risk_hint_issues),
                 hint_issue_confidence_threshold: Number(values.hint_issue_confidence_threshold || 0.85),
                 hint_issue_evidence_cap: Number(values.hint_issue_evidence_cap || 2),
+                enable_llm_evidence_filter: Boolean(values.enable_llm_evidence_filter),
+                llm_evidence_filter_confidence_threshold: Number(values.llm_evidence_filter_confidence_threshold || 0.72),
+                llm_evidence_filter_timeout_seconds: Number(values.llm_evidence_filter_timeout_seconds || 35),
+                enable_llm_issue_judge: Boolean(values.enable_llm_issue_judge),
+                llm_issue_judge_confidence_threshold: Number(values.llm_issue_judge_confidence_threshold || 0.78),
+                llm_issue_judge_timeout_seconds: Number(values.llm_issue_judge_timeout_seconds || 45),
                 rule_screening_mode: values.rule_screening_mode || "llm",
                 rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
                 rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
@@ -574,6 +580,46 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="hint_issue_evidence_cap" label="提示类 Issue 最大证据条数">
                           <InputNumber min={0} max={10} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_llm_evidence_filter"
+                          label="启用证据误报过滤"
+                          valuePropName="checked"
+                          extra="开启后，弱证据问题会在进入最终裁决前先做一次 LLM 误报过滤；失败自动回退本地规则。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_evidence_filter_confidence_threshold" label="证据过滤触发阈值">
+                          <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_evidence_filter_timeout_seconds" label="证据过滤 LLM 超时（秒）">
+                          <InputNumber min={10} max={180} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_llm_issue_judge"
+                          label="启用 LLM Issue 裁判"
+                          valuePropName="checked"
+                          extra="开启后，低置信或薄证据 issue 会在收敛阶段再次判定；失败自动回退本地规则。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_issue_judge_confidence_threshold" label="Issue 裁判触发阈值">
+                          <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="llm_issue_judge_timeout_seconds" label="Issue 裁判 LLM 超时（秒）">
+                          <InputNumber min={10} max={180} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>

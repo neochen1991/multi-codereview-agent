@@ -3761,6 +3761,7 @@ def test_review_runner_schema_gate_downgrades_unstructured_direct_defect(storage
     assert result["verification_needed"] is True
     assert "direct_defect_without_evidence" in result["schema_validation_errors"]
     assert result["normalized_issue_type"]
+    assert result["schema_payload_valid"] is True
 
 
 def test_review_runner_schema_gate_hard_rejects_empty_expert_payload(storage_root: Path):
@@ -3791,6 +3792,7 @@ def test_review_runner_schema_gate_hard_rejects_empty_expert_payload(storage_roo
     assert result["finding_type"] == "risk_hypothesis"
     assert result["confidence"] <= 0.35
     assert "irrecoverable_empty_payload" in result["schema_validation_errors"]
+    assert result["schema_payload_valid"] is True
 
 
 def test_review_runner_normalize_review_observations_preserves_language_and_tags(storage_root: Path):
@@ -4707,6 +4709,51 @@ def test_review_runner_caches_repository_problem_context(storage_root: Path, mon
 
     assert first["snippet"] == second["snippet"]
     assert calls["count"] == 1
+
+
+def test_review_runner_merge_repository_context_for_batch_keeps_observations_and_signals(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    merged = runner._merge_repository_context_for_batch(
+        {
+            "java_quality_signals": ["comment_contract_unimplemented"],
+            "review_observations": [
+                {
+                    "observation_id": "obs_comment_001",
+                    "kind": "declared_intent_without_implementation",
+                    "signal": "comment_contract_unimplemented",
+                    "file_path": "src/main/java/com/example/CourseCreator.java",
+                    "line_start": 13,
+                    "summary": "TODO 承诺未落地",
+                    "evidence": ["// TODO 持久化后同步发送审计事件"],
+                    "confidence": 0.9,
+                }
+            ],
+        },
+        {
+            "java_quality_signals": ["loop_call_amplification"],
+            "review_observations": [
+                {
+                    "observation_id": "obs_loop_001",
+                    "kind": "control_flow_with_external_call",
+                    "signal": "loop_call_amplification",
+                    "file_path": "src/main/java/com/example/OrderBatchService.java",
+                    "line_start": 16,
+                    "summary": "循环体中的外部依赖调用",
+                    "evidence": ["orderRepository.findByOrderNo(item.getOrderNo())"],
+                    "confidence": 0.87,
+                }
+            ],
+        },
+    )
+
+    assert set(merged["java_quality_signals"]) == {
+        "comment_contract_unimplemented",
+        "loop_call_amplification",
+    }
+    observations = merged["review_observations"]
+    assert len(observations) == 2
+    assert {item["observation_id"] for item in observations} == {"obs_comment_001", "obs_loop_001"}
 
 
 def test_review_runner_runtime_repo_context_overrides_stale_command_context(storage_root: Path):
@@ -5926,6 +5973,313 @@ def test_review_runner_apply_issue_consistency_validation_detects_query_anchor_c
     assert validated.consistency_check_status == "downgraded"
     assert any("当前代码" in item for item in validated.consistency_conflicts)
     assert "锚点" in str(metadata["summary"])
+
+
+def test_review_runner_coalesces_same_root_cause_issues_before_final_judge(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    query_correctness = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_query_correctness",
+        title="equalsPredicateTransformer语义被从精确匹配改成模糊匹配",
+        summary="builder.equal 被改成 builder.like，查询语义被静默放宽。",
+        finding_type="direct_defect",
+        normalized_issue_type="business_rule_broken",
+        file_path="src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        line_start=63,
+        status="needs_human",
+        severity="blocker",
+        confidence=0.98,
+        finding_ids=["fdg_correctness"],
+        participant_expert_ids=["correctness_business"],
+        primary_expert_id="correctness_business",
+    )
+    query_database = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_query_database",
+        title="等于过滤谓词被错误修改为前后模糊查询，破坏SQL语义并导致索引失效",
+        summary="equals 查询被替换成 like 查询，精确匹配语义退化。",
+        finding_type="direct_defect",
+        normalized_issue_type="query_semantics_regression,missing_index_support",
+        file_path=query_correctness.file_path,
+        line_start=63,
+        status="needs_human",
+        severity="high",
+        confidence=0.99,
+        finding_ids=["fdg_database"],
+        participant_expert_ids=["database_analysis"],
+        primary_expert_id="database_analysis",
+    )
+    unrelated = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_naming",
+        title="常量命名不符合规范且使用弱语义tmp后缀",
+        summary="chunksTmp 是弱语义命名。",
+        finding_type="direct_defect",
+        normalized_issue_type="naming_misleading",
+        file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        line_start=23,
+        status="open",
+        severity="medium",
+        confidence=0.95,
+        finding_ids=["fdg_naming"],
+        participant_expert_ids=["architecture_design"],
+        primary_expert_id="architecture_design",
+    )
+
+    issues = runner._coalesce_duplicate_issues([query_correctness, query_database, unrelated])
+
+    assert len(issues) == 2
+    merged = next(issue for issue in issues if issue.file_path == query_correctness.file_path)
+    assert merged.normalized_issue_type == "query_semantics_regression"
+    assert set(merged.finding_ids) == {"fdg_correctness", "fdg_database"}
+    assert set(merged.participant_expert_ids) == {"correctness_business", "database_analysis"}
+    assert merged.confidence == 0.99
+    assert merged.severity == "blocker"
+
+
+def test_review_runner_appends_deterministic_query_bound_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_query_bound_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/query-bound",
+            target_ref="main",
+            changed_files=[
+                "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+            ],
+            unified_diff="""diff --git a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+--- a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
++++ b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+@@ -37,11 +37,9 @@ public class MySqlDomainEventsConsumer {
+ \tpublic void consume() {
+ \t\twhile (!shouldStop) {
+ \t\t\tNativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(
+-\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on LIMIT :chunk\"
++\t\t\t\t\"SELECT * FROM domain_events ORDER BY occurred_on\"
+ \t\t\t);
+-\t\t\tquery.setParameter(\"chunk\", CHUNKS);
+ \t\t\tquery.list();
+ \t\t}
+ \t}
+""",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+
+    runner._append_deterministic_query_bound_findings(review, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].expert_id == "database_analysis"
+    assert findings[0].normalized_issue_type == "query_bound_removed"
+    assert findings[0].line_start == 37
+    assert "LIMIT" in " ".join(findings[0].evidence)
+    assert len(finding_payloads) == 1
+
+
+def test_review_runner_augments_repository_context_with_java_observations(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/comment-and-loop",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/CourseCreator.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/CourseCreator.java b/src/main/java/com/example/CourseCreator.java\n"
+            "--- a/src/main/java/com/example/CourseCreator.java\n"
+            "+++ b/src/main/java/com/example/CourseCreator.java\n"
+            "@@ -12,3 +12,4 @@ public final class CourseCreator {\n"
+            "+        // TODO 持久化后同步发送审计事件\n"
+            "         repository.save(course);\n"
+            "         eventBus.publish(course.pullDomainEvents());\n"
+        ),
+    )
+    repository_context = {
+        "primary_context": {
+            "path": "src/main/java/com/example/CourseCreator.java",
+            "line_start": 12,
+            "snippet": (
+                "12 |     public void create(Course course) {\n"
+                "13 |         // TODO 持久化后同步发送审计事件\n"
+                "14 |         repository.save(course);\n"
+                "15 |         eventBus.publish(course.pullDomainEvents());"
+            ),
+        }
+    }
+
+    enriched = runner._augment_repository_context_with_quality_signals(
+        subject,
+        "src/main/java/com/example/CourseCreator.java",
+        13,
+        repository_context,
+        {
+            "file_path": "src/main/java/com/example/CourseCreator.java",
+            "start_line": 12,
+            "end_line": 15,
+            "excerpt": (
+                "+        // TODO 持久化后同步发送审计事件\n"
+                "         repository.save(course);\n"
+                "         eventBus.publish(course.pullDomainEvents());"
+            ),
+        },
+    )
+
+    assert "comment_contract_unimplemented" in enriched["java_quality_signals"]
+    assert enriched["review_observations"]
+    assert enriched["review_observations"][0]["kind"] == "declared_intent_without_implementation"
+
+
+def test_review_runner_appends_deterministic_loop_observation_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_loop_obs_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/loop-risk",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderBatchService.java"],
+            unified_diff="",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+    expert_jobs = [
+        {
+            "repository_context": {
+                "review_observations": [
+                    {
+                        "observation_id": "obs_loop_001",
+                        "kind": "control_flow_with_external_call",
+                        "signal": "loop_call_amplification",
+                        "file_path": "src/main/java/com/example/OrderBatchService.java",
+                        "line_start": 40,
+                        "summary": "检测到循环体中的外部依赖调用现象：for / orderRepository.findByOrderNo",
+                        "evidence": [
+                            "for (OrderItem item : items) {",
+                            "orderRepository.findByOrderNo(item.getOrderNo());",
+                        ],
+                        "related_symbols": ["for", "orderRepository.findByOrderNo"],
+                        "confidence": 0.87,
+                    }
+                ]
+            }
+        }
+    ]
+
+    runner._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].expert_id == "performance_reliability"
+    assert findings[0].normalized_issue_type == "loop_call_amplification"
+    assert findings[0].title == "循环调用放大"
+    assert findings[0].line_start == 40
+    assert len(finding_payloads) == 1
+
+
+def test_review_runner_appends_deterministic_comment_contract_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_comment_obs_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/comment-gap",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderService.java"],
+            unified_diff="",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+    expert_jobs = [
+        {
+            "repository_context": {
+                "review_observations": [
+                    {
+                        "observation_id": "obs_contract_001",
+                        "kind": "declared_intent_without_implementation",
+                        "signal": "comment_contract_unimplemented",
+                        "file_path": "src/main/java/com/example/OrderService.java",
+                        "line_start": 22,
+                        "summary": "检测到注释、TODO、占位实现或方法意图与当前实现可能不一致",
+                        "evidence": [
+                            "// TODO: 创建订单后自动扣减库存并发送事件",
+                            "return orderRepository.save(order);",
+                        ],
+                        "related_symbols": ["TODO", "create"],
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+        }
+    ]
+
+    runner._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].expert_id == "correctness_business"
+    assert findings[0].normalized_issue_type == "comment_contract_unimplemented"
+    assert findings[0].title == "承诺未落地"
+    assert findings[0].line_start == 22
+    assert len(finding_payloads) == 1
+
+
+def test_review_runner_normalizes_single_merged_query_issue_family(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_query_merged",
+        title="同一代码行存在 3 个问题：equals操作被错误替换为模糊like",
+        summary="问题汇总：equals 查询语义从精确匹配退化为模糊匹配，builder.like 会扩大结果集。",
+        finding_type="direct_defect",
+        normalized_issue_type="magic_value_overuse",
+        file_path="src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        line_start=63,
+        finding_ids=["fdg_a", "fdg_b", "fdg_c"],
+        participant_expert_ids=["architecture_design", "database_analysis", "correctness_business"],
+    )
+
+    normalized = runner._coalesce_duplicate_issues([issue])
+
+    assert len(normalized) == 1
+    assert normalized[0].normalized_issue_type == "query_semantics_regression"
+    assert normalized[0].title == "查询语义从精确匹配退化为模糊匹配"
+
+
+def test_review_runner_preserves_comment_contract_issue_family(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_comment_contract",
+        title="承诺未落地",
+        summary="TODO 承诺的审计事件没有真正实现。",
+        finding_type="direct_defect",
+        normalized_issue_type="course_creation_semantics",
+        file_path="src/main/java/com/example/CourseCreator.java",
+        line_start=13,
+        finding_ids=["fdg_comment_contract"],
+        participant_expert_ids=["correctness_business"],
+    )
+
+    normalized = runner._coalesce_duplicate_issues([issue])
+
+    assert len(normalized) == 1
+    assert normalized[0].normalized_issue_type == "comment_contract_unimplemented"
+    assert normalized[0].title == "承诺未落地"
 
 
 def test_review_runner_validate_final_issues_with_judge_emits_validation_message(storage_root: Path, monkeypatch):

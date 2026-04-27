@@ -40,6 +40,32 @@ def test_java_quality_signal_extractor_detects_general_java_quality_signals() ->
     assert "exception_swallowed" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_detects_removed_guards():
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OwnerController.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -18,7 +18,7 @@ public class OwnerController {",
+                    "-    public String create(@Valid Owner owner, BindingResult result) {",
+                    "+    public String create(Owner owner, BindingResult result) {",
+                    "@@ -42,7 +42,6 @@ public class OwnerController {",
+                    "-    synchronized (ownerId) {",
+                    "-        if (requestIdAlreadyProcessed(requestId)) return;",
+                    "+    {",
+                ]
+            )
+        },
+    )
+
+    assert "security_guard_removed" in payload["signals"]
+    assert "lock_guard_removed" in payload["signals"]
+    assert "idempotency_guard_removed" in payload["signals"]
+    security_observation = next(item for item in payload["observations"] if item["signal"] == "security_guard_removed")
+    assert security_observation["kind"] == "security_guard_removed"
+
+
 def test_java_quality_signal_extractor_detects_factory_bypass_and_event_ordering() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(

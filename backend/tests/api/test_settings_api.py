@@ -47,6 +47,12 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "suppress_low_risk_hint_issues": True,
             "hint_issue_confidence_threshold": 0.9,
             "hint_issue_evidence_cap": 3,
+            "enable_llm_evidence_filter": True,
+            "llm_evidence_filter_confidence_threshold": 0.74,
+            "llm_evidence_filter_timeout_seconds": 40,
+            "enable_llm_issue_judge": True,
+            "llm_issue_judge_confidence_threshold": 0.77,
+            "llm_issue_judge_timeout_seconds": 44,
             "rule_screening_mode": "llm",
             "rule_screening_batch_size": 10,
             "rule_screening_llm_timeout_seconds": 150,
@@ -101,6 +107,12 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["suppress_low_risk_hint_issues"] is True
     assert payload["hint_issue_confidence_threshold"] == 0.9
     assert payload["hint_issue_evidence_cap"] == 3
+    assert payload["enable_llm_evidence_filter"] is True
+    assert payload["llm_evidence_filter_confidence_threshold"] == 0.74
+    assert payload["llm_evidence_filter_timeout_seconds"] == 40
+    assert payload["enable_llm_issue_judge"] is True
+    assert payload["llm_issue_judge_confidence_threshold"] == 0.77
+    assert payload["llm_issue_judge_timeout_seconds"] == 44
     assert payload["rule_screening_mode"] == "llm"
     assert payload["rule_screening_batch_size"] == 10
     assert payload["rule_screening_llm_timeout_seconds"] == 150

@@ -127,14 +127,49 @@ SEMANTIC_SYNONYMS = {
     "n + 1": "n_plus_one",
     "逐条查询": "n_plus_one",
     "循环查询": "n_plus_one",
+    "query_bound_removed": "query_boundary_missing",
+    "unbounded_query_risk": "query_boundary_missing",
+    "query_without_bound": "query_boundary_missing",
+    "query boundary": "query_boundary_missing",
+    "query_boundary_missing": "query_boundary_missing",
     "批量无上限": "query_boundary_missing",
     "缺少limit": "query_boundary_missing",
+    "删除limit": "query_boundary_missing",
+    "移除limit": "query_boundary_missing",
+    "limit保护": "query_boundary_missing",
     "无分页": "query_boundary_missing",
+    "无界查询": "query_boundary_missing",
+    "大结果集": "query_boundary_missing",
+    "全量查询": "query_boundary_missing",
+    "query_semantics_changed": "query_semantics_weakened",
+    "query_semantics_weakened": "query_semantics_weakened",
+    "query_input_boundary_risk": "query_semantics_weakened",
+    "query_plan_risk": "query_semantics_weakened",
+    "精确匹配": "query_semantics_weakened",
+    "模糊匹配": "query_semantics_weakened",
+    "查询语义": "query_semantics_weakened",
+    "语义退化": "query_semantics_weakened",
+    "builder.equal": "query_semantics_weakened",
+    "builder.like": "query_semantics_weakened",
+    "equal": "query_semantics_weakened",
+    "equals": "query_semantics_weakened",
+    "like": "query_semantics_weakened",
     "领域事件": "domain_event",
     "domain event": "domain_event",
     "domainevent": "domain_event",
     "聚合工厂": "aggregate_factory",
     "factory bypass": "aggregate_factory",
+}
+
+PROBLEM_FAMILY_TOKENS = {
+    "query_semantics_regression": {
+        "query_semantics_weakened",
+        "query_boundary_missing",
+    },
+    "domain_aggregate_creation": {
+        "aggregate_factory",
+        "domain_event",
+    },
 }
 
 RESPONSIBILITY_TOKEN_HINTS = {
@@ -370,6 +405,21 @@ def _build_problem_token_set(item: dict[str, object]) -> set[str]:
     return set(deduped[:12])
 
 
+def _build_problem_family_set(item: dict[str, object]) -> set[str]:
+    tokens = _build_problem_token_set(item)
+    families: set[str] = set()
+    for family, family_tokens in PROBLEM_FAMILY_TOKENS.items():
+        if tokens & family_tokens:
+            families.add(family)
+    explicit_type = str(item.get("normalized_issue_type") or "").strip()
+    if explicit_type:
+        explicit_tokens = set(_extract_semantic_tokens(explicit_type))
+        for family, family_tokens in PROBLEM_FAMILY_TOKENS.items():
+            if explicit_tokens & family_tokens:
+                families.add(family)
+    return families
+
+
 def _build_normalized_issue_type(items: list[dict[str, object]]) -> str:
     explicit = [
         str(item.get("normalized_issue_type") or "").strip()
@@ -422,6 +472,11 @@ def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict
         for item in grouped_items
         if str(item.get("normalized_issue_type") or "").strip()
     ]
+    candidate_families = _build_problem_family_set(candidate)
+    if candidate_families:
+        for item in grouped_items:
+            if candidate_families & _build_problem_family_set(item):
+                return True
     if candidate_explicit and grouped_explicit:
         return any(candidate_explicit == item for item in grouped_explicit)
     candidate_severity_rank = PRIORITY_ORDER.get(str(candidate.get("severity") or "medium").lower(), 2)
@@ -506,6 +561,13 @@ def _is_location_compatible(candidate: dict[str, object], grouped_items: list[di
     nearby_window = 2
     if candidate_type and candidate_type in grouped_types:
         return min(abs(candidate_line - line) for line in grouped_lines) <= nearby_window
+    candidate_families = _build_problem_family_set(candidate)
+    if candidate_families:
+        grouped_families: set[str] = set()
+        for item in grouped_items:
+            grouped_families.update(_build_problem_family_set(item))
+        if candidate_families & grouped_families:
+            return min(abs(candidate_line - line) for line in grouped_lines) <= nearby_window
     candidate_title = str(candidate.get("title") or "").strip().lower()
     grouped_titles = {
         str(item.get("title") or "").strip().lower()

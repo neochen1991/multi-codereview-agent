@@ -127,6 +127,20 @@ EXPERT_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
 RISK_HINT_EXPERTS: dict[str, tuple[str, ...]] = {
     "security_surface": ("security_compliance",),
     "database_migration": ("database_analysis", "performance_reliability"),
+    "performance_reliability": ("performance_reliability",),
+}
+
+
+RISK_SIGNAL_EXPERTS: dict[str, tuple[str, ...]] = {
+    "security_guard_removed": ("security_compliance", "correctness_business"),
+    "query_bound_removed": ("database_analysis", "performance_reliability"),
+    "loop_call_amplification": ("performance_reliability", "database_analysis"),
+    "comment_contract_unimplemented": ("correctness_business",),
+    "exception_swallowed": ("correctness_business", "maintainability_code_health"),
+    "lock_scope_risk": ("performance_reliability",),
+    "transactional_side_effect": ("performance_reliability", "database_analysis"),
+    "mq_delivery_risk": ("mq_analysis",),
+    "cache_consistency_risk": ("redis_analysis",),
 }
 
 
@@ -142,6 +156,8 @@ def route_experts(state: ReviewState) -> ReviewState:
             continue
         for expert_id in expert_ids:
             _append_once(selected, expert_id)
+    for expert_id in _match_experts_by_risk_signals(next_state):
+        _append_once(selected, expert_id)
     for expert_id in _match_experts_by_diff(next_state):
         _append_once(selected, expert_id)
     next_state["selected_experts"] = selected
@@ -164,6 +180,18 @@ def _match_experts_by_diff(state: ReviewState) -> list[str]:
     return matched
 
 
+def _match_experts_by_risk_signals(state: ReviewState) -> list[str]:
+    matched: list[str] = []
+    for change_slice in list(state.get("change_slices") or []):
+        if not isinstance(change_slice, dict):
+            continue
+        for signal in list(change_slice.get("risk_signals") or []):
+            for expert_id in RISK_SIGNAL_EXPERTS.get(str(signal).strip(), ()):
+                if expert_id not in matched:
+                    matched.append(expert_id)
+    return matched
+
+
 def _build_signal_text(state: ReviewState) -> str:
     parts: list[str] = []
     parts.extend(str(item) for item in state.get("changed_files", []) if str(item).strip())
@@ -173,6 +201,9 @@ def _build_signal_text(state: ReviewState) -> str:
     for change_slice in list(state.get("change_slices") or []):
         if not isinstance(change_slice, dict):
             continue
+        risk_signals = " ".join(str(item) for item in list(change_slice.get("risk_signals") or []) if str(item).strip())
+        if risk_signals:
+            parts.append(risk_signals)
         for key in ("file_path", "path", "summary", "diff", "content", "excerpt"):
             value = change_slice.get(key)
             if value:

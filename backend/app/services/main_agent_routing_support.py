@@ -231,6 +231,22 @@ def merge_expert_selection(
                 }
             )
             skipped_entries = [item for item in skipped_entries if str(item.get("expert_id") or "") != "security_compliance"]
+    if "change_impact_analysis" in requested_expert_ids and "change_impact_analysis" not in selected_ids:
+        impact_expert = experts_by_id.get("change_impact_analysis")
+        if impact_expert is not None:
+            selected_ids.append("change_impact_analysis")
+            selected_entries.append(
+                {
+                    "expert_id": "change_impact_analysis",
+                    "expert_name": impact_expert.name_zh,
+                    "reason": "每个 MR 都需要输出关联影响报告，系统固定保留关联性影响分析专家。",
+                    "confidence": 0.9,
+                    "source": "system_required",
+                }
+            )
+            skipped_entries = [
+                item for item in skipped_entries if str(item.get("expert_id") or "") != "change_impact_analysis"
+            ]
     selected_ids, selected_entries, skipped_entries = apply_java_signal_expert_retention(
         requested_expert_ids=requested_expert_ids,
         experts_by_id=experts_by_id,

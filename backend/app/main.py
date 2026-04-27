@@ -11,6 +11,7 @@ from app.config import settings
 from app.logging_config import configure_logging as configure_app_logging
 import app.services.review_service as review_service_module
 from app.services.auto_review_scheduler import AutoReviewScheduler
+from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 from app.services.memory_probe import MemoryProbe
 
 
@@ -41,7 +42,9 @@ def create_application() -> FastAPI:
     app.include_router(settings_routes.router, prefix=settings.API_PREFIX)
     app.include_router(governance.router, prefix=settings.API_PREFIX)
     scheduler = AutoReviewScheduler(review_service_module.review_service)
+    gitnexus_scheduler = GitNexusIndexScheduler(review_service_module.review_service)
     app.state.auto_review_scheduler = scheduler
+    app.state.gitnexus_index_scheduler = gitnexus_scheduler
 
     http_probe_enabled = str(os.getenv("REVIEW_HTTP_MEMORY_PROBE", "")).strip().lower() in {"1", "true", "on", "yes"}
     if http_probe_enabled:
@@ -62,11 +65,13 @@ def create_application() -> FastAPI:
             faulthandler.enable()
             faulthandler.dump_traceback_later(watchdog_dump_seconds, repeat=True)
         scheduler.start()
+        gitnexus_scheduler.start()
         MemoryProbe.log("app.startup.after_scheduler")
 
     @app.on_event("shutdown")
     def shutdown_scheduler() -> None:
         MemoryProbe.log("app.shutdown.begin")
+        gitnexus_scheduler.stop()
         scheduler.stop()
         if watchdog_dump_seconds > 0:
             faulthandler.cancel_dump_traceback_later()

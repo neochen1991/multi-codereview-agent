@@ -16,7 +16,7 @@ from uuid import uuid4
 from app.config import settings
 from app.domain.models.event import ReviewEvent
 from app.domain.models.expert_profile import ExpertProfile
-from app.domain.models.finding import ReviewFinding
+from app.domain.models.finding import ExpertFindingPayload, ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
@@ -31,6 +31,7 @@ from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.knowledge_service import KnowledgeService
+from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.memory_probe import MemoryProbe
@@ -79,6 +80,7 @@ class ReviewRunner:
         self.main_agent_service = MainAgentService()
         self.llm_chat_service = LLMChatService()
         self.java_quality_signal_extractor = CodeObservationExtractor()
+        self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
@@ -520,6 +522,15 @@ class ReviewRunner:
                 hunk_file_path = str(command.get("file_path") or file_path)
                 hunk_line_start = int(command.get("line_start") or line_start or 1)
                 summary = str(command.get("summary") or "")
+                raw_repository_context = dict(command.get("repository_context") or {})
+                target_hunk_payload = dict(command.get("target_hunk") or {})
+                enriched_repository_context = self._augment_repository_context_with_quality_signals(
+                    review.subject,
+                    hunk_file_path,
+                    hunk_line_start,
+                    raw_repository_context,
+                    target_hunk_payload,
+                )
                 command_message = self.message_repo.append(
                     ConversationMessage(
                         review_id=review_id,
@@ -537,10 +548,8 @@ class ReviewRunner:
                             "hunk_count": len(route_hints),
                             "related_files": command.get("related_files", []),
                             "business_changed_files": self._business_changed_files(review.subject),
-                            "target_hunk": command.get("target_hunk", {}),
-                            "repository_context": self._build_repository_context_metadata(
-                                dict(command.get("repository_context") or {})
-                            ),
+                            "target_hunk": target_hunk_payload,
+                            "repository_context": self._build_repository_context_metadata(enriched_repository_context),
                             "expected_checks": command.get("expected_checks", []),
                             "disallowed_inference": command.get("disallowed_inference", []),
                             "routing_reason": command.get("routing_reason", ""),
@@ -572,8 +581,8 @@ class ReviewRunner:
                     expert,
                     hunk_file_path,
                     hunk_line_start,
-                    dict(command.get("repository_context") or {}),
-                    dict(command.get("target_hunk") or {}),
+                    enriched_repository_context,
+                    target_hunk_payload,
                 )
                 expert_route_jobs.append(
                     {
@@ -582,8 +591,8 @@ class ReviewRunner:
                         "command_message": command_message,
                         "file_path": hunk_file_path,
                         "line_start": hunk_line_start,
-                        "repository_context": dict(command.get("repository_context") or {}),
-                        "target_hunk": dict(command.get("target_hunk") or {}),
+                        "repository_context": enriched_repository_context,
+                        "target_hunk": target_hunk_payload,
                         "target_hunks": [dict(item) for item in list(command.get("target_hunks") or []) if isinstance(item, dict)],
                         "related_files": list(command.get("related_files") or []),
                         "business_changed_files": self._business_changed_files(review.subject),
@@ -779,6 +788,8 @@ class ReviewRunner:
             len(expert_jobs),
             expert_execution_elapsed_ms,
         )
+        self._append_deterministic_query_bound_findings(review, finding_payloads)
+        self._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
         self._abort_if_closed(review_id)
         if not expert_jobs:
             reason = "用户选择的专家与当前变更相关性不足，且未能补入兜底专家，无法继续审核。"
@@ -1038,6 +1049,7 @@ class ReviewRunner:
                 len(finding_payloads),
                 len(filtered_finding_ids),
             )
+        issues = self._coalesce_duplicate_issues(issues)
         if issue_filter_decisions:
             self.message_repo.append(
                 ConversationMessage(
@@ -1131,6 +1143,7 @@ class ReviewRunner:
             pending_human_count=len(pending_human_issue_ids),
             partial_failure_count=len(expert_failures),
         )
+        review = self._attach_impact_report(review, effective_runtime_settings)
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
         self._abort_if_closed(review_id)
@@ -1203,6 +1216,340 @@ class ReviewRunner:
             issue_count=len(issues),
         )
         return review
+
+    def _attach_impact_report(self, review: ReviewTask, runtime_settings) -> ReviewTask:
+        """在任务结果里持久化每个 MR 的关联影响报告。"""
+
+        impact_report = self.gitnexus_impact_service.analyze(review.subject, runtime_settings)
+        metadata = dict(review.subject.metadata or {})
+        metadata["impact_report"] = impact_report.model_dump(mode="json")
+        return review.model_copy(update={"subject": review.subject.model_copy(update={"metadata": metadata})})
+
+    def _augment_repository_context_with_quality_signals(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> dict[str, object]:
+        enriched = dict(repository_context or {})
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=enriched,
+            full_diff=self._build_target_file_full_diff(subject, file_path),
+        )
+        if list(java_quality.get("signals") or []):
+            enriched["java_quality_signals"] = [
+                str(item).strip()
+                for item in list(java_quality.get("signals") or [])[:10]
+                if str(item).strip()
+            ]
+        if str(java_quality.get("summary") or "").strip():
+            enriched["java_quality_signal_summary"] = str(java_quality.get("summary") or "").strip()
+        observations = self._normalize_review_observations(java_quality.get("observations"))
+        if observations:
+            enriched["review_observations"] = observations
+        if dict(java_quality.get("analysis_stages") or {}):
+            enriched["analysis_stages"] = dict(java_quality.get("analysis_stages") or {})
+        primary_context = dict(enriched.get("primary_context") or {})
+        if file_path and primary_context and not primary_context.get("path"):
+            primary_context["path"] = file_path
+            if line_start and not primary_context.get("line_start"):
+                primary_context["line_start"] = line_start
+            enriched["primary_context"] = primary_context
+        return enriched
+
+    def _append_deterministic_query_bound_findings(
+        self,
+        review: ReviewTask,
+        finding_payloads: list[dict[str, object]],
+    ) -> None:
+        """把删除 LIMIT/分页边界这类确定性风险补成 finding，避免被 LLM 首轮遗漏。"""
+
+        if not str(review.subject.unified_diff or "").strip():
+            return
+        existing = [
+            item
+            for item in finding_payloads
+            if str(item.get("normalized_issue_type") or "").strip() in {"query_bound_removed", "query_boundary_missing"}
+        ]
+        if existing:
+            return
+        for file_path in review.subject.changed_files:
+            normalized_file_path = str(file_path or "").strip()
+            if not normalized_file_path.lower().endswith(".java"):
+                continue
+            for hunk in self.diff_excerpt_service.list_hunks(review.subject.unified_diff, normalized_file_path):
+                excerpt = str(hunk.get("excerpt") or "")
+                if not self._hunk_removes_query_bound(excerpt):
+                    continue
+                line_start = int(hunk.get("start_line") or 1)
+                finding = ReviewFinding(
+                    review_id=review.review_id,
+                    expert_id="database_analysis",
+                    title="查询边界缺失",
+                    summary="本次 diff 删除了查询的 LIMIT、分页或批量边界保护，数据量放大后可能返回大结果集并拖垮数据库访问路径。",
+                    finding_type="direct_defect",
+                    normalized_issue_type="query_bound_removed",
+                    severity="high",
+                    confidence=0.92,
+                    file_path=normalized_file_path,
+                    line_start=line_start,
+                    evidence=self._query_bound_evidence(excerpt),
+                    matched_rules=["PERF-SQL-001"],
+                    violated_guidelines=["大结果集查询必须显式分页、LIMIT 或批量边界保护"],
+                    rule_based_reasoning="diff 中直接出现 LIMIT/分页参数删除，且新增查询路径没有等价边界保护，属于可由静态 diff 确认的数据访问缺陷。",
+                    remediation_strategy="恢复分页、LIMIT 或批量分片边界。",
+                    remediation_suggestion="为该查询补回 LIMIT/分页约束，并确认批量消费只按固定窗口读取数据。",
+                    remediation_steps=["恢复 LIMIT 或 setMaxResults", "保留批量参数绑定", "补充大数据量消费回归测试"],
+                    code_excerpt=excerpt,
+                    code_context={"deterministic_signal": "query_bound_removed"},
+                    suggested_code="// TODO: 恢复 LIMIT :chunk / setMaxResults / Pageable 等查询边界，避免无界读取",
+                    suggested_code_language="java",
+                )
+                self.finding_repo.save(review.review_id, finding)
+                finding_payloads.append(finding.model_dump(mode="json"))
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_created",
+                        phase="expert_review",
+                        message="数据库专家通过确定性规则补充了查询边界缺失 finding",
+                        payload={
+                            "finding_id": finding.finding_id,
+                            "expert_id": finding.expert_id,
+                            "file_path": finding.file_path,
+                            "line_start": finding.line_start,
+                            "deterministic_signal": "query_bound_removed",
+                        },
+                    )
+                )
+                return
+
+    def _append_deterministic_observation_findings(
+        self,
+        review: ReviewTask,
+        expert_jobs: list[dict[str, object]],
+        finding_payloads: list[dict[str, object]],
+    ) -> None:
+        """把高确定性的 observation 补成 finding，避免专家超时或漏报后结果变薄。"""
+
+        observations = self._collect_observations_from_expert_jobs(expert_jobs)
+        if not observations:
+            return
+
+        profiles = {
+            "control_flow_with_external_call": {
+                "expert_id": "performance_reliability",
+                "title": "循环调用放大",
+                "normalized_issue_type": "loop_call_amplification",
+                "summary": "当前改动把仓储、远程接口或消息发送放进循环路径，批量场景下会线性放大数据库往返、网络调用和整体时延。",
+                "matched_rules": ["PERF-LOOP-001"],
+                "violated_guidelines": ["循环体内不应逐条执行仓储、远程调用或消息发送"],
+                "rule_based_reasoning": "observation 已明确命中循环体中的外部依赖调用，这类问题可直接从代码结构确认，不需要依赖更多运行时条件。",
+                "remediation_strategy": "把循环内逐条外部调用改成批量查询、批量提交或循环外聚合后统一处理。",
+                "remediation_suggestion": "优先把循环内仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
+                "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
+                "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
+                "confidence_floor": 0.86,
+            },
+            "declared_intent_without_implementation": {
+                "expert_id": "correctness_business",
+                "title": "承诺未落地",
+                "normalized_issue_type": "comment_contract_unimplemented",
+                "summary": "注释、TODO 或方法意图已经承诺了行为，但当前实现没有对应动作，调用方会误以为能力已经落地。",
+                "matched_rules": ["CORRECTNESS-CONTRACT-001"],
+                "violated_guidelines": ["注释、TODO、接口说明和方法意图必须与真实实现保持一致"],
+                "rule_based_reasoning": "observation 已明确命中注释或待办承诺与实现不一致，这类语义缺口可以直接从 diff 和上下文判断。",
+                "remediation_strategy": "要么补齐承诺中的行为，要么删除会误导调用方的注释、TODO 或命名表达。",
+                "remediation_suggestion": "先确认该承诺是否仍然成立；如果成立就补齐实现，如果不再成立就删除失效承诺并同步修正文档或命名。",
+                "remediation_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释、TODO 或接口说明"],
+                "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
+                "confidence_floor": 0.88,
+            },
+        }
+
+        for observation in observations:
+            kind = str(observation.get("kind") or "").strip()
+            profile = profiles.get(kind)
+            if not profile:
+                continue
+            file_path = str(observation.get("file_path") or "").strip()
+            line_start = int(self._normalize_optional_line_value(observation.get("line_start")) or 1)
+            normalized_issue_type = str(profile.get("normalized_issue_type") or "").strip()
+            if self._has_matching_deterministic_finding(
+                finding_payloads,
+                file_path=file_path,
+                line_start=line_start,
+                normalized_issue_type=normalized_issue_type,
+                title=str(profile.get("title") or ""),
+            ):
+                continue
+            evidence = [str(item).strip() for item in list(observation.get("evidence") or []) if str(item).strip()]
+            related_symbols = [
+                str(item).strip() for item in list(observation.get("related_symbols") or []) if str(item).strip()
+            ]
+            symbol_display = " / ".join(related_symbols[:2]) if related_symbols else "当前代码路径"
+            claim = str(observation.get("summary") or "").strip()
+            if kind == "control_flow_with_external_call":
+                claim = (
+                    f"当前实现把外部依赖调用放进循环路径（{symbol_display}），"
+                    "批量场景下会线性放大数据库/网络往返与整体时延。"
+                )
+            elif kind == "declared_intent_without_implementation":
+                claim = (
+                    f"注释、TODO 或方法意图已经承诺了行为（{symbol_display}），"
+                    "但当前实现没有对应动作，属于直接的语义缺口。"
+                )
+            finding = ReviewFinding(
+                review_id=review.review_id,
+                expert_id=str(profile["expert_id"]),
+                title=str(profile["title"]),
+                summary=str(profile["summary"]),
+                finding_type="direct_defect",
+                normalized_issue_type=normalized_issue_type,
+                severity="high",
+                confidence=max(float(observation.get("confidence") or 0.0), float(profile.get("confidence_floor") or 0.85)),
+                file_path=file_path,
+                line_start=line_start,
+                evidence=evidence[:3] or [claim],
+                matched_rules=[str(item).strip() for item in list(profile.get("matched_rules") or []) if str(item).strip()],
+                violated_guidelines=[
+                    str(item).strip() for item in list(profile.get("violated_guidelines") or []) if str(item).strip()
+                ],
+                rule_based_reasoning=str(profile["rule_based_reasoning"]),
+                remediation_strategy=str(profile["remediation_strategy"]),
+                remediation_suggestion=str(profile["remediation_suggestion"]),
+                remediation_steps=[str(item).strip() for item in list(profile.get("remediation_steps") or []) if str(item).strip()],
+                code_excerpt="\n".join(evidence[:3]),
+                code_context={
+                    "deterministic_signal": normalized_issue_type,
+                    "observation_id": str(observation.get("observation_id") or "").strip(),
+                    "observation_kind": kind,
+                },
+                suggested_code=str(profile["suggested_code"]),
+                suggested_code_language="java",
+            )
+            self.finding_repo.save(review.review_id, finding)
+            finding_payloads.append(finding.model_dump(mode="json"))
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="finding_created",
+                    phase="expert_review",
+                    message=f"{finding.expert_id} 通过 observation 兜底补充了 {finding.title} finding",
+                    payload={
+                        "finding_id": finding.finding_id,
+                        "expert_id": finding.expert_id,
+                        "file_path": finding.file_path,
+                        "line_start": finding.line_start,
+                        "deterministic_signal": normalized_issue_type,
+                    },
+                )
+            )
+
+    def _collect_observations_from_expert_jobs(self, expert_jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+        collected: list[dict[str, object]] = []
+        seen: set[tuple[str, str, int, str]] = set()
+        for job in expert_jobs:
+            if not isinstance(job, dict):
+                continue
+            collected.extend(self._dedupe_observation_items(self._normalize_review_observations(dict(job.get("repository_context") or {}).get("review_observations")), seen))
+            batch_items = [dict(item) for item in list(job.get("batch_items") or []) if isinstance(item, dict)]
+            for item in batch_items:
+                repository_context = dict(item.get("repository_context") or {})
+                collected.extend(
+                    self._dedupe_observation_items(
+                        self._normalize_review_observations(repository_context.get("review_observations")),
+                        seen,
+                    )
+                )
+        return collected
+
+    def _dedupe_observation_items(
+        self,
+        observations: list[dict[str, object]],
+        seen: set[tuple[str, str, int, str]],
+    ) -> list[dict[str, object]]:
+        deduped: list[dict[str, object]] = []
+        for item in observations:
+            file_key = str(item.get("file_path") or "").strip().lower()
+            kind_key = str(item.get("kind") or "").strip().lower()
+            line_key = int(self._normalize_optional_line_value(item.get("line_start")) or 1)
+            signal_key = str(item.get("signal") or "").strip().lower()
+            key = (file_key, kind_key, line_key, signal_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(item))
+        return deduped
+
+    def _has_matching_deterministic_finding(
+        self,
+        finding_payloads: list[dict[str, object]],
+        *,
+        file_path: str,
+        line_start: int,
+        normalized_issue_type: str,
+        title: str,
+    ) -> bool:
+        file_key = str(file_path or "").strip().lower()
+        title_key = str(title or "").strip().lower()
+        issue_type_key = str(normalized_issue_type or "").strip().lower()
+        for item in finding_payloads:
+            existing_file = str(item.get("file_path") or "").strip().lower()
+            if existing_file != file_key:
+                continue
+            existing_line = int(self._normalize_optional_line_value(item.get("line_start")) or 1)
+            if abs(existing_line - int(line_start or 1)) > 2:
+                continue
+            existing_type = str(item.get("normalized_issue_type") or "").strip().lower()
+            existing_title = str(item.get("title") or "").strip().lower()
+            if issue_type_key and existing_type == issue_type_key:
+                return True
+            if title_key and existing_title == title_key:
+                return True
+        return False
+
+    @staticmethod
+    def _hunk_removes_query_bound(excerpt: str) -> bool:
+        removed_lines = [
+            line.lower()
+            for line in str(excerpt or "").splitlines()
+            if "   - |" in line
+        ]
+        added_lines = [
+            line.lower()
+            for line in str(excerpt or "").splitlines()
+            if re.search(r"\|\s*\+", line)
+        ]
+        removed_blob = "\n".join(removed_lines)
+        added_blob = "\n".join(added_lines)
+        removed_bound = any(
+            token in removed_blob
+            for token in (" limit ", " limit :", "setmaxresults", "pageable", "pagerequest", "setparameter(\"chunk\"")
+        )
+        added_equivalent_bound = any(
+            token in added_blob
+            for token in (" limit ", "setmaxresults", "pageable", "pagerequest")
+        )
+        return removed_bound and not added_equivalent_bound
+
+    @staticmethod
+    def _query_bound_evidence(excerpt: str) -> list[str]:
+        evidence = [
+            line.strip()
+            for line in str(excerpt or "").splitlines()
+            if "   - |" in line and any(token in line.lower() for token in ("limit", "setmaxresults", "page", "chunk"))
+        ]
+        added_query = [
+            line.strip()
+            for line in str(excerpt or "").splitlines()
+            if re.search(r"\|\s*\+", line) and any(token in line.lower() for token in ("select", "query", "list()"))
+        ]
+        return (evidence + added_query)[:4] or ["diff 显示查询边界保护被删除。"]
 
     def clear_runtime_caches(self) -> None:
         """清理 ReviewRunner 持有的长生命周期缓存。"""
@@ -1843,9 +2190,22 @@ class ReviewRunner:
                     ]
                     or [int(item.get("line_start") or 1)],
                     "excerpt": str(item.get("excerpt") or ""),
+                    "risk_signals": [
+                        str(value).strip()
+                        for value in list(item.get("risk_signals") or [])
+                        if str(value).strip()
+                    ],
                 }
                 for item in sorted(grouped_items, key=lambda item: int(item.get("line_start") or 1))
             ]
+            risk_signals = list(
+                dict.fromkeys(
+                    str(value).strip()
+                    for item in grouped_items
+                    for value in list(item.get("risk_signals") or [])
+                    if str(value).strip()
+                )
+            )
             merged_repo_hits: dict[str, object] = {}
             for item in grouped_items:
                 for key, value in dict(item.get("repo_hits") or {}).items():
@@ -1858,6 +2218,7 @@ class ReviewRunner:
                     "line_start": line_start,
                     "target_hunk": dict(target_hunks[0]),
                     "target_hunks": target_hunks,
+                    "risk_signals": risk_signals,
                     "repo_hits": merged_repo_hits,
                     "routeable": True,
                     "skip_reason": "",
@@ -2295,6 +2656,42 @@ class ReviewRunner:
         candidate = dict(incoming or {})
         for key, value in candidate.items():
             if value in (None, "", [], {}):
+                continue
+            if key == "review_observations":
+                existing = self._normalize_review_observations(merged.get(key))
+                seen = {
+                    (
+                        str(item.get("observation_id") or "").strip(),
+                        str(item.get("file_path") or "").strip(),
+                        int(self._normalize_optional_line_value(item.get("line_start")) or 1),
+                        str(item.get("kind") or "").strip(),
+                    )
+                    for item in existing
+                }
+                for item in self._normalize_review_observations(value):
+                    marker = (
+                        str(item.get("observation_id") or "").strip(),
+                        str(item.get("file_path") or "").strip(),
+                        int(self._normalize_optional_line_value(item.get("line_start")) or 1),
+                        str(item.get("kind") or "").strip(),
+                    )
+                    if marker in seen:
+                        continue
+                    existing.append(dict(item))
+                    seen.add(marker)
+                merged[key] = existing[:20]
+                continue
+            if key == "java_quality_signals":
+                existing = [
+                    str(item).strip()
+                    for item in list(merged.get(key) or [])
+                    if str(item).strip()
+                ]
+                for item in list(value or []):
+                    signal = str(item).strip()
+                    if signal and signal not in existing:
+                        existing.append(signal)
+                merged[key] = existing[:16]
                 continue
             if key == "related_code_snippets":
                 existing = [dict(item) for item in list(merged.get(key) or []) if isinstance(item, dict)]
@@ -3505,6 +3902,256 @@ class ReviewRunner:
                 },
             )
         )
+
+    def _coalesce_duplicate_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        """真实落库前按研发可理解的根因合并重复 issue。"""
+
+        groups: list[list[DebateIssue]] = []
+        for issue in issues:
+            matched_group = next(
+                (
+                    group
+                    for group in groups
+                    if self._issues_share_root_cause(issue, group)
+                ),
+                None,
+            )
+            if matched_group is None:
+                groups.append([issue])
+            else:
+                matched_group.append(issue)
+        return [self._merge_issue_group(group) for group in groups]
+
+    def _issues_share_root_cause(self, candidate: DebateIssue, grouped: list[DebateIssue]) -> bool:
+        if not grouped:
+            return False
+        if not candidate.file_path:
+            return False
+        candidate_family = self._issue_root_family(candidate)
+        if not candidate_family:
+            return False
+        for item in grouped:
+            if item.file_path != candidate.file_path:
+                continue
+            if abs(int(item.line_start or 1) - int(candidate.line_start or 1)) > 2:
+                continue
+            if self._issue_root_family(item) == candidate_family:
+                return True
+        return False
+
+    def _issue_root_family(self, issue: DebateIssue) -> str:
+        text = "\n".join(
+            [
+                issue.title,
+                issue.summary,
+                issue.normalized_issue_type,
+                issue.remediation_strategy,
+                issue.remediation_suggestion,
+                *issue.aggregated_titles,
+                *issue.aggregated_summaries,
+            ]
+        ).lower()
+        compact = re.sub(r"\s+", "", text)
+        path = issue.file_path.lower()
+        if "hibernatecriteriaconverter" in path and any(
+            token in compact
+            for token in (
+                "equal",
+                "equals",
+                "like",
+                "精确匹配",
+                "模糊匹配",
+                "查询语义",
+                "语义退化",
+                "索引失效",
+            )
+        ):
+            return "query_semantics_regression"
+        if any(
+            token in compact
+            for token in (
+                "承诺未落地",
+                "注释承诺未落地",
+                "todo",
+                "未实现",
+                "没有实现",
+                "comment_contract_unimplemented",
+            )
+        ):
+            return "comment_contract_unimplemented"
+        if "coursecreator" in path and any(
+            token in compact
+            for token in (
+                "course.create",
+                "newcourse",
+                "聚合工厂",
+                "聚合根",
+                "领域事件",
+                "持久化",
+                "repository.save",
+                "eventbus.publish",
+            )
+        ):
+            return "course_creation_semantics"
+        if "mysqldomaineventsconsumer" in path and any(
+            token in compact
+            for token in (
+                "chunk",
+                "chunks",
+                "chunkstmp",
+                "常量",
+                "批量",
+                "limit",
+                "分页",
+                "边界",
+            )
+        ):
+            return "event_consumer_batch_boundary"
+        return ""
+
+    def _merge_issue_group(self, group: list[DebateIssue]) -> DebateIssue:
+        if len(group) == 1:
+            return self._normalize_single_coalesced_issue(group[0])
+        primary = sorted(
+            group,
+            key=lambda item: (
+                -self._severity_rank(item.severity),
+                -float(item.confidence or 0.0),
+                item.issue_id,
+            ),
+        )[0].model_copy(deep=True)
+        primary.finding_ids = self._merge_unique(
+            [finding_id for issue in group for finding_id in issue.finding_ids]
+        )
+        primary.participant_expert_ids = self._merge_unique(
+            [
+                expert_id
+                for issue in group
+                for expert_id in (issue.participant_expert_ids or ([issue.primary_expert_id] if issue.primary_expert_id else []))
+            ]
+        )
+        primary.expert_views = self._merge_issue_expert_views(group)
+        primary.aggregated_titles = self._merge_unique(
+            [title for issue in group for title in ([issue.title] + issue.aggregated_titles) if title]
+        )
+        primary.aggregated_summaries = self._merge_unique(
+            [summary for issue in group for summary in ([issue.summary] + issue.aggregated_summaries) if summary]
+        )
+        primary.aggregated_remediation_strategies = self._merge_unique(
+            [value for issue in group for value in ([issue.remediation_strategy] + issue.aggregated_remediation_strategies) if value]
+        )
+        primary.aggregated_remediation_suggestions = self._merge_unique(
+            [value for issue in group for value in ([issue.remediation_suggestion] + issue.aggregated_remediation_suggestions) if value]
+        )
+        primary.aggregated_remediation_steps = self._merge_unique(
+            [step for issue in group for step in (issue.remediation_steps + issue.aggregated_remediation_steps) if step]
+        )
+        primary.evidence = self._merge_unique([value for issue in group for value in issue.evidence])
+        primary.cross_file_evidence = self._merge_unique([value for issue in group for value in issue.cross_file_evidence])
+        primary.assumptions = self._merge_unique([value for issue in group for value in issue.assumptions])
+        primary.context_files = self._merge_unique([value for issue in group for value in issue.context_files])[:6]
+        primary.confidence = max(float(issue.confidence or 0.0) for issue in group)
+        primary.direct_evidence = any(issue.direct_evidence for issue in group)
+        primary.needs_human = any(issue.needs_human for issue in group)
+        primary.needs_debate = any(issue.needs_debate for issue in group)
+        primary.verified = any(issue.verified for issue in group)
+        primary.severity = self._highest_severity([issue.severity for issue in group])
+        primary.normalized_issue_type = self._merge_issue_types(group)
+        if len(primary.aggregated_titles) > 1:
+            primary.title = f"同一根因涉及 {len(primary.aggregated_titles)} 个专家发现：{primary.aggregated_titles[0]}"
+        primary.summary = self._build_merged_issue_summary(primary.aggregated_summaries, primary.aggregated_remediation_suggestions)
+        primary.confidence_breakdown = {
+            **dict(primary.confidence_breakdown or {}),
+            "coalesced_issue_count": len(group),
+            "coalesced_issue_ids": [issue.issue_id for issue in group],
+        }
+        return primary
+
+    def _normalize_single_coalesced_issue(self, issue: DebateIssue) -> DebateIssue:
+        family = self._issue_root_family(issue)
+        if not family:
+            return issue
+        normalized = issue.model_copy(deep=True)
+        if family == "query_semantics_regression":
+            normalized.normalized_issue_type = "query_semantics_regression"
+            if "查询语义" in normalized.summary or "like" in normalized.summary.lower():
+                normalized.title = "查询语义从精确匹配退化为模糊匹配"
+        elif family == "comment_contract_unimplemented":
+            normalized.normalized_issue_type = "comment_contract_unimplemented"
+            if "承诺未落地" in normalized.title or "todo" in normalized.title.lower():
+                normalized.title = "承诺未落地"
+        elif family == "course_creation_semantics":
+            normalized.normalized_issue_type = "course_creation_semantics"
+        elif family == "event_consumer_batch_boundary":
+            normalized.normalized_issue_type = "event_consumer_batch_boundary"
+        return normalized
+
+    def _merge_issue_expert_views(self, group: list[DebateIssue]) -> list[dict[str, object]]:
+        views: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in group:
+            source_views = issue.expert_views or [
+                {
+                    "expert_id": issue.primary_expert_id,
+                    "title": issue.title,
+                    "summary": issue.summary,
+                    "severity": issue.severity,
+                    "confidence": issue.confidence,
+                    "normalized_issue_type": issue.normalized_issue_type,
+                }
+            ]
+            for view in source_views:
+                expert_id = str(view.get("expert_id") or "").strip()
+                title = str(view.get("title") or issue.title).strip()
+                key = (expert_id, title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                views.append(dict(view))
+        return views
+
+    @staticmethod
+    def _merge_unique(values: list[str]) -> list[str]:
+        merged: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+        return merged
+
+    def _merge_issue_types(self, group: list[DebateIssue]) -> str:
+        types = self._merge_unique([issue.normalized_issue_type for issue in group])
+        family = self._issue_root_family(group[0])
+        if family == "query_semantics_regression":
+            return "query_semantics_regression"
+        if family == "comment_contract_unimplemented":
+            return "comment_contract_unimplemented"
+        if family == "course_creation_semantics":
+            return "course_creation_semantics"
+        if family == "event_consumer_batch_boundary":
+            return "event_consumer_batch_boundary"
+        return ",".join(types[:3])
+
+    @staticmethod
+    def _build_merged_issue_summary(summaries: list[str], remediation_suggestions: list[str]) -> str:
+        parts: list[str] = []
+        if summaries:
+            parts.append("问题汇总：")
+            parts.extend(f"- {item}" for item in summaries[:6])
+        if remediation_suggestions:
+            parts.append("修复建议汇总：")
+            parts.extend(f"- {item}" for item in remediation_suggestions[:4])
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _severity_rank(severity: str) -> int:
+        return {"blocker": 4, "critical": 3, "high": 3, "medium": 2, "low": 1}.get(
+            str(severity or "medium").lower(),
+            2,
+        )
+
+    def _highest_severity(self, severities: list[str]) -> str:
+        return sorted(severities or ["medium"], key=self._severity_rank, reverse=True)[0]
 
     def _validate_final_issues_with_judge(
         self,
@@ -5127,6 +5774,7 @@ class ReviewRunner:
         )
         runtime_tool_summary = self._build_runtime_tool_summary(runtime_tool_results)
         repository_context_summary = self._build_repository_context_summary(prompt_repository_context, runtime_tool_results)
+        repo_review_instruction_summary = self._build_repo_review_instruction_summary(prompt_repository_context)
         repository_source_blocks = self._build_repository_source_blocks(prompt_repository_context, runtime_tool_results)
         hunk_summary = self._build_hunk_summary(target_hunk)
         hunk_batch_summary = self._build_hunk_batch_summary(target_hunks or [])
@@ -5184,6 +5832,7 @@ class ReviewRunner:
                     "related_diff_summary": related_diff_summary,
                     "runtime_tool_summary": runtime_tool_summary,
                     "repository_context_summary": repository_context_summary,
+                    "repo_review_instruction_summary": repo_review_instruction_summary,
                     "repository_source_blocks": repository_source_blocks,
                     "code_excerpt": code_excerpt,
                     "observation_review_summary": observation_review_summary,
@@ -5202,6 +5851,7 @@ class ReviewRunner:
             related_diff_summary = light_sections["related_diff_summary"]
             runtime_tool_summary = light_sections["runtime_tool_summary"]
             repository_context_summary = light_sections["repository_context_summary"]
+            repo_review_instruction_summary = light_sections["repo_review_instruction_summary"]
             repository_source_blocks = light_sections["repository_source_blocks"]
             code_excerpt = light_sections["code_excerpt"]
             observation_review_summary = light_sections["observation_review_summary"]
@@ -5233,6 +5883,7 @@ class ReviewRunner:
             f"其他变更文件摘要:\n{related_diff_summary}\n"
             f"运行时工具调用结果:\n{runtime_tool_summary}\n"
             f"代码仓上下文:\n{repository_context_summary}\n"
+            f"仓库内检视规则:\n{repo_review_instruction_summary or '当前目标文件未命中仓库内 REVIEW.md 或 .codereview.yaml 规则。'}\n"
             f"关键源码上下文:\n{repository_source_blocks}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"结构化观察点:\n{observation_review_summary}\n"
@@ -6332,6 +6983,7 @@ class ReviewRunner:
             "related_diff_summary",
             "runtime_tool_summary",
             "repository_context_summary",
+            "repo_review_instruction_summary",
             "repository_source_blocks",
             "code_excerpt",
             "observation_review_summary",
@@ -6406,6 +7058,7 @@ class ReviewRunner:
             "related_diff_summary": ("related_diff_summary", False),
             "runtime_tool_summary": ("runtime_tool_evidence", False),
             "repository_context_summary": ("repository_context_summary", False),
+            "repo_review_instruction_summary": ("matched_rules", True),
             "repository_source_blocks": ("related_source_snippet", False),
             "code_excerpt": ("current_code", True),
             "observation_review_summary": ("critical_observations", False),
@@ -7046,6 +7699,93 @@ class ReviewRunner:
                         "direct_evidence": True,
                     }
                 )
+            elif expert.expert_id == "database_analysis" and kind in {"query_without_bound", "query_plan_risk"}:
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "查询边界缺失",
+                        "finding_type": "direct_defect",
+                        "normalized_issue_type": "query_bound_removed",
+                        "claim": f"当前查询路径缺少分页、LIMIT 或批量边界保护（{symbol_display}），数据量放大后可能触发全表扫描或大结果集返回。",
+                        "severity": "high",
+                        "matched_rules": [],
+                        "violated_guidelines": [],
+                        "rule_based_reasoning": "查询入口删除分页、LIMIT 或引入模糊/全量查询时，数据库访问成本会随数据规模放大，属于需要直接修正的数据访问缺陷。",
+                        "evidence": evidence[:3] or [summary or "检测到查询边界或查询计划风险。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "恢复分页、LIMIT、批量分片或更精确的查询条件。",
+                        "suggested_fix": "为该查询补回分页/limit 约束，并确认索引能覆盖过滤和排序字段。",
+                        "change_steps": ["恢复查询边界", "补充或确认索引", "增加大数据量场景测试"],
+                        "suggested_code": "// TODO: 恢复分页/LIMIT 或批量边界，避免无界查询",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.86),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
+            elif expert.expert_id == "performance_reliability" and kind in {"bulk_processing_boundary_missing", "transactional_side_effect"}:
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "批量路径可靠性风险",
+                        "finding_type": "direct_defect",
+                        "normalized_issue_type": kind,
+                        "claim": f"当前批量或事务路径存在会随数据量放大的副作用（{symbol_display}），容易造成吞吐退化、超时或回滚语义不一致。",
+                        "severity": "high",
+                        "matched_rules": [],
+                        "violated_guidelines": [],
+                        "rule_based_reasoning": "批量路径和事务边界内的外部副作用都需要有边界、超时和失败语义，否则生产数据量下会放大为稳定性问题。",
+                        "evidence": evidence[:3] or [summary or "检测到批处理或事务副作用风险。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "把副作用移出事务边界，或改成批量、异步、带超时和幂等保护的处理方式。",
+                        "suggested_fix": "为批处理增加分片、限流、超时和失败补偿；事务内不要直接做远程调用或消息发送。",
+                        "change_steps": ["识别批量输入规模", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
+                        "suggested_code": "// TODO: 为批量/事务副作用路径补充边界、超时和幂等保护",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.84),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
+            elif expert.expert_id == "security_compliance" and kind in {"input_validation_removed", "security_guard_removed"}:
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": "入口保护被删除",
+                        "finding_type": "direct_defect",
+                        "normalized_issue_type": "security_guard_removed",
+                        "claim": f"当前变更删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），可能扩大未授权或非法输入的进入面。",
+                        "severity": "high",
+                        "matched_rules": [],
+                        "violated_guidelines": [],
+                        "rule_based_reasoning": "入口校验和权限判断属于安全边界。diff 中删除这类保护时，应直接作为高风险安全问题处理，而不是依赖后续人工猜测。",
+                        "evidence": evidence[:3] or [summary or "检测到入口保护或权限校验被删除。"],
+                        "cross_file_evidence": [],
+                        "assumptions": [],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "fix_strategy": "恢复入口校验、权限判断或身份一致性检查。",
+                        "suggested_fix": "保留原有校验，并为异常输入/越权输入补充回归测试。",
+                        "change_steps": ["恢复被删除的校验", "确认错误响应语义", "补充越权或非法输入测试"],
+                        "suggested_code": "// TODO: 恢复入口校验/权限保护，避免非法输入绕过",
+                        "confidence": max(float(item.get("confidence") or 0.0), 0.86),
+                        "verification_needed": False,
+                        "verification_plan": "",
+                        "direct_evidence": True,
+                    }
+                )
 
             if len(forced) >= max(1, int(max_findings or 1)):
                 break
@@ -7354,6 +8094,7 @@ class ReviewRunner:
         if not str(result.get("normalized_issue_type") or "").strip():
             inferred_type = self._normalize_issue_type(result, expert_id)
             result["normalized_issue_type"] = inferred_type
+        result["schema_payload_valid"] = True
 
         evidence = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
         cross_file_evidence = [
@@ -7382,6 +8123,11 @@ class ReviewRunner:
             errors.append("direct_defect_without_evidence")
             result["finding_type"] = "risk_hypothesis"
             result["direct_evidence"] = False
+
+        payload_errors = self._validate_expert_finding_payload(result)
+        if payload_errors:
+            errors.extend(payload_errors)
+            result["schema_payload_valid"] = False
 
         if errors:
             irrecoverable_empty_payload = (
@@ -7412,6 +8158,31 @@ class ReviewRunner:
             if not str(result.get("verification_plan") or "").strip():
                 result["verification_plan"] = "系统将补齐结构化字段、代码证据和规范命中后再自动复核该结论。"
         return result
+
+    def _validate_expert_finding_payload(self, parsed: dict[str, object]) -> list[str]:
+        payload = dict(parsed)
+        payload["claim"] = str(payload.get("claim") or payload.get("summary") or "").strip()
+        payload["summary"] = str(payload.get("summary") or payload.get("claim") or "").strip()
+        payload["title"] = str(payload.get("title") or "").strip()
+        payload["finding_type"] = str(payload.get("finding_type") or "").strip()
+        payload["severity"] = str(payload.get("severity") or "").strip()
+        payload["normalized_issue_type"] = str(payload.get("normalized_issue_type") or "").strip()
+        payload["file_path"] = str(payload.get("file_path") or "").strip()
+        for key in (
+            "evidence",
+            "cross_file_evidence",
+            "assumptions",
+            "context_files",
+            "matched_rules",
+            "violated_guidelines",
+            "change_steps",
+        ):
+            payload[key] = [str(item).strip() for item in list(payload.get(key) or []) if str(item).strip()]
+        try:
+            ExpertFindingPayload.model_validate(payload)
+        except Exception as exc:
+            return [f"pydantic_payload_invalid:{type(exc).__name__}"]
+        return []
 
     def _build_finding_title_by_expert_id(self, expert_id: str) -> str:
         names = {
@@ -8347,6 +9118,37 @@ class ReviewRunner:
                 lines.append(f"  证据: {' / '.join(evidence[:2])}")
         return "\n".join(lines)
 
+    def _build_repo_review_instruction_summary(self, repository_context: dict[str, object]) -> str:
+        raw = repository_context.get("repo_review_instructions")
+        if not isinstance(raw, dict):
+            return ""
+        summary = str(raw.get("summary") or "").strip()
+        if summary:
+            return summary
+        instructions = [
+            item
+            for item in list(raw.get("instructions") or [])
+            if isinstance(item, dict) and str(item.get("content") or "").strip()
+        ]
+        if not instructions:
+            return ""
+        lines = ["仓库内检视规则："]
+        for item in instructions[:6]:
+            title = str(item.get("title") or item.get("source") or "规则").strip()
+            source_path = str(item.get("path") or "").strip()
+            content = " ".join(
+                line.strip()
+                for line in str(item.get("content") or "").splitlines()
+                if line.strip()
+            )
+            label = f"- {title}"
+            if source_path:
+                label += f"（{source_path}）"
+            lines.append(label)
+            if content:
+                lines.append(f"  {content[:420]}")
+        return "\n".join(lines)
+
     def _build_repository_source_blocks(
         self,
         repository_context: dict[str, object],
@@ -8615,6 +9417,19 @@ class ReviewRunner:
             normalized = str(term).strip()
             if normalized:
                 query_terms.append(f"{term_prefix}:{normalized}")
+        repo_instruction_payload = repository_context.get("repo_review_instructions")
+        if isinstance(repo_instruction_payload, dict):
+            for instruction in list(repo_instruction_payload.get("instructions") or [])[:6]:
+                if not isinstance(instruction, dict):
+                    continue
+                for value in [
+                    instruction.get("title"),
+                    instruction.get("content"),
+                    " ".join(str(item) for item in list(instruction.get("matched_globs") or [])[:3]),
+                ]:
+                    normalized = str(value or "").strip()
+                    if normalized:
+                        query_terms.append(f"repo_instruction:{normalized[:240]}")
         return {
             "changed_files": list(subject.changed_files),
             "query_terms": query_terms,

@@ -22,7 +22,8 @@ def build_routing_system_prompt() -> str:
         "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
         "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
         "SQL、事务、schema、索引 -> database_analysis；"
-        "批处理、锁竞争、超时重试、故障放大 -> performance_reliability。"
+        "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+        "影响范围、调用链、测试范围 -> change_impact_analysis。"
     )
 
 
@@ -44,7 +45,8 @@ def build_expert_selection_system_prompt() -> str:
         "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
         "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
         "SQL、事务、schema、索引 -> database_analysis；"
-        "批处理、锁竞争、超时重试、故障放大 -> performance_reliability。"
+        "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+        "影响范围、调用链、测试范围 -> change_impact_analysis。"
     )
 
 
@@ -111,7 +113,8 @@ def build_routing_user_prompt(
         "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
         "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
         "- database_analysis: SQL、事务、schema、索引\n"
-        "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n\n"
+        "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+        "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
         f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
         f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
         "请输出 JSON，格式为：\n"
@@ -176,7 +179,8 @@ def build_expert_selection_user_prompt(
         "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
         "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
         "- database_analysis: SQL、事务、schema、索引\n"
-        "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n\n"
+        "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+        "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
         f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
         "请输出 JSON，格式为：\n"
         "{\n"

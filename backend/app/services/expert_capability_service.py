@@ -188,6 +188,17 @@ class ExpertCapabilityService:
             "ddd_architecture": ["aggregate", "domain", "entity", "value object", "repository", "application service"],
             "ddd_specification": ["aggregate", "domain", "entity", "value object", "repository", "application service"],
             "maintainability_code_health": ["todo", "if ", "switch", "else", "dup", "helper", "util"],
+            "change_impact_analysis": [
+                "impact",
+                "dependency",
+                "call graph",
+                "entrypoint",
+                "controller",
+                "repository",
+                "test scope",
+                "影响",
+                "测试范围",
+            ],
         }
         return mapping.get(expert_id, [])
 

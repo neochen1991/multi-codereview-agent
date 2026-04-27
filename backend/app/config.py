@@ -28,6 +28,7 @@ class Settings(BaseModel):
             "performance_reliability",
             "maintainability_code_health",
             "test_verification",
+            "change_impact_analysis",
         ]
     )
     DEFAULT_LLM_PROVIDER: str = "dashscope-openai-compatible"

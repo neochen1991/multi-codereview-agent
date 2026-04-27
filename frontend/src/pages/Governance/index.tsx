@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Card, Col, Empty, Row, Space, Statistic, Tag, Typography } from "antd";
 
-import { governanceApi, type GovernanceMetrics, type LlmTimeoutMetrics } from "@/services/api";
+import {
+  governanceApi,
+  type GovernanceMetrics,
+  type LlmTimeoutMetrics,
+  type RuntimeThresholdRecommendations,
+} from "@/services/api";
 
 const { Paragraph, Text } = Typography;
 
@@ -9,14 +14,20 @@ const { Paragraph, Text } = Typography;
 const GovernancePage: React.FC = () => {
   const [metrics, setMetrics] = useState<GovernanceMetrics | null>(null);
   const [llmTimeoutMetrics, setLlmTimeoutMetrics] = useState<LlmTimeoutMetrics | null>(null);
+  const [thresholdRecommendations, setThresholdRecommendations] = useState<RuntimeThresholdRecommendations | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     setLoading(true);
-    void Promise.all([governanceApi.getQualityMetrics(), governanceApi.getLlmTimeoutMetrics()])
-      .then(([quality, llmTimeout]) => {
+    void Promise.all([
+      governanceApi.getQualityMetrics(),
+      governanceApi.getLlmTimeoutMetrics(),
+      governanceApi.getRuntimeThresholdRecommendations(),
+    ])
+      .then(([quality, llmTimeout, recommendations]) => {
         setMetrics(quality);
         setLlmTimeoutMetrics(llmTimeout);
+        setThresholdRecommendations(recommendations);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -59,6 +70,68 @@ const GovernancePage: React.FC = () => {
             </Card>
           </Col>
         </Row>
+      </Card>
+
+      <Card className="module-card" title="反馈阈值建议" style={{ marginTop: 16 }} loading={loading}>
+        <Paragraph>
+          这里基于历史人工反馈生成阈值建议，只展示建议，不会自动修改运行时配置。建议生效仍需要人工到设置页确认。
+        </Paragraph>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Tag color={thresholdRecommendations?.should_tighten ? "warning" : "success"}>
+            {thresholdRecommendations?.should_tighten ? "建议收紧阈值" : "暂无收紧建议"}
+          </Tag>
+          <Tag color="default">{thresholdRecommendations?.applied ? "已自动应用" : "未自动应用"}</Tag>
+        </Space>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12} xl={6}>
+            <Card className="module-card">
+              <Statistic
+                title="建议 P1 阈值"
+                value={thresholdRecommendations?.recommended_thresholds.issue_confidence_threshold_p1 || 0}
+                precision={2}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <Card className="module-card">
+              <Statistic
+                title="建议 P2 阈值"
+                value={thresholdRecommendations?.recommended_thresholds.issue_confidence_threshold_p2 || 0}
+                precision={2}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <Card className="module-card">
+              <Statistic
+                title="建议 P3 阈值"
+                value={thresholdRecommendations?.recommended_thresholds.issue_confidence_threshold_p3 || 0}
+                precision={2}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            <Card className="module-card">
+              <Statistic
+                title="提示类阈值"
+                value={thresholdRecommendations?.recommended_thresholds.hint_issue_confidence_threshold || 0}
+                precision={2}
+              />
+            </Card>
+          </Col>
+        </Row>
+        <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>
+          {thresholdRecommendations?.reason || "暂无阈值建议。"}
+        </Paragraph>
+        {thresholdRecommendations?.basis?.length ? (
+          <Space wrap style={{ marginTop: 12 }}>
+            {thresholdRecommendations.basis.slice(0, 6).map((item) => (
+              <Tag key={`${item.group}-${item.key}`} color="warning">
+                {`${item.group}:${item.key} · 样本 ${item.sample_count} · 误报 ${(item.false_positive_rate * 100).toFixed(0)}%`}
+              </Tag>
+            ))}
+          </Space>
+        ) : null}
       </Card>
 
       <Card className="module-card" title="LLM Timeout 观测" style={{ marginTop: 16 }} loading={loading}>

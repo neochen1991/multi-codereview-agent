@@ -21,6 +21,13 @@ def expert_metrics() -> list[dict[str, object]]:
     return review_service_module.review_service.build_expert_metrics()
 
 
+@router.get("/governance/runtime-threshold-recommendations")
+def runtime_threshold_recommendations() -> dict[str, object]:
+    """返回基于历史误报画像生成的阈值建议，不自动写回配置。"""
+
+    return review_service_module.review_service.build_runtime_threshold_recommendations()
+
+
 @router.get("/governance/llm-timeout-metrics")
 def llm_timeout_metrics() -> dict[str, object]:
     """返回最近一段时间的 LLM timeout 与耗时分布。"""

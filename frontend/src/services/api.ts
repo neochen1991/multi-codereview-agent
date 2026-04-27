@@ -316,6 +316,12 @@ export interface ConfidenceSummary {
   risk_hypothesis_count?: number;
   test_gap_count?: number;
   design_concern_count?: number;
+  llm_judged_issue_count?: number;
+  llm_judge_accepted_count?: number;
+  llm_judge_needs_verification_count?: number;
+  llm_judge_needs_human_count?: number;
+  llm_judge_rejected_count?: number;
+  quality_filtered_issue_count?: number;
 }
 
 export interface LlmUsageSummary {
@@ -323,6 +329,43 @@ export interface LlmUsageSummary {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+}
+
+export interface ImpactSymbol {
+  file_path: string;
+  symbol: string;
+  kind: string;
+  line_start: number;
+}
+
+export interface ImpactFile {
+  file_path: string;
+  relationship: string;
+  reason: string;
+  risk_level: string;
+}
+
+export interface TestScopeRecommendation {
+  scope: string;
+  reason: string;
+  paths: string[];
+  priority: string;
+}
+
+export interface ImpactReport {
+  graph_status: string;
+  graph_indexed_at?: string;
+  graph_commit?: string;
+  changed_files: string[];
+  changed_symbols: ImpactSymbol[];
+  impacted_files: ImpactFile[];
+  impacted_modules: string[];
+  external_entrypoints: string[];
+  risk_level: string;
+  recommended_test_scope: TestScopeRecommendation[];
+  must_run_tests: string[];
+  manual_verification: string[];
+  limitations: string[];
 }
 
 export interface ReviewReport {
@@ -337,6 +380,7 @@ export interface ReviewReport {
   llm_usage_summary: LlmUsageSummary;
   human_review_status: string;
   issue_filter_decisions?: IssueFilterDecision[];
+  impact_report?: ImpactReport | null;
 }
 
 export interface GovernanceMetrics {
@@ -346,6 +390,24 @@ export interface GovernanceMetrics {
   debate_survival_rate: number;
   needs_human_count: number;
   false_positive_count: number;
+}
+
+export interface RuntimeThresholdRecommendations {
+  applied: boolean;
+  should_tighten: boolean;
+  recommended_thresholds: {
+    issue_confidence_threshold_p1: number;
+    issue_confidence_threshold_p2: number;
+    issue_confidence_threshold_p3: number;
+    hint_issue_confidence_threshold: number;
+  };
+  basis: Array<{
+    group: string;
+    key: string;
+    sample_count: number;
+    false_positive_rate: number;
+  }>;
+  reason: string;
 }
 
 export interface LlmTimeoutSample {
@@ -454,6 +516,12 @@ export interface RuntimeSettings {
   suppress_low_risk_hint_issues: boolean;
   hint_issue_confidence_threshold: number;
   hint_issue_evidence_cap: number;
+  enable_llm_evidence_filter: boolean;
+  llm_evidence_filter_confidence_threshold: number;
+  llm_evidence_filter_timeout_seconds: number;
+  enable_llm_issue_judge: boolean;
+  llm_issue_judge_confidence_threshold: number;
+  llm_issue_judge_timeout_seconds: number;
   rule_screening_mode: "heuristic" | "llm";
   rule_screening_batch_size: number;
   rule_screening_llm_timeout_seconds: number;
@@ -881,6 +949,10 @@ export const governanceApi = {
   },
   async getLlmTimeoutMetrics(): Promise<LlmTimeoutMetrics> {
     const { data } = await api.get("/governance/llm-timeout-metrics");
+    return data;
+  },
+  async getRuntimeThresholdRecommendations(): Promise<RuntimeThresholdRecommendations> {
+    const { data } = await api.get("/governance/runtime-threshold-recommendations");
     return data;
   },
 };

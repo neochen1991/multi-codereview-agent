@@ -57,6 +57,7 @@ class ArtifactService:
             "status": review.status,
             "phase": review.phase,
             "pending_human_issue_ids": review.pending_human_issue_ids,
+            "impact_report": dict(review.subject.metadata or {}).get("impact_report"),
             "updated_at": review.updated_at,
         }
         write_json(artifact_dir / "summary_comment.json", summary_comment)

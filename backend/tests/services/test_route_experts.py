@@ -73,3 +73,27 @@ def test_route_experts_reads_change_slice_signals():
         "mq_analysis",
         "performance_reliability",
     ]
+
+
+def test_route_experts_adds_specialists_from_hunk_risk_signals():
+    state = {
+        "selected_experts": ["maintainability_code_health"],
+        "risk_hints": [],
+        "changed_files": [],
+        "unified_diff": "",
+        "change_slices": [
+            {
+                "file_path": "src/main/java/app/OwnerController.java",
+                "risk_signals": ["security_guard_removed", "query_bound_removed", "comment_contract_unimplemented"],
+            }
+        ],
+    }
+
+    routed = route_experts(state)
+
+    selected = routed["selected_experts"]
+    assert selected[0] == "maintainability_code_health"
+    assert "security_compliance" in selected
+    assert "correctness_business" in selected
+    assert "database_analysis" in selected
+    assert "performance_reliability" in selected

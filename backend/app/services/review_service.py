@@ -20,7 +20,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.knowledge import KnowledgeDocument
 from app.domain.models.message import ConversationMessage
-from app.domain.models.report import ReviewReport
+from app.domain.models.report import ImpactReport, ReviewReport
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.domain.models.review_tool_plugin import ReviewToolPlugin
@@ -32,6 +32,7 @@ from app.services.expert_registry import ExpertRegistry
 from app.services.extension_editor_service import ExtensionEditorService
 from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.knowledge_service import KnowledgeService
+from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_runner import ReviewClosedError, ReviewRunner
@@ -77,6 +78,7 @@ class ReviewService:
         self.feedback_learner_service = None
         self.knowledge_service = None
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
+        self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
@@ -944,7 +946,7 @@ class ReviewService:
         issues = self.issue_repo.list(review_id)
         findings = self.finding_repo.list(review_id)
         finding_by_id = {item.finding_id: item for item in findings}
-        if self._issues_require_finding_rehydration(issues):
+        if self._issues_require_finding_rehydration(issues, findings):
             return self._rehydrate_issues_from_findings(review_id, issues, findings)
         return [self._realign_issue_location(issue, finding_by_id) for issue in issues]
 
@@ -1054,6 +1056,17 @@ class ReviewService:
 
     def build_expert_metrics(self) -> list[dict[str, object]]:
         return self.feedback_learner_service.build_expert_metrics()
+
+    def build_runtime_threshold_recommendations(self) -> dict[str, object]:
+        runtime = self.get_runtime_settings()
+        return self.feedback_learner_service.build_runtime_threshold_recommendations(
+            {
+                "issue_confidence_threshold_p1": runtime.issue_confidence_threshold_p1,
+                "issue_confidence_threshold_p2": runtime.issue_confidence_threshold_p2,
+                "issue_confidence_threshold_p3": runtime.issue_confidence_threshold_p3,
+                "hint_issue_confidence_threshold": runtime.hint_issue_confidence_threshold,
+            }
+        )
 
     def build_llm_timeout_metrics(self, *, tail_lines: int = 4000) -> dict[str, object]:
         """从后端日志中聚合最近一段时间的 LLM timeout 与耗时概览。"""
@@ -1229,6 +1242,24 @@ class ReviewService:
         paged_issues = self._slice_items(issues, offset=issues_offset, limit=issues_limit)
         light_issues = [self._build_light_report_issue(item) for item in paged_issues]
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
+        impact_report = self._build_impact_report_for_review(review)
+        llm_judge_rejected_count = len(
+            [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "llm_judge_rejected"]
+        )
+        quality_filtered_issue_count = len(
+            [
+                item
+                for item in issue_filter_decisions
+                if str(item.get("rule_code") or "")
+                in {
+                    "llm_judge_rejected",
+                    "conditional_conclusion",
+                    "removed_line_only",
+                    "below_priority_confidence_threshold",
+                    "below_issue_priority_threshold",
+                }
+            ]
+        )
         issue_count = issues_total_count
         summary = (
             f"本次代码审核共收敛 {findings_total_count} 条发现，"
@@ -1249,6 +1280,7 @@ class ReviewService:
             human_review_status=review.human_review_status,
             llm_usage_summary=self.message_repo.summarize_llm_usage(review_id),
             issue_filter_decisions=issue_filter_decisions,
+            impact_report=impact_report,
             confidence_summary={
                 "high_confidence_count": len(
                     [item for item in findings if item.confidence >= 0.85]
@@ -1276,8 +1308,17 @@ class ReviewService:
                 "llm_judge_needs_human_count": len(
                     [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
                 ),
+                "llm_judge_rejected_count": llm_judge_rejected_count,
+                "quality_filtered_issue_count": quality_filtered_issue_count,
             },
         )
+
+    def _build_impact_report_for_review(self, review: ReviewTask) -> ImpactReport:
+        metadata = dict(review.subject.metadata or {})
+        cached = metadata.get("impact_report") or metadata.get("gitnexus_impact_report")
+        if isinstance(cached, dict):
+            return ImpactReport.model_validate(cached)
+        return self.gitnexus_impact_service.analyze(review.subject, self.get_runtime_settings())
 
     def _realign_issue_location(
         self,
@@ -1288,21 +1329,72 @@ class ReviewService:
             finding = finding_by_id.get(str(finding_id))
             if finding is None:
                 continue
-            return issue.model_copy(
-                update={
-                    "canonical_issue_id": str(issue.canonical_issue_id or issue.issue_id or "").strip(),
-                    "file_path": finding.file_path,
-                    "line_start": int(finding.line_start or 1),
-                }
+            return self._normalize_report_issue_family(
+                issue.model_copy(
+                    update={
+                        "canonical_issue_id": str(issue.canonical_issue_id or issue.issue_id or "").strip(),
+                        "file_path": finding.file_path,
+                        "line_start": int(finding.line_start or 1),
+                    }
+                )
             )
         if str(issue.canonical_issue_id or "").strip():
-            return issue
-        return issue.model_copy(update={"canonical_issue_id": str(issue.issue_id or "").strip()})
+            return self._normalize_report_issue_family(issue)
+        return self._normalize_report_issue_family(
+            issue.model_copy(update={"canonical_issue_id": str(issue.issue_id or "").strip()})
+        )
 
-    def _issues_require_finding_rehydration(self, issues: list[DebateIssue]) -> bool:
+    def _normalize_report_issue_family(self, issue: DebateIssue) -> DebateIssue:
+        text = "\n".join(
+            [
+                issue.title,
+                issue.summary,
+                issue.normalized_issue_type,
+                *issue.aggregated_titles,
+                *issue.aggregated_summaries,
+            ]
+        ).lower()
+        compact = re.sub(r"\s+", "", text)
+        if "hibernatecriteriaconverter" in str(issue.file_path or "").lower() and any(
+            token in compact
+            for token in ("equal", "equals", "like", "精确匹配", "模糊匹配", "查询语义", "语义退化")
+        ):
+            return issue.model_copy(
+                update={
+                    "normalized_issue_type": "query_semantics_regression",
+                    "title": "查询语义从精确匹配退化为模糊匹配",
+                }
+            )
+        if any(
+            token in compact
+            for token in ("承诺未落地", "todo", "未实现", "没有实现", "comment_contract_unimplemented")
+        ):
+            return issue.model_copy(
+                update={
+                    "normalized_issue_type": "comment_contract_unimplemented",
+                    "title": "承诺未落地",
+                }
+            )
+        return issue
+
+    def _issues_require_finding_rehydration(
+        self,
+        issues: list[DebateIssue],
+        findings: list[ReviewFinding],
+    ) -> bool:
+        finding_by_id = {str(item.finding_id or "").strip(): item for item in findings}
         for issue in issues:
             finding_ids = [str(item or "").strip() for item in issue.finding_ids if str(item or "").strip()]
-            if len(finding_ids) > 1:
+            if len(finding_ids) <= 1:
+                continue
+            linked_findings = [finding_by_id[finding_id] for finding_id in finding_ids if finding_id in finding_by_id]
+            if len(linked_findings) <= 1:
+                continue
+            linked_paths = {str(item.file_path or "").strip() for item in linked_findings}
+            linked_lines = [int(item.line_start or 1) for item in linked_findings]
+            if len(linked_paths) > 1:
+                return True
+            if max(linked_lines) - min(linked_lines) > 2:
                 return True
         return False
 

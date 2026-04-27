@@ -64,6 +64,15 @@ def test_runtime_settings_service_prefers_config_for_system_fields(storage_root:
     assert "database_sources" not in sqlite_payload
 
 
+def test_runtime_settings_service_keeps_required_runtime_tools(storage_root: Path) -> None:
+    sqlite_repository = SqliteRuntimeSettingsRepository(storage_root / "app.db")
+    sqlite_repository.save_payload({"runtime_tool_allowlist": ["knowledge_search", "diff_inspector"]})
+
+    runtime = RuntimeSettingsService(storage_root).get()
+
+    assert "gitnexus_impact_analysis" in runtime.runtime_tool_allowlist
+
+
 def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_root: Path) -> None:
     service = RuntimeSettingsService(storage_root)
 
@@ -104,7 +113,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert runtime.database_sources[0].repo_url == "https://github.com/example/repo.git"
     assert runtime.default_analysis_mode == "light"
     assert runtime.standard_llm_timeout_seconds == 90
-    assert runtime.runtime_tool_allowlist == ["repo_context_search"]
+    assert runtime.runtime_tool_allowlist == ["repo_context_search", "gitnexus_impact_analysis"]
     assert runtime.light_llm_max_prompt_chars == 88000
     assert runtime.light_llm_max_input_tokens == 98000
 
@@ -148,6 +157,12 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
             "suppress_low_risk_hint_issues": False,
             "hint_issue_confidence_threshold": 0.91,
             "hint_issue_evidence_cap": 4,
+            "enable_llm_evidence_filter": True,
+            "llm_evidence_filter_confidence_threshold": 0.73,
+            "llm_evidence_filter_timeout_seconds": 42,
+            "enable_llm_issue_judge": True,
+            "llm_issue_judge_confidence_threshold": 0.76,
+            "llm_issue_judge_timeout_seconds": 43,
         }
     )
 
@@ -160,6 +175,12 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
     assert runtime.suppress_low_risk_hint_issues is False
     assert runtime.hint_issue_confidence_threshold == 0.91
     assert runtime.hint_issue_evidence_cap == 4
+    assert runtime.enable_llm_evidence_filter is True
+    assert runtime.llm_evidence_filter_confidence_threshold == 0.73
+    assert runtime.llm_evidence_filter_timeout_seconds == 42
+    assert runtime.enable_llm_issue_judge is True
+    assert runtime.llm_issue_judge_confidence_threshold == 0.76
+    assert runtime.llm_issue_judge_timeout_seconds == 43
 
     sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
     assert sqlite_payload["issue_filter_enabled"] is False
@@ -171,6 +192,12 @@ def test_runtime_settings_service_persists_issue_filter_governance_fields_in_sql
     assert sqlite_payload["suppress_low_risk_hint_issues"] is False
     assert sqlite_payload["hint_issue_confidence_threshold"] == 0.91
     assert sqlite_payload["hint_issue_evidence_cap"] == 4
+    assert sqlite_payload["enable_llm_evidence_filter"] is True
+    assert sqlite_payload["llm_evidence_filter_confidence_threshold"] == 0.73
+    assert sqlite_payload["llm_evidence_filter_timeout_seconds"] == 42
+    assert sqlite_payload["enable_llm_issue_judge"] is True
+    assert sqlite_payload["llm_issue_judge_confidence_threshold"] == 0.76
+    assert sqlite_payload["llm_issue_judge_timeout_seconds"] == 43
 
     config_repository = FileAppConfigRepository(config_path=storage_root.parent / "config.json", storage_root=storage_root)
     config_runtime = config_repository.get_runtime_settings()

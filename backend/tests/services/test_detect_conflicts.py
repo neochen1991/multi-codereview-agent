@@ -809,7 +809,7 @@ def test_detect_conflicts_keeps_same_line_secondary_problem_as_separate_issue():
     assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_combo_2"]
 
 
-def test_detect_conflicts_does_not_merge_same_line_same_title_when_issue_type_differs():
+def test_detect_conflicts_merges_same_line_query_semantics_family_even_when_issue_type_differs():
     state = {
         "issue_filter_config": {
             "issue_filter_enabled": False,
@@ -856,9 +856,66 @@ def test_detect_conflicts_does_not_merge_same_line_same_title_when_issue_type_di
 
     result = detect_conflicts(state)
 
-    assert len(result["conflicts"]) == 2
-    issue_types = {conflict["normalized_issue_type"] for conflict in result["conflicts"]}
-    assert issue_types == {"query_semantics_changed", "query_input_boundary_risk"}
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert set(conflict["finding_ids"]) == {"fdg_same_title_1", "fdg_same_title_2"}
+    assert conflict["primary_expert_id"] in {"database_analysis", "security_compliance"}
+    assert "query_semantics_changed" in {
+        view["normalized_issue_type"] for view in conflict["expert_views"]
+    }
+
+
+def test_detect_conflicts_merges_query_bound_and_query_plan_as_one_root_cause():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_bound_1",
+                "expert_id": "database_analysis",
+                "title": "查询边界缺失",
+                "summary": "SQL 删除 LIMIT :chunk 后，当前查询路径缺少分页或批量边界保护。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_bound_removed",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/MySqlDomainEventsConsumer.java",
+                "line_start": 37,
+                "evidence": ["- LIMIT :chunk", "+ ORDER BY occurred_on"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["批量读取必须保留分页或 LIMIT 边界"],
+            },
+            {
+                "finding_id": "fdg_bound_2",
+                "expert_id": "performance_reliability",
+                "title": "删除 LIMIT 可能导致大结果集",
+                "summary": "同一个查询从有限批量读取变成无界查询，数据量放大后会拖垮消费任务。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "query_plan_risk",
+                "severity": "high",
+                "confidence": 0.86,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/MySqlDomainEventsConsumer.java",
+                "line_start": 38,
+                "evidence": ["SELECT * FROM domain_events ORDER BY occurred_on"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询必须有边界"],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert set(conflict["finding_ids"]) == {"fdg_bound_1", "fdg_bound_2"}
+    assert conflict["primary_expert_id"] == "database_analysis"
 
 
 def test_detect_conflicts_merges_same_line_synonym_problem_types():

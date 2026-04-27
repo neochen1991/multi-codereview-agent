@@ -101,6 +101,14 @@ def build_repository_context_metadata(repository_context: dict[str, object]) -> 
             for item in list(repository_context.get("context_files") or [])[:8]
             if str(item).strip()
         ],
+        "repo_review_instruction_count": len(
+            list(
+                dict(repository_context.get("repo_review_instructions") or {}).get("instructions")
+                or []
+            )
+        )
+        if isinstance(repository_context.get("repo_review_instructions"), dict)
+        else 0,
     }
 
     def _compact_entries(key: str, *, symbol_key: str = "symbol") -> list[dict[str, object]]:

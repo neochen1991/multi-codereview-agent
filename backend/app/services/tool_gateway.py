@@ -17,6 +17,7 @@ from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.java_ddd_context_assembler import JavaDddContextAssembler
 from app.services.knowledge_retrieval_service import KnowledgeRetrievalService
 from app.services.memory_probe import MemoryProbe
+from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.postgres_metadata_service import PostgresMetadataService
 from app.services.repository_context_service import RepositoryContextService
 
@@ -47,6 +48,7 @@ class ReviewToolGateway:
         self._diff_excerpt = DiffExcerptService()
         self._java_ddd_context_assembler = JavaDddContextAssembler()
         self._postgres_metadata = PostgresMetadataService()
+        self._gitnexus_impact = GitNexusImpactService(root)
         self._plugin_loader = ToolPluginLoader(Path(__file__).resolve().parents[3] / "extensions" / "tools")
         self._register_defaults()
 
@@ -234,6 +236,7 @@ class ReviewToolGateway:
             "tool",
             self._repository_query_risk_inspector,
         )
+        self._gateway.register("gitnexus_impact_analysis", "tool", self._gitnexus_impact_analysis)
 
     def _invoke_plugin_tool(self, tool_name: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         plugin = self._plugin_loader.get(tool_name)
@@ -344,6 +347,31 @@ class ReviewToolGateway:
         return {
             "summary": f"提取 {file_path}:{line_start} 的 diff 片段",
             "excerpt": excerpt,
+        }
+
+    def _gitnexus_impact_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
+        subject_payload = dict(payload.get("subject") or {})
+        runtime_payload = dict(payload.get("runtime") or {})
+        subject = ReviewSubject.model_validate(
+            {
+                "subject_type": subject_payload.get("subject_type") or "mr",
+                "repo_id": subject_payload.get("repo_id") or "",
+                "project_id": subject_payload.get("project_id") or "",
+                "source_ref": subject_payload.get("source_ref") or "",
+                "target_ref": subject_payload.get("target_ref") or "",
+                "title": subject_payload.get("title") or "",
+                "mr_url": subject_payload.get("mr_url") or "",
+                "changed_files": list(subject_payload.get("changed_files") or []),
+                "unified_diff": subject_payload.get("unified_diff") or "",
+                "metadata": dict(subject_payload.get("metadata") or {}),
+            }
+        )
+        runtime = RuntimeSettings.model_validate(runtime_payload)
+        report = self._gitnexus_impact.analyze(subject, runtime)
+        return {
+            "summary": f"关联影响分析完成：{len(report.changed_files)} 个变更文件，风险等级 {report.risk_level}",
+            "success": True,
+            "impact_report": report.model_dump(mode="json"),
         }
 
     def _test_surface_locator(self, payload: dict[str, Any]) -> dict[str, Any]:

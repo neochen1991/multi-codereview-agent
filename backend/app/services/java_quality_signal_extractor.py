@@ -64,6 +64,27 @@ class JavaQualitySignalExtractor:
             signal_terms["unbounded_query_risk"] = query_risk_terms
             summary_parts.append("检测到分页或 limit 保护被移除")
 
+        security_guard_terms = self._detect_security_guard_removed(diff_excerpt)
+        if security_guard_terms:
+            signals.append("security_guard_removed")
+            matched_terms.extend(security_guard_terms)
+            signal_terms["security_guard_removed"] = security_guard_terms
+            summary_parts.append("检测到入口校验、权限或身份一致性保护被删除")
+
+        idempotency_terms = self._detect_idempotency_guard_removed(diff_excerpt)
+        if idempotency_terms:
+            signals.append("idempotency_guard_removed")
+            matched_terms.extend(idempotency_terms)
+            signal_terms["idempotency_guard_removed"] = idempotency_terms
+            summary_parts.append("检测到幂等或重复处理保护被删除")
+
+        lock_guard_terms = self._detect_lock_guard_removed(diff_excerpt)
+        if lock_guard_terms:
+            signals.append("lock_guard_removed")
+            matched_terms.extend(lock_guard_terms)
+            signal_terms["lock_guard_removed"] = lock_guard_terms
+            summary_parts.append("检测到锁或并发保护被删除")
+
         query_plan_terms = self._detect_query_plan_risk(diff_excerpt, combined)
         if query_plan_terms:
             signals.append("query_plan_risk")
@@ -289,6 +310,27 @@ class JavaQualitySignalExtractor:
                 "summary": "检测到查询缺少边界保护现象：{terms}",
                 "risk_hints": ["无分页", "全量扫描", "数据库压力"],
                 "confidence": 0.8,
+            },
+            "security_guard_removed": {
+                "kind": "security_guard_removed",
+                "summary": "检测到入口校验、权限或身份一致性保护被删除：{terms}",
+                "risk_hints": ["入口保护删除", "越权/非法输入风险", "安全边界弱化"],
+                "confidence": 0.86,
+                "tags": ["security", "guard"],
+            },
+            "idempotency_guard_removed": {
+                "kind": "idempotency_guard_removed",
+                "summary": "检测到幂等或重复处理保护被删除：{terms}",
+                "risk_hints": ["重复处理", "幂等失效", "消息/请求重放风险"],
+                "confidence": 0.84,
+                "tags": ["idempotency", "reliability"],
+            },
+            "lock_guard_removed": {
+                "kind": "lock_guard_removed",
+                "summary": "检测到锁或并发保护被删除：{terms}",
+                "risk_hints": ["并发保护删除", "竞态条件", "重复提交/状态错乱"],
+                "confidence": 0.84,
+                "tags": ["lock", "concurrency"],
             },
             "query_semantics_weakened": {
                 "kind": "query_semantics_changed",
@@ -538,6 +580,62 @@ class JavaQualitySignalExtractor:
                 terms.append("jdbcTemplate.query")
             return terms[:4]
         return []
+
+    def _detect_security_guard_removed(self, diff_excerpt: str) -> list[str]:
+        removed = "\n".join(self._removed_diff_lines(diff_excerpt)).lower()
+        added = "\n".join(self._added_diff_lines(diff_excerpt)).lower()
+        tokens = [
+            "@valid",
+            "bindingresult",
+            "rejectvalue",
+            "haspermission",
+            "permission",
+            "authorize",
+            "authenticated",
+            "ownerid",
+            "tenant",
+            "mismatch",
+            "csrf",
+            "sanitize",
+        ]
+        removed_terms = [token for token in tokens if token in removed and token not in added]
+        if not removed_terms:
+            return []
+        return removed_terms[:4]
+
+    def _detect_idempotency_guard_removed(self, diff_excerpt: str) -> list[str]:
+        removed = "\n".join(self._removed_diff_lines(diff_excerpt)).lower()
+        added = "\n".join(self._added_diff_lines(diff_excerpt)).lower()
+        tokens = ["idempotent", "idempotency", "duplicate", "deduplicate", "requestid", "eventid", "幂等", "重复消费"]
+        if any(token in removed for token in tokens) and not any(token in added for token in tokens):
+            return [token for token in tokens if token in removed][:4]
+        return []
+
+    def _detect_lock_guard_removed(self, diff_excerpt: str) -> list[str]:
+        removed = "\n".join(self._removed_diff_lines(diff_excerpt)).lower()
+        added = "\n".join(self._added_diff_lines(diff_excerpt)).lower()
+        tokens = ["synchronized", "lock(", "trylock", "unlock", "setnx", "redisson", "mutex"]
+        if any(token in removed for token in tokens) and not any(token in added for token in tokens):
+            return [token for token in tokens if token in removed][:4]
+        return []
+
+    def _removed_diff_lines(self, diff_excerpt: str) -> list[str]:
+        lines: list[str] = []
+        for line in str(diff_excerpt or "").splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("---") or not stripped.startswith("-"):
+                continue
+            lines.append(stripped[1:].strip())
+        return lines
+
+    def _added_diff_lines(self, diff_excerpt: str) -> list[str]:
+        lines: list[str] = []
+        for line in str(diff_excerpt or "").splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("+++") or not stripped.startswith("+"):
+                continue
+            lines.append(stripped[1:].strip())
+        return lines
 
     def _detect_naming_convention_violation(self, diff_excerpt: str) -> list[str]:
         added_identifiers: list[str] = []

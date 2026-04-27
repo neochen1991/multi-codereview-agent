@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
-from app.domain.models.report import ReviewReport
+from app.domain.models.report import ImpactReport, ReviewReport
 from app.domain.models.review import ReviewTask
 
 
@@ -16,6 +16,7 @@ def build_report(
     llm_usage_summary: dict[str, object],
     selected_expert_count: int,
     light_review_payload: dict[str, object],
+    impact_report: ImpactReport | dict[str, object] | None = None,
 ) -> ReviewReport:
     findings_total_count = len(findings)
     issues_total_count = len(issues)
@@ -32,6 +33,23 @@ def build_report(
     )
     llm_judge_needs_human_count = len(
         [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
+    )
+    llm_judge_rejected_count = len(
+        [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "llm_judge_rejected"]
+    )
+    quality_filtered_issue_count = len(
+        [
+            item
+            for item in issue_filter_decisions
+            if str(item.get("rule_code") or "")
+            in {
+                "llm_judge_rejected",
+                "conditional_conclusion",
+                "removed_line_only",
+                "below_priority_confidence_threshold",
+                "below_issue_priority_threshold",
+            }
+        ]
     )
     summary = (
         f"本次代码审核共收敛 {findings_total_count} 条发现，"
@@ -51,6 +69,7 @@ def build_report(
         human_review_status=review.human_review_status,
         llm_usage_summary=llm_usage_summary,
         issue_filter_decisions=issue_filter_decisions,
+        impact_report=ImpactReport.model_validate(impact_report) if impact_report else None,
         confidence_summary={
             "high_confidence_count": len([item for item in findings if item.confidence >= 0.85]),
             "debated_issue_count": len([item for item in issues if item.status in {"debating", "needs_human", "resolved"}]),
@@ -64,6 +83,8 @@ def build_report(
             "llm_judge_accepted_count": llm_judge_accepted_count,
             "llm_judge_needs_verification_count": llm_judge_needs_verification_count,
             "llm_judge_needs_human_count": llm_judge_needs_human_count,
+            "llm_judge_rejected_count": llm_judge_rejected_count,
+            "quality_filtered_issue_count": quality_filtered_issue_count,
         },
     )
 
