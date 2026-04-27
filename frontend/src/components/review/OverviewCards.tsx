@@ -1,6 +1,8 @@
 import React from "react";
 import { Card, Col, Row, Statistic, Tag } from "antd";
 
+import { getReviewPhaseLabel, getReviewStatusLabel } from "@/utils/reviewStatus";
+
 type OverviewCardsProps = {
   status: string;
   phase: string;
@@ -31,10 +33,8 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
   onIssueClick,
   onHumanGateClick,
 }) => {
-  const statusLabel =
-    status === "idle" ? "未开始" : status === "waiting_human" ? "待人工确认" : status;
-  const phaseLabel =
-    phase === "not_started" ? "尚未启动" : phase === "expert_review" ? "专家审查中" : phase;
+  const statusLabel = getReviewStatusLabel(status);
+  const phaseLabel = getReviewPhaseLabel(phase);
 
   return (
     <Row gutter={[16, 16]}>
@@ -69,7 +69,7 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onIssueClick ? "overview-stat-button-clickable" : ""}`} onClick={onIssueClick}>
           <Card className="module-card">
-            <Statistic title="争议议题" value={issueCount} />
+            <Statistic title="有效问题" value={issueCount} />
           </Card>
         </button>
       </Col>

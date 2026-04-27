@@ -88,8 +88,8 @@ class TestScopeRecommendation(BaseModel):
 class ImpactReport(BaseModel):
     """面向每个 MR 输出的关联影响报告。
 
-    GitNexus 图谱可用时填充符号、路径和跨文件影响；不可用时仍输出基于 diff
-    与路径规则的降级报告，保证结果页和产物里始终有测试范围建议。
+    仅在 GitNexus 图谱和 MCP 分析成功时生成，用于展示变更影响范围、
+    关键路径和建议测试范围。
     """
 
     graph_status: str = "missing"

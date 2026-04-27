@@ -1,5 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+from app.repositories.fs import write_json
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 from app.services.review_service import ReviewService
 
@@ -13,3 +15,47 @@ def test_gitnexus_index_scheduler_skips_without_repo_path(storage_root: Path, mo
 
     assert status["state"] == "skipped"
     assert "本地代码仓路径" in str(status["message"])
+
+
+def test_gitnexus_index_scheduler_skips_without_gitnexus_binary(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: None)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "skipped"
+    assert status["gitnexus_installed"] is False
+    assert "未预装 GitNexus" in str(status["message"])
+
+
+def test_gitnexus_index_scheduler_records_registry_status(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    registry_dir = tmp_path / ".gitnexus"
+    registry_dir.mkdir(exist_ok=True)
+    write_json(registry_dir / "registry.json", {"repositories": [{"name": "repo", "path": str(repo_path)}]})
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    assert status["gitnexus_installed"] is True
+    assert status["gitnexus_command"] == "gitnexus analyze"
+    assert status["registry_registered"] is True
+    assert str(status["registry_path"]).endswith(".gitnexus/registry.json")

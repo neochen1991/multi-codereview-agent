@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
 from app.config import settings
 from app.domain.models.runtime_settings import PostgresDataSourceSettings
+from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 import app.services.review_service as review_service_module
 
 router = APIRouter()
+
+
+def _gitnexus_scheduler(request: Request) -> GitNexusIndexScheduler:
+    scheduler = getattr(request.app.state, "gitnexus_index_scheduler", None)
+    if isinstance(scheduler, GitNexusIndexScheduler):
+        return scheduler
+    return GitNexusIndexScheduler(review_service_module.review_service)
 
 
 class RuntimeSettingsRequest(BaseModel):
@@ -174,6 +182,20 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     response["auto_review_repo_url"] = str(runtime.code_repo_clone_url or runtime.auto_review_repo_url or "").strip()
     response["config_path"] = str(settings.CONFIG_PATH)
     return response
+
+
+@router.get("/settings/gitnexus/index/status")
+def get_gitnexus_index_status(request: Request) -> dict[str, object]:
+    """返回 GitNexus 最近一次建图状态。"""
+
+    return _gitnexus_scheduler(request).status()
+
+
+@router.post("/settings/gitnexus/index/run", status_code=status.HTTP_202_ACCEPTED)
+def run_gitnexus_index(request: Request) -> dict[str, object]:
+    """手动触发 GitNexus 建图，供公共机器部署后按项目人工刷新图谱。"""
+
+    return _gitnexus_scheduler(request).trigger_manual_index()
 
 
 @router.get("/settings/extensions/skills")

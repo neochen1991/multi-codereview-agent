@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Col, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   ArrowRightOutlined,
@@ -12,15 +12,8 @@ import {
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
-import { reviewApi, type ReviewSummary } from "@/services/api";
-
-const statusColor: Record<string, string> = {
-  pending: "default",
-  running: "processing",
-  completed: "success",
-  failed: "error",
-  closed: "warning",
-};
+import { reviewApi, settingsApi, type GitNexusIndexStatus, type ReviewSummary } from "@/services/api";
+import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 type QuickEntry = {
   key: string;
@@ -44,6 +37,7 @@ const HomePage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [syncingQueue, setSyncingQueue] = useState(false);
   const [queueStartingId, setQueueStartingId] = useState("");
+  const [gitnexusStatus, setGitnexusStatus] = useState<GitNexusIndexStatus | null>(null);
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -52,9 +46,14 @@ const HomePage: React.FC = () => {
   const loadReviews = async () => {
     setLoading(true);
     try {
-      const [allReviews, queueRows] = await Promise.all([reviewApi.list(), reviewApi.listQueue()]);
+      const [allReviews, queueRows, gitnexus] = await Promise.all([
+        reviewApi.list(),
+        reviewApi.listQueue(),
+        settingsApi.getGitNexusIndexStatus().catch(() => null),
+      ]);
       setReviews(allReviews);
       setPendingQueue(queueRows);
+      setGitnexusStatus(gitnexus);
     } catch (error: any) {
       message.error(error?.message || "加载审核列表失败");
     } finally {
@@ -162,7 +161,7 @@ const HomePage: React.FC = () => {
       width: 180,
       render: (value: string, record) => (
         <Space size={6} wrap>
-          <Tag color={statusColor[value] || "default"}>{value}</Tag>
+          <Tag color={getReviewStatusColor(value)}>{getReviewStatusLabel(value)}</Tag>
           {record.analysis_mode === "light" ? <Tag color="gold">轻量模式</Tag> : <Tag color="blue">标准模式</Tag>}
         </Space>
       ),
@@ -272,6 +271,21 @@ const HomePage: React.FC = () => {
         </Row>
       </Card>
 
+      {gitnexusStatus?.gitnexus_installed === false ? (
+        <Alert
+          style={{ marginTop: 16 }}
+          type="warning"
+          showIcon
+          message="当前机器未预装 GitNexus"
+          description="关联影响分析仍会展示，但会自动降级为 diff/路径规则报告。建议先到设置页完成 GitNexus 安装检查。"
+          action={
+            <Button size="small" onClick={() => navigate("/settings")}>
+              前往设置页
+            </Button>
+          }
+        />
+      ) : null}
+
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24}>
           <Card className="module-card" title="待处理 MR 队列">
@@ -326,7 +340,7 @@ const HomePage: React.FC = () => {
                         <Tag color={record.is_next_candidate ? "processing" : "default"}>
                           {record.is_next_candidate ? "等待自动启动" : "排队中"}
                         </Tag>
-                        <Tag color="default">{record.status}</Tag>
+                        <Tag color={getReviewStatusColor(record.status)}>{getReviewStatusLabel(record.status)}</Tag>
                       </Space>
                       <Text type="secondary" style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
                         {record.queue_blocker_message || "等待调度器拉起审核任务。"}

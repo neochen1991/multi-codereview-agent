@@ -5,6 +5,7 @@ import type { TableRowSelection } from "antd/es/table/interface";
 import { useNavigate } from "react-router-dom";
 
 import { reviewApi, type ReviewSummary } from "@/services/api";
+import { getReviewPhaseLabel, getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const buildReviewLabel = (record: ReviewSummary) =>
   record.subject.title || `${record.subject.source_ref} -> ${record.subject.target_ref}`;
@@ -26,14 +27,6 @@ const formatAnalysisMode = (value?: string) => {
     return { label: "轻量模式", color: "gold" as const };
   }
   return { label: "标准模式", color: "blue" as const };
-};
-
-const statusColor = (value?: string) => {
-  if (value === "running") return "processing";
-  if (value === "completed") return "success";
-  if (value === "failed") return "error";
-  if (value === "closed") return "warning";
-  return "default";
 };
 
 // 历史记录页用于回看审核结果，并从“查看工作台”跳回详情。
@@ -122,7 +115,7 @@ const HistoryPage: React.FC = () => {
       dataIndex: "phase",
       key: "phase",
       width: 140,
-      render: (value: string) => <Tag color="processing">{value}</Tag>,
+      render: (value: string) => <Tag color={value === "impact_analysis" ? "geekblue" : "processing"}>{getReviewPhaseLabel(value)}</Tag>,
     },
     {
       title: "状态",
@@ -131,7 +124,7 @@ const HistoryPage: React.FC = () => {
       width: 120,
       render: (value: string, record) => (
         <Space size={6} wrap>
-          <Tag color={statusColor(value)}>{value}</Tag>
+          <Tag color={getReviewStatusColor(value)}>{getReviewStatusLabel(value)}</Tag>
           {record.subject.metadata?.trigger_source === "auto_scheduler" ? <Tag color="purple">自动队列</Tag> : null}
         </Space>
       ),
@@ -160,7 +153,7 @@ const HistoryPage: React.FC = () => {
       width: 140,
       render: (value?: string) => (
         <Tag color={value === "requested" ? "error" : value === "approved" ? "success" : "default"}>
-          {value || "not_required"}
+          {value === "requested" ? "待人工裁决" : value === "approved" ? "人工已批准" : value === "rejected" ? "人工已驳回" : "无需人工"}
         </Tag>
       ),
     },

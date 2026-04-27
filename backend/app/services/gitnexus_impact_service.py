@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-import subprocess
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,6 +11,7 @@ from app.domain.models.report import ImpactFile, ImpactPath, ImpactReport, Impac
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.fs import read_json
+from app.services.mcp_stdio_client import McpStdioClient
 
 
 class GitNexusImpactClient(Protocol):
@@ -31,11 +31,11 @@ class GitNexusImpactClient(Protocol):
 class GitNexusMcpImpactClient:
     """通过 GitNexus MCP stdio server 查询已建图谱。
 
-    GitNexus 官方推荐的本地 MCP 启动命令是：
+    GitNexus 官方推荐的本地 MCP 启动命令是预装后的：
 
-    `npx -y gitnexus@latest mcp`
+    `gitnexus mcp`
 
-    这里使用 MCP JSON-RPC stdio 协议调用 `impact` 和 `detect_changes`。
+    这里通过通用 McpStdioClient 调用 `list_repos`、`detect_changes` 和 `impact`。
     """
 
     def __init__(self, timeout_seconds: int | None = None) -> None:
@@ -65,18 +65,23 @@ class GitNexusMcpImpactClient:
                 "id": 2,
                 "method": "tools/call",
                 "params": {
+                    "name": "list_repos",
+                    "arguments": {},
+                },
+            },
+            {
+                "id": 3,
+                "method": "tools/call",
+                "params": {
                     "name": "detect_changes",
                     "arguments": {
                         "repo": repo_name,
                         "scope": "all",
-                        "baseRef": subject.target_ref,
-                        "headRef": subject.source_ref,
-                        "changedFiles": list(subject.changed_files),
                     },
                 },
             },
         ]
-        next_id = 3
+        next_id = 4
         for symbol in changed_symbols[:8]:
             if not symbol.symbol:
                 continue
@@ -89,23 +94,25 @@ class GitNexusMcpImpactClient:
                         "arguments": {
                             "repo": repo_name,
                             "target": symbol.symbol,
-                            "direction": "upstream",
-                            "maxDepth": 3,
-                            "minConfidence": 0.6,
-                            "includeTests": True,
                         },
                     },
                 }
             )
             next_id += 1
         responses = self._call_mcp(command, repo_path, requests)
+        available_repos = self._extract_repo_names(self._tool_payload(responses.get(2)))
+        if available_repos and repo_name not in available_repos:
+            raise RuntimeError(
+                f"GitNexus MCP 未发现仓库 {repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
+            )
         return {
             "repo": repo_name,
-            "detect_changes": self._tool_payload(responses.get(2)),
+            "available_repos": available_repos,
+            "detect_changes": self._tool_payload(responses.get(3)),
             "impact_results": [
                 self._tool_payload(responses.get(request["id"]))
                 for request in requests
-                if isinstance(request.get("id"), int) and int(request["id"]) >= 3
+                if isinstance(request.get("id"), int) and int(request["id"]) >= 4
             ],
             "raw_response_count": len(responses),
         }
@@ -114,7 +121,7 @@ class GitNexusMcpImpactClient:
         raw = str(os.getenv("GITNEXUS_MCP_COMMAND") or "").strip()
         if raw:
             return raw.split()
-        return ["npx", "-y", "gitnexus@latest", "mcp"]
+        return ["gitnexus", "mcp"]
 
     def _call_mcp(
         self,
@@ -122,51 +129,11 @@ class GitNexusMcpImpactClient:
         repo_path: str,
         requests: list[dict[str, Any]],
     ) -> dict[int, dict[str, Any]]:
-        payload = b"".join(self._encode_message(request) for request in requests)
-        completed = subprocess.run(
-            command,
-            input=payload,
-            cwd=repo_path,
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
-        if completed.returncode != 0:
-            stderr = completed.stderr.decode("utf-8", errors="ignore")[-800:]
-            raise RuntimeError(f"GitNexus MCP 调用失败: {stderr or completed.returncode}")
-        return self._decode_messages(completed.stdout)
-
-    def _encode_message(self, message: dict[str, Any]) -> bytes:
-        body = json.dumps({"jsonrpc": "2.0", **message}, ensure_ascii=False).encode("utf-8")
-        return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
-
-    def _decode_messages(self, data: bytes) -> dict[int, dict[str, Any]]:
-        responses: dict[int, dict[str, Any]] = {}
-        index = 0
-        while index < len(data):
-            header_end = data.find(b"\r\n\r\n", index)
-            if header_end < 0:
-                break
-            headers = data[index:header_end].decode("ascii", errors="ignore")
-            length = 0
-            for line in headers.splitlines():
-                if line.lower().startswith("content-length:"):
-                    length = int(line.split(":", 1)[1].strip())
-                    break
-            body_start = header_end + 4
-            body_end = body_start + length
-            if length <= 0 or body_end > len(data):
-                break
-            try:
-                message = json.loads(data[body_start:body_end].decode("utf-8"))
-            except json.JSONDecodeError:
-                index = body_end
-                continue
-            message_id = message.get("id")
-            if isinstance(message_id, int):
-                responses[message_id] = message
-            index = body_end
-        return responses
+        client = McpStdioClient(command, cwd=repo_path, timeout_seconds=self.timeout_seconds)
+        try:
+            return client.call_many(requests)
+        except RuntimeError as error:
+            raise RuntimeError(f"GitNexus MCP 调用失败: {error}") from error
 
     def _tool_payload(self, response: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(response, dict):
@@ -185,6 +152,34 @@ class GitNexusMcpImpactClient:
                 return {"text": text}
             return parsed if isinstance(parsed, dict) else {"value": parsed}
         return result
+
+    def _extract_repo_names(self, payload: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for key in ("repos", "repositories", "items", "results", "value"):
+            raw = payload.get(key)
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if isinstance(item, str) and item.strip():
+                    candidates.append(item.strip())
+                elif isinstance(item, dict):
+                    repo_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+                    if repo_name:
+                        candidates.append(repo_name)
+        text = str(payload.get("text") or "").strip()
+        if text and not candidates:
+            for line in text.splitlines():
+                line = line.strip().lstrip("-").strip()
+                if line:
+                    candidates.append(line)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
 
 
 class GitNexusImpactService:
@@ -210,15 +205,12 @@ class GitNexusImpactService:
         self._mcp_client = mcp_client or GitNexusMcpImpactClient()
 
     def analyze(self, subject: ReviewSubject, runtime: RuntimeSettings | None = None) -> ImpactReport:
-        """返回标准化影响报告，确保 GitNexus 不可用时也有测试建议。"""
+        """返回标准化影响报告；GitNexus 不可用时直接抛错，不再生成降级报告。"""
 
         cached = self._cached_gitnexus_report(subject)
         if cached is not None:
             return cached
-        graph_report = self._gitnexus_graph_report(subject, runtime)
-        if graph_report is not None:
-            return graph_report
-        return self._fallback_report(subject, runtime)
+        return self._gitnexus_graph_report(subject, runtime)
 
     def _cached_gitnexus_report(self, subject: ReviewSubject) -> ImpactReport | None:
         metadata = dict(subject.metadata or {})
@@ -230,34 +222,28 @@ class GitNexusImpactService:
         payload.setdefault("graph_status", "ready")
         return ImpactReport.model_validate(payload)
 
-    def _gitnexus_graph_report(self, subject: ReviewSubject, runtime: RuntimeSettings | None) -> ImpactReport | None:
+    def _gitnexus_graph_report(self, subject: ReviewSubject, runtime: RuntimeSettings | None) -> ImpactReport:
         repo_path = self._repo_path(subject, runtime)
         if not repo_path:
-            return None
+            raise RuntimeError("未配置本地代码仓路径，无法执行 GitNexus 关联影响分析。")
         graph_status = self._load_graph_status(repo_path)
         if str(graph_status.get("state") or "") != "ready":
-            return None
+            raise RuntimeError("GitNexus 图谱未就绪，请先完成 gitnexus analyze 建图。")
+        if shutil.which("gitnexus") is None:
+            raise RuntimeError("当前机器未预装 GitNexus，可执行命令 `gitnexus` 不存在。")
+        resolved_repo_name = self._resolve_gitnexus_repo_name(repo_path, graph_status)
+        if not resolved_repo_name:
+            raise RuntimeError("GitNexus 图谱已存在，但未在官方 registry 中识别到该仓库。")
         changed_symbols = self._extract_changed_symbols(subject.unified_diff)
         try:
             raw = self._mcp_client.analyze_mr(
-                repo_name=str(graph_status.get("repo_name") or Path(repo_path).name),
+                repo_name=resolved_repo_name,
                 repo_path=repo_path,
                 subject=subject,
                 changed_symbols=changed_symbols,
             )
         except Exception as error:
-            fallback = self._fallback_report(subject, runtime)
-            return fallback.model_copy(
-                update={
-                    "graph_status": "fallback",
-                    "graph_indexed_at": str(graph_status.get("indexed_at") or graph_status.get("updated_at") or ""),
-                    "graph_commit": str(graph_status.get("commit") or ""),
-                    "limitations": [
-                        f"GitNexus 图谱已就绪，但本次 MCP 影响分析调用失败：{error}",
-                        *fallback.limitations,
-                    ],
-                }
-            )
+            raise RuntimeError(f"GitNexus 图谱已就绪，但按官方 MCP 流程调用失败：{error}") from error
         return self._normalize_gitnexus_payload(subject, runtime, graph_status, raw, changed_symbols)
 
     def _load_graph_status(self, repo_path: str) -> dict[str, Any]:
@@ -282,6 +268,42 @@ class GitNexusImpactService:
                 "updated_at": "",
             }
         return {}
+
+    def _resolve_gitnexus_repo_name(self, repo_path: str, graph_status: dict[str, Any]) -> str:
+        status_name = str(graph_status.get("repo_name") or "").strip()
+        if status_name:
+            return status_name
+        registry = self._load_gitnexus_registry()
+        if not registry:
+            return ""
+        repo_path_resolved = str(Path(repo_path).resolve())
+        for item in registry:
+            if not isinstance(item, dict):
+                continue
+            candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+            candidate_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+            if not candidate_name:
+                continue
+            if candidate_path and str(Path(candidate_path).resolve()) == repo_path_resolved:
+                return candidate_name
+        return ""
+
+    def _load_gitnexus_registry(self) -> list[dict[str, Any]]:
+        registry_path = Path.home() / ".gitnexus" / "registry.json"
+        if not registry_path.exists():
+            return []
+        try:
+            payload = read_json(registry_path)
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ("repos", "repositories", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
 
     def _normalize_gitnexus_payload(
         self,
@@ -334,7 +356,7 @@ class GitNexusImpactService:
             ],
             limitations=[
                 "GitNexus 图谱已用于本次 MR 关联影响分析。",
-                "如本次 MR diff 尚未同步到本地仓工作区，GitNexus detect_changes 可能只能覆盖符号级 impact 结果。",
+                "当前实现按官方 MCP 流程先查询 list_repos，再调用 detect_changes(scope=all) 和 impact。",
             ],
         )
 

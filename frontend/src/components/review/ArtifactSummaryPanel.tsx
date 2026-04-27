@@ -2,6 +2,7 @@ import React from "react";
 import { Card, Descriptions, Empty, Tag, Typography } from "antd";
 
 import type { ReviewArtifacts } from "@/services/api";
+import { getReviewPhaseLabel, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const { Paragraph } = Typography;
 
@@ -39,7 +40,7 @@ const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }
             )}
           </Descriptions.Item>
           <Descriptions.Item label="产物状态">
-            {reportSnapshot ? `${reportSnapshot.phase} · ${reportSnapshot.status}` : "-"}
+            {reportSnapshot ? `${getReviewPhaseLabel(reportSnapshot.phase)} · ${getReviewStatusLabel(reportSnapshot.status)}` : "-"}
           </Descriptions.Item>
           <Descriptions.Item label="待人工议题">
             {reportSnapshot?.pending_human_issue_ids?.length || 0}

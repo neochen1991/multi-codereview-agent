@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App as AntdApp, Button, Card, Col, Empty, Modal, Popconfirm, Row, Space, Tabs, Tag, Typography } from "antd";
+import { Alert, App as AntdApp, Button, Card, Col, Empty, Modal, Popconfirm, Row, Space, Tabs, Tag, Typography } from "antd";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import ArtifactSummaryPanel from "@/components/review/ArtifactSummaryPanel";
@@ -28,14 +28,18 @@ import {
   type ReviewSummary,
   type RuleScreeningMetadata,
   type RuntimeSettings,
+  type GitNexusIndexStatus,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
+import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const CodeReviewConclusionPanel = lazy(() => import("@/components/review/CodeReviewConclusionPanel"));
 const DiffPreviewPanel = lazy(() => import("@/components/review/DiffPreviewPanel"));
 const ExpertLaneBoard = lazy(() => import("@/components/review/ExpertLaneBoard"));
 const FindingsPanel = lazy(() => import("@/components/review/FindingsPanel"));
 const HumanGatePanel = lazy(() => import("@/components/review/HumanGatePanel"));
+const ImpactAnalysisProcessPanel = lazy(() => import("@/components/review/ImpactAnalysisProcessPanel"));
+const ImpactReportMarkdownPanel = lazy(() => import("@/components/review/ImpactReportMarkdownPanel"));
 const IssueDetailPanel = lazy(() => import("@/components/review/IssueDetailPanel"));
 const IssueThresholdFilteredPanel = lazy(() => import("@/components/review/IssueThresholdFilteredPanel"));
 const IssueThreadList = lazy(() => import("@/components/review/IssueThreadList"));
@@ -76,9 +80,15 @@ type ExpertRuleCoverageSummary = {
   rule_screening: RuleScreeningMetadata;
 };
 
-type WorkspaceTabKey = "overview" | "process" | "result";
-type ProcessMainTabKey = "dialogue" | "lanes" | "diff" | "replay";
+type ImpactFailureSummary = {
+  state: string;
+  error_message?: string;
+};
+
+type WorkspaceTabKey = "overview" | "process" | "result" | "impact";
+type ProcessMainTabKey = "dialogue" | "lanes" | "impact" | "diff" | "replay";
 type ProcessSidebarTabKey = "issues" | "knowledge" | "events";
+type ResultMainTabKey = "issues";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -93,7 +103,7 @@ const defaultFormState: ReviewFormState = {
   selected_experts: [],
 };
 
-const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result"];
+const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result", "impact"];
 const PROCESS_INCREMENTAL_LIMIT = 500;
 const PROCESS_CLIENT_CACHE_LIMIT = 4000;
 
@@ -236,6 +246,16 @@ const normalizeRuleScreeningMetadata = (value: unknown): RuleScreeningMetadata |
           ? item.matched_terms.map((entry) => String(entry)).filter(Boolean)
           : [],
       })),
+  };
+};
+
+const readImpactFailureSummary = (review?: ReviewSummary | null): ImpactFailureSummary | null => {
+  const raw = review?.subject?.metadata?.impact_analysis_progress;
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Record<string, unknown>;
+  return {
+    state: String(payload.state || ""),
+    error_message: payload.error_message ? String(payload.error_message) : undefined,
   };
 };
 
@@ -419,9 +439,14 @@ const ReviewWorkbenchPage: React.FC = () => {
   const { reviewId = "" } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const [activeStep, setActiveStep] = useState<WorkspaceTabKey>("overview");
+  const [activeStep, setActiveStep] = useState<WorkspaceTabKey>(() => {
+    const search = new URLSearchParams(window.location.search);
+    const rawTab = search.get("tab");
+    return isWorkspaceTabKey(rawTab) ? rawTab : "overview";
+  });
   const [processMainTab, setProcessMainTab] = useState<ProcessMainTabKey>("dialogue");
   const [processSidebarTab, setProcessSidebarTab] = useState<ProcessSidebarTabKey>("issues");
+  const [resultMainTab, setResultMainTab] = useState<ResultMainTabKey>("issues");
   const [review, setReview] = useState<ReviewSummary | null>(null);
   const [replay, setReplay] = useState<ReviewReplayBundle | null>(null);
   const [report, setReport] = useState<ReviewReport | null>(null);
@@ -432,6 +457,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [artifacts, setArtifacts] = useState<ReviewArtifacts | null>(null);
   const [experts, setExperts] = useState<ExpertProfile[]>([]);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null);
+  const [gitnexusStatus, setGitnexusStatus] = useState<GitNexusIndexStatus | null>(null);
   const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocument[]>([]);
   const [selectedIssueId, setSelectedIssueId] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState("");
@@ -624,6 +650,28 @@ const ReviewWorkbenchPage: React.FC = () => {
     return { report: nextReport, artifacts: artifactBundle };
   };
 
+  const loadImpactBundle = async (targetReviewId: string) => {
+    const nextReport = await reviewApi.getReport(targetReviewId, {
+      findings_limit: 0,
+      findings_offset: 0,
+      issues_limit: 0,
+      issues_offset: 0,
+    });
+    setReport(nextReport);
+    setArtifacts(null);
+    setIssues([]);
+    setFindings([]);
+    setEvents([]);
+    setMessages([]);
+    setReplay(null);
+    processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
+    setResultFindingDetailCache({});
+    setResultFindingDetailsLoading(false);
+    setResultFindingDetailsError("");
+    syncSelectionFromData([], []);
+    return { report: nextReport };
+  };
+
   const loadReplayBundle = async (targetReviewId: string) => {
     const replayBundle = await reviewApi.getReplay(targetReviewId);
     setReplay(replayBundle);
@@ -677,6 +725,10 @@ const ReviewWorkbenchPage: React.FC = () => {
           syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
           return;
         }
+        if (activeStep === "impact") {
+          await loadImpactBundle(targetReviewId);
+          return;
+        }
         setResultFindingDetailsLoading(false);
         setResultFindingDetailsError("");
         setReplay(null);
@@ -707,10 +759,11 @@ const ReviewWorkbenchPage: React.FC = () => {
   useEffect(() => {
     // 页面初始化时先拉专家列表和 runtime settings，
     // 这样“概览与启动”页才能拿到默认模式、默认分支和可选专家。
-    void Promise.all([expertApi.list(), settingsApi.getRuntime()])
-      .then(([rows, runtime]) => {
+    void Promise.all([expertApi.list(), settingsApi.getRuntime(), settingsApi.getGitNexusIndexStatus().catch(() => null)])
+      .then(([rows, runtime, gitnexus]) => {
         setExperts(rows.filter((item) => item.enabled));
         setRuntimeSettings(runtime);
+        setGitnexusStatus(gitnexus);
         if (!reviewId) {
           setForm((current) => ({
             ...current,
@@ -724,6 +777,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       .catch(() => {
         setExperts([]);
         setRuntimeSettings(null);
+        setGitnexusStatus(null);
       });
   }, [reviewId]);
 
@@ -897,6 +951,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueFilterDecisionByFindingId, selectedFinding],
   );
+  const impactFailureSummary = useMemo(() => readImpactFailureSummary(review), [review]);
   const selectedFindingRuleScreening = useMemo(() => {
     if (!selectedFindingDetail || !replay?.messages?.length) return null;
     const candidate = replay.messages
@@ -1043,6 +1098,11 @@ const ReviewWorkbenchPage: React.FC = () => {
         key: "result",
         label: "结论与行动",
         hint: "查看最终 Code Review 报告、问题清单、人工裁决和修复建议。",
+      },
+      {
+        key: "impact",
+        label: "关联影响报告",
+        hint: "查看 GitNexus 生成的影响范围、测试建议和 Markdown 报告导出。",
       },
     ],
     [],
@@ -1212,25 +1272,39 @@ const ReviewWorkbenchPage: React.FC = () => {
 
   return (
     <div className="review-workbench-page">
+      {gitnexusStatus?.gitnexus_installed === false ? (
+        <Alert
+          style={{ marginBottom: 16 }}
+          type="warning"
+          showIcon
+          message="当前机器未预装 GitNexus"
+          description="本系统仍可正常做代码审核，但“关联影响分析”会自动降级为 diff/路径规则报告，暂时无法使用正式代码图谱。"
+          action={
+            <Button size="small" onClick={() => navigate("/settings")}>
+              查看设置
+            </Button>
+          }
+        />
+      ) : null}
       <Card className="module-card review-hero-card" loading={loading}>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Tag color="processing">Code Review Workbench</Tag>
           <Space wrap>
             <Tag
               color={
-                currentStatus === "waiting_human" || currentStatus === "failed"
-                  ? "error"
-                  : currentStatus === "completed"
-                    ? "success"
-                    : currentStatus === "running"
-                      ? "processing"
-                      : "default"
+                getReviewStatusColor(currentStatus)
               }
             >
-              {currentStatus === "idle" ? "未开始" : currentStatus}
+              {getReviewStatusLabel(currentStatus)}
             </Tag>
             <Tag color={review?.human_review_status === "requested" ? "error" : "success"}>
-              human: {review?.human_review_status || "not_required"}
+              {review?.human_review_status === "requested"
+                ? "人工裁决中"
+                : review?.human_review_status === "approved"
+                  ? "人工已批准"
+                  : review?.human_review_status === "rejected"
+                    ? "人工已驳回"
+                    : "无需人工裁决"}
             </Tag>
           </Space>
           <Title level={3} style={{ margin: 0 }}>
@@ -1436,6 +1510,15 @@ const ReviewWorkbenchPage: React.FC = () => {
                     ),
                   },
                   {
+                    key: "impact",
+                    label: "关联影响分析",
+                    children: (
+                      <Suspense fallback={<WorkbenchPanelFallback description="关联影响分析加载中..." />}>
+                        <ImpactAnalysisProcessPanel review={review} messages={allMessages} />
+                      </Suspense>
+                    ),
+                  },
+                  {
                     key: "diff",
                     label: "Diff 预览",
                     children: (
@@ -1464,6 +1547,14 @@ const ReviewWorkbenchPage: React.FC = () => {
 
         {activeStep === "result" && (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {impactFailureSummary?.state === "failed" ? (
+              <Alert
+                type="error"
+                showIcon
+                message="关联影响分析未生成成功"
+                description={impactFailureSummary.error_message || "GitNexus 调用失败，本次审核没有可用的关联影响报告。"}
+              />
+            ) : null}
             <Row gutter={[16, 16]} align="stretch">
               <Col xs={24} xl={15}>
                 <div ref={resultSummaryRef}>
@@ -1544,55 +1635,71 @@ const ReviewWorkbenchPage: React.FC = () => {
                 </div>
               </Col>
             </Row>
-            <ExpertRuleCoveragePanel items={expertRuleCoverage} />
-            <Suspense fallback={<WorkbenchPanelFallback description="正式 issue 清单加载中..." />}>
-              <ResultIssuePanel
-                reviewId={reviewId}
-                issues={issues}
-                findings={findings}
-                selectedIssueId={selectedIssueId}
-                onSelectIssue={(issueId) => {
-                  setSelectedIssueId(issueId);
-                  const issue = issues.find((item) => item.issue_id === issueId);
-                  const representativeFinding = issue ? pickRepresentativeFindingForIssue(issue, findingById) : null;
-                  const findingId = representativeFinding?.finding_id;
-                  if (findingId) {
-                    setSelectedFindingId(findingId);
-                    setFindingModalOpen(true);
-                  }
-                }}
-              />
-            </Suspense>
-            <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
-              <IssueThresholdFilteredPanel
-                findings={findings}
-                issueFilterDecisions={issueFilterDecisions}
-                onSelectFinding={(findingId) => {
-                  setSelectedFindingId(findingId);
-                  const issue = issueByFindingId.get(findingId);
-                  if (issue) setSelectedIssueId(issue.issue_id);
-                  setFindingModalOpen(true);
-                }}
-              />
-            </Suspense>
-            <div ref={resultFindingsRef}>
-              <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
-                <FindingsPanel
-                  findings={findings}
-                  issues={issues}
-                  issueFilterDecisions={issueFilterDecisions}
-                  selectedFindingId={selectedFindingId}
-                  onSelectFinding={(findingId) => {
-                    setSelectedFindingId(findingId);
-                    const issue = issueByFindingId.get(findingId);
-                    if (issue) setSelectedIssueId(issue.issue_id);
-                    setFindingModalOpen(true);
-                  }}
-                />
-              </Suspense>
-            </div>
-            <ReviewSubjectPanel review={review} />
-            <ArtifactSummaryPanel artifacts={artifacts} />
+            <Tabs
+              className="result-main-tabs"
+              activeKey={resultMainTab}
+              onChange={(key) => setResultMainTab(key as ResultMainTabKey)}
+              destroyOnHidden
+              items={[
+                {
+                  key: "issues",
+                  label: "有效问题清单",
+                  children: (
+                    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                      <ExpertRuleCoveragePanel items={expertRuleCoverage} />
+                      <Suspense fallback={<WorkbenchPanelFallback description="有效问题清单加载中..." />}>
+                        <ResultIssuePanel
+                          reviewId={reviewId}
+                          issues={issues}
+                          findings={findings}
+                          selectedIssueId={selectedIssueId}
+                          onSelectIssue={(issueId) => {
+                            setSelectedIssueId(issueId);
+                            const issue = issues.find((item) => item.issue_id === issueId);
+                            const representativeFinding = issue ? pickRepresentativeFindingForIssue(issue, findingById) : null;
+                            const findingId = representativeFinding?.finding_id;
+                            if (findingId) {
+                              setSelectedFindingId(findingId);
+                              setFindingModalOpen(true);
+                            }
+                          }}
+                        />
+                      </Suspense>
+                      <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
+                        <IssueThresholdFilteredPanel
+                          findings={findings}
+                          issueFilterDecisions={issueFilterDecisions}
+                          onSelectFinding={(findingId) => {
+                            setSelectedFindingId(findingId);
+                            const issue = issueByFindingId.get(findingId);
+                            if (issue) setSelectedIssueId(issue.issue_id);
+                            setFindingModalOpen(true);
+                          }}
+                        />
+                      </Suspense>
+                      <div ref={resultFindingsRef}>
+                        <Suspense fallback={<WorkbenchPanelFallback description="问题清单加载中..." />}>
+                          <FindingsPanel
+                            findings={findings}
+                            issues={issues}
+                            issueFilterDecisions={issueFilterDecisions}
+                            selectedFindingId={selectedFindingId}
+                            onSelectFinding={(findingId) => {
+                              setSelectedFindingId(findingId);
+                              const issue = issueByFindingId.get(findingId);
+                              if (issue) setSelectedIssueId(issue.issue_id);
+                              setFindingModalOpen(true);
+                            }}
+                          />
+                        </Suspense>
+                      </div>
+                      <ReviewSubjectPanel review={review} />
+                      <ArtifactSummaryPanel artifacts={artifacts} />
+                    </Space>
+                  ),
+                },
+              ]}
+            />
             <Modal
               title="问题详情"
               open={findingModalOpen}
@@ -1617,6 +1724,22 @@ const ReviewWorkbenchPage: React.FC = () => {
                 />
               </Suspense>
             </Modal>
+          </Space>
+        )}
+
+        {activeStep === "impact" && (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {impactFailureSummary?.state === "failed" ? (
+              <Alert
+                type="error"
+                showIcon
+                message="关联影响分析未生成成功"
+                description={impactFailureSummary.error_message || "GitNexus 调用失败，本次审核没有可用的关联影响报告。"}
+              />
+            ) : null}
+            <Suspense fallback={<WorkbenchPanelFallback description="关联影响报告加载中..." />}>
+              <ImpactReportMarkdownPanel report={report} review={review} />
+            </Suspense>
           </Space>
         )}
       </div>

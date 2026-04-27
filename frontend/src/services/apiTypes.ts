@@ -334,6 +334,14 @@ export interface ImpactFile {
   risk_level: string;
 }
 
+export interface ImpactPath {
+  source: string;
+  target: string;
+  path: string[];
+  depth: number;
+  risk: string;
+}
+
 export interface TestScopeRecommendation {
   scope: string;
   reason: string;
@@ -349,6 +357,7 @@ export interface ImpactReport {
   changed_symbols: ImpactSymbol[];
   impacted_files: ImpactFile[];
   impacted_modules: string[];
+  impact_paths: ImpactPath[];
   external_entrypoints: string[];
   risk_level: string;
   recommended_test_scope: TestScopeRecommendation[];
@@ -538,6 +547,27 @@ export interface RuntimeSettings {
   verify_ssl: boolean;
   use_system_trust_store: boolean;
   ca_bundle_path: string;
+}
+
+export interface GitNexusIndexStatus {
+  state: "idle" | "running" | "ready" | "failed" | "skipped" | "unknown" | string;
+  message: string;
+  gitnexus_installed?: boolean;
+  gitnexus_command?: string;
+  gitnexus_path?: string;
+  updated_at?: string;
+  indexed_at?: string;
+  repo_path?: string;
+  repo_name?: string;
+  commit?: string;
+  graph_dir?: string;
+  graph_dir_exists?: boolean;
+  registry_path?: string;
+  registry_registered?: boolean;
+  return_code?: number;
+  stdout?: string;
+  stderr?: string;
+  trigger?: string;
 }
 
 export interface PostgresDataSourceSettings {

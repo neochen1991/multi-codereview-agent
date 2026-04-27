@@ -7,6 +7,7 @@ import {
   type ExpertProfile,
   type ExtensionSkill,
   type ExtensionTool,
+  type GitNexusIndexStatus,
   type PostgresDataSourceSettings,
   type RuntimeSettings,
 } from "@/services/api";
@@ -66,21 +67,25 @@ const SettingsPage: React.FC = () => {
   const [extensionTools, setExtensionTools] = React.useState<ExtensionTool[]>([]);
   const [savingSkill, setSavingSkill] = React.useState(false);
   const [savingTool, setSavingTool] = React.useState(false);
+  const [gitnexusStatus, setGitnexusStatus] = React.useState<GitNexusIndexStatus | null>(null);
+  const [gitnexusRunning, setGitnexusRunning] = React.useState(false);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
+        settingsApi.getGitNexusIndexStatus(),
       ]);
       form.setFieldsValue(runtime);
       setExperts(expertList);
       setExtensionSkills(skills);
       setExtensionTools(tools);
+      setGitnexusStatus(gitnexus);
       if (skills.length > 0) {
         const first = skills[0];
         skillForm.setFieldsValue({
@@ -114,6 +119,27 @@ const SettingsPage: React.FC = () => {
   React.useEffect(() => {
     void loadPage();
   }, [loadPage]);
+
+  const refreshGitNexusStatus = React.useCallback(async () => {
+    const status = await settingsApi.getGitNexusIndexStatus();
+    setGitnexusStatus(status);
+  }, []);
+
+  const handleRunGitNexusIndex = React.useCallback(async () => {
+    setGitnexusRunning(true);
+    try {
+      const status = await settingsApi.runGitNexusIndex();
+      setGitnexusStatus(status);
+      message.success("GitNexus 建图任务已触发");
+      window.setTimeout(() => {
+        void refreshGitNexusStatus();
+      }, 1500);
+    } catch (error: any) {
+      message.error(error?.message || "触发 GitNexus 建图失败");
+    } finally {
+      setGitnexusRunning(false);
+    }
+  }, [refreshGitNexusStatus]);
 
   const renderConfiguredNotice = (
     configuredField: string,
@@ -173,6 +199,14 @@ const SettingsPage: React.FC = () => {
     </Form.Item>
   );
 
+  const gitnexusStateColor = (state?: string) => {
+    if (state === "ready") return "success";
+    if (state === "running") return "processing";
+    if (state === "failed") return "error";
+    if (state === "skipped") return "warning";
+    return "default";
+  };
+
   return (
     <div className="settings-page">
       <Card className="module-card settings-hero-card">
@@ -209,6 +243,76 @@ const SettingsPage: React.FC = () => {
           <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
           <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
           <Descriptions.Item label="Issue 治理">低风险、提示性、常见建议类问题可只保留在 findings，不升级为 issue / debate</Descriptions.Item>
+        </Descriptions>
+      </Card>
+
+      <Card
+        className="module-card"
+        title="GitNexus 代码图谱"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Button onClick={() => void refreshGitNexusStatus()}>刷新状态</Button>
+            <Button type="primary" loading={gitnexusRunning} onClick={() => void handleRunGitNexusIndex()}>
+              手动建立图谱
+            </Button>
+          </Space>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="GitNexus 图谱用于每个 MR 的关联影响分析"
+          description="部署机器需要预先安装 GitNexus。后台定时任务和手工入口只负责调用已安装的 gitnexus analyze 建图；建图完成后，结果页“关联影响报告”会优先使用 GitNexus 图谱，失败时自动降级为 diff/路径规则分析。"
+        />
+        <Descriptions column={1} size="small">
+          <Descriptions.Item label="状态">
+            <Space wrap>
+              <Tag color={gitnexusStateColor(gitnexusStatus?.state)}>{gitnexusStatus?.state || "idle"}</Tag>
+              <span>{gitnexusStatus?.message || "尚未执行 GitNexus 建图。"}</span>
+            </Space>
+          </Descriptions.Item>
+          <Descriptions.Item label="安装状态">
+            <Space wrap>
+              <Tag color={gitnexusStatus?.gitnexus_installed ? "success" : "error"}>
+                {gitnexusStatus?.gitnexus_installed ? "已预装" : "未安装"}
+              </Tag>
+              <span>{gitnexusStatus?.gitnexus_path || "当前机器未发现 gitnexus 可执行命令"}</span>
+            </Space>
+          </Descriptions.Item>
+          <Descriptions.Item label="执行命令">
+            {gitnexusStatus?.gitnexus_command || "gitnexus analyze"}
+          </Descriptions.Item>
+          <Descriptions.Item label="代码仓路径">
+            {gitnexusStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
+          </Descriptions.Item>
+          <Descriptions.Item label="图谱目录">
+            {gitnexusStatus?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
+            {typeof gitnexusStatus?.graph_dir_exists === "boolean" ? (
+              <Tag style={{ marginLeft: 8 }} color={gitnexusStatus.graph_dir_exists ? "success" : "warning"}>
+                {gitnexusStatus.graph_dir_exists ? "目录存在" : "目录不存在"}
+              </Tag>
+            ) : null}
+          </Descriptions.Item>
+          <Descriptions.Item label="最近更新时间">
+            {gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="当前 commit">
+            {gitnexusStatus?.commit || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="官方 Registry">
+            {gitnexusStatus?.registry_path ? (
+              <Space wrap>
+                <Tag color={gitnexusStatus.registry_registered ? "success" : "warning"}>
+                  {gitnexusStatus.registry_registered ? "已注册" : "未注册"}
+                </Tag>
+                <span>{gitnexusStatus.registry_path}</span>
+              </Space>
+            ) : (
+              "暂无"
+            )}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
 

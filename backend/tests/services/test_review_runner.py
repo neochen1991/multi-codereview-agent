@@ -6,6 +6,7 @@ from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSect
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
+from app.domain.models.report import ImpactReport, TestScopeRecommendation as ImpactTestScopeRecommendation
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
@@ -28,6 +29,104 @@ def test_review_runner_emits_finding_created_event(storage_root: Path):
     runner.run_once(review_id)
     events = runner.list_events(review_id)
     assert any(event.event_type == "finding_created" for event in events)
+
+
+def test_change_impact_analysis_findings_are_always_suppressed(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        finding_id="finding-impact-1",
+        review_id="review-impact-1",
+        expert_id="change_impact_analysis",
+        title="影响范围提示",
+        summary="本次改动可能影响订单入口和库存联动。",
+        finding_type="risk_hypothesis",
+        severity="medium",
+        confidence=0.92,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=12,
+        evidence=["GitNexus 返回了调用链影响。"],
+        remediation_suggestion="补充回归测试。",
+        code_excerpt="+ orderService.create();",
+        created_at="2026-04-27T00:00:00Z",
+    )
+
+    assert runner._should_skip_finding("change_impact_analysis", finding) is True
+
+
+def test_change_impact_analysis_runs_in_dedicated_flow(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["change_impact_analysis"]
+    runner.review_repo.save(review)
+
+    def _should_not_build_manual_routing(*_args, **_kwargs):
+        raise AssertionError("只有关联影响分析专家时不应进入普通专家派工流程")
+
+    monkeypatch.setattr(runner, "_build_manual_routing_plan", _should_not_build_manual_routing)
+    monkeypatch.setattr(
+        runner.gitnexus_impact_service,
+        "analyze",
+        lambda subject, runtime: ImpactReport(
+            graph_status="ready",
+            risk_level="medium",
+            changed_files=list(subject.changed_files or []),
+            impacted_files=[],
+            impacted_modules=["order"],
+            changed_symbols=[],
+            impact_paths=[],
+            external_entrypoints=["OrderController#create"],
+                recommended_test_scope=[
+                ImpactTestScopeRecommendation(
+                    scope="订单创建接口回归",
+                    reason="入口调用链命中订单创建主流程",
+                    paths=["OrderController -> OrderService -> OrderRepository"],
+                    priority="high",
+                )
+            ],
+            must_run_tests=["OrderControllerTest#create"],
+            manual_verification=["验证订单创建后库存联动"],
+            limitations=[],
+        ),
+    )
+
+    updated = runner.run_once(review_id)
+
+    assert updated.status == "completed"
+    assert dict(updated.subject.metadata or {}).get("impact_report")
+    messages = runner.message_repo.list(review_id)
+    assert any(item.message_type == "impact_analysis_started" for item in messages)
+    assert any(item.message_type == "impact_report_generated" for item in messages)
+
+
+def test_change_impact_analysis_failure_does_not_emit_fallback_report(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["change_impact_analysis"]
+    runner.review_repo.save(review)
+
+    monkeypatch.setattr(
+        runner.gitnexus_impact_service,
+        "analyze",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("gitnexus mcp timeout")),
+    )
+
+    updated = runner.run_once(review_id)
+
+    assert updated.status == "completed"
+    metadata = dict(updated.subject.metadata or {})
+    assert "impact_report" not in metadata
+    progress = dict(metadata.get("impact_analysis_progress") or {})
+    assert progress.get("state") == "failed"
+    assert progress.get("graph_status") == "failed"
+    assert "gitnexus mcp timeout" in str(progress.get("error_message") or "")
+    messages = runner.message_repo.list(review_id)
+    assert any(item.message_type == "impact_analysis_started" for item in messages)
+    assert any(item.message_type == "impact_report_failed" for item in messages)
+    assert not any(item.message_type == "impact_report_generated" for item in messages)
 
 
 def test_review_runner_releases_large_expert_job_payload_after_execution(storage_root: Path):

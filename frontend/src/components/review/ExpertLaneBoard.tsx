@@ -80,12 +80,12 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
   const [categoryFilter, setCategoryFilter] = React.useState<LaneCategory>("all");
   const [laneVisibleCount, setLaneVisibleCount] = React.useState<Record<string, number>>({});
   const expertIds = useMemo(() => {
-    const selected = review?.selected_experts || [];
+    const selected = (review?.selected_experts || []).filter((item) => item !== "change_impact_analysis");
     const fromMessages = Array.from(
       new Set(
         messages
           .map((item) => item.expert_id)
-          .filter((value) => value && value !== "main_agent" && value !== "judge"),
+          .filter((value) => value && value !== "main_agent" && value !== "judge" && value !== "change_impact_analysis"),
       ),
     );
     return Array.from(new Set([...selected, ...fromMessages]));

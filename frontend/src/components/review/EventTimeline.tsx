@@ -2,6 +2,7 @@ import React from "react";
 import { Button, Card, List, Space, Tag, Typography } from "antd";
 
 import type { ReviewEvent } from "@/services/api";
+import { getReviewPhaseLabel } from "@/utils/reviewStatus";
 
 const { Text } = Typography;
 
@@ -40,7 +41,7 @@ const EventTimeline: React.FC<EventTimelineProps> = ({ events }) => {
               <List.Item.Meta
                 title={
                   <div className="review-event-title">
-                    <Tag color="blue">{item.phase}</Tag>
+                    <Tag color={item.phase === "impact_analysis" ? "geekblue" : "blue"}>{getReviewPhaseLabel(item.phase)}</Tag>
                     <span>{item.message}</span>
                   </div>
                 }

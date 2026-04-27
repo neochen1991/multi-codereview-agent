@@ -716,7 +716,9 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "main_agent_routing_ready" ||
     eventType === "main_agent_expert_execution_completed" ||
     eventType === "issue_filter_applied" ||
-    eventType === "expert_rule_screening_batch"
+    eventType === "expert_rule_screening_batch" ||
+    eventType === "impact_analysis_started" ||
+    eventType === "impact_report_generated"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
@@ -784,6 +786,10 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("专家审查执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
     summaryParts.push("主Agent 已按治理规则筛出仅保留为 finding 的提示性问题");
+  } else if (eventType === "impact_analysis_started") {
+    summaryParts.push("系统已启动关联影响分析");
+  } else if (eventType === "impact_report_generated") {
+    summaryParts.push("系统已生成关联影响报告");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
   if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
@@ -809,6 +815,8 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     headerNote:
       eventType === "main_agent_command"
         ? `派工给 ${targetExpertName || targetExpertId || "指定专家"}`
+        : eventType === "impact_analysis_started" || eventType === "impact_report_generated"
+          ? "独立报告流程"
         : replyToExpertId
           ? `回应 ${replyToExpertId}`
           : undefined,
@@ -1092,6 +1100,27 @@ const buildStructuredGroups = (
     return {
       summaryText: row.summary,
       groups: [issueFilterGroup],
+    };
+  }
+
+  if (row.eventType === "impact_analysis_started" || row.eventType === "impact_report_generated") {
+    const impactReport =
+      metadata.impact_report && typeof metadata.impact_report === "object"
+        ? (metadata.impact_report as Record<string, unknown>)
+        : null;
+    const sections = [
+      { label: "阶段", values: normalizeSingleValue(metadata.phase) },
+      { label: "工具", values: normalizeSingleValue(metadata.tool_name) },
+      { label: "图谱状态", values: normalizeSingleValue(metadata.graph_status || impactReport?.graph_status) },
+      { label: "风险等级", values: normalizeSingleValue(metadata.risk_level || impactReport?.risk_level) },
+      { label: "变更文件", values: normalizeValueList(impactReport?.changed_files) },
+      { label: "影响模块", values: normalizeValueList(impactReport?.impacted_modules) },
+      { label: "建议测试范围", values: normalizeValueList(impactReport?.recommended_test_scope).map((item) => item) },
+      { label: "建议执行项", values: normalizeValueList(impactReport?.must_run_tests) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: row.summary,
+      groups: sections.length ? [{ title: "关联影响分析结果", sections }] : [],
     };
   }
 

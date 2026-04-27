@@ -108,6 +108,24 @@ def _prepare_repo(root: Path) -> Path:
     return repo_path
 
 
+def _prepare_registry(root: Path, repo_path: Path) -> Path:
+    registry_dir = root / ".gitnexus"
+    registry_dir.mkdir(exist_ok=True)
+    registry_path = registry_dir / "registry.json"
+    write_json(
+        registry_path,
+        {
+            "repositories": [
+                {
+                    "name": "repo",
+                    "path": str(repo_path),
+                }
+            ]
+        },
+    )
+    return registry_path
+
+
 def _build_review_payload(repo_path: Path) -> dict[str, object]:
     return {
         "subject_type": "mr",
@@ -138,6 +156,7 @@ def _run_case(name: str, client) -> dict[str, object]:
         root = Path(tmp)
         storage_root = root / "storage"
         repo_path = _prepare_repo(root)
+        registry_path = _prepare_registry(root, repo_path)
         write_json(
             storage_root / "gitnexus" / "index_status.json",
             {
@@ -154,19 +173,30 @@ def _run_case(name: str, client) -> dict[str, object]:
         service.gitnexus_impact_service = GitNexusImpactService(storage_root, mcp_client=client)
         service.runner.gitnexus_impact_service = service.gitnexus_impact_service
         service.runtime_settings_service.update({"code_repo_local_path": str(repo_path)})
-        review = service.create_review(_build_review_payload(repo_path))
-        report = service.build_report(review.review_id)
-        impact = report.impact_report
-        return {
-            "case": name,
-            "graph_status": impact.graph_status if impact else None,
-            "graph_commit": impact.graph_commit if impact else None,
-            "risk_level": impact.risk_level if impact else None,
-            "impacted_files": [item.file_path for item in (impact.impacted_files[:4] if impact else [])],
-            "recommended_test_scope": [item.scope for item in (impact.recommended_test_scope[:4] if impact else [])],
-            "impact_paths": [item.path for item in (impact.impact_paths[:2] if impact else [])],
-            "limitations": impact.limitations[:3] if impact else [],
-        }
+        import os
+
+        original_home_env = os.environ.get("HOME")
+        os.environ["HOME"] = str(root)
+        try:
+            review = service.create_review(_build_review_payload(repo_path))
+            report = service.build_report(review.review_id)
+            impact = report.impact_report
+            return {
+                "case": name,
+                "registry_path": str(registry_path),
+                "graph_status": impact.graph_status if impact else None,
+                "graph_commit": impact.graph_commit if impact else None,
+                "risk_level": impact.risk_level if impact else None,
+                "impacted_files": [item.file_path for item in (impact.impacted_files[:4] if impact else [])],
+                "recommended_test_scope": [item.scope for item in (impact.recommended_test_scope[:4] if impact else [])],
+                "impact_paths": [item.path for item in (impact.impact_paths[:2] if impact else [])],
+                "limitations": impact.limitations[:3] if impact else [],
+            }
+        finally:
+            if original_home_env is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = original_home_env
 
 
 def main() -> None:

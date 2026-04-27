@@ -88,7 +88,7 @@
 这次 MR 改了这些文件以后，可能波及哪些入口、模块、调用链，以及应该回归哪些测试？
 ```
 
-本项目为此新增了 `change_impact_analysis` 专家。它不会替代正确性、数据库、性能或测试专家报缺陷，而是为每个 MR 输出一份 `impact_report`，帮助研发同学快速确认影响范围和测试范围。
+本项目为此新增了 `change_impact_analysis` 专家。它不是代码检视专家，不参与问题清单收敛，只负责调用 GitNexus 为每个 MR 输出一份 `impact_report`，帮助研发和测试同学快速确认影响范围和测试范围。
 
 当前报告会展示在结果页的“关联影响报告”区域，也会进入后端 `ReviewReport.impact_report` 字段和 artifact 快照。
 
@@ -122,7 +122,7 @@
 后台建图默认关闭。需要接入 GitNexus 时，先确保公共机器上可以执行：
 
 ```bash
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 然后在启动后端前设置环境变量：
@@ -147,7 +147,21 @@ export GITNEXUS_INDEX_TIMEOUT_SECONDS=900
 后端启动后，`GitNexusIndexScheduler` 会按间隔在该仓库目录执行：
 
 ```bash
-npx gitnexus analyze
+gitnexus analyze
+```
+
+如果不想等待定时任务，也可以在前端手工触发：
+
+1. 进入「设置」页。
+2. 找到「GitNexus 代码图谱」卡片。
+3. 点击「手动建立图谱」。
+4. 点击「刷新状态」查看 `running / ready / failed / skipped` 状态。
+
+对应后端接口为：
+
+```http
+GET /api/settings/gitnexus/index/status
+POST /api/settings/gitnexus/index/run
 ```
 
 建图状态会写到：
@@ -166,11 +180,15 @@ backend/app/storage/gitnexus/index_status.json
   "indexed_at": "2026-04-27T00:00:00+00:00",
   "commit": "当前仓库 HEAD commit",
   "graph_dir": "/data/repos/your-project/.gitnexus",
-  "graph_dir_exists": true
+  "graph_dir_exists": true,
+  "registry_path": "/home/service/.gitnexus/registry.json",
+  "registry_registered": true
 }
 ```
 
-如果没有配置 `code_repo.local_path`、机器上没有 `npx`、或者 GitNexus 执行失败，调度器只记录 `skipped / failed` 状态，不影响 MR 审核。
+其中 `registry_registered=true` 表示当前仓库已经被 GitNexus 官方 registry 识别到；如果这里是 `false`，说明虽然本地建图成功了，但还没有完全走通官方推荐的 registry / MCP 发现流程。
+
+如果没有配置 `code_repo.local_path`、机器上没有预装 `gitnexus`、或者 GitNexus 执行失败，调度器只记录 `skipped / failed` 状态，不影响 MR 审核。
 
 ### MR 审核时如何使用 GitNexus 结果
 
@@ -183,7 +201,8 @@ backend/app/storage/gitnexus/index_status.json
   -> state=ready 且本地仓存在 .gitnexus/，继续
   -> 否则 fallback
 使用 GitNexus MCP 查询图谱
-  -> detect_changes：识别整体变更影响
+  -> list_repos：确认仓库已按官方流程注册
+  -> detect_changes(scope=all)：识别整体变更影响
   -> impact：对 diff 中提取出的变更类/方法/函数做符号级影响分析
 标准化为 ReviewReport.impact_report
   -> graph_status=ready
@@ -196,15 +215,23 @@ MCP 调用失败
 当前代码默认使用 GitNexus MCP stdio server：
 
 ```bash
-npx -y gitnexus@latest mcp
+gitnexus mcp
 ```
 
 如需改成本地固定命令，可以设置：
 
 ```bash
-export GITNEXUS_MCP_COMMAND="npx -y gitnexus@latest mcp"
+export GITNEXUS_MCP_COMMAND="gitnexus mcp"
 export GITNEXUS_MCP_TIMEOUT_SECONDS=45
 ```
+
+当前实现已经改成按官方 README 的思路接入：
+
+- 后台先执行 `gitnexus analyze` 建图
+- 运行时先通过 GitNexus MCP 的 `list_repos` 确认仓库已注册
+- 再调用 `detect_changes(scope=all)` 和 `impact`
+- 不再向 `detect_changes` 传递项目私有的自定义参数
+- MCP stdio 通信已收口到项目内统一的 `McpStdioClient`，GitNexus 适配层只保留仓库识别和结果标准化逻辑
 
 ### 如何做一条真实链路 smoke test
 
@@ -256,7 +283,7 @@ PYTHONPATH=backend .venv/bin/python scripts/smoke_gitnexus_impact_demo.py
 注意：
 
 - 这条脚本默认不依赖真实外网 GitNexus 服务，而是用 fake client 模拟图谱成功/失败结果，适合本地和 CI 快速回归
-- 如果要验证真实 `npx gitnexus analyze` 和真实 MCP，请在能访问 npm/GitHub 的机器上再跑一轮完整环境测试
+- 如果要验证真实 `gitnexus analyze` 和真实 MCP，请先在部署机器预装 GitNexus，再跑一轮完整环境测试
 
 审核流程里有两个入口会消费这份分析结果：
 
