@@ -264,7 +264,7 @@ const SettingsPage: React.FC = () => {
           showIcon
           style={{ marginBottom: 12 }}
           message="GitNexus 图谱用于每个 MR 的关联影响分析"
-          description="部署机器需要预先安装 GitNexus。后台定时任务和手工入口只负责调用已安装的 gitnexus analyze 建图；建图完成后，结果页“关联影响报告”会优先使用 GitNexus 图谱，失败时自动降级为 diff/路径规则分析。"
+          description="部署机器需要预先安装 GitNexus。后台定时任务和手工入口只负责调用已安装的 gitnexus analyze 建图；建图完成后，结果页“关联影响报告”会直接展示 GitNexus 的影响分析结果。如果建图或调用失败，页面会明确提示失败原因，不再自动降级。"
         />
         <Descriptions column={1} size="small">
           <Descriptions.Item label="状态">

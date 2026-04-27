@@ -59,3 +59,20 @@ def test_gitnexus_index_scheduler_records_registry_status(storage_root: Path, tm
     assert status["gitnexus_command"] == "gitnexus analyze"
     assert status["registry_registered"] is True
     assert str(status["registry_path"]).endswith(".gitnexus/registry.json")
+
+
+def test_gitnexus_index_scheduler_fails_when_repo_path_missing(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    missing_repo = tmp_path / "missing-repo"
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(missing_repo)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "failed"
+    assert "本地代码仓路径不存在" in str(status["message"])
+    assert status["repo_path"] == str(missing_repo)

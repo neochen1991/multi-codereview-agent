@@ -4,12 +4,15 @@ import os
 import shutil
 import subprocess
 import threading
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.repositories.fs import read_json, write_json
 from app.services.memory_probe import MemoryProbe
 from app.services.review_service import ReviewService
+
+logger = logging.getLogger(__name__)
 
 
 class GitNexusIndexScheduler:
@@ -56,6 +59,7 @@ class GitNexusIndexScheduler:
             try:
                 self.tick()
             except Exception as error:
+                logger.exception("gitnexus index scheduler tick failed error=%s", error)
                 MemoryProbe.log("gitnexus_index_scheduler.error", error=error.__class__.__name__)
             interval = max(60, int(os.getenv("GITNEXUS_INDEX_INTERVAL_SECONDS", "3600") or 3600))
             self._stop_event.wait(interval)
@@ -75,12 +79,39 @@ class GitNexusIndexScheduler:
             )
             write_json(status_path, status)
             return status
+        repo_dir = Path(repo_path).expanduser()
+        if not repo_dir.exists():
+            status = self._status(
+                "failed",
+                f"配置的本地代码仓路径不存在：{repo_dir}",
+                repo_path=str(repo_dir),
+                repo_name=repo_dir.name,
+                gitnexus_installed=bool(binary_path),
+                gitnexus_command="gitnexus analyze",
+                gitnexus_path=binary_path,
+            )
+            write_json(status_path, status)
+            logger.error("gitnexus index skipped because repo path does not exist repo_path=%s", repo_dir)
+            return status
+        if not repo_dir.is_dir():
+            status = self._status(
+                "failed",
+                f"配置的本地代码仓路径不是目录：{repo_dir}",
+                repo_path=str(repo_dir),
+                repo_name=repo_dir.name,
+                gitnexus_installed=bool(binary_path),
+                gitnexus_command="gitnexus analyze",
+                gitnexus_path=binary_path,
+            )
+            write_json(status_path, status)
+            logger.error("gitnexus index skipped because repo path is not a directory repo_path=%s", repo_dir)
+            return status
         if not binary_path:
             status = self._status(
                 "skipped",
                 "当前机器未预装 GitNexus，跳过建图。请先安装 GitNexus CLI，再执行图谱建立。",
-                repo_path=repo_path,
-                repo_name=Path(repo_path).name,
+                repo_path=str(repo_dir),
+                repo_name=repo_dir.name,
                 gitnexus_installed=False,
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path="",
@@ -89,16 +120,36 @@ class GitNexusIndexScheduler:
             return status
         timeout = max(60, int(os.getenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "900") or 900))
         command = list(self.COMMAND)
-        completed = subprocess.run(
-            command,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            status = self._status(
+                "failed",
+                f"GitNexus 建图启动失败：{error}",
+                repo_path=str(repo_dir),
+                repo_name=repo_dir.name,
+                gitnexus_installed=bool(binary_path),
+                gitnexus_command="gitnexus analyze",
+                gitnexus_path=binary_path,
+                error_type="FileNotFoundError",
+            )
+            write_json(status_path, status)
+            logger.exception(
+                "gitnexus index start failed repo_path=%s command=%s error=%s",
+                repo_dir,
+                " ".join(command),
+                error,
+            )
+            return status
         state = "ready" if completed.returncode == 0 else "failed"
-        registry_registered, registry_path = self._registry_status(repo_path)
+        registry_registered, registry_path = self._registry_status(str(repo_dir))
         if completed.returncode == 0 and registry_registered:
             message = "GitNexus 建图完成，仓库已写入官方 registry。"
         elif completed.returncode == 0:
@@ -108,12 +159,12 @@ class GitNexusIndexScheduler:
         status = self._status(
             state,
             message,
-            repo_path=repo_path,
-            repo_name=Path(repo_path).name,
+            repo_path=str(repo_dir),
+            repo_name=repo_dir.name,
             indexed_at=datetime.now(UTC).isoformat() if completed.returncode == 0 else "",
-            commit=self._current_commit(repo_path),
-            graph_dir=str(Path(repo_path) / ".gitnexus"),
-            graph_dir_exists=(Path(repo_path) / ".gitnexus").exists(),
+            commit=self._current_commit(str(repo_dir)),
+            graph_dir=str(repo_dir / ".gitnexus"),
+            graph_dir_exists=(repo_dir / ".gitnexus").exists(),
             gitnexus_installed=True,
             gitnexus_command="gitnexus analyze",
             gitnexus_path=binary_path,
@@ -199,18 +250,23 @@ class GitNexusIndexScheduler:
             binary_path = shutil.which("gitnexus") or ""
             status = self._status(
                 "failed",
-                f"GitNexus 手动建图异常：{error.__class__.__name__}",
+                f"GitNexus 手动建图异常：{error}",
                 gitnexus_installed=bool(binary_path),
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path=binary_path,
+                error_type=error.__class__.__name__,
             )
             write_json(self._status_path(), status)
+            logger.exception("gitnexus manual index failed error=%s", error)
 
     def _enabled(self) -> bool:
         return str(os.getenv("GITNEXUS_INDEX_ENABLED", "")).strip().lower() in {"1", "true", "on", "yes"}
 
     def _resolve_repo_path(self, runtime) -> str:
-        return str(getattr(runtime, "code_repo_local_path", "") or "").strip()
+        raw = str(getattr(runtime, "code_repo_local_path", "") or "").strip()
+        if not raw:
+            return ""
+        return str(Path(raw).expanduser())
 
     def _status_path(self) -> Path:
         return self._review_service.storage_root / "gitnexus" / "index_status.json"
