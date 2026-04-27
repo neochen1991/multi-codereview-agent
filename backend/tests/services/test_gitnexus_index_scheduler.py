@@ -76,3 +76,28 @@ def test_gitnexus_index_scheduler_fails_when_repo_path_missing(storage_root: Pat
     assert status["state"] == "failed"
     assert "本地代码仓路径不存在" in str(status["message"])
     assert status["repo_path"] == str(missing_repo)
+
+
+def test_gitnexus_index_scheduler_uses_resolved_gitnexus_binary(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "C:\\GitNexus\\gitnexus.exe" if command == "gitnexus" else None)
+
+    captured: list[object] = []
+
+    def _fake_run(command, **kwargs):
+        captured.append(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    assert captured[0] == ["C:\\GitNexus\\gitnexus.exe", "analyze"]

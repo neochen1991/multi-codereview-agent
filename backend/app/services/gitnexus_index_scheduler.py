@@ -119,7 +119,7 @@ class GitNexusIndexScheduler:
             write_json(status_path, status)
             return status
         timeout = max(60, int(os.getenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "900") or 900))
-        command = list(self.COMMAND)
+        command = [binary_path or self.COMMAND[0], *self.COMMAND[1:]]
         try:
             completed = subprocess.run(
                 command,
@@ -130,9 +130,14 @@ class GitNexusIndexScheduler:
                 check=False,
             )
         except FileNotFoundError as error:
+            executable = command[0] if command else "gitnexus"
             status = self._status(
                 "failed",
-                f"GitNexus 建图启动失败：{error}",
+                (
+                    "GitNexus 建图启动失败：系统找不到指定的文件。"
+                    f" 请优先检查 GitNexus 可执行命令是否可用，以及本地代码仓路径是否有效。"
+                    f" executable={executable} repo_path={repo_dir} raw_error={error}"
+                ),
                 repo_path=str(repo_dir),
                 repo_name=repo_dir.name,
                 gitnexus_installed=bool(binary_path),

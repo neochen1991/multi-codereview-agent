@@ -16,17 +16,24 @@ class McpStdioClient:
 
     def call_many(self, requests: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         executable = self.command[0] if self.command else ""
-        if executable and shutil.which(executable) is None:
+        resolved_executable = shutil.which(executable) if executable else None
+        if executable and resolved_executable is None:
             raise RuntimeError(f"MCP 可执行命令不存在: {executable}")
+        command = [resolved_executable or executable, *self.command[1:]]
         payload = b"".join(self._encode_message(request) for request in requests)
-        completed = subprocess.run(
-            self.command,
-            input=payload,
-            cwd=self.cwd,
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                input=payload,
+                cwd=self.cwd,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"MCP 可执行命令启动失败: executable={command[0]} cwd={self.cwd} error={error}"
+            ) from error
         if completed.returncode != 0:
             stderr = completed.stderr.decode("utf-8", errors="ignore")[-800:]
             raise RuntimeError(stderr or str(completed.returncode))

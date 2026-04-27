@@ -1102,7 +1102,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       {
         key: "impact",
         label: "关联影响报告",
-        hint: "查看 GitNexus 生成的影响范围、测试建议和 Markdown 报告导出。",
+        hint: "查看 GitNexus 生成的影响范围、受波及对象和建议测试范围。",
       },
     ],
     [],
@@ -1349,26 +1349,28 @@ const ReviewWorkbenchPage: React.FC = () => {
         </div>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <OverviewCards
-          status={review?.status || "idle"}
-          phase={review?.phase || "not_started"}
-          expertCount={
-            expertSelectionSummary?.selected_experts.length ||
-            review?.selected_experts?.length ||
-            form.selected_experts.length
-          }
-          findingCount={visibleFindings.length}
-          issueCount={issues.length}
-          humanGateCount={review?.pending_human_issue_ids?.length || 0}
-          onStatusClick={focusProcessDialogue}
-          onPhaseClick={focusProcessDialogue}
-          onExpertClick={focusProcessDialogue}
-          onFindingClick={() => focusResultGroup("all")}
-          onIssueClick={focusProcessIssues}
-          onHumanGateClick={focusResultHuman}
-        />
-      </div>
+      {activeStep !== "impact" ? (
+        <div style={{ marginTop: 16 }}>
+          <OverviewCards
+            status={review?.status || "idle"}
+            phase={review?.phase || "not_started"}
+            expertCount={
+              expertSelectionSummary?.selected_experts.length ||
+              review?.selected_experts?.length ||
+              form.selected_experts.length
+            }
+            findingCount={visibleFindings.length}
+            issueCount={issues.length}
+            humanGateCount={review?.pending_human_issue_ids?.length || 0}
+            onStatusClick={focusProcessDialogue}
+            onPhaseClick={focusProcessDialogue}
+            onExpertClick={focusProcessDialogue}
+            onFindingClick={() => focusResultGroup("all")}
+            onIssueClick={focusProcessIssues}
+            onHumanGateClick={focusResultHuman}
+          />
+        </div>
+      ) : null}
 
       <div style={{ marginTop: 16 }}>
         {activeStep === "overview" && (

@@ -62,6 +62,40 @@ const buildExecutiveSummary = (impactReport: ImpactReport): string => {
   return [moduleText, entrypointText, testText].filter(Boolean).join("；") || "本次改动的关联影响已生成，请结合下方范围和测试建议评估上线风险。";
 };
 
+const buildAnalysisBasis = (impactReport: ImpactReport): string[] => {
+  const items = [
+    "先通过 list_repos 确认当前仓库已经按 GitNexus 官方方式注册。",
+    "再调用 detect_changes(repo, scope=all) 识别本次改动的受影响文件、模块和候选测试范围。",
+    "最后对关键变更符号调用 impact(repo, target)，补充调用链和 blast radius。",
+  ];
+  return [...items, ...impactReport.limitations];
+};
+
+const buildRiskDistribution = (items: ImpactFile[]): Array<{ label: string; count: number; tone: string }> => {
+  const high = items.filter((item) => priorityRank(item.risk_level) >= 3).length;
+  const medium = items.filter((item) => priorityRank(item.risk_level) === 2).length;
+  const low = items.filter((item) => priorityRank(item.risk_level) <= 1).length;
+  return [
+    { label: "高风险", count: high, tone: "error" },
+    { label: "中风险", count: medium, tone: "warning" },
+    { label: "低风险", count: low, tone: "success" },
+  ];
+};
+
+const priorityRank = (value?: string): number => {
+  if (value === "high" || value === "p0" || value === "p1") return 3;
+  if (value === "medium" || value === "p2") return 2;
+  if (value === "low" || value === "p3") return 1;
+  return 0;
+};
+
+const priorityLabel = (value?: string): string => {
+  if (value === "high" || value === "p0" || value === "p1") return "优先执行";
+  if (value === "medium" || value === "p2") return "建议执行";
+  if (value === "low" || value === "p3") return "补充关注";
+  return "一般";
+};
+
 const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const impactReport = review?.impact_report;
   if (!review || !impactReport) return "";
@@ -116,8 +150,8 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     "## 人工确认项",
     ...(impactReport.manual_verification.length ? impactReport.manual_verification.map((item) => `- ${item}`) : ["- 暂无"]),
     "",
-    "## 边界说明",
-    ...(impactReport.limitations.length ? impactReport.limitations.map((item) => `- ${item}`) : ["- 暂无"]),
+    "## 分析依据与边界",
+    ...buildAnalysisBasis(impactReport).map((item) => `- ${item}`),
   ];
   return sections.join("\n");
 };
@@ -152,25 +186,59 @@ const renderListSection = (title: string, items: string[], emptyText: string) =>
   </section>
 );
 
+const renderMiniStats = (title: string, items: Array<{ label: string; count: number; tone: string }>) => (
+  <section className="impact-report-section">
+    <Title level={5}>{title}</Title>
+    <div className="impact-report-mini-stats">
+      {items.map((item) => (
+        <div key={item.label} className={`impact-report-mini-stat impact-report-mini-stat-${item.tone}`}>
+          <Text type="secondary">{item.label}</Text>
+          <div className="impact-report-mini-stat-value">{item.count}</div>
+        </div>
+      ))}
+    </div>
+  </section>
+);
+
 const renderImpactedFiles = (items: ImpactFile[]) => (
   <section className="impact-report-section">
     <Title level={5}>影响文件</Title>
     {items.length ? (
-      <div className="impact-report-file-list">
-        {items.map((item) => (
-          <div key={`${item.file_path}-${item.relationship}-${item.reason}`} className="impact-report-file-card">
-            <div className="impact-report-file-head">
-              <Text strong>{item.file_path}</Text>
-              <Space size={8} wrap>
-                <Tag>{item.relationship || "关联"}</Tag>
-                <Tag color={riskColor(item.risk_level)}>{`风险 ${item.risk_level || "unknown"}`}</Tag>
-              </Space>
+      <div className="impact-report-file-groups">
+        {[
+          { key: "high", title: "高风险影响", matcher: (item: ImpactFile) => priorityRank(item.risk_level) >= 3 },
+          { key: "medium", title: "中风险影响", matcher: (item: ImpactFile) => priorityRank(item.risk_level) === 2 },
+          { key: "low", title: "低风险影响", matcher: (item: ImpactFile) => priorityRank(item.risk_level) <= 1 },
+        ]
+          .map((group) => ({
+            ...group,
+            items: items.filter(group.matcher),
+          }))
+          .filter((group) => group.items.length)
+          .map((group) => (
+            <div key={group.key} className="impact-report-file-group">
+              <div className="impact-report-test-group-head">
+                <Title level={5}>{group.title}</Title>
+                <Tag>{group.items.length}</Tag>
+              </div>
+              <div className="impact-report-file-list">
+                {group.items.map((item) => (
+                  <div key={`${item.file_path}-${item.relationship}-${item.reason}`} className="impact-report-file-card">
+                    <div className="impact-report-file-head">
+                      <Text strong>{item.file_path}</Text>
+                      <Space size={8} wrap>
+                        <Tag>{item.relationship || "关联"}</Tag>
+                        <Tag color={riskColor(item.risk_level)}>{`风险 ${item.risk_level || "unknown"}`}</Tag>
+                      </Space>
+                    </div>
+                    <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                      {item.reason || "暂无影响说明"}
+                    </Paragraph>
+                  </div>
+                ))}
+              </div>
             </div>
-            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-              {item.reason || "暂无影响说明"}
-            </Paragraph>
-          </div>
-        ))}
+          ))}
       </div>
     ) : (
       <Text type="secondary">当前没有识别到明确的受影响文件。</Text>
@@ -202,12 +270,29 @@ const renderImpactPaths = (items: ImpactPath[]) => (
                   </React.Fragment>
                 ))}
               </div>
+              <div className="impact-report-path-timeline">
+                {pathText.map((node, nodeIndex) => (
+                  <div key={`${node}-timeline-${nodeIndex}`} className="impact-report-path-timeline-item">
+                    <div className="impact-report-path-timeline-dot" />
+                    <div className="impact-report-path-timeline-line" hidden={nodeIndex === pathText.length - 1} />
+                    <div className="impact-report-path-timeline-content">
+                      <Text strong>{node}</Text>
+                      <Text type="secondary">{nodeIndex === 0 ? "影响起点" : nodeIndex === pathText.length - 1 ? "影响落点" : "中间传播节点"}</Text>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           );
         })}
       </div>
     ) : (
-      <Text type="secondary">当前没有可展示的调用链或依赖路径。</Text>
+      <Alert
+        type="warning"
+        showIcon
+        message="本次图谱结果没有返回显式调用链"
+        description="当前报告仍可用于判断影响范围和测试建议；如果需要更细的跨模块传播路径，可以在 GitNexus 图谱更新后重新分析。"
+      />
     )}
   </section>
 );
@@ -216,28 +301,127 @@ const renderTestScope = (items: TestScopeRecommendation[]) => (
   <section className="impact-report-section">
     <Title level={5}>建议测试范围</Title>
     {items.length ? (
-      <div className="impact-report-test-list">
-        {items.map((item) => (
-          <div key={`${item.scope}-${item.priority}`} className="impact-report-test-card">
-            <div className="impact-report-test-head">
-              <Text strong>{item.scope}</Text>
-              <Tag color={priorityColor(item.priority)}>{item.priority || "unknown"}</Tag>
-            </div>
-            <Paragraph style={{ marginBottom: 8 }}>{item.reason || "暂无原因说明"}</Paragraph>
-            {item.paths.length ? (
-              <div className="impact-report-inline-meta">
-                <Text type="secondary">关联路径</Text>
-                <Text>{item.paths.join("、")}</Text>
+      <div className="impact-report-test-groups">
+        {[
+          { key: "high", title: "必须先跑", matcher: (item: TestScopeRecommendation) => priorityRank(item.priority) >= 3 },
+          {
+            key: "medium",
+            title: "建议补跑",
+            matcher: (item: TestScopeRecommendation) => priorityRank(item.priority) === 2,
+          },
+          { key: "low", title: "补充关注", matcher: (item: TestScopeRecommendation) => priorityRank(item.priority) <= 1 },
+        ]
+          .map((group) => ({
+            ...group,
+            items: items.filter(group.matcher),
+          }))
+          .filter((group) => group.items.length)
+          .map((group) => (
+            <div key={group.key} className="impact-report-test-group">
+              <div className="impact-report-test-group-head">
+                <Title level={5}>{group.title}</Title>
+                <Tag>{group.items.length}</Tag>
               </div>
-            ) : null}
-          </div>
-        ))}
+              <div className="impact-report-test-list">
+                {group.items.map((item) => (
+                  <div key={`${item.scope}-${item.priority}`} className="impact-report-test-card">
+                    <div className="impact-report-test-head">
+                      <Text strong>{item.scope}</Text>
+                      <Tag color={priorityColor(item.priority)}>{priorityLabel(item.priority)}</Tag>
+                    </div>
+                    <Paragraph style={{ marginBottom: 8 }}>{item.reason || "暂无原因说明"}</Paragraph>
+                    {item.paths.length ? (
+                      <div className="impact-report-inline-meta">
+                        <Text type="secondary">关联路径</Text>
+                        <Text>{item.paths.join("、")}</Text>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
       </div>
     ) : (
       <Text type="secondary">当前没有生成测试范围建议。</Text>
     )}
   </section>
 );
+
+const renderExecutionChecklist = (items: TestScopeRecommendation[], commands: string[], manualVerification: string[]) => {
+  const checklist = [
+    ...items
+      .slice()
+      .sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority))
+      .map((item) => ({
+        title: item.scope,
+        detail: item.reason || "补充相关测试验证。",
+        kind: priorityLabel(item.priority),
+      })),
+    ...commands.slice(0, 4).map((item) => ({
+      title: item,
+      detail: "建议纳入本次回归执行集。",
+      kind: "执行命令",
+    })),
+    ...manualVerification.slice(0, 3).map((item) => ({
+      title: item,
+      detail: "这部分需要研发或测试人工补判断。",
+      kind: "人工确认",
+    })),
+  ].slice(0, 8);
+
+  return (
+    <section className="impact-report-section">
+      <Title level={5}>建议执行顺序</Title>
+      {checklist.length ? (
+        <div className="impact-report-checklist">
+          {checklist.map((item, index) => (
+            <div key={`${item.kind}-${item.title}-${index}`} className="impact-report-checklist-item">
+              <div className="impact-report-checklist-index">{index + 1}</div>
+              <div className="impact-report-checklist-content">
+                <div className="impact-report-checklist-head">
+                  <Text strong>{item.title}</Text>
+                  <Tag>{item.kind}</Tag>
+                </div>
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  {item.detail}
+                </Paragraph>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Text type="secondary">当前没有生成明确的执行顺序建议。</Text>
+      )}
+    </section>
+  );
+};
+
+const renderReportHeadline = (impactReport: ImpactReport) => {
+  const headline =
+    impactReport.recommended_test_scope.length > 0
+      ? `本次改动已识别出 ${impactReport.recommended_test_scope.length} 类优先测试范围，建议先围绕高风险影响面执行回归。`
+      : "本次改动已完成影响分析，请结合受影响范围安排后续验证。";
+  return (
+    <section className="impact-report-hero">
+      <div className="impact-report-hero-main">
+        <Text type="secondary">关联影响结论</Text>
+        <Title level={4}>{headline}</Title>
+        <Paragraph style={{ marginBottom: 0 }}>
+          {buildExecutiveSummary(impactReport)}
+        </Paragraph>
+      </div>
+      <div className="impact-report-hero-side">
+        <div className="impact-report-hero-badge">
+          <Text type="secondary">本次整体风险</Text>
+          <div className="impact-report-hero-risk">
+            <Tag color={riskColor(impactReport.risk_level)}>{impactReport.risk_level || "unknown"}</Tag>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
 
 type ImpactReportMarkdownPanelProps = {
   report: ReviewReport | null;
@@ -261,21 +445,24 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
     ];
   }, [impactReport]);
 
-  const impactedFilePaths = useMemo(
-    () => (impactReport ? dedupeStrings(impactReport.impacted_files.map((item) => item.file_path)) : []),
-    [impactReport],
-  );
-  const changedSymbols = useMemo(
-    () =>
-      impactReport
-        ? dedupeStrings(
-            impactReport.changed_symbols.map((item) =>
-              [item.file_path, item.symbol || item.kind || "unknown"].filter(Boolean).join(" · "),
-            ),
-          )
-        : [],
-    [impactReport],
-  );
+  const analysisBasis = useMemo(() => (impactReport ? buildAnalysisBasis(impactReport) : []), [impactReport]);
+  const riskDistribution = useMemo(() => (impactReport ? buildRiskDistribution(impactReport.impacted_files) : []), [impactReport]);
+  const topAttentionItems = useMemo(() => {
+    if (!impactReport) return [];
+    const impactTargets = impactReport.impacted_files
+      .slice()
+      .sort((a, b) => priorityRank(a.risk_level) - priorityRank(b.risk_level))
+      .reverse()
+      .slice(0, 3)
+      .map((item) => `${item.file_path}：${item.reason}`);
+    const testTargets = impactReport.recommended_test_scope
+      .slice()
+      .sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority))
+      .reverse()
+      .slice(0, 2)
+      .map((item) => `${item.scope}：${item.reason}`);
+    return dedupeStrings([...impactTargets, ...testTargets]).slice(0, 5);
+  }, [impactReport]);
 
   return (
     <Card
@@ -289,6 +476,8 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
     >
       {impactReport ? (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          {renderReportHeadline(impactReport)}
+
           <div className="impact-report-summary-grid">
             {summaryCards.map((item) => (
               <div key={item.label} className={`impact-report-summary-card impact-report-summary-card-${item.tone}`}>
@@ -298,12 +487,7 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
             ))}
           </div>
 
-          <Alert
-            type="info"
-            showIcon
-            message="报告解读"
-            description={buildExecutiveSummary(impactReport)}
-          />
+          {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
 
           <section className="impact-report-section">
             <Title level={5}>分析基线</Title>
@@ -328,14 +512,18 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
           </section>
 
           {renderListSection("本次变更文件", impactReport.changed_files, "当前没有记录到变更文件。")}
+          {renderMiniStats("影响风险分布", riskDistribution)}
           {renderImpactedFiles(impactReport.impacted_files)}
-          {renderListSection("影响文件清单", impactedFilePaths, "当前没有整理出的影响文件清单。")}
           {renderImpactPaths(impactReport.impact_paths)}
           {renderTestScope(impactReport.recommended_test_scope)}
-          {renderListSection("变更符号", changedSymbols, "当前没有结构化符号信息。")}
+          {renderExecutionChecklist(
+            impactReport.recommended_test_scope,
+            impactReport.must_run_tests,
+            impactReport.manual_verification,
+          )}
           {renderListSection("建议执行项", impactReport.must_run_tests, "当前没有额外的必跑项。")}
           {renderListSection("人工确认项", impactReport.manual_verification, "当前没有额外的人工确认项。")}
-          {renderListSection("边界说明", impactReport.limitations, "当前没有额外的边界说明。")}
+          {renderListSection("分析依据与边界", analysisBasis, "当前没有额外的分析说明。")}
         </Space>
       ) : impactFailure?.state === "failed" ? (
         <Space direction="vertical" size={12} style={{ width: "100%" }}>

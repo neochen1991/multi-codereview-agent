@@ -1129,6 +1129,47 @@ body {
   gap: 12px;
 }
 
+.impact-report-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 16px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  border: 1px solid #d7e6ff;
+  background: radial-gradient(circle at top left, #f7fbff 0%, #eef5ff 42%, #ffffff 100%);
+}
+
+.impact-report-hero-main {
+  display: grid;
+  gap: 8px;
+}
+
+.impact-report-hero-main .ant-typography {
+  margin-bottom: 0;
+}
+
+.impact-report-hero-side {
+  display: flex;
+  align-items: stretch;
+}
+
+.impact-report-hero-badge {
+  width: 100%;
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid #d8e3f2;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.impact-report-hero-risk {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
 .impact-report-summary-card {
   padding: 14px 16px;
   border-radius: 14px;
@@ -1163,6 +1204,43 @@ body {
   margin-bottom: 0;
 }
 
+.impact-report-mini-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.impact-report-mini-stat {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, #ffffff 0%, #fafcff 100%);
+}
+
+.impact-report-mini-stat-error {
+  border-color: #ffd6d6;
+  background: linear-gradient(180deg, #fff5f5 0%, #ffffff 100%);
+}
+
+.impact-report-mini-stat-warning {
+  border-color: #ffe6bf;
+  background: linear-gradient(180deg, #fffaf0 0%, #ffffff 100%);
+}
+
+.impact-report-mini-stat-success {
+  border-color: #cdebd5;
+  background: linear-gradient(180deg, #f6fff7 0%, #ffffff 100%);
+}
+
+.impact-report-mini-stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #0f172a;
+}
+
 .impact-report-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1184,6 +1262,29 @@ body {
 .impact-report-test-list {
   display: grid;
   gap: 10px;
+}
+
+.impact-report-file-groups,
+.impact-report-test-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.impact-report-file-group,
+.impact-report-test-group {
+  display: grid;
+  gap: 10px;
+}
+
+.impact-report-test-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.impact-report-test-group-head .ant-typography {
+  margin-bottom: 0;
 }
 
 .impact-report-bullet-item {
@@ -1232,6 +1333,42 @@ body {
   gap: 8px;
 }
 
+.impact-report-path-timeline {
+  display: grid;
+  gap: 8px;
+}
+
+.impact-report-path-timeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.impact-report-path-timeline-dot {
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #6b8afd;
+  box-shadow: 0 0 0 4px rgba(107, 138, 253, 0.12);
+}
+
+.impact-report-path-timeline-line {
+  position: absolute;
+  left: 5px;
+  top: 18px;
+  bottom: -10px;
+  width: 2px;
+  background: linear-gradient(180deg, #c7d7ff 0%, #e5ecff 100%);
+}
+
+.impact-report-path-timeline-content {
+  display: grid;
+  gap: 2px;
+}
+
 .impact-report-path-node {
   padding: 6px 10px;
   border-radius: 999px;
@@ -1249,6 +1386,54 @@ body {
 .impact-report-inline-meta {
   display: grid;
   gap: 4px;
+}
+
+.impact-report-checklist {
+  display: grid;
+  gap: 10px;
+}
+
+.impact-report-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.impact-report-checklist-index {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: #e8f0ff;
+  color: #1e40af;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.impact-report-checklist-content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.impact-report-checklist-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@media (max-width: 980px) {
+  .impact-report-hero {
+    grid-template-columns: 1fr;
+  }
 }
 
 .impact-analysis-message-stack {

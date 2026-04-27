@@ -185,10 +185,8 @@ class GitNexusMcpImpactClient:
 class GitNexusImpactService:
     """生成每个 MR 的关联影响报告。
 
-    第一阶段先定义稳定边界：如果 subject metadata 已经写入 GitNexus 分析结果，
-    直接标准化为 ImpactReport；否则基于 diff 和路径规则生成降级报告。
-    后续后台定时建图只需要把 GitNexus 输出写入同一份 metadata 或替换本服务内部
-    的真实调用实现，不影响报告模型和前端。
+    如果 subject metadata 已经写入 GitNexus 分析结果，直接标准化为 ImpactReport；
+    否则要求本地 GitNexus 图谱和官方 MCP 能力可用，再按官方流程查询影响范围。
     """
 
     _SYMBOL_PATTERNS = [
