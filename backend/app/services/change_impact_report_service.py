@@ -118,7 +118,7 @@ class ChangeImpactReportService:
         )
 
     def _user_prompt(self, report: ImpactReport, trace: dict[str, Any]) -> str:
-        llm_variables = [item for item in self._schema_variables() if item.get("source") == "llm"]
+        template_variables = self._schema_variables()
         facts = {
             "workflow": self.WORKFLOW,
             "repo": trace.get("repo") or "",
@@ -141,8 +141,12 @@ class ChangeImpactReportService:
             "test_focus": ["3-6 条，按优先级给出该测什么", "..."],
             "manual_checks": ["需要人工确认的边界", "..."],
             "template_variables": {
-                item.get("name", "variable"): item.get("description", "按模板变量要求输出")
-                for item in llm_variables
+                item.get("name", "variable"): {
+                    "description": item.get("description", "按模板变量要求输出"),
+                    "source_hint": item.get("source", "llm"),
+                    "format": item.get("format", "text"),
+                }
+                for item in template_variables
             },
         }
         return (
@@ -152,7 +156,8 @@ class ChangeImpactReportService:
             "2. 只引用 facts 里的对象，不要新增未出现的调用链。\n"
             "3. 测试建议要能直接执行，优先讲必须测什么，再讲建议补测什么。\n"
             "4. 如果某个影响只是候选关系，要明确说“候选”或“建议人工确认”。\n"
-            "5. 只为 source=llm 的模板变量生成内容，不能覆盖 system/gitnexus 已经提供的事实字段。\n"
+            "5. 请为模板中出现的每一个变量都生成最终填充值，由你结合 GitNexus facts 进行判断和组织，不要直接回传占位符。\n"
+            "6. source_hint 只是参考，不是限制；最终值仍然由你基于 facts 生成，但不能虚构不存在的证据。\n"
             "6. 输出必须是 JSON，不要输出 Markdown 之外的解释。\n\n"
             f"Markdown 模板:\n{self._report_template}\n\n"
             f"模板变量 schema:\n{json.dumps(self._template_schema, ensure_ascii=False, indent=2)}\n\n"
@@ -538,10 +543,11 @@ class ChangeImpactReportService:
         }
         merged_context = dict(base_context)
         merged_context.update({key: value for key, value in dict(template_variables or {}).items() if str(value or "").strip()})
-        rendered = self._report_template
-        for placeholder in self.extract_template_placeholders(self._report_template):
-            rendered = rendered.replace(f"{{{{{placeholder}}}}}", str(merged_context.get(placeholder) or "- 暂无"))
-        return rendered
+        return re.sub(
+            r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}",
+            lambda match: str(merged_context.get(str(match.group(1) or "").strip()) or "- 暂无"),
+            self._report_template,
+        )
 
     def _bulletize(self, items: list[str]) -> str:
         normalized = [str(item or "").strip() for item in items if str(item or "").strip()]

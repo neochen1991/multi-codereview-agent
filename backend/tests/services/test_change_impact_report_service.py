@@ -199,6 +199,48 @@ def test_change_impact_report_service_supports_schema_driven_custom_placeholder(
     assert "本次改动影响订单创建主链路。" in updated.llm_markdown
 
 
+def test_change_impact_report_service_allows_llm_to_fill_non_llm_schema_variables():
+    service = ChangeImpactReportService()
+    service._report_template = "# 自定义报告\n\n仓库：{{repo_name}}\n\n链路：{{impact_paths}}"
+    service._template_schema = {
+        "variables": [
+            {"name": "repo_name", "source": "system", "required": True, "description": "仓库名称"},
+            {"name": "impact_paths", "source": "gitnexus", "required": False, "description": "关键调用链路"},
+        ]
+    }
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+    service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]
+        text=(
+            '{"summary":"影响订单主链路。",'
+            '"key_impact_points":["订单创建链路被波及。"],'
+            '"test_focus":["优先回归订单创建接口。"],'
+            '"manual_checks":["确认消息发送顺序。"],'
+            '"template_variables":{"repo_name":"order-domain-service","impact_paths":"- OrderController.createOrder -> OrderApplicationService.createOrder -> OrderRepository.save"}}'
+        ),
+        mode="live",
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    updated, _ = service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(),
+        report=_report(),
+        trace={"repo": "repo", "detect_changes": {}, "context_results": [], "impact_results": []},
+        review_id="rev_test",
+    )
+
+    assert "order-domain-service" in updated.llm_markdown
+    assert "OrderController.createOrder -> OrderApplicationService.createOrder -> OrderRepository.save" in updated.llm_markdown
+
+
 def test_change_impact_report_service_can_analyze_template_schema_with_llm():
     service = ChangeImpactReportService()
     service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]

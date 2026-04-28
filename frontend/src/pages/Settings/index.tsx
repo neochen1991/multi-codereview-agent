@@ -51,6 +51,23 @@ const parseJsonArray = <T,>(value: string): T[] => {
 
 const collapseExpandIconPosition = "end" as const;
 
+const formatBeijingTime = (value?: string) => {
+  const text = String(value || "").trim();
+  if (!text) return "暂无";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+};
+
 const renderPreviewMarkdown = (markdown: string): React.ReactNode[] => {
   const lines = String(markdown || "").split(/\r?\n/);
   const nodes: React.ReactNode[] = [];
@@ -554,10 +571,10 @@ const SettingsPage: React.FC = () => {
                       {impactTemplate?.schema_path || "暂无"}
                     </Descriptions.Item>
                     <Descriptions.Item label="最近更新时间">
-                      {impactTemplate?.updated_at || "暂无"}
+                      {formatBeijingTime(impactTemplate?.updated_at)}
                     </Descriptions.Item>
                     <Descriptions.Item label="Schema 最近更新时间">
-                      {impactTemplate?.schema_updated_at || "暂无"}
+                      {formatBeijingTime(impactTemplate?.schema_updated_at)}
                     </Descriptions.Item>
                   </Descriptions>
                   <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 16 }}>

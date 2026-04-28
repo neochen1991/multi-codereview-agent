@@ -316,6 +316,9 @@ const priorityRank = (value?: string): number => {
   return 0;
 };
 
+const hasUnresolvedTemplateVariables = (markdown?: string): boolean =>
+  /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(String(markdown || ""));
+
 const renderTemplateMarkdown = (markdown: string): React.ReactNode[] => {
   const lines = String(markdown || "").split(/\r?\n/);
   const nodes: React.ReactNode[] = [];
@@ -393,7 +396,9 @@ const priorityLabel = (value?: string): string => {
 const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const impactReport = review?.impact_report;
   if (!review || !impactReport) return "";
-  if (impactReport.llm_markdown?.trim()) return impactReport.llm_markdown.trim();
+  if (impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown)) {
+    return impactReport.llm_markdown.trim();
+  }
   const sections: string[] = [
     `# 关联影响报告 - ${review.review_id}`,
     "",
@@ -827,7 +832,7 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       }
     >
       {impactReport ? (
-        impactReport.llm_markdown?.trim() ? (
+        impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown) ? (
           <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
         ) : (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
