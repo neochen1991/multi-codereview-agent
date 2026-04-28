@@ -511,106 +511,119 @@ const SettingsPage: React.FC = () => {
           </Space>
         }
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="LLM 会基于 GitNexus 返回的事实，按这里的 Markdown 模板生成最终关联影响分析报告。"
-          description="建议保留章节结构和占位语义，主要调整标题、表达风格和测试建议的展示方式。保存后会更新当前生效模板；如果改坏了，可以随时恢复到系统默认模板。"
-        />
-        <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
-          <Descriptions.Item label="模板文件">
-            {impactTemplate?.template_path || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="默认模板文件">
-            {impactTemplate?.default_template_path || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="变量 Schema 文件">
-            {impactTemplate?.schema_path || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="默认变量 Schema 文件">
-            {impactTemplate?.default_schema_path || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="最近更新时间">
-            {impactTemplate?.updated_at || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="Schema 最近更新时间">
-            {impactTemplate?.schema_updated_at || "暂无"}
-          </Descriptions.Item>
-        </Descriptions>
-        <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 16 }}>
-          <Alert
-            type={impactTemplate?.undefined_placeholders?.length ? "warning" : "success"}
-            showIcon
-            message={
-              impactTemplate?.undefined_placeholders?.length
-                ? `模板里有 ${impactTemplate.undefined_placeholders.length} 个占位符还没有在 Schema 中定义`
-                : "模板占位符和 Schema 变量定义已对齐"
-            }
-            description={
-              <>
-                <div>模板占位符：{(impactTemplate?.placeholders || []).join(", ") || "暂无"}</div>
-                <div>未定义占位符：{(impactTemplate?.undefined_placeholders || []).join(", ") || "无"}</div>
-                <div>未使用变量：{(impactTemplate?.unused_variables || []).join(", ") || "无"}</div>
-              </>
-            }
-          />
-        </Space>
-        <Input.TextArea
-          value={impactTemplateContent}
-          onChange={(event) => setImpactTemplateContent(event.target.value)}
-          autoSize={{ minRows: 18, maxRows: 28 }}
-          placeholder="在这里编辑关联影响分析报告 Markdown 模板，或通过右上角上传 .md 文件覆盖。"
-        />
-        <Input.TextArea
-          style={{ marginTop: 12 }}
-          value={impactTemplateSchemaContent}
-          onChange={(event) => setImpactTemplateSchemaContent(event.target.value)}
-          autoSize={{ minRows: 12, maxRows: 22 }}
-          placeholder='在这里编辑模板变量 Schema（JSON），定义占位符名称、来源、说明和是否必填。'
-        />
-        <Card
-          size="small"
-          title="模板预览"
-          style={{ marginTop: 16, background: "#fafafa" }}
-          extra={impactTemplatePreview?.undefined_placeholders?.length ? <Tag color="warning">存在未定义占位符</Tag> : null}
-        >
-          <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-            这里使用一份内置的 Java MR 示例数据渲染模板，方便检查章节结构、占位符和表达效果。
-          </Paragraph>
-          <Tabs
-            size="small"
-            items={[
-              {
-                key: "rendered",
-                label: "渲染预览",
-                children: (
-                  <div className="template-preview-rendered">
-                    {impactTemplatePreview?.markdown ? (
-                      renderPreviewMarkdown(impactTemplatePreview.markdown)
-                    ) : (
-                      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                        点击“预览模板”后，这里会显示一份按当前模板渲染出的示例关联影响分析报告。
-                      </Paragraph>
-                    )}
-                  </div>
-                ),
-              },
-              {
-                key: "raw",
-                label: "Markdown 原文",
-                children: (
-                  <Input.TextArea
-                    value={impactTemplatePreview?.markdown || ""}
-                    readOnly
-                    autoSize={{ minRows: 16, maxRows: 28 }}
-                    placeholder="点击“预览模板”后，这里会显示一份示例关联影响分析报告。"
+        <Collapse
+          ghost
+          items={[
+            {
+              key: "impact-report-template-editor",
+              label: "展开模板编辑、Schema 配置与预览",
+              children: (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="LLM 会基于 GitNexus 返回的事实，按这里的 Markdown 模板生成最终关联影响分析报告。"
+                    description="建议保留章节结构和占位语义，主要调整标题、表达风格和测试建议的展示方式。保存后会更新当前生效模板；如果改坏了，可以随时恢复到系统默认模板。"
                   />
-                ),
-              },
-            ]}
-          />
-        </Card>
+                  <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="模板文件">
+                      {impactTemplate?.template_path || "暂无"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="默认模板文件">
+                      {impactTemplate?.default_template_path || "暂无"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="变量 Schema 文件">
+                      {impactTemplate?.schema_path || "暂无"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="默认变量 Schema 文件">
+                      {impactTemplate?.default_schema_path || "暂无"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="最近更新时间">
+                      {impactTemplate?.updated_at || "暂无"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Schema 最近更新时间">
+                      {impactTemplate?.schema_updated_at || "暂无"}
+                    </Descriptions.Item>
+                  </Descriptions>
+                  <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 16 }}>
+                    <Alert
+                      type={impactTemplate?.undefined_placeholders?.length ? "warning" : "success"}
+                      showIcon
+                      message={
+                        impactTemplate?.undefined_placeholders?.length
+                          ? `模板里有 ${impactTemplate.undefined_placeholders.length} 个占位符还没有在 Schema 中定义`
+                          : "模板占位符和 Schema 变量定义已对齐"
+                      }
+                      description={
+                        <>
+                          <div>模板占位符：{(impactTemplate?.placeholders || []).join(", ") || "暂无"}</div>
+                          <div>未定义占位符：{(impactTemplate?.undefined_placeholders || []).join(", ") || "无"}</div>
+                          <div>未使用变量：{(impactTemplate?.unused_variables || []).join(", ") || "无"}</div>
+                        </>
+                      }
+                    />
+                  </Space>
+                  <Input.TextArea
+                    value={impactTemplateContent}
+                    onChange={(event) => setImpactTemplateContent(event.target.value)}
+                    autoSize={{ minRows: 18, maxRows: 28 }}
+                    placeholder="在这里编辑关联影响分析报告 Markdown 模板，或通过右上角上传 .md 文件覆盖。"
+                  />
+                  <Input.TextArea
+                    style={{ marginTop: 12 }}
+                    value={impactTemplateSchemaContent}
+                    onChange={(event) => setImpactTemplateSchemaContent(event.target.value)}
+                    autoSize={{ minRows: 12, maxRows: 22 }}
+                    placeholder='在这里编辑模板变量 Schema（JSON），定义占位符名称、来源、说明和是否必填。'
+                  />
+                  <Card
+                    size="small"
+                    title="模板预览"
+                    style={{ marginTop: 16, background: "#fafafa" }}
+                    extra={impactTemplatePreview?.undefined_placeholders?.length ? <Tag color="warning">存在未定义占位符</Tag> : null}
+                  >
+                    <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+                      这里使用一份内置的 Java MR 示例数据渲染模板，方便检查章节结构、占位符和表达效果。
+                    </Paragraph>
+                    <Tabs
+                      size="small"
+                      items={[
+                        {
+                          key: "rendered",
+                          label: "渲染预览",
+                          children: (
+                            <div className="template-preview-rendered">
+                              {impactTemplatePreview?.markdown ? (
+                                renderPreviewMarkdown(impactTemplatePreview.markdown)
+                              ) : (
+                                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                                  点击“预览模板”后，这里会显示一份按当前模板渲染出的示例关联影响分析报告。
+                                </Paragraph>
+                              )}
+                            </div>
+                          ),
+                        },
+                        {
+                          key: "raw",
+                          label: "Markdown 原文",
+                          children: (
+                            <Input.TextArea
+                              value={impactTemplatePreview?.markdown || ""}
+                              readOnly
+                              autoSize={{ minRows: 16, maxRows: 28 }}
+                              placeholder="点击“预览模板”后，这里会显示一份示例关联影响分析报告。"
+                            />
+                          ),
+                        },
+                      ]}
+                    />
+                  </Card>
+                </>
+              ),
+            },
+          ]}
+        />
       </Card>
 
       <Card className="module-card" title="运行时设置" style={{ marginTop: 16 }} loading={loading}>
