@@ -78,16 +78,27 @@ class GitNexusMcpImpactClient:
         list_repos_payload = self._call_tool(command, repo_path, "list_repos", {}, runtime_env)
         available_repos = self._extract_repo_names(list_repos_payload)
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
-        detect_changes_payload = self._call_tool(
-            command,
-            repo_path,
-            "detect_changes",
-            {
-                "repo": effective_repo_name,
-                "scope": "all",
-            },
-            runtime_env,
-        )
+        detect_changes_payload: dict[str, Any] = {}
+        detect_changes_error = ""
+        try:
+            detect_changes_payload = self._call_tool(
+                command,
+                repo_path,
+                "detect_changes",
+                {
+                    "repo": effective_repo_name,
+                    "scope": "all",
+                },
+                runtime_env,
+            )
+        except RuntimeError as error:
+            detect_changes_error = str(error)
+            logger.warning(
+                "gitnexus detect_changes unavailable repo=%s repo_path=%s error=%s; continue with changed symbols + context/impact",
+                effective_repo_name,
+                repo_path,
+                detect_changes_error,
+            )
         targets = self._build_targets(changed_symbols, detect_changes_payload)
         context_payloads: list[dict[str, Any]] = []
         impact_payloads: list[dict[str, Any]] = []
@@ -116,6 +127,7 @@ class GitNexusMcpImpactClient:
             "impact_results": impact_payloads,
             "queried_targets": targets,
             "raw_response_count": 2 + len(context_payloads) + len(impact_payloads),
+            "detect_changes_error": detect_changes_error,
         }
 
     def _command(self) -> list[str]:
@@ -767,6 +779,7 @@ class GitNexusImpactService:
             impacted_modules,
         )
         risk_level = str(detect_changes.get("risk_level") or detect_changes.get("riskLevel") or fallback.risk_level)
+        detect_changes_error = str(raw.get("detect_changes_error") or "").strip()
         logger.info(
             "gitnexus normalize report graph_status=ready impacted_files=%s impacted_modules=%s impact_paths=%s impact_graph_nodes=%s impact_graph_edges=%s test_scopes=%s",
             len(impacted_files),
@@ -809,6 +822,11 @@ class GitNexusImpactService:
             limitations=[
                 "GitNexus 图谱已用于本次 MR 关联影响分析。",
                 "当前实现按官方 MCP 流程先查询 list_repos，再调用 detect_changes(scope=all) 和 impact。",
+                *(
+                    [f"detect_changes 未成功返回，本次主要基于 MR 变更符号继续查询 context/impact：{detect_changes_error}"]
+                    if detect_changes_error
+                    else []
+                ),
             ],
         )
 
@@ -859,7 +877,12 @@ class GitNexusImpactService:
         symbols = self._extract_changed_symbols(subject.unified_diff)
         repo_path = self._repo_path(subject, runtime)
         if symbols:
-            return self._enrich_changed_symbols_from_source(repo_path, subject, symbols) if repo_path else symbols
+            return symbols
+        if str(subject.unified_diff or "").strip():
+            logger.info(
+                "gitnexus symbol extraction used platform diff only because unified_diff is present but produced no symbol declarations"
+            )
+            return []
         local_diff = self._load_local_diff_from_git(repo_path, subject) if repo_path else ""
         if local_diff:
             symbols = self._extract_changed_symbols(local_diff)

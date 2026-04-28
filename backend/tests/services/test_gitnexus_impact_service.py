@@ -69,7 +69,7 @@ class FailingGitNexusImpactClient:
         raise RuntimeError("mcp unavailable")
 
 
-def test_gitnexus_mcp_impact_client_raises_when_detect_changes_returns_error():
+def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error():
     client = GitNexusMcpImpactClient(timeout_seconds=5)
     subject = ReviewSubject(
         subject_type="mr",
@@ -84,25 +84,26 @@ def test_gitnexus_mcp_impact_client_raises_when_detect_changes_returns_error():
     responses = [
         {2: {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}},
         {2: {"error": {"code": -32000, "message": "detect failed", "data": {"reason": "repo not indexed"}}}},
+        {2: {"result": {"content": [{"text": '{"symbol":{"name":"OrderService.create"},"incoming":{"calls":[{"name":"OrderController.create"}]}}'}]}}},
+        {2: {"result": {"content": [{"text": '{"paths":[["OrderController.create","OrderService.create"]]}'}]}}},
     ]
 
     def fake_call_mcp(command, repo_path, requests, runtime_env=None):
         return responses.pop(0)
 
     with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
-        try:
-            client.analyze_mr(
-                repo_name="repo",
-                repo_path="/tmp/repo",
-                subject=subject,
-                changed_symbols=[],
-                runtime_env=None,
-            )
-        except RuntimeError as error:
-            assert "GitNexus detect_changes 调用失败" in str(error)
-            assert "detect failed" in str(error)
-        else:
-            raise AssertionError("detect_changes 返回 error 时应直接失败")
+        payload = client.analyze_mr(
+            repo_name="repo",
+            repo_path="/tmp/repo",
+            subject=subject,
+            changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": ""})()],
+            runtime_env=None,
+        )
+
+    assert payload["detect_changes"] == {}
+    assert "GitNexus detect_changes 调用失败" in payload["detect_changes_error"]
+    assert payload["context_results"]
+    assert payload["impact_results"]
 
 
 def test_gitnexus_impact_service_builds_fallback_report(storage_root: Path):
@@ -446,6 +447,40 @@ def test_gitnexus_impact_service_extracts_symbols_from_local_git_diff_when_subje
     assert capture.changed_symbols
     assert capture.changed_symbols[0].symbol == "createOrder"
     assert capture.changed_symbols[0].container == "OrderController"
+
+
+def test_gitnexus_impact_service_prefers_platform_diff_without_local_git_enrichment(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderController.java "
+            "b/src/main/java/com/example/OrderController.java\n"
+            "@@ -10,0 +10,4 @@\n"
+            " public class OrderController {\n"
+            "+  public OrderDTO createOrder() {\n"
+            "+    return service.create();\n"
+            "+  }\n"
+            " }\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_path)},
+    )
+
+    with (
+        patch.object(service, "_enrich_changed_symbols_from_source", side_effect=AssertionError("should not enrich from local git")),
+        patch.object(service, "_load_local_diff_from_git", side_effect=AssertionError("should not load local git diff")),
+        patch.object(service, "_scan_changed_file_symbols", side_effect=AssertionError("should not scan local git source")),
+    ):
+        symbols = service._build_changed_symbols(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert any(item.symbol == "createOrder" and item.container == "OrderController" for item in symbols)
 
 
 def test_gitnexus_local_git_diff_resolves_available_refs_before_running(storage_root: Path, tmp_path: Path):
