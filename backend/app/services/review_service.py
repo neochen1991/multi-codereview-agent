@@ -40,6 +40,7 @@ from app.services.review_runner import ReviewClosedError, ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = logging.getLogger(__name__)
+DEFAULT_MR_EXPERTS = ("change_impact_analysis",)
 
 
 def parse_json_object(value: str) -> dict[str, object]:
@@ -144,6 +145,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        if subject.subject_type == "mr":
+            for expert_id in DEFAULT_MR_EXPERTS:
+                if expert_id not in selected_experts:
+                    selected_experts.append(expert_id)
         subject.metadata = {
             **dict(subject.metadata or {}),
             # API 直接创建且缺少 diff/changed_files 时，允许走兜底派工，避免回放/报告页完全无数据。

@@ -448,6 +448,87 @@ def test_gitnexus_impact_service_extracts_symbols_from_local_git_diff_when_subje
     assert capture.changed_symbols[0].container == "OrderController"
 
 
+def test_gitnexus_local_git_diff_resolves_available_refs_before_running(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/missing",
+        target_ref="main",
+        commits=["abc123"],
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        if command[:3] == ["git", "rev-parse", "--verify"]:
+            ref = command[3].replace("^{commit}", "")
+            if ref in {"abc123", "origin/main"}:
+                return type("Completed", (), {"returncode": 0, "stdout": f"{ref}\n", "stderr": ""})()
+            return type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "unknown revision"})()
+        if command[:3] == ["git", "diff", "--unified=3"]:
+            assert command[3] == "origin/main"
+            assert command[4] == "abc123"
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": "diff --git a/foo b/foo\n@@ -1,0 +1,1 @@\n+demo\n",
+                    "stderr": "",
+                },
+            )()
+        raise AssertionError(f"unexpected command: {command}")
+
+    with patch("app.services.gitnexus_impact_service.subprocess.run", side_effect=fake_run):
+        diff = service._load_local_diff_from_git(str(repo_path), subject)
+
+    assert "+demo" in diff
+
+
+def test_gitnexus_scan_changed_file_symbols_uses_resolved_git_refs(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/missing",
+        target_ref="main",
+        commits=["abc123"],
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        if command[:3] == ["git", "rev-parse", "--verify"]:
+            ref = command[3].replace("^{commit}", "")
+            if ref in {"abc123", "origin/main"}:
+                return type("Completed", (), {"returncode": 0, "stdout": f"{ref}\n", "stderr": ""})()
+            return type("Completed", (), {"returncode": 1, "stdout": "", "stderr": "unknown revision"})()
+        if command[:2] == ["git", "show"]:
+            assert command[2] == "abc123:src/main/java/com/example/OrderController.java"
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": "public class OrderController {\n  public OrderDTO createOrder() {\n    return service.create();\n  }\n}\n",
+                    "stderr": "",
+                },
+            )()
+        raise AssertionError(f"unexpected command: {command}")
+
+    with patch("app.services.gitnexus_impact_service.subprocess.run", side_effect=fake_run):
+        symbols = service._scan_changed_file_symbols(str(repo_path), subject)
+
+    assert any(item.symbol == "createOrder" and item.container == "OrderController" for item in symbols)
+
+
 def test_tool_gateway_invokes_gitnexus_impact_analysis(storage_root: Path):
     gateway = ReviewToolGateway(storage_root)
     expert = ExpertProfile(

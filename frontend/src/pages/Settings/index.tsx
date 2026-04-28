@@ -500,9 +500,9 @@ const SettingsPage: React.FC = () => {
               </Tag>
             ) : null}
           </Descriptions.Item>
-          <Descriptions.Item label="最近更新时间">
-            {gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at || "暂无"}
-          </Descriptions.Item>
+                    <Descriptions.Item label="最近更新时间">
+                      {formatBeijingTime(gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at)}
+                    </Descriptions.Item>
           <Descriptions.Item label="当前 commit">
             {gitnexusStatus?.commit || "暂无"}
           </Descriptions.Item>

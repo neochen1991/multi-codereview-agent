@@ -5,6 +5,7 @@ import { UploadOutlined } from "@ant-design/icons";
 import type { ExpertProfile, ReviewDesignDocumentInput } from "@/services/api";
 
 const { Text } = Typography;
+const DEFAULT_REQUIRED_EXPERT_ID = "change_impact_analysis";
 const RECOMMENDED_EXPERT_IDS = [
   "correctness_business",
   "architecture_design",
@@ -95,6 +96,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   const selectedFromCandidates = requestedExpertIds.filter((expertId) => selectedExpertIdSet.has(expertId));
   const removedFromCandidates = requestedExpertIds.filter((expertId) => skippedExpertIdSet.has(expertId));
   const addedByModel = selectedExperts.filter((item) => !requestedExpertIds.includes(item.expert_id));
+  const isMrReview = form.subject_type === "mr";
 
   return (
     <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
@@ -222,11 +224,21 @@ const ReviewOverviewPanel: React.FC<Props> = ({
               value={form.selected_experts}
               onChange={(value) => onChange({ selected_experts: value })}
               options={experts.map((expert) => ({
-                label: `${expert.name_zh}${expert.custom ? "（自定义）" : ""}`,
+                label:
+                  `${expert.name_zh}${expert.custom ? "（自定义）" : ""}` +
+                  (expert.expert_id === DEFAULT_REQUIRED_EXPERT_ID && isMrReview ? "（系统默认）" : ""),
                 value: expert.expert_id,
               }))}
             />
             <Space direction="vertical" size={8} style={{ width: "100%", marginTop: 12 }}>
+              {!readonly && isMrReview ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="关联性影响分析专家会默认参与每一次 MR 检视"
+                  description="系统会默认勾选该专家，用于生成影响范围、调用链和测试建议报告。你仍然可以继续补充其他候选专家。"
+                />
+              ) : null}
               <div className="review-design-docs-readonly">
                 <Text strong>候选专家</Text>
                 <Space wrap style={{ width: "100%", marginTop: 8 }}>
@@ -234,6 +246,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                     requestedExpertIds.map((expertId) => (
                       <Tag key={`candidate-${expertId}`} color="blue">
                         {expertNameById.get(expertId) || expertId}
+                        {expertId === DEFAULT_REQUIRED_EXPERT_ID && isMrReview ? " · 系统默认" : ""}
                       </Tag>
                     ))
                   ) : (
@@ -260,6 +273,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                             <Text strong>{expert?.name_zh || expertId}</Text>
                             <Space size={6} wrap>
                               <Tag color="blue">候选</Tag>
+                              {expertId === DEFAULT_REQUIRED_EXPERT_ID && isMrReview ? <Tag color="gold">系统默认</Tag> : null}
                               {isSelected ? <Tag color="green">已参与</Tag> : null}
                               {isRemoved ? <Tag color="orange">未纳入</Tag> : null}
                             </Space>

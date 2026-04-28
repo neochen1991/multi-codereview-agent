@@ -912,7 +912,19 @@ class GitNexusImpactService:
         repo_dir = Path(repo_path)
         if not repo_path or not repo_dir.exists() or not repo_dir.is_dir():
             return ""
-        command = ["git", "diff", "--unified=3", str(subject.target_ref), str(subject.source_ref)]
+        source_ref = self._resolve_existing_git_ref(repo_path, self._source_ref_candidates(subject))
+        target_ref = self._resolve_existing_git_ref(repo_path, self._target_ref_candidates(subject))
+        if not source_ref or not target_ref:
+            logger.warning(
+                "gitnexus local git diff skipped because refs are unavailable repo_path=%s source_ref=%s target_ref=%s source_candidates=%s target_candidates=%s",
+                repo_path,
+                source_ref,
+                target_ref,
+                self._source_ref_candidates(subject),
+                self._target_ref_candidates(subject),
+            )
+            return ""
+        command = ["git", "diff", "--unified=3", target_ref, source_ref]
         changed_files = self._changed_files(subject)
         if changed_files:
             command.extend(["--", *changed_files[:40]])
@@ -982,10 +994,12 @@ class GitNexusImpactService:
 
     def _scan_changed_file_symbols(self, repo_path: str, subject: ReviewSubject) -> list[ImpactSymbol]:
         symbols: list[ImpactSymbol] = []
+        source_ref = self._resolve_existing_git_ref(repo_path, self._source_ref_candidates(subject))
+        target_ref = self._resolve_existing_git_ref(repo_path, self._target_ref_candidates(subject))
         for path in self._changed_files(subject)[:24]:
-            content = self._load_file_content(repo_path, str(subject.source_ref or ""), path)
+            content = self._load_file_content(repo_path, source_ref, path)
             if not content:
-                content = self._load_file_content(repo_path, str(subject.target_ref or ""), path)
+                content = self._load_file_content(repo_path, target_ref, path)
             if not content:
                 continue
             symbols.extend(self._extract_symbols_from_source(path, content))
@@ -1009,6 +1023,67 @@ class GitNexusImpactService:
         if completed.returncode != 0:
             return ""
         return str(completed.stdout or "")
+
+    def _source_ref_candidates(self, subject: ReviewSubject) -> list[str]:
+        metadata = dict(subject.metadata or {})
+        candidates: list[str] = []
+        candidates.extend(str(item or "").strip() for item in list(subject.commits or []))
+        candidates.append(str(metadata.get("auto_queue_head_sha") or "").strip())
+        candidates.append(str(metadata.get("head_sha") or "").strip())
+        candidates.extend(self._ref_aliases(str(subject.source_ref or "").strip()))
+        candidates.append("HEAD")
+        return self._dedupe(candidates)
+
+    def _target_ref_candidates(self, subject: ReviewSubject) -> list[str]:
+        target_ref = str(subject.target_ref or "").strip()
+        candidates: list[str] = []
+        candidates.extend(self._ref_aliases(target_ref))
+        if target_ref not in {"main", "master"}:
+            candidates.extend(self._ref_aliases("main"))
+            candidates.extend(self._ref_aliases("master"))
+        return self._dedupe(candidates)
+
+    def _ref_aliases(self, ref: str) -> list[str]:
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return []
+        if normalized.startswith("refs/"):
+            return [normalized]
+        return [
+            normalized,
+            f"refs/heads/{normalized}",
+            f"origin/{normalized}",
+            f"refs/remotes/origin/{normalized}",
+            f"upstream/{normalized}",
+            f"refs/remotes/upstream/{normalized}",
+        ]
+
+    def _resolve_existing_git_ref(self, repo_path: str, candidates: list[str]) -> str:
+        for candidate in candidates:
+            ref = str(candidate or "").strip()
+            if not ref:
+                continue
+            command = ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"]
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except Exception as error:
+                logger.warning(
+                    "gitnexus git ref verification failed repo_path=%s ref=%s error=%s",
+                    repo_path,
+                    ref,
+                    error,
+                )
+                continue
+            if completed.returncode == 0:
+                return ref
+        return ""
 
     def _extract_symbols_from_source(self, file_path: str, content: str) -> list[ImpactSymbol]:
         symbols: list[ImpactSymbol] = []

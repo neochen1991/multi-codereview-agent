@@ -21,7 +21,7 @@
 - `extensions/skills` + `extensions/tools` 可插拔扩展机制
 - 审核启动页可上传本次审核专属的详细设计文档（Markdown）
 - 正确性与业务专家可通过 `design-consistency-check` 检查代码与详细设计是否一致
-- 每个 MR 都会输出关联影响报告；GitNexus 图谱可用时使用图谱结果，不可用时使用 diff/路径规则降级生成测试范围建议
+- 每个 MR 默认都会带上 `change_impact_analysis` 专家，单独输出一份关联影响报告；只有拿到 GitNexus 正式结果时才生成报告
 
 ## 专家体系与职责边界
 
@@ -41,7 +41,7 @@
 | `performance_reliability` | 热点路径、并发稳定性、资源效率、超时重试、失败恢复 | 批处理过大、锁竞争放大、同步阻塞、资源泄漏、超时重试缺口、局部故障放大成系统压力 | 不主提索引设计和 SQL 字段问题，不主提命名和风格问题 |
 | `security_compliance` | 鉴权授权、输入校验、敏感数据、合规边界 | 权限绕过、输入校验绕过、敏感信息泄露、合规风险 | 不主提一般边界条件问题，不判断普通性能瓶颈，不评论可读性 |
 | `test_verification` | 自动化测试覆盖、断言质量、回归保护、验证步骤 | 缺测试、断言太弱、风险路径无保护、缺集成测试、缺回归脚本或人工验证清单 | 不判断业务规则本身是否正确，不评论命名风格，不主提架构边界问题 |
-| `change_impact_analysis` | 本次 MR 的影响范围、调用链影响、建议测试范围 | 识别直接变更文件、候选受影响文件、入口点、数据访问路径、必须回归的测试范围；GitNexus 不可用时说明降级边界 | 不裁决业务逻辑是否正确，不判断 SQL 性能/事务问题是否成立，不评价测试断言质量 |
+| `change_impact_analysis` | 本次 MR 的影响范围、调用链影响、建议测试范围 | 识别直接变更文件、候选受影响文件、入口点、数据访问路径、必须回归的测试范围；基于 GitNexus 输出独立影响报告 | 不裁决业务逻辑是否正确，不判断 SQL 性能/事务问题是否成立，不评价测试断言质量 |
 | `frontend_accessibility` | 前端 a11y、关键交互可达性、基础渲染可达性 | a11y 回归、关键交互不可达、基础渲染或可达性退化 | 不看后端业务逻辑，不看数据库、中间件，不评论通用 Java 编码规范 |
 
 理解这张表时，可以先按这个顺序判断问题归属：
@@ -90,6 +90,12 @@
 
 本项目为此新增了 `change_impact_analysis` 专家。它不是代码检视专家，不参与问题清单收敛，只负责调用 GitNexus 为每个 MR 输出一份 `impact_report`，帮助研发和测试同学快速确认影响范围和测试范围。
 
+当前实现里，这个专家会作为 **每一次 MR 检视的默认参与专家**：
+
+- 前端新建 MR 审核时会默认勾选 `change_impact_analysis`
+- 后端创建 `subject_type = "mr"` 的审核任务时，也会自动补入这个专家
+- 它不进入普通 issue/finding 收敛链路，只走独立的 `impact_analysis` 阶段
+
 当前报告会展示在结果页的“关联影响报告”区域，也会进入后端 `ReviewReport.impact_report` 字段和 artifact 快照。
 
 ### GitNexus 在这里怎么用
@@ -103,19 +109,21 @@
 | 后台建图 | `GitNexusIndexScheduler` | 定时对配置的本地代码仓执行 | `.gitnexus/` 图谱和 `index_status.json` |
 | MR 影响报告 | `GitNexusImpactService` + `change_impact_analysis` 专家 | 每个 MR 请求都执行 | 基于图谱的 `impact_report` |
 
-设计原则是：后台先把配置仓库建好图谱；每次 MR 关联影响分析必须先尝试使用这份图谱。只有图谱未就绪、MCP 调用失败或本地仓未配置时，才会退回到 diff/路径规则，并在 `limitations` 里写明原因。
+设计原则是：后台先把配置仓库建好图谱；每次 MR 关联影响分析必须先尝试使用这份图谱。只有真正拿到 GitNexus MCP 的正式结果，系统才会生成并展示关联影响报告。
 
-### 默认行为：先保证每个 MR 有报告
+### 默认行为：每个 MR 默认带上关联影响分析专家
 
-如果 GitNexus 图谱不可用，系统会自动降级：
+当前系统会先保证 **每个 MR 任务默认选中 `change_impact_analysis`**，但不会为了“有一份报告”去伪造降级结果。
 
-- 从 `changed_files` 和 `unified_diff` 识别直接变更文件
-- 从 diff 中提取新增/修改的类、方法、函数等符号
-- 按路径规则识别 Controller/API、Repository/Mapper/DAO、SQL/Migration、Job/Consumer 等入口或数据访问面
-- 推导候选测试文件和建议测试范围
-- 在报告里明确写出 `graph_status = fallback`
+也就是说：
 
-这份降级报告不声称自己有完整调用链，只用于给研发同学一个最低限度的影响范围和测试范围提示。
+- MR 创建时默认带上 `change_impact_analysis`
+- 它会尝试按官方 GitNexus MCP 流程执行 `list_repos -> detect_changes -> context -> impact`
+- 如果 GitNexus 图谱未就绪、registry 未识别、MCP 调用失败或本地仓未配置：
+  - 关联影响分析步骤会明确标记 `failed`
+  - 整个代码审核任务仍可继续完成
+  - 结果页不会再展示伪造的 fallback 报告
+  - 失败原因会记录在过程事件和结果页提示里
 
 ### 开启 GitNexus 后台建图
 
@@ -203,14 +211,15 @@ backend/app/storage/gitnexus/index_status.json
 使用 GitNexus MCP 查询图谱
   -> list_repos：确认仓库已按官方流程注册
   -> detect_changes(scope=all)：识别整体变更影响
+  -> context：围绕关键变更类/方法补齐上下游语义
   -> impact：对 diff 中提取出的变更类/方法/函数做符号级影响分析
 标准化为 ReviewReport.impact_report
   -> graph_status=ready
 MCP 调用失败
-  -> graph_status=fallback，并在 limitations 写明失败原因
+  -> 关联影响分析步骤 failed，并记录失败原因
 ```
 
-也就是说，每次 MR 请求都会先尝试使用后台建好的 GitNexus 图谱。不是等专家自由发挥，也不是只看文件路径。
+也就是说，每次 MR 请求都会先尝试使用后台建好的 GitNexus 图谱。不是等专家自由发挥，也不是只看文件路径；只有 GitNexus 正式结果成功返回，结果页才会展示关联影响报告正文。
 
 当前代码默认使用 GitNexus MCP stdio server：
 

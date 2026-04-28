@@ -91,6 +91,7 @@ type ProcessSidebarTabKey = "issues" | "knowledge" | "events";
 type ResultMainTabKey = "issues";
 
 const { Paragraph, Text, Title } = Typography;
+const DEFAULT_SELECTED_EXPERTS = ["change_impact_analysis"];
 
 const defaultFormState: ReviewFormState = {
   subject_type: "mr",
@@ -100,7 +101,7 @@ const defaultFormState: ReviewFormState = {
   source_ref: "",
   target_ref: "",
   design_docs: [],
-  selected_experts: [],
+  selected_experts: DEFAULT_SELECTED_EXPERTS,
 };
 
 const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result", "impact"];

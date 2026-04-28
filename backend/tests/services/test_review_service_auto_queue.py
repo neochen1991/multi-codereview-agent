@@ -52,7 +52,7 @@ def test_enqueue_open_merge_requests_creates_pending_reviews_and_deduplicates(tm
     assert queue[0].created_at <= queue[1].created_at
 
 
-def test_create_review_defaults_to_empty_selected_experts(tmp_path: Path):
+def test_create_review_defaults_to_change_impact_expert_for_mr(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     review = service.create_review(
         {
@@ -63,6 +63,22 @@ def test_create_review_defaults_to_empty_selected_experts(tmp_path: Path):
             "target_ref": "main",
             "mr_url": "https://github.com/example/repo/pull/1",
             "title": "default experts empty",
+        }
+    )
+
+    assert review.selected_experts == ["change_impact_analysis"]
+
+
+def test_create_review_keeps_branch_review_experts_empty_by_default(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "branch",
+            "repo_id": "repo_default",
+            "project_id": "proj_default",
+            "source_ref": "feature/default",
+            "target_ref": "main",
+            "title": "default branch experts empty",
         }
     )
 
