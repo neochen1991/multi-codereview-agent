@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.report import ImpactReport
@@ -27,6 +29,7 @@ class ChangeImpactReportService:
     DEFAULT_TEMPLATE_PATH = (
         Path(__file__).resolve().parents[1] / "builtin_experts" / "change_impact_analysis" / "report_template.default.md"
     )
+    SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
     SCHEMA_PATH = (
         Path(__file__).resolve().parents[1] / "builtin_experts" / "change_impact_analysis" / "report_template.schema.json"
     )
@@ -77,16 +80,24 @@ class ChangeImpactReportService:
         test_focus = self._normalize_string_list(payload.get("test_focus")) or list(fallback["test_focus"])
         manual_checks = self._normalize_string_list(payload.get("manual_checks")) or list(report.manual_verification)
         template_variables = self._normalize_template_variable_values(payload.get("template_variables"))
-        markdown = self._render_template(
-            report=report,
-            repo_name=str(trace.get("repo") or ""),
-            queried_targets=[str(item) for item in list(trace.get("queried_targets") or [])[:12]],
-            key_impact_points=key_impact_points,
-            test_focus=test_focus,
-            manual_checks=manual_checks,
-            summary=summary,
-            template_variables=template_variables,
-        )
+        markdown_candidate = str(payload.get("markdown") or "").strip()
+        if markdown_candidate and not self._contains_unresolved_placeholders(markdown_candidate):
+            markdown = markdown_candidate
+        else:
+            markdown = self._render_template(
+                report=report,
+                repo_name=str(trace.get("repo") or ""),
+                source_branch=str(trace.get("source_branch") or ""),
+                target_branch=str(trace.get("target_branch") or ""),
+                queried_targets=[str(item) for item in list(trace.get("queried_targets") or [])[:12]],
+                key_impact_points=key_impact_points,
+                test_focus=test_focus,
+                manual_checks=manual_checks,
+                summary=summary,
+                template_variables=template_variables,
+            )
+        if self._looks_like_intranet_template(self._report_template):
+            markdown = self._normalize_intranet_markdown(markdown)
         updated = report.model_copy(
             update={
                 "report_summary": summary,
@@ -122,6 +133,8 @@ class ChangeImpactReportService:
         facts = {
             "workflow": self.WORKFLOW,
             "repo": trace.get("repo") or "",
+            "source_branch": trace.get("source_branch") or "",
+            "target_branch": trace.get("target_branch") or "",
             "queried_targets": list(trace.get("queried_targets") or [])[:12],
             "available_repos": list(trace.get("available_repos") or [])[:12],
             "changed_files": report.changed_files,
@@ -140,6 +153,7 @@ class ChangeImpactReportService:
             "key_impact_points": ["3-6 条，讲清楚影响到了谁、为什么", "..."],
             "test_focus": ["3-6 条，按优先级给出该测什么", "..."],
             "manual_checks": ["需要人工确认的边界", "..."],
+            "markdown": "严格按照模板最终生成的完整 Markdown 报告，所有占位符都已替换，遍历块都已展开",
             "template_variables": {
                 item.get("name", "variable"): {
                     "description": item.get("description", "按模板变量要求输出"),
@@ -156,9 +170,12 @@ class ChangeImpactReportService:
             "2. 只引用 facts 里的对象，不要新增未出现的调用链。\n"
             "3. 测试建议要能直接执行，优先讲必须测什么，再讲建议补测什么。\n"
             "4. 如果某个影响只是候选关系，要明确说“候选”或“建议人工确认”。\n"
-            "5. 请为模板中出现的每一个变量都生成最终填充值，由你结合 GitNexus facts 进行判断和组织，不要直接回传占位符。\n"
-            "6. source_hint 只是参考，不是限制；最终值仍然由你基于 facts 生成，但不能虚构不存在的证据。\n"
-            "6. 输出必须是 JSON，不要输出 Markdown 之外的解释。\n\n"
+            "5. 最终必须输出一份完整的 markdown 字段，严格按照当前模板结构来呈现，包括表格、标题、列表和调用链块。\n"
+            "6. 在“调用链影响分析”部分，优先使用 ```mermaid ... ``` 的 flowchart LR 展示调用链，每个变更方法至少一张图。\n"
+            "7. 模板中的每一个变量都要由你结合 GitNexus facts 判断并填充，不要在最终 markdown 中保留任何 {{ }} 占位符。\n"
+            "8. 如果模板中出现“遍历”“列出”“无则显示”这类说明，必须在 markdown 里展开成最终内容，而不是把说明原样抄回去。\n"
+            "9. source_hint 只是参考，不是限制；最终值仍然由你基于 facts 生成，但不能虚构不存在的证据。\n"
+            "10. 输出必须是 JSON，不要输出 Markdown 之外的解释。\n\n"
             f"Markdown 模板:\n{self._report_template}\n\n"
             f"模板变量 schema:\n{json.dumps(self._template_schema, ensure_ascii=False, indent=2)}\n\n"
             f"输出 schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
@@ -178,17 +195,6 @@ class ChangeImpactReportService:
             report.report_summary
             or f"本次 MR 已通过 GitNexus 分析出关联影响，建议优先回归 {', '.join(test_focus[:2]) or '关键变更链路'}。"
         )
-        markdown_lines = [
-            self._render_template(
-                report=report,
-                repo_name="当前仓库",
-                queried_targets=[],
-                key_impact_points=key_impact_points[:6],
-                test_focus=test_focus[:6],
-                manual_checks=report.manual_verification[:6],
-                summary=summary,
-            )
-        ]
         return {
             "summary": summary,
             "key_impact_points": key_impact_points[:6],
@@ -201,7 +207,7 @@ class ChangeImpactReportService:
                 "should_test": self._bulletize(test_focus[2:6]),
                 "manual_checks": self._bulletize(report.manual_verification[:6]),
             },
-            "markdown": "\n".join(markdown_lines),
+            "markdown": "",
         }
 
     def _parse_json_payload(self, text: str) -> dict[str, Any] | None:
@@ -381,6 +387,8 @@ class ChangeImpactReportService:
         markdown = preview_service._render_template(
             report=report,
             repo_name="order-service",
+            source_branch="feature/order-impact",
+            target_branch="main",
             queried_targets=["OrderController.createOrder", "OrderApplicationService.createOrder", "OrderRepository.save"],
             key_impact_points=[
                 "订单创建入口和仓储保存链路被同时波及，需要把接口、事务和写库顺序作为同一个测试单元来验证。",
@@ -478,7 +486,7 @@ class ChangeImpactReportService:
 
     @classmethod
     def extract_template_placeholders(cls, content: str) -> list[str]:
-        matches = re.findall(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}", str(content or ""))
+        matches = re.findall(r"\{\{\s*([^{}]+?)\s*\}\}", str(content or ""))
         deduped: list[str] = []
         seen: set[str] = set()
         for item in matches:
@@ -489,11 +497,16 @@ class ChangeImpactReportService:
             deduped.append(name)
         return deduped
 
+    def _contains_unresolved_placeholders(self, markdown: str) -> bool:
+        return bool(re.search(r"\{\{\s*[^{}]+?\s*\}\}", str(markdown or "")))
+
     def _render_template(
         self,
         *,
         report: ImpactReport,
         repo_name: str,
+        source_branch: str,
+        target_branch: str,
         queried_targets: list[str],
         key_impact_points: list[str],
         test_focus: list[str],
@@ -501,6 +514,19 @@ class ChangeImpactReportService:
         summary: str,
         template_variables: dict[str, str] | None = None,
     ) -> str:
+        if self._looks_like_intranet_template(self._report_template):
+            return self._render_intranet_template(
+                report=report,
+                repo_name=repo_name,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                queried_targets=queried_targets,
+                key_impact_points=key_impact_points,
+                test_focus=test_focus,
+                manual_checks=manual_checks,
+                summary=summary,
+                template_variables=template_variables,
+            )
         must_test = test_focus[:2]
         should_test = test_focus[2:] or [item.scope for item in report.recommended_test_scope[2:6]]
         data_access_impact = self._derive_data_access_impact(report)
@@ -509,6 +535,8 @@ class ChangeImpactReportService:
         base_context = {
             "summary": summary or "暂无总结",
             "repo_name": repo_name or "未知仓库",
+            "source_branch": source_branch or "未知源分支",
+            "target_branch": target_branch or "未知目标分支",
             "changed_file_count": str(len(report.changed_files)),
             "changed_files": self._bulletize(report.changed_files),
             "changed_symbols": self._bulletize(
@@ -544,10 +572,344 @@ class ChangeImpactReportService:
         merged_context = dict(base_context)
         merged_context.update({key: value for key, value in dict(template_variables or {}).items() if str(value or "").strip()})
         return re.sub(
-            r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}",
+            r"\{\{\s*([^{}]+?)\s*\}\}",
             lambda match: str(merged_context.get(str(match.group(1) or "").strip()) or "- 暂无"),
             self._report_template,
         )
+
+    def _looks_like_intranet_template(self, template: str) -> bool:
+        markers = (
+            "遍历 java_methods，每行一条记录",
+            "遍历 mybatis_sqls，每行一条记录",
+            "遍历 call_chains，每个方法生成以下块",
+            "列出高风险项：如修改了被多处调用的核心方法",
+        )
+        return any(marker in str(template or "") for marker in markers)
+
+    def _render_intranet_template(
+        self,
+        *,
+        report: ImpactReport,
+        repo_name: str,
+        source_branch: str,
+        target_branch: str,
+        queried_targets: list[str],
+        key_impact_points: list[str],
+        test_focus: list[str],
+        manual_checks: list[str],
+        summary: str,
+        template_variables: dict[str, str] | None = None,
+    ) -> str:
+        rendered = str(self._report_template or "")
+        now_text = datetime.now(self.SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        java_method_rows = self._build_java_method_rows(report)
+        mybatis_rows = self._build_mybatis_sql_rows(report)
+        call_chain_blocks = self._build_call_chain_blocks(report)
+        risk_items = self._build_risk_items(report, key_impact_points)
+        test_scenarios = self._build_test_scenarios(report, test_focus)
+        exception_lines = self._build_analysis_exceptions(report, manual_checks)
+        manual_section = self._bulletize(manual_checks) if manual_checks else "无异常"
+        base_context = {
+            "当前时间": now_text,
+            "source_branch": source_branch or repo_name or "未知源分支",
+            "target_branch": target_branch or "未知目标分支",
+            "java_file_count": str(sum(1 for path in report.changed_files if path.endswith(".java"))),
+            "xml_file_count": str(sum(1 for path in report.changed_files if path.endswith(".xml"))),
+            "method_count": str(len(report.changed_symbols)),
+            "sql_count": str(len(self._collect_mybatis_sql_entries(report))),
+            "summary": summary or "暂无总结",
+            "repo_name": repo_name or "未知仓库",
+            "queried_targets": self._bulletize(queried_targets),
+            "manual_checks": manual_section,
+            "根据调用链和变更类型，列出需要重点测试的场景": test_scenarios,
+            "测试场景 1": test_focus[0] if test_focus else "变更文件对应的单元测试",
+            "测试场景 2": test_focus[1] if len(test_focus) > 1 else "接口级回归测试",
+            "如果 errors 数组非空，列出查询失败的方法": exception_lines if exception_lines != "无异常" else "无异常",
+            "如果无异常，显示“无异常”": "无异常" if exception_lines == "无异常" else "",
+            "列出高风险项：如修改了被多处调用的核心方法": risk_items["high"],
+            "列出中风险项：如修改了有上下游依赖的方法": risk_items["medium"],
+            "列出低风险项：如新增方法、无调用链影响": risk_items["low"],
+        }
+        merged_context = dict(base_context)
+        merged_context.update({key: value for key, value in dict(template_variables or {}).items() if str(value or "").strip()})
+        rendered = re.sub(r"\{\{\s*遍历 java_methods，每行一条记录\s*\}\}", java_method_rows, rendered)
+        rendered = re.sub(r"\{\{\s*遍历 mybatis_sqls，每行一条记录\s*\}\}", mybatis_rows, rendered)
+        rendered = self._render_call_chain_loop(rendered, call_chain_blocks)
+        rendered = re.sub(
+            r"\{\{\s*([^{}]+?)\s*\}\}",
+            lambda match: str(merged_context.get(str(match.group(1) or "").strip()) or "- 暂无"),
+            rendered,
+        )
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered).strip()
+        if self._contains_unresolved_placeholders(rendered):
+            rendered = self._strip_remaining_placeholders(rendered)
+        return rendered
+
+    def _render_call_chain_loop(self, template: str, blocks: list[dict[str, str]]) -> str:
+        pattern = re.compile(
+            r"\{\{\s*遍历 call_chains，每个方法生成以下块\s*\}\}(.*?)\{\{\s*结束遍历\s*\}\}",
+            flags=re.DOTALL,
+        )
+        match = pattern.search(template)
+        if not match:
+            return template
+        loop_body = str(match.group(1) or "").strip("\n")
+        rendered_blocks: list[str] = []
+        payloads = blocks or [self._empty_call_chain_block()]
+        for block in payloads:
+            rendered_block = re.sub(
+                    r"\{\{\s*([^{}]+?)\s*\}\}",
+                    lambda item: str(block.get(str(item.group(1) or "").strip()) or "- 暂无"),
+                    loop_body,
+                ).strip()
+            mermaid_chart = str(block.get("mermaid_chart") or "").strip()
+            if mermaid_chart and "```mermaid" not in rendered_block:
+                rendered_block = self._inject_mermaid_after_heading(rendered_block, mermaid_chart)
+            rendered_blocks.append(rendered_block)
+        return template[: match.start()] + "\n\n".join(rendered_blocks) + template[match.end() :]
+
+    def _inject_mermaid_after_heading(self, block: str, mermaid_chart: str) -> str:
+        lines = str(block or "").splitlines()
+        if not lines:
+            return f"{mermaid_chart}\n{block}".strip()
+        return "\n".join([lines[0], "", mermaid_chart, "", *lines[1:]]).strip()
+
+    def _build_java_method_rows(self, report: ImpactReport) -> str:
+        rows: list[str] = []
+        changed_files = {path for path in report.changed_files}
+        for item in report.changed_symbols[:24]:
+            change_type = "modified" if item.file_path in changed_files else "impacted"
+            rows.append(
+                f"| {item.container or '未知类'} | {item.symbol or '未知方法'} | {change_type} | {item.file_path or '未知文件'} |"
+            )
+        return "\n".join(rows) if rows else "| - 暂无 | - 暂无 | - 暂无 | - 暂无 |"
+
+    def _collect_mybatis_sql_entries(self, report: ImpactReport) -> list[dict[str, str]]:
+        entries: list[dict[str, str]] = []
+        for path in report.changed_files:
+            lowered = path.lower()
+            if not lowered.endswith(".xml") or "mapper" not in lowered and "mybatis" not in lowered:
+                continue
+            namespace = Path(path).stem or "未知Namespace"
+            entries.append(
+                {
+                    "namespace": namespace,
+                    "sql_id": "待人工确认",
+                    "sql_type": "MyBatis XML",
+                    "change_type": "modified",
+                    "file_path": path,
+                }
+            )
+        return entries
+
+    def _build_mybatis_sql_rows(self, report: ImpactReport) -> str:
+        rows = [
+            f"| {item['namespace']} | {item['sql_id']} | {item['sql_type']} | {item['change_type']} | {item['file_path']} |"
+            for item in self._collect_mybatis_sql_entries(report)[:12]
+        ]
+        return "\n".join(rows) if rows else "| 无 | 无 | 无 | 无 | 无 |"
+
+    def _build_call_chain_blocks(self, report: ImpactReport) -> list[dict[str, str]]:
+        blocks: list[dict[str, str]] = []
+        for symbol in report.changed_symbols[:12]:
+            method_signature = f"{symbol.container + '.' if symbol.container else ''}{symbol.symbol}".strip(".") or "未知方法"
+            upstream = self._dedupe(
+                [
+                    " -> ".join(path.path)
+                    for path in report.impact_paths
+                    if path.path and method_signature in path.path[1:]
+                ]
+            )
+            downstream = self._dedupe(
+                [
+                    " -> ".join(path.path)
+                    for path in report.impact_paths
+                    if path.path and (
+                        method_signature == path.path[0]
+                        or symbol.symbol in path.path
+                        or (symbol.container and symbol.container in path.path)
+                    )
+                ]
+            )
+            related_files = [item.file_path for item in report.impacted_files if item.file_path and symbol.file_path != item.file_path]
+            impact_summary_parts = []
+            if downstream:
+                impact_summary_parts.append(f"该方法所在链路会继续触达 {', '.join(downstream[:2])}。")
+            if upstream:
+                impact_summary_parts.append(f"上游已有调用方依赖这段逻辑，需要联动验证 {', '.join(upstream[:2])}。")
+            if related_files:
+                impact_summary_parts.append(f"当前候选受影响文件包括 {', '.join(related_files[:2])}。")
+            if not impact_summary_parts:
+                impact_summary_parts.append("当前图谱未给出更深调用链，建议结合代码上下文人工确认该方法的上下游依赖。")
+            blocks.append(
+                {
+                    "method_signature": method_signature,
+                    "mermaid_chart": self._build_call_chain_mermaid(
+                        method_signature=method_signature,
+                        upstream=upstream,
+                        downstream=downstream,
+                        impacted_files=related_files,
+                        recommended_tests=[item.scope for item in report.recommended_test_scope[:2]],
+                    ),
+                    "列出 callers，无则显示 “无上游调用”": self._bulletize(upstream) if upstream else "无上游调用",
+                    "列出 callees，无则显示 “无下游调用”": self._bulletize(downstream) if downstream else "无下游调用",
+                    "基于调用链分析，简要说明该方法变更可能带来的影响": " ".join(impact_summary_parts),
+                }
+            )
+        return blocks
+
+    def _empty_call_chain_block(self) -> dict[str, str]:
+        return {
+            "method_signature": "暂无可展开的方法",
+            "mermaid_chart": "```mermaid\nflowchart LR\n    start[\"暂无可展开的方法\"]\n```",
+            "列出 callers，无则显示 “无上游调用”": "无上游调用",
+            "列出 callees，无则显示 “无下游调用”": "无下游调用",
+            "基于调用链分析，简要说明该方法变更可能带来的影响": "当前图谱没有返回可展开的调用链，请结合实际代码人工确认。",
+        }
+
+    def _build_call_chain_mermaid(
+        self,
+        *,
+        method_signature: str,
+        upstream: list[str],
+        downstream: list[str],
+        impacted_files: list[str],
+        recommended_tests: list[str],
+    ) -> str:
+        lines = [
+            "```mermaid",
+            "flowchart LR",
+            "    classDef changed fill:#dbeafe,stroke:#2563eb,color:#0f172a,stroke-width:2px;",
+            "    classDef downstream fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;",
+            "    classDef file fill:#fef3c7,stroke:#d97706,color:#78350f;",
+            "    classDef test fill:#dcfce7,stroke:#16a34a,color:#14532d;",
+        ]
+        center_id = self._mermaid_node_id(f"center::{method_signature}")
+        lines.append(f'    {center_id}["{self._escape_mermaid_label(method_signature)}"]')
+        lines.append(f"    class {center_id} changed")
+        for index, item in enumerate(upstream[:3], start=1):
+            node_id = self._mermaid_node_id(f"up::{method_signature}::{index}")
+            lines.append(f'    {node_id}["{self._escape_mermaid_label(self._compact_chain_label(item))}"]')
+            lines.append(f"    {node_id} --> {center_id}")
+            lines.append(f"    class {node_id} downstream")
+        for index, item in enumerate(downstream[:4], start=1):
+            node_id = self._mermaid_node_id(f"down::{method_signature}::{index}")
+            lines.append(f'    {node_id}["{self._escape_mermaid_label(self._compact_chain_label(item))}"]')
+            lines.append(f"    {center_id} --> {node_id}")
+            lines.append(f"    class {node_id} downstream")
+        for index, item in enumerate(impacted_files[:2], start=1):
+            node_id = self._mermaid_node_id(f"file::{method_signature}::{index}")
+            file_name = Path(item).name or item
+            lines.append(f'    {node_id}["文件: {self._escape_mermaid_label(file_name)}"]')
+            lines.append(f"    {center_id} -.-> {node_id}")
+            lines.append(f"    class {node_id} file")
+        for index, item in enumerate(recommended_tests[:2], start=1):
+            node_id = self._mermaid_node_id(f"test::{method_signature}::{index}")
+            lines.append(f'    {node_id}["测试: {self._escape_mermaid_label(item)}"]')
+            lines.append(f"    {center_id} -.-> {node_id}")
+            lines.append(f"    class {node_id} test")
+        lines.append("```")
+        return "\n".join(lines)
+
+    def _mermaid_node_id(self, value: str) -> str:
+        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", str(value or "node"))
+        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+        return sanitized or "node"
+
+    def _escape_mermaid_label(self, value: str) -> str:
+        text = str(value or "").replace('"', '\\"')
+        return text[:120]
+
+    def _compact_chain_label(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if "->" not in text:
+            return self._short_symbol_name(text)
+        parts = [self._short_symbol_name(item) for item in text.split("->")]
+        compact = " -> ".join(item for item in parts if item)
+        return compact[:72] if compact else text[:72]
+
+    def _short_symbol_name(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = Path(text).name or text
+        text = text.replace(".java", "")
+        if "." in text and " " not in text:
+            segments = [segment for segment in text.split(".") if segment]
+            if len(segments) >= 2:
+                text = ".".join(segments[-2:])
+            elif segments:
+                text = segments[-1]
+        return text[:32]
+
+    def _build_risk_items(self, report: ImpactReport, key_impact_points: list[str]) -> dict[str, str]:
+        high: list[str] = []
+        medium: list[str] = []
+        low: list[str] = []
+        for symbol in report.changed_symbols:
+            signature = f"{symbol.container + '.' if symbol.container else ''}{symbol.symbol}".strip(".")
+            related = [path for path in report.impact_paths if signature in path.path or symbol.symbol in path.path]
+            if len(related) >= 2 or report.risk_level.lower() == "high":
+                high.append(f"{signature} 关联到 {len(related) or len(report.impact_paths)} 条调用链，属于核心变更点。")
+            elif related:
+                medium.append(f"{signature} 存在上下游依赖，建议联动验证调用方与下游实现。")
+            else:
+                low.append(f"{signature} 当前未识别出明显扩散链路，更多影响需结合代码人工确认。")
+        if not high and report.risk_level.lower() == "medium":
+            medium.extend(key_impact_points[:2])
+        if not low:
+            low.append("当前未识别出纯新增且无依赖扩散的方法。")
+        return {
+            "high": "；".join(self._dedupe(high)[:3]) or "无高风险项",
+            "medium": "；".join(self._dedupe(medium)[:3]) or "无中风险项",
+            "low": "；".join(self._dedupe(low)[:3]) or "无低风险项",
+        }
+
+    def _build_test_scenarios(self, report: ImpactReport, test_focus: list[str]) -> str:
+        lines: list[str] = []
+        for index, item in enumerate(test_focus[:5], start=1):
+            lines.append(f"{index}. {item}")
+        next_index = len(lines) + 1
+        for scope in report.recommended_test_scope[:5]:
+            candidate = f"{scope.scope}：{scope.reason}"
+            if any(scope.scope in line for line in lines):
+                continue
+            lines.append(f"{next_index}. {candidate}")
+            next_index += 1
+        return "\n".join(lines) if lines else "1. 变更文件对应的单元测试\n2. 接口级回归测试"
+
+    def _build_analysis_exceptions(self, report: ImpactReport, manual_checks: list[str]) -> str:
+        exception_lines = [item for item in report.limitations if "失败" in item or "异常" in item or "未" in item]
+        if exception_lines:
+            return self._bulletize(exception_lines[:6])
+        if manual_checks:
+            return "无异常"
+        return "无异常"
+
+    def _strip_remaining_placeholders(self, text: str) -> str:
+        cleaned = re.sub(r"\{\{\s*[^{}]+?\s*\}\}", "- 暂无", text)
+        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    def _normalize_intranet_markdown(self, markdown: str) -> str:
+        lines = [line.rstrip() for line in str(markdown or "").splitlines()]
+        normalized: list[str] = []
+        seen_numbered: set[str] = set()
+        for line in lines:
+            stripped = line.strip()
+            if re.fullmatch(r"\d+\.\s*\.\.\.", stripped):
+                continue
+            if normalized and stripped == normalized[-1].strip() and stripped in {"无异常", "---"}:
+                continue
+            if re.match(r"^\d+\.\s+", stripped):
+                if stripped in seen_numbered:
+                    continue
+                seen_numbered.add(stripped)
+            normalized.append(line)
+        text = "\n".join(normalized)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     def _bulletize(self, items: list[str]) -> str:
         normalized = [str(item or "").strip() for item in items if str(item or "").strip()]

@@ -1,5 +1,6 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Empty, Space, Tag, Typography } from "antd";
+import mermaid from "mermaid";
 
 import type {
   ImpactFile,
@@ -317,72 +318,528 @@ const priorityRank = (value?: string): number => {
 };
 
 const hasUnresolvedTemplateVariables = (markdown?: string): boolean =>
-  /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(String(markdown || ""));
+  /\{\{\s*[^{}]+\s*\}\}/.test(String(markdown || ""));
+
+const renderInlineTemplateText = (text: string): React.ReactNode[] => {
+  const source = String(text || "");
+  const tokens: React.ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = pattern.exec(source);
+  while (match) {
+    if (match.index > lastIndex) {
+      tokens.push(source.slice(lastIndex, match.index));
+    }
+    const token = match[0] || "";
+    if (token.startsWith("**") && token.endsWith("**")) {
+      tokens.push(
+        <strong key={`strong-${match.index}`} className="template-preview-strong">
+          {token.slice(2, -2)}
+        </strong>,
+      );
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      tokens.push(
+        <code key={`code-${match.index}`} className="template-preview-inline-code">
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else {
+      tokens.push(token);
+    }
+    lastIndex = match.index + token.length;
+    match = pattern.exec(source);
+  }
+  if (lastIndex < source.length) {
+    tokens.push(source.slice(lastIndex));
+  }
+  return tokens.length ? tokens : [source];
+};
+
+let mermaidConfigured = false;
+
+const normalizeMermaidNodeLabel = (value: string): string => String(value || "").replace(/\s+/g, " ").trim();
+
+const extractMermaidNodeLabels = (chart: string): string[] => {
+  const labels = Array.from(chart.matchAll(/\["([^"]+)"\]/g)).map((match) => normalizeMermaidNodeLabel(match[1] || ""));
+  return Array.from(new Set(labels.filter(Boolean)));
+};
+
+const extractMermaidCenterLabel = (chart: string): string =>
+  normalizeMermaidNodeLabel(chart.match(/\["([^"]+)"\]/)?.[1] || "");
+
+const buildMermaidSearchTerms = (label: string): string[] => {
+  const normalized = normalizeMermaidNodeLabel(label);
+  if (!normalized) return [];
+  const raw = normalized.replace(/^文件:\s*/, "").replace(/^测试:\s*/, "");
+  const terms = [normalized, raw];
+  if (raw.includes(" -> ")) {
+    raw.split(" -> ").forEach((item) => terms.push(item.trim()));
+  }
+  if (raw.includes(".")) {
+    const pieces = raw.split(".").map((item) => item.trim()).filter(Boolean);
+    if (pieces.length) {
+      terms.push(pieces[pieces.length - 1]);
+    }
+  }
+  return Array.from(new Set(terms.map((item) => item.trim()).filter(Boolean)));
+};
+
+const clearMermaidLinkedHighlights = (scope: ParentNode | null) => {
+  if (!scope) return;
+  scope.querySelectorAll(".template-preview-linked-highlight").forEach((node) => {
+    node.classList.remove("template-preview-linked-highlight");
+  });
+  scope.querySelectorAll(".template-preview-mermaid-block-linked").forEach((node) => {
+    node.classList.remove("template-preview-mermaid-block-linked");
+  });
+};
+
+const contentSelector =
+  ".template-preview-h1, .template-preview-h2, .template-preview-h3, .template-preview-h4, .template-preview-paragraph, .template-preview-list li, .template-preview-table td, .template-preview-quote div";
+
+const collectMermaidLocalCandidates = (block: Element | null): HTMLElement[] => {
+  if (!block || !block.parentElement) return [];
+  const results: HTMLElement[] = [];
+  const pushIfMatch = (element: Element | null) => {
+    if (!(element instanceof HTMLElement)) return;
+    if (element.matches(contentSelector)) {
+      results.push(element);
+    }
+    results.push(...Array.from(element.querySelectorAll<HTMLElement>(contentSelector)));
+  };
+  pushIfMatch(block.previousElementSibling);
+  let cursor = block.nextElementSibling;
+  while (cursor) {
+    if (
+      cursor.classList.contains("template-preview-mermaid-block") ||
+      cursor.classList.contains("template-preview-divider") ||
+      cursor.classList.contains("template-preview-h4")
+    ) {
+      break;
+    }
+    pushIfMatch(cursor);
+    cursor = cursor.nextElementSibling;
+  }
+  return results;
+};
+
+const scrollToMermaidRelatedContent = (scope: ParentNode | null, label: string, block?: Element | null) => {
+  if (!scope) return;
+  clearMermaidLinkedHighlights(scope);
+  const terms = buildMermaidSearchTerms(label);
+  if (!terms.length) return;
+  const localCandidates = collectMermaidLocalCandidates(block || null);
+  const candidates = localCandidates.length
+    ? localCandidates
+    : Array.from(scope.querySelectorAll<HTMLElement>(contentSelector));
+  const matched = candidates.filter((element) => {
+    const text = normalizeMermaidNodeLabel(element.textContent || "");
+    return terms.some((term) => text.includes(term));
+  });
+  if (!matched.length) return;
+  matched.slice(0, 6).forEach((element) => {
+    element.classList.add("template-preview-linked-highlight");
+  });
+  matched[0]?.scrollIntoView({ behavior: "smooth", block: "center" });
+};
+
+const findLinkedMermaidBlock = (scope: ParentNode | null, currentBlock: Element | null, label: string): HTMLElement | null => {
+  if (!scope) return null;
+  const terms = buildMermaidSearchTerms(label);
+  if (!terms.length) return null;
+  const blocks = Array.from(scope.querySelectorAll<HTMLElement>(".template-preview-mermaid-block[data-center-label]"));
+  return (
+    blocks.find((block) => {
+      if (currentBlock && block === currentBlock) return false;
+      const centerLabel = normalizeMermaidNodeLabel(block.dataset.centerLabel || "");
+      return terms.some((term) => centerLabel.includes(term) || term.includes(centerLabel));
+    }) || null
+  );
+};
+
+const ensureMermaid = () => {
+  if (mermaidConfigured) return;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "loose",
+    theme: "neutral",
+    flowchart: { useMaxWidth: true, htmlLabels: false, curve: "basis" },
+  });
+  mermaidConfigured = true;
+};
+
+const MermaidBlock = ({ chart }: { chart: string }) => {
+  const blockRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [error, setError] = useState<string>("");
+  const [zoom, setZoom] = useState<number>(1);
+  const [activeNode, setActiveNode] = useState<string>("");
+  const [linkedBlockLabel, setLinkedBlockLabel] = useState<string>("");
+  const nodeLabels = useMemo(() => extractMermaidNodeLabels(chart), [chart]);
+  const centerLabel = useMemo(() => extractMermaidCenterLabel(chart), [chart]);
+
+  useEffect(() => {
+    let disposed = false;
+    const render = async () => {
+      if (!containerRef.current) return;
+      setError("");
+      ensureMermaid();
+      const id = `impact-mermaid-${Math.random().toString(36).slice(2, 10)}`;
+      try {
+        const result = await mermaid.render(id, chart);
+        if (disposed || !containerRef.current) return;
+        containerRef.current.innerHTML = result.svg;
+      } catch (err) {
+        if (disposed || !containerRef.current) return;
+        containerRef.current.innerHTML = "";
+        setError(err instanceof Error ? err.message : "Mermaid 渲染失败");
+      }
+    };
+    void render();
+    return () => {
+      disposed = true;
+    };
+  }, [chart]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const nodes = Array.from(containerRef.current.querySelectorAll<SVGGElement>(".node"));
+    nodes.forEach((node) => {
+      const label = normalizeMermaidNodeLabel(node.textContent || "");
+      node.classList.toggle("template-preview-mermaid-node-active", Boolean(activeNode) && label === activeNode);
+      node.classList.toggle("template-preview-mermaid-node-clickable", Boolean(label));
+      node.setAttribute("data-node-label", label);
+      node.style.cursor = label ? "pointer" : "default";
+      node.onclick = () => {
+        if (!label) return;
+        setActiveNode((current) => (current === label ? "" : label));
+      };
+    });
+  }, [chart, activeNode]);
+
+  useEffect(() => {
+    const scope = containerRef.current?.closest(".template-preview-rendered");
+    const block = blockRef.current;
+    if (!scope) return;
+    if (!activeNode) {
+      clearMermaidLinkedHighlights(scope);
+      setLinkedBlockLabel("");
+      return;
+    }
+    scrollToMermaidRelatedContent(scope, activeNode, block);
+    const linkedBlock = findLinkedMermaidBlock(scope, block, activeNode);
+    if (linkedBlock) {
+      linkedBlock.classList.add("template-preview-mermaid-block-linked");
+      linkedBlock.scrollIntoView({ behavior: "smooth", block: "center" });
+      setLinkedBlockLabel(normalizeMermaidNodeLabel(linkedBlock.dataset.centerLabel || ""));
+      return;
+    }
+    setLinkedBlockLabel("");
+  }, [activeNode]);
+
+  return (
+    <div ref={blockRef} className="template-preview-mermaid-block" data-center-label={centerLabel}>
+      <div className="template-preview-mermaid-toolbar">
+        <div className="template-preview-mermaid-legend" aria-label="调用链图例">
+          <span className="template-preview-mermaid-legend-item">
+            <span className="template-preview-mermaid-legend-swatch template-preview-mermaid-legend-swatch-changed" />
+            变更方法
+          </span>
+          <span className="template-preview-mermaid-legend-item">
+            <span className="template-preview-mermaid-legend-swatch template-preview-mermaid-legend-swatch-downstream" />
+            调用链节点
+          </span>
+          <span className="template-preview-mermaid-legend-item">
+            <span className="template-preview-mermaid-legend-swatch template-preview-mermaid-legend-swatch-file" />
+            受影响文件
+          </span>
+          <span className="template-preview-mermaid-legend-item">
+            <span className="template-preview-mermaid-legend-swatch template-preview-mermaid-legend-swatch-test" />
+            测试建议
+          </span>
+        </div>
+        <Space size={8} className="template-preview-mermaid-actions">
+          <Text type="secondary" className="template-preview-mermaid-zoom-label">
+            {Math.round(zoom * 100)}%
+          </Text>
+          <Button size="small" onClick={() => setZoom((value) => Math.max(0.7, Number((value - 0.1).toFixed(2))))}>
+            缩小
+          </Button>
+          <Button size="small" onClick={() => setZoom(1)}>
+            重置
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            ghost
+            onClick={() => setZoom((value) => Math.min(1.8, Number((value + 0.1).toFixed(2))))}
+          >
+            放大
+          </Button>
+        </Space>
+      </div>
+      <div className="template-preview-mermaid-canvas">
+        <div
+          className="template-preview-mermaid-zoom-surface"
+          style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }}
+        >
+          <div ref={containerRef} />
+        </div>
+      </div>
+      <div className="template-preview-mermaid-node-panel">
+        <div className="template-preview-mermaid-node-panel-header">
+          <Text strong>图内节点</Text>
+          <Text type="secondary">
+            {activeNode ? `当前聚焦：${activeNode}` : "点击节点或下方名称，可高亮查看"}
+          </Text>
+        </div>
+        {linkedBlockLabel ? (
+          <Alert
+            type="info"
+            showIcon
+            className="template-preview-mermaid-link-alert"
+            message={`已联动到另一张调用图：${linkedBlockLabel}`}
+          />
+        ) : null}
+        <div className="template-preview-mermaid-node-list">
+          {nodeLabels.map((label) => (
+            <Button
+              key={label}
+              size="small"
+              type={activeNode === label ? "primary" : "default"}
+              ghost={activeNode === label}
+              className="template-preview-mermaid-node-chip"
+              onClick={() => setActiveNode((current) => (current === label ? "" : label))}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      {error ? (
+        <Alert
+          type="warning"
+          showIcon
+          className="template-preview-mermaid-fallback"
+          message="Mermaid 图渲染失败，已保留原始图代码"
+          description={<pre className="template-preview-mermaid-code">{chart}</pre>}
+        />
+      ) : null}
+    </div>
+  );
+};
 
 const renderTemplateMarkdown = (markdown: string): React.ReactNode[] => {
   const lines = String(markdown || "").split(/\r?\n/);
   const nodes: React.ReactNode[] = [];
   let bulletBuffer: string[] = [];
+  let orderedBuffer: string[] = [];
   let paragraphBuffer: string[] = [];
+  let quoteBuffer: string[] = [];
+  let tableBuffer: string[] = [];
+  let mermaidBuffer: string[] | null = null;
+
+  const normalizeTableRow = (value: string): string[] => {
+    const text = value.trim().replace(/^｜/, "|").replace(/｜$/g, "|").replace(/｜/g, "|");
+    return text
+      .split("|")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  };
+
+  const flushTable = () => {
+    if (!tableBuffer.length) return;
+    const rows = tableBuffer.map(normalizeTableRow).filter((row) => row.length);
+    if (!rows.length) {
+      tableBuffer = [];
+      return;
+    }
+    const dividerPattern = /^:?-{2,}:?$/;
+    const header = rows[0];
+    const body = rows.slice(1).filter((row) => !row.every((cell) => dividerPattern.test(cell.replace(/\s+/g, ""))));
+    nodes.push(
+      <div key={`template-table-${nodes.length}`} className="template-preview-table-wrap">
+        <table className="template-preview-table">
+          <thead>
+            <tr>
+              {header.map((cell, index) => (
+                <th key={`th-${index}`}>{renderInlineTemplateText(cell)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((row, rowIndex) => (
+              <tr key={`tr-${rowIndex}`}>
+                {row.map((cell, cellIndex) => (
+                  <td key={`td-${rowIndex}-${cellIndex}`}>{renderInlineTemplateText(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>,
+    );
+    tableBuffer = [];
+  };
 
   const flushBullets = () => {
     if (!bulletBuffer.length) return;
     nodes.push(
       <ul key={`template-ul-${nodes.length}`} className="template-preview-list">
         {bulletBuffer.map((item, index) => (
-          <li key={`${item}-${index}`}>{item}</li>
+          <li key={`${item}-${index}`}>{renderInlineTemplateText(item)}</li>
         ))}
       </ul>,
     );
     bulletBuffer = [];
   };
 
+  const flushOrdered = () => {
+    if (!orderedBuffer.length) return;
+    nodes.push(
+      <ol key={`template-ol-${nodes.length}`} className="template-preview-list template-preview-list-ordered">
+        {orderedBuffer.map((item, index) => (
+          <li key={`${item}-${index}`}>{renderInlineTemplateText(item)}</li>
+        ))}
+      </ol>,
+    );
+    orderedBuffer = [];
+  };
+
   const flushParagraph = () => {
     if (!paragraphBuffer.length) return;
     nodes.push(
       <Paragraph key={`template-p-${nodes.length}`} className="template-preview-paragraph">
-        {paragraphBuffer.join(" ")}
+        {renderInlineTemplateText(paragraphBuffer.join(" "))}
       </Paragraph>,
     );
     paragraphBuffer = [];
   };
 
+  const flushQuote = () => {
+    if (!quoteBuffer.length) return;
+    nodes.push(
+      <blockquote key={`template-quote-${nodes.length}`} className="template-preview-quote">
+        {quoteBuffer.map((item, index) => (
+          <div key={`${item}-${index}`}>{renderInlineTemplateText(item)}</div>
+        ))}
+      </blockquote>,
+    );
+    quoteBuffer = [];
+  };
+
   lines.forEach((line, index) => {
     const text = line.trim();
+    if (mermaidBuffer) {
+      if (text === "```") {
+        flushTable();
+        flushQuote();
+        flushBullets();
+        flushOrdered();
+        flushParagraph();
+        nodes.push(<MermaidBlock key={`template-mermaid-${index}`} chart={mermaidBuffer.join("\n")} />);
+        mermaidBuffer = null;
+      } else {
+        mermaidBuffer.push(line);
+      }
+      return;
+    }
     if (!text) {
+      flushTable();
+      flushQuote();
       flushBullets();
+      flushOrdered();
       flushParagraph();
+      return;
+    }
+    if (text === "```mermaid") {
+      flushTable();
+      flushQuote();
+      flushBullets();
+      flushOrdered();
+      flushParagraph();
+      mermaidBuffer = [];
+      return;
+    }
+    if (/^[|｜].*[|｜]$/.test(text)) {
+      flushQuote();
+      flushBullets();
+      flushOrdered();
+      flushParagraph();
+      tableBuffer.push(text);
+      return;
+    }
+    flushTable();
+    if (text === "---") {
+      flushQuote();
+      flushBullets();
+      flushOrdered();
+      flushParagraph();
+      nodes.push(<hr key={`template-hr-${index}`} className="template-preview-divider" />);
+      return;
+    }
+    if (text.startsWith(">")) {
+      flushBullets();
+      flushOrdered();
+      flushParagraph();
+      quoteBuffer.push(text.replace(/^>\s?/, ""));
+      return;
+    }
+    flushQuote();
+    if (text.startsWith("#### ")) {
+      flushBullets();
+      flushOrdered();
+      flushParagraph();
+      nodes.push(<Title key={`template-h4-${index}`} level={5} className="template-preview-h4">{renderInlineTemplateText(text.slice(5))}</Title>);
       return;
     }
     if (text.startsWith("### ")) {
       flushBullets();
+      flushOrdered();
       flushParagraph();
-      nodes.push(<Title key={`template-h3-${index}`} level={5}>{text.slice(4)}</Title>);
+      nodes.push(<Title key={`template-h3-${index}`} level={5} className="template-preview-h3">{renderInlineTemplateText(text.slice(4))}</Title>);
       return;
     }
     if (text.startsWith("## ")) {
       flushBullets();
+      flushOrdered();
       flushParagraph();
-      nodes.push(<Title key={`template-h2-${index}`} level={4}>{text.slice(3)}</Title>);
+      nodes.push(<Title key={`template-h2-${index}`} level={4} className="template-preview-h2">{renderInlineTemplateText(text.slice(3))}</Title>);
       return;
     }
     if (text.startsWith("# ")) {
       flushBullets();
+      flushOrdered();
       flushParagraph();
-      nodes.push(<Title key={`template-h1-${index}`} level={3}>{text.slice(2)}</Title>);
+      nodes.push(<Title key={`template-h1-${index}`} level={3} className="template-preview-h1">{renderInlineTemplateText(text.slice(2))}</Title>);
       return;
     }
     if (text.startsWith("- ")) {
       flushParagraph();
+      flushOrdered();
       bulletBuffer.push(text.slice(2));
       return;
     }
+    if (/^\d+\.\s+/.test(text)) {
+      flushParagraph();
+      flushBullets();
+      orderedBuffer.push(text.replace(/^\d+\.\s+/, ""));
+      return;
+    }
     flushBullets();
+    flushOrdered();
     paragraphBuffer.push(text);
   });
 
+  flushTable();
+  flushQuote();
   flushBullets();
+  flushOrdered();
   flushParagraph();
+  const tailMermaid = mermaidBuffer as string[] | null;
+  if (tailMermaid && tailMermaid.length > 0) {
+    nodes.push(<MermaidBlock key={`template-mermaid-tail-${nodes.length}`} chart={tailMermaid.join("\n")} />);
+  }
   return nodes;
 };
 

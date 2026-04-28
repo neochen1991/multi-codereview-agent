@@ -1292,6 +1292,9 @@ class ReviewRunner(
         llm_result = None
         try:
             impact_report, impact_trace = self.gitnexus_impact_service.analyze_with_trace(latest.subject, runtime_settings)
+            impact_trace = dict(impact_trace or {})
+            impact_trace.setdefault("source_branch", str(latest.subject.source_ref or "").strip())
+            impact_trace.setdefault("target_branch", str(latest.subject.target_ref or "").strip())
             impact_report, llm_result = self.change_impact_report_service.synthesize(
                 expert=expert,
                 runtime_settings=runtime_settings,

@@ -115,12 +115,7 @@ def test_change_impact_report_service_synthesizes_llm_fields():
     assert updated.report_summary == "本次改动影响订单入口和审计发布链路。"
     assert updated.key_impact_points == ["OrderController 入口新增 notifyAudit。"]
     assert updated.test_focus == ["优先回归订单创建接口。"]
-    assert updated.llm_markdown.startswith("# 关联影响分析报告")
-    assert "## 1. 报告结论" in updated.llm_markdown
-    assert "## 5. 数据与事务影响" in updated.llm_markdown
-    assert "Repository" in updated.llm_markdown
-    assert "高" in updated.llm_markdown or "high" in updated.llm_markdown
-    assert "本次改动影响订单入口和审计发布链路。" in updated.llm_markdown
+    assert updated.llm_markdown == "## 结论\n本次改动影响订单入口和审计发布链路。"
     assert updated.llm_generated is True
     assert updated.analysis_workflow
 
@@ -241,6 +236,50 @@ def test_change_impact_report_service_allows_llm_to_fill_non_llm_schema_variable
     assert "OrderController.createOrder -> OrderApplicationService.createOrder -> OrderRepository.save" in updated.llm_markdown
 
 
+def test_change_impact_report_service_prefers_llm_rendered_markdown_for_intranet_template():
+    service = ChangeImpactReportService()
+    service._report_template = "## 模板标题\n\n{{ 当前时间 }}\n\n{{ 遍历 java_methods，每行一条记录 }}"
+    service._template_schema = {
+        "variables": [
+            {"name": "当前时间", "source": "llm", "required": True, "description": "分析时间"},
+            {"name": "遍历 java_methods，每行一条记录", "source": "llm", "required": True, "description": "方法列表"},
+        ]
+    }
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+    service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]
+        text=(
+            '{"summary":"订单主链路受影响。",'
+            '"key_impact_points":["订单入口到仓储链路需要回归。"],'
+            '"test_focus":["优先回归订单创建接口。"],'
+            '"manual_checks":["确认审计消息发送链路。"],'
+            '"markdown":"## 代码关联影响分析报告\\n\\n> 分析时间：2026-04-28 10:00:00\\n\\n### 变更方法清单\\n\\n| 类名 | 方法 | 变更类型 | 文件 |\\n| --- | --- | --- | --- |\\n| OrderController | notifyAudit | modified | src/main/java/com/example/order/OrderController.java |"}'
+        ),
+        mode="live",
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    updated, _ = service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(),
+        report=_report(),
+        trace={"repo": "repo", "detect_changes": {}, "context_results": [], "impact_results": []},
+        review_id="rev_test",
+    )
+
+    assert updated.llm_markdown.startswith("## 代码关联影响分析报告")
+    assert "{{ 当前时间 }}" not in updated.llm_markdown
+    assert "{{ 遍历 java_methods，每行一条记录 }}" not in updated.llm_markdown
+    assert "OrderController | notifyAudit | modified" in updated.llm_markdown
+
+
 def test_change_impact_report_service_can_analyze_template_schema_with_llm():
     service = ChangeImpactReportService()
     service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]
@@ -267,3 +306,74 @@ def test_change_impact_report_service_can_analyze_template_schema_with_llm():
     assert variables[0]["source"] == "llm"
     assert variables[1]["name"] == "impact_paths"
     assert variables[1]["source"] == "gitnexus"
+
+
+def test_extract_template_placeholders_supports_chinese_instructional_placeholders():
+    placeholders = ChangeImpactReportService.extract_template_placeholders(
+        "## 模板\n{{ 当前时间 }}\n{{ 遍历 java_methods，每行一条记录 }}\n{{ source_branch }}"
+    )
+
+    assert placeholders == ["当前时间", "遍历 java_methods，每行一条记录", "source_branch"]
+
+
+def test_change_impact_report_service_renders_intranet_template_without_leftover_placeholders():
+    service = ChangeImpactReportService()
+    service._report_template = """## 代码关联影响分析报告
+
+> 分析时间：{{ 当前时间 }}
+> 对比分支：{{ source_branch }} -> {{ target_branch }}
+
+### 变更方法清单
+
+{{ 遍历 java_methods，每行一条记录 }}
+
+### 调用链影响分析
+
+{{ 遍历 call_chains，每个方法生成以下块 }}
+#### `{{ method_signature }}`
+{{ 列出 callers，无则显示 “无上游调用”}}
+{{ 列出 callees，无则显示 “无下游调用”}}
+{{ 基于调用链分析，简要说明该方法变更可能带来的影响 }}
+{{ 结束遍历 }}
+
+### 风险评估
+{{ 列出高风险项：如修改了被多处调用的核心方法 }}
+
+### 测试建议
+{{ 根据调用链和变更类型，列出需要重点测试的场景 }}
+"""
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+    service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]
+        text="plain text response",
+        mode="fallback",
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+        error="parse_failed",
+    )
+
+    updated, _ = service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(),
+        report=_report(),
+        trace={
+            "repo": "repo",
+            "source_branch": "feature/order-impact",
+            "target_branch": "main",
+            "detect_changes": {},
+            "context_results": [],
+            "impact_results": [],
+        },
+        review_id="rev_test",
+    )
+
+    assert "{{" not in updated.llm_markdown
+    assert "feature/order-impact -> main" in updated.llm_markdown
+    assert "OrderController | notifyAudit | modified" in updated.llm_markdown
+    assert "OrderController -> OrderApplicationService -> OrderRepository" in updated.llm_markdown or "OrderController -> OrderApplicationService" in updated.llm_markdown
