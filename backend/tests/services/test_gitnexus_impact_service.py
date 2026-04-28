@@ -13,6 +13,7 @@ class FakeGitNexusImpactClient:
     def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols):
         return {
             "detect_changes": {
+                "changed_symbols": ["StockRepository.findByStatus", "StockService.reserve"],
                 "affected_files": [
                     {
                         "path": "inventory/src/main/java/com/example/StockService.java",
@@ -31,11 +32,35 @@ class FakeGitNexusImpactClient:
                     }
                 ],
             },
+            "context_results": [
+                {
+                    "symbol": {"name": "StockRepository.findByStatus"},
+                    "incoming": {"calls": [{"name": "StockService.reserve"}]},
+                    "outgoing": {"calls": [{"name": "StockMapper.selectByStatus"}]},
+                    "processes": [{"name": "库存扣减流程"}],
+                }
+            ],
             "impact_results": [
                 {
                     "paths": [["StockController.create", "StockService.reserve", "StockRepository.findByStatus"]],
                 }
             ],
+        }
+
+
+class CaptureGitNexusImpactClient:
+    def __init__(self) -> None:
+        self.changed_symbols = []
+
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols):
+        self.changed_symbols = list(changed_symbols)
+        return {
+            "detect_changes": {
+                "affected_files": [],
+                "affected_processes": ["inventory"],
+            },
+            "context_results": [],
+            "impact_results": [],
         }
 
 
@@ -111,6 +136,8 @@ def test_gitnexus_impact_service_uses_ready_graph_before_fallback(storage_root: 
     assert any(item.file_path.endswith("StockService.java") for item in report.impacted_files)
     assert any(item.scope == "库存扣减主链路回归" for item in report.recommended_test_scope)
     assert report.impact_paths[0].path[-1] == "StockRepository.findByStatus"
+    assert any(node.label == "StockService.reserve" for node in report.impact_graph.nodes)
+    assert any(edge.source == "StockService.reserve" and edge.target == "StockRepository.findByStatus" for edge in report.impact_graph.edges)
 
 
 def test_gitnexus_impact_service_marks_fallback_when_ready_graph_call_fails(storage_root: Path, tmp_path: Path):
@@ -180,6 +207,52 @@ def test_gitnexus_impact_service_requires_preinstalled_gitnexus(storage_root: Pa
             assert "未预装 GitNexus" in str(error)
         else:
             raise AssertionError("未安装 GitNexus 时应直接失败")
+
+
+def test_gitnexus_impact_service_extracts_symbols_from_local_git_diff_when_subject_diff_missing(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        storage_root / "gitnexus" / "index_status.json",
+        {"state": "ready", "repo_path": str(repo_path), "repo_name": "repo", "commit": "abc123"},
+    )
+    capture = CaptureGitNexusImpactClient()
+    service = GitNexusImpactService(storage_root, mcp_client=capture)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+        metadata={"workspace_repo_path": str(repo_path)},
+    )
+
+    with (
+        patch("app.services.gitnexus_impact_service.shutil.which", return_value="/usr/local/bin/gitnexus"),
+        patch.object(
+            service,
+            "_load_local_diff_from_git",
+            return_value=(
+                "diff --git a/src/main/java/com/example/OrderController.java "
+                "b/src/main/java/com/example/OrderController.java\n"
+                "@@ -10,0 +10,4 @@\n"
+                " public class OrderController {\n"
+                "+  public OrderDTO createOrder() {\n"
+                "+    return service.create();\n"
+                "+  }\n"
+                " }\n"
+            ),
+        ),
+    ):
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert report.graph_status == "ready"
+    assert capture.changed_symbols
+    assert capture.changed_symbols[0].symbol == "createOrder"
+    assert capture.changed_symbols[0].container == "OrderController"
 
 
 def test_tool_gateway_invokes_gitnexus_impact_analysis(storage_root: Path):

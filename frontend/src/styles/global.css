@@ -1388,6 +1388,113 @@ body {
   gap: 4px;
 }
 
+.impact-graph-scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.impact-graph-canvas {
+  position: relative;
+  min-height: 280px;
+  border-radius: 18px;
+  border: 1px solid #d8e3f2;
+  background:
+    radial-gradient(circle at top left, rgba(107, 138, 253, 0.08) 0%, transparent 38%),
+    linear-gradient(180deg, #fbfdff 0%, #f4f8ff 100%);
+}
+
+.impact-graph-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.impact-graph-edge {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-width: 2;
+}
+
+.impact-graph-edge-label {
+  fill: #64748b;
+  font-size: 11px;
+  text-anchor: middle;
+}
+
+.impact-graph-node {
+  position: absolute;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid #d8e3f2;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+}
+
+.impact-graph-node-primary {
+  border-color: #9db8ff;
+  background: linear-gradient(180deg, #eef4ff 0%, #ffffff 100%);
+}
+
+.impact-graph-node-accent {
+  border-color: #f8c4c4;
+  background: linear-gradient(180deg, #fff4f4 0%, #ffffff 100%);
+}
+
+.impact-graph-node-process {
+  border-color: #cce9d5;
+  background: linear-gradient(180deg, #f3fff7 0%, #ffffff 100%);
+}
+
+.impact-graph-node-danger {
+  border-color: #f3c2c2;
+  background: linear-gradient(180deg, #fff6f5 0%, #ffffff 100%);
+}
+
+.impact-graph-node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.impact-graph-node-role,
+.impact-graph-node-risk {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.impact-graph-node-role {
+  color: #3155a8;
+  background: #edf3ff;
+}
+
+.impact-graph-node-risk {
+  color: #92400e;
+  background: #fff4de;
+  text-transform: lowercase;
+}
+
+.impact-graph-node-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: #0f172a;
+  word-break: break-word;
+}
+
+.impact-graph-node-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+  word-break: break-word;
+}
+
 .impact-report-checklist {
   display: grid;
   gap: 10px;

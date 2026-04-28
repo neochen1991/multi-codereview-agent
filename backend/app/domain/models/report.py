@@ -54,6 +54,7 @@ class ImpactSymbol(BaseModel):
     file_path: str = ""
     symbol: str = ""
     kind: str = ""
+    container: str = ""
     line_start: int = 0
 
 
@@ -74,6 +75,33 @@ class ImpactPath(BaseModel):
     path: list[str] = Field(default_factory=list)
     depth: int = 0
     risk: str = ""
+
+
+class ImpactGraphNode(BaseModel):
+    """关联影响图中的节点。"""
+
+    node_id: str = ""
+    label: str = ""
+    kind: str = ""
+    file_path: str = ""
+    role: str = ""
+    risk: str = ""
+
+
+class ImpactGraphEdge(BaseModel):
+    """关联影响图中的边。"""
+
+    source: str = ""
+    target: str = ""
+    relationship: str = ""
+    confidence: float = 0.0
+
+
+class ImpactGraph(BaseModel):
+    """关联影响图。"""
+
+    nodes: list[ImpactGraphNode] = Field(default_factory=list)
+    edges: list[ImpactGraphEdge] = Field(default_factory=list)
 
 
 class TestScopeRecommendation(BaseModel):
@@ -100,6 +128,7 @@ class ImpactReport(BaseModel):
     impacted_files: list[ImpactFile] = Field(default_factory=list)
     impacted_modules: list[str] = Field(default_factory=list)
     impact_paths: list[ImpactPath] = Field(default_factory=list)
+    impact_graph: ImpactGraph = Field(default_factory=ImpactGraph)
     external_entrypoints: list[str] = Field(default_factory=list)
     risk_level: str = "low"
     recommended_test_scope: list[TestScopeRecommendation] = Field(default_factory=list)

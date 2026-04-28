@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import logging
+import multiprocessing as mp
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,14 @@ from app.services.memory_probe import MemoryProbe
 from app.services.review_service import ReviewService
 
 logger = logging.getLogger(__name__)
+
+
+def _run_gitnexus_index_in_subprocess(storage_root: str) -> None:
+    """在独立子进程中执行一次 GitNexus 建图，避免阻塞主服务进程。"""
+
+    service = ReviewService(storage_root=Path(storage_root))
+    scheduler = GitNexusIndexScheduler(service)
+    scheduler.tick()
 
 
 class GitNexusIndexScheduler:
@@ -33,7 +42,7 @@ class GitNexusIndexScheduler:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._manual_lock = threading.Lock()
-        self._manual_thread: threading.Thread | None = None
+        self._manual_process: mp.Process | None = None
 
     def start(self) -> None:
         if os.getenv("PYTEST_CURRENT_TEST"):
@@ -224,14 +233,14 @@ class GitNexusIndexScheduler:
         """手动触发一次建图，避免用户只能等待后台定时任务。"""
 
         with self._manual_lock:
-            if self._manual_thread and self._manual_thread.is_alive():
+            if self._manual_process and self._manual_process.is_alive():
                 return self.status()
             runtime = self._review_service.get_runtime_settings()
             repo_path = self._resolve_repo_path(runtime)
             binary_path = shutil.which("gitnexus") or ""
             running_status = self._status(
                 "running",
-                "GitNexus 手动建图已触发，后台正在执行。",
+                "GitNexus 手动建图已触发，后台子进程正在执行。",
                 repo_path=repo_path,
                 repo_name=Path(repo_path).name if repo_path else "",
                 trigger="manual",
@@ -239,30 +248,69 @@ class GitNexusIndexScheduler:
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path=binary_path,
             )
+            try:
+                process_ctx = mp.get_context("spawn")
+                process = process_ctx.Process(
+                    target=_run_gitnexus_index_in_subprocess,
+                    args=(str(self._review_service.storage_root),),
+                    name="gitnexus-manual-index",
+                    daemon=False,
+                )
+                process.start()
+            except Exception as error:
+                failed = self._status(
+                    "failed",
+                    f"GitNexus 手动建图子进程启动失败：{error}",
+                    repo_path=repo_path,
+                    repo_name=Path(repo_path).name if repo_path else "",
+                    trigger="manual",
+                    gitnexus_installed=bool(binary_path),
+                    gitnexus_command="gitnexus analyze",
+                    gitnexus_path=binary_path,
+                    error_type=error.__class__.__name__,
+                )
+                write_json(self._status_path(), failed)
+                logger.exception("gitnexus manual index process start failed error=%s", error)
+                return failed
+
+            running_status["worker_pid"] = int(process.pid or 0)
             write_json(self._status_path(), running_status)
-            self._manual_thread = threading.Thread(
-                target=self._run_manual_tick,
-                name="gitnexus-manual-index",
-                daemon=True,
-            )
-            self._manual_thread.start()
+            self._manual_process = process
+            threading.Thread(target=self._watch_manual_process, name="gitnexus-manual-index-watch", daemon=True).start()
             return running_status
 
-    def _run_manual_tick(self) -> None:
+    def _watch_manual_process(self) -> None:
+        process = self._manual_process
+        if process is None:
+            return
         try:
-            self.tick()
-        except Exception as error:
-            binary_path = shutil.which("gitnexus") or ""
-            status = self._status(
-                "failed",
-                f"GitNexus 手动建图异常：{error}",
-                gitnexus_installed=bool(binary_path),
-                gitnexus_command="gitnexus analyze",
-                gitnexus_path=binary_path,
-                error_type=error.__class__.__name__,
-            )
-            write_json(self._status_path(), status)
-            logger.exception("gitnexus manual index failed error=%s", error)
+            process.join()
+            if int(process.exitcode or 0) != 0:
+                current = self.status()
+                if str(current.get("state") or "") == "running":
+                    binary_path = shutil.which("gitnexus") or ""
+                    failed = self._status(
+                        "failed",
+                        f"GitNexus 手动建图子进程异常退出，exit_code={process.exitcode}",
+                        repo_path=str(current.get("repo_path") or ""),
+                        repo_name=str(current.get("repo_name") or ""),
+                        trigger="manual",
+                        gitnexus_installed=bool(binary_path),
+                        gitnexus_command="gitnexus analyze",
+                        gitnexus_path=binary_path,
+                        error_type="SubprocessExit",
+                        worker_pid=int(process.pid or 0),
+                    )
+                    write_json(self._status_path(), failed)
+                logger.error(
+                    "gitnexus manual index subprocess exited abnormally pid=%s exit_code=%s",
+                    process.pid,
+                    process.exitcode,
+                )
+        finally:
+            with self._manual_lock:
+                if self._manual_process is process:
+                    self._manual_process = None
 
     def _enabled(self) -> bool:
         return str(os.getenv("GITNEXUS_INDEX_ENABLED", "")).strip().lower() in {"1", "true", "on", "yes"}

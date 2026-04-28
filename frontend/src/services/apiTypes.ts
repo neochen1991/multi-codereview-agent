@@ -324,6 +324,7 @@ export interface ImpactSymbol {
   file_path: string;
   symbol: string;
   kind: string;
+  container: string;
   line_start: number;
 }
 
@@ -342,6 +343,27 @@ export interface ImpactPath {
   risk: string;
 }
 
+export interface ImpactGraphNode {
+  node_id: string;
+  label: string;
+  kind: string;
+  file_path: string;
+  role: string;
+  risk: string;
+}
+
+export interface ImpactGraphEdge {
+  source: string;
+  target: string;
+  relationship: string;
+  confidence: number;
+}
+
+export interface ImpactGraph {
+  nodes: ImpactGraphNode[];
+  edges: ImpactGraphEdge[];
+}
+
 export interface TestScopeRecommendation {
   scope: string;
   reason: string;
@@ -358,6 +380,7 @@ export interface ImpactReport {
   impacted_files: ImpactFile[];
   impacted_modules: string[];
   impact_paths: ImpactPath[];
+  impact_graph: ImpactGraph;
   external_entrypoints: string[];
   risk_level: string;
   recommended_test_scope: TestScopeRecommendation[];

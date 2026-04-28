@@ -2,7 +2,7 @@
 
 本次 MR 改了这些代码以后，可能影响哪些模块、调用入口和测试范围？
 
-请直接使用 `gitnexus_impact_analysis` 工具。工具会返回标准化的 `impact_report`，其中可能来自 GitNexus 代码图谱，也可能是图谱不可用时的降级分析。
+请直接使用 `gitnexus_impact_analysis` 工具。工具只会在 GitNexus 代码图谱和 MCP 调用成功时返回标准化的 `impact_report`；如果 GitNexus 不可用，本步骤应直接失败，不要自行降级或猜测影响范围。
 
 输出要求：
 

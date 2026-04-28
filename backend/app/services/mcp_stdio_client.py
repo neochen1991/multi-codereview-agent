@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class McpStdioClient:
@@ -20,6 +23,13 @@ class McpStdioClient:
         if executable and resolved_executable is None:
             raise RuntimeError(f"MCP 可执行命令不存在: {executable}")
         command = [resolved_executable or executable, *self.command[1:]]
+        logger.info(
+            "mcp stdio call start executable=%s cwd=%s timeout_seconds=%s request_count=%s",
+            command[0] if command else "",
+            self.cwd,
+            self.timeout_seconds,
+            len(requests),
+        )
         payload = b"".join(self._encode_message(request) for request in requests)
         try:
             completed = subprocess.run(
@@ -36,8 +46,22 @@ class McpStdioClient:
             ) from error
         if completed.returncode != 0:
             stderr = completed.stderr.decode("utf-8", errors="ignore")[-800:]
+            logger.error(
+                "mcp stdio call failed executable=%s cwd=%s return_code=%s stderr=%s",
+                command[0] if command else "",
+                self.cwd,
+                completed.returncode,
+                stderr,
+            )
             raise RuntimeError(stderr or str(completed.returncode))
-        return self._decode_messages(completed.stdout)
+        responses = self._decode_messages(completed.stdout)
+        logger.info(
+            "mcp stdio call finish executable=%s cwd=%s response_count=%s",
+            command[0] if command else "",
+            self.cwd,
+            len(responses),
+        )
+        return responses
 
     def _encode_message(self, message: dict[str, Any]) -> bytes:
         body = json.dumps({"jsonrpc": "2.0", **message}, ensure_ascii=False).encode("utf-8")

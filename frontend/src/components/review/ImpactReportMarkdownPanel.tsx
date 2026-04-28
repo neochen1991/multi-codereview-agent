@@ -1,7 +1,17 @@
 import React, { useMemo } from "react";
 import { Alert, Button, Card, Empty, Space, Tag, Typography } from "antd";
 
-import type { ImpactFile, ImpactPath, ImpactReport, ReviewReport, ReviewSummary, TestScopeRecommendation } from "@/services/api";
+import type {
+  ImpactFile,
+  ImpactGraph,
+  ImpactGraphEdge,
+  ImpactGraphNode,
+  ImpactPath,
+  ImpactReport,
+  ReviewReport,
+  ReviewSummary,
+  TestScopeRecommendation,
+} from "@/services/api";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -71,6 +81,28 @@ const buildAnalysisBasis = (impactReport: ImpactReport): string[] => {
   return [...items, ...impactReport.limitations];
 };
 
+const buildRelationshipInsights = (impactReport: ImpactReport): string[] => {
+  const insights: string[] = [];
+  for (const item of impactReport.impacted_files) {
+    if (item.relationship === "changed") continue;
+    insights.push(`${item.file_path} 被标记为 ${item.relationship}，原因是：${item.reason}`);
+  }
+  for (const scope of impactReport.recommended_test_scope) {
+    if (!scope.paths.length) continue;
+    insights.push(`${scope.scope} 需要优先验证，主要覆盖：${scope.paths.join("、")}`);
+  }
+  for (const path of impactReport.impact_paths.slice(0, 6)) {
+    const chain = path.path?.length ? path.path.join(" -> ") : [path.source, path.target].filter(Boolean).join(" -> ");
+    if (chain) {
+      insights.push(`影响链路：${chain}`);
+    }
+  }
+  if (!insights.length && impactReport.impacted_modules.length) {
+    insights.push(`当前至少识别到模块级波及：${impactReport.impacted_modules.join("、")}`);
+  }
+  return dedupeStrings(insights).slice(0, 8);
+};
+
 const buildRiskDistribution = (items: ImpactFile[]): Array<{ label: string; count: number; tone: string }> => {
   const high = items.filter((item) => priorityRank(item.risk_level) >= 3).length;
   const medium = items.filter((item) => priorityRank(item.risk_level) === 2).length;
@@ -80,6 +112,184 @@ const buildRiskDistribution = (items: ImpactFile[]): Array<{ label: string; coun
     { label: "中风险", count: medium, tone: "warning" },
     { label: "低风险", count: low, tone: "success" },
   ];
+};
+
+type GraphLayoutNode = ImpactGraphNode & {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  column: number;
+};
+
+type GraphLayoutEdge = ImpactGraphEdge & {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+};
+
+type GraphLayout = {
+  width: number;
+  height: number;
+  nodes: GraphLayoutNode[];
+  edges: GraphLayoutEdge[];
+};
+
+const roleLabel = (value?: string): string => {
+  if (value === "changed" || value === "start") return "变更起点";
+  if (value === "impacted") return "影响落点";
+  if (value === "incoming") return "上游调用";
+  if (value === "outgoing") return "下游调用";
+  if (value === "process") return "业务流程";
+  if (value === "context") return "上下文";
+  return "关联节点";
+};
+
+const nodeTone = (node: Pick<ImpactGraphNode, "role" | "risk">): string => {
+  if (node.role === "changed" || node.role === "start") return "primary";
+  if (node.role === "impacted") return "accent";
+  if (node.role === "process") return "process";
+  if (node.risk === "high" || node.risk === "critical") return "danger";
+  return "default";
+};
+
+const buildFallbackGraph = (paths: ImpactPath[]): ImpactGraph => {
+  const nodes = new Map<string, ImpactGraphNode>();
+  const edges = new Map<string, ImpactGraphEdge>();
+  paths.forEach((item) => {
+    const values = item.path?.length ? item.path : [item.source, item.target].filter(Boolean);
+    values.forEach((value, index) => {
+      const normalized = String(value || "").trim();
+      if (!normalized || nodes.has(normalized)) return;
+      nodes.set(normalized, {
+        node_id: normalized,
+        label: normalized,
+        kind: "symbol",
+        file_path: "",
+        role: index === 0 ? "start" : index === values.length - 1 ? "impacted" : "path",
+        risk: item.risk || "medium",
+      });
+    });
+    values.forEach((value, index) => {
+      if (index === values.length - 1) return;
+      const source = String(value || "").trim();
+      const target = String(values[index + 1] || "").trim();
+      if (!source || !target) return;
+      edges.set(`${source}=>${target}`, {
+        source,
+        target,
+        relationship: "calls",
+        confidence: 1,
+      });
+    });
+  });
+  return { nodes: Array.from(nodes.values()), edges: Array.from(edges.values()) };
+};
+
+const buildGraphLayout = (impactReport: ImpactReport): GraphLayout | null => {
+  const rawGraph = impactReport.impact_graph?.nodes?.length ? impactReport.impact_graph : buildFallbackGraph(impactReport.impact_paths || []);
+  if (!rawGraph.nodes.length) return null;
+  const nodes = rawGraph.nodes.filter((item) => item.node_id && item.label);
+  const edges = rawGraph.edges.filter((item) => item.source && item.target && item.source !== item.target);
+  const rank = new Map<string, number>();
+  nodes.forEach((node) => {
+    if (node.role === "changed" || node.role === "start") rank.set(node.node_id, 0);
+  });
+  if (!rank.size && nodes[0]) rank.set(nodes[0].node_id, 0);
+  for (let step = 0; step < nodes.length * 3; step += 1) {
+    let moved = false;
+    edges.forEach((edge) => {
+      const sourceRank = rank.get(edge.source);
+      const targetRank = rank.get(edge.target);
+      if (sourceRank == null) return;
+      const nextRank = sourceRank + 1;
+      if (targetRank == null || targetRank < nextRank) {
+        rank.set(edge.target, nextRank);
+        moved = true;
+      }
+    });
+    if (!moved) break;
+  }
+  nodes.forEach((node) => {
+    if (rank.has(node.node_id)) return;
+    if (node.role === "process" || node.role === "incoming") {
+      rank.set(node.node_id, 0);
+      return;
+    }
+    if (node.role === "outgoing" || node.role === "impacted") {
+      rank.set(node.node_id, 2);
+      return;
+    }
+    rank.set(node.node_id, 1);
+  });
+
+  const grouped = new Map<number, ImpactGraphNode[]>();
+  nodes.forEach((node) => {
+    const column = rank.get(node.node_id) || 0;
+    const bucket = grouped.get(column) || [];
+    bucket.push(node);
+    grouped.set(column, bucket);
+  });
+
+  const columnOrder = Array.from(grouped.keys()).sort((a, b) => a - b);
+  const roleOrder: Record<string, number> = {
+    changed: 0,
+    start: 0,
+    process: 1,
+    incoming: 1,
+    context: 2,
+    path: 3,
+    outgoing: 4,
+    impacted: 5,
+  };
+  const nodeWidth = 220;
+  const nodeHeight = 76;
+  const xGap = 260;
+  const yGap = 110;
+  const padding = 28;
+  const positioned = new Map<string, GraphLayoutNode>();
+  let maxRows = 1;
+  columnOrder.forEach((column) => {
+    const bucket = (grouped.get(column) || []).slice().sort((a, b) => {
+      const roleGap = (roleOrder[a.role || "path"] ?? 99) - (roleOrder[b.role || "path"] ?? 99);
+      if (roleGap !== 0) return roleGap;
+      return a.label.localeCompare(b.label);
+    });
+    maxRows = Math.max(maxRows, bucket.length);
+    bucket.forEach((node, rowIndex) => {
+      positioned.set(node.node_id, {
+        ...node,
+        column,
+        width: nodeWidth,
+        height: nodeHeight,
+        x: padding + column * xGap,
+        y: padding + rowIndex * yGap,
+      });
+    });
+  });
+
+  const layoutEdges: GraphLayoutEdge[] = edges
+    .map((edge) => {
+      const source = positioned.get(edge.source);
+      const target = positioned.get(edge.target);
+      if (!source || !target) return null;
+      return {
+        ...edge,
+        fromX: source.x + source.width,
+        fromY: source.y + source.height / 2,
+        toX: target.x,
+        toY: target.y + target.height / 2,
+      };
+    })
+    .filter(Boolean) as GraphLayoutEdge[];
+
+  return {
+    width: padding * 2 + Math.max(columnOrder.length - 1, 0) * xGap + nodeWidth,
+    height: padding * 2 + Math.max(maxRows - 1, 0) * yGap + nodeHeight,
+    nodes: Array.from(positioned.values()),
+    edges: layoutEdges,
+  };
 };
 
 const priorityRank = (value?: string): number => {
@@ -297,6 +507,56 @@ const renderImpactPaths = (items: ImpactPath[]) => (
   </section>
 );
 
+const renderImpactGraph = (impactReport: ImpactReport) => {
+  const layout = buildGraphLayout(impactReport);
+  return (
+    <section className="impact-report-section">
+      <Title level={5}>关键调用链路图</Title>
+      {layout ? (
+        <div className="impact-graph-scroll">
+          <div className="impact-graph-canvas" style={{ width: layout.width, height: layout.height }}>
+            <svg className="impact-graph-svg" width={layout.width} height={layout.height} viewBox={`0 0 ${layout.width} ${layout.height}`}>
+              <defs>
+                <marker id="impact-graph-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                  <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" />
+                </marker>
+              </defs>
+              {layout.edges.map((edge) => {
+                const midX = (edge.fromX + edge.toX) / 2;
+                const path = `M ${edge.fromX} ${edge.fromY} C ${midX} ${edge.fromY}, ${midX} ${edge.toY}, ${edge.toX} ${edge.toY}`;
+                return (
+                  <g key={`${edge.source}-${edge.target}-${edge.relationship}`}>
+                    <path d={path} className="impact-graph-edge" markerEnd="url(#impact-graph-arrow)" />
+                    <text x={midX} y={(edge.fromY + edge.toY) / 2 - 6} className="impact-graph-edge-label">
+                      {edge.relationship}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+            {layout.nodes.map((node) => (
+              <div
+                key={node.node_id}
+                className={`impact-graph-node impact-graph-node-${nodeTone(node)}`}
+                style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+              >
+                <div className="impact-graph-node-head">
+                  <span className="impact-graph-node-role">{roleLabel(node.role)}</span>
+                  {node.risk ? <span className="impact-graph-node-risk">{node.risk}</span> : null}
+                </div>
+                <div className="impact-graph-node-title">{node.label}</div>
+                {node.file_path ? <div className="impact-graph-node-meta">{node.file_path}</div> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <Text type="secondary">当前还没有足够的链路节点，暂时无法绘制调用图。</Text>
+      )}
+    </section>
+  );
+};
+
 const renderTestScope = (items: TestScopeRecommendation[]) => (
   <section className="impact-report-section">
     <Title level={5}>建议测试范围</Title>
@@ -446,6 +706,10 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
   }, [impactReport]);
 
   const analysisBasis = useMemo(() => (impactReport ? buildAnalysisBasis(impactReport) : []), [impactReport]);
+  const relationshipInsights = useMemo(
+    () => (impactReport ? buildRelationshipInsights(impactReport) : []),
+    [impactReport],
+  );
   const riskDistribution = useMemo(() => (impactReport ? buildRiskDistribution(impactReport.impacted_files) : []), [impactReport]);
   const topAttentionItems = useMemo(() => {
     if (!impactReport) return [];
@@ -488,6 +752,8 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
           </div>
 
           {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
+          {renderListSection("关联影响解读", relationshipInsights, "当前没有识别出更细的传播关系。")}
+          {renderImpactGraph(impactReport)}
 
           <section className="impact-report-section">
             <Title level={5}>分析基线</Title>
