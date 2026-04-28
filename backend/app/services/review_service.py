@@ -4,6 +4,7 @@ import threading
 import os
 import multiprocessing as mp
 import logging
+import json
 import shutil
 import time
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.expert_registry import ExpertRegistry
 from app.services.extension_editor_service import ExtensionEditorService
 from app.services.feedback_learner_service import FeedbackLearnerService
+from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
@@ -38,6 +40,17 @@ from app.services.review_runner import ReviewClosedError, ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
 
 logger = logging.getLogger(__name__)
+
+
+def parse_json_object(value: str) -> dict[str, object]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _run_review_in_subprocess(storage_root: str, review_id: str) -> None:
@@ -1001,6 +1014,79 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
 
     def read_extension_tool_script(self, tool_id: str, entry: str = "run.py") -> str:
         return self.extension_editor_service.read_tool_script(tool_id, entry)
+
+    def get_change_impact_report_template(self) -> dict[str, object]:
+        template_path = ChangeImpactReportService.TEMPLATE_PATH
+        default_template_path = ChangeImpactReportService.DEFAULT_TEMPLATE_PATH
+        schema_path = ChangeImpactReportService.SCHEMA_PATH
+        default_schema_path = ChangeImpactReportService.DEFAULT_SCHEMA_PATH
+        content = template_path.read_text(encoding="utf-8") if template_path.exists() else ""
+        schema_content = schema_path.read_text(encoding="utf-8") if schema_path.exists() else ""
+        updated_at = ""
+        schema_updated_at = ""
+        if template_path.exists():
+            updated_at = datetime.fromtimestamp(template_path.stat().st_mtime, tz=UTC).isoformat()
+        if schema_path.exists():
+            schema_updated_at = datetime.fromtimestamp(schema_path.stat().st_mtime, tz=UTC).isoformat()
+        placeholders = ChangeImpactReportService.extract_template_placeholders(content)
+        schema_payload = parse_json_object(schema_content)
+        schema_variables = [
+            item for item in list(schema_payload.get("variables") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        variable_names = {str(item.get("name") or "").strip() for item in schema_variables}
+        return {
+            "template_path": str(template_path),
+            "default_template_path": str(default_template_path),
+            "schema_path": str(schema_path),
+            "default_schema_path": str(default_schema_path),
+            "content": content,
+            "schema_content": schema_content,
+            "updated_at": updated_at,
+            "schema_updated_at": schema_updated_at,
+            "placeholders": placeholders,
+            "schema_variables": schema_variables,
+            "undefined_placeholders": [name for name in placeholders if name not in variable_names],
+            "unused_variables": [name for name in variable_names if name not in placeholders],
+        }
+
+    def update_change_impact_report_template(self, content: str, schema_content: str = "") -> dict[str, object]:
+        template_path = ChangeImpactReportService.TEMPLATE_PATH
+        schema_path = ChangeImpactReportService.SCHEMA_PATH
+        template_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized = str(content or "").rstrip() + "\n"
+        template_path.write_text(normalized, encoding="utf-8")
+        if str(schema_content or "").strip():
+            normalized_schema = json.dumps(parse_json_object(schema_content), ensure_ascii=False, indent=2) + "\n"
+            schema_path.write_text(normalized_schema, encoding="utf-8")
+        return self.get_change_impact_report_template()
+
+    def reset_change_impact_report_template(self) -> dict[str, object]:
+        template_path = ChangeImpactReportService.TEMPLATE_PATH
+        default_template_path = ChangeImpactReportService.DEFAULT_TEMPLATE_PATH
+        schema_path = ChangeImpactReportService.SCHEMA_PATH
+        default_schema_path = ChangeImpactReportService.DEFAULT_SCHEMA_PATH
+        default_content = default_template_path.read_text(encoding="utf-8")
+        default_schema_content = default_schema_path.read_text(encoding="utf-8")
+        template_path.parent.mkdir(parents=True, exist_ok=True)
+        template_path.write_text(default_content.rstrip() + "\n", encoding="utf-8")
+        schema_path.write_text(default_schema_content.rstrip() + "\n", encoding="utf-8")
+        return self.get_change_impact_report_template()
+
+    def preview_change_impact_report_template(self, content: str, schema_content: str = "") -> dict[str, object]:
+        template = str(content or "").strip() or self.get_change_impact_report_template().get("content") or ""
+        schema_payload = parse_json_object(schema_content) if str(schema_content or "").strip() else parse_json_object(
+            str(self.get_change_impact_report_template().get("schema_content") or "")
+        )
+        preview = ChangeImpactReportService().render_preview(str(template), schema_payload)
+        return {
+            **preview,
+            "undefined_placeholders": [
+                name
+                for name in list(preview.get("placeholders") or [])
+                if name not in {str(item.get("name") or "").strip() for item in list(preview.get("schema_variables") or []) if isinstance(item, dict)}
+            ],
+        }
 
     def build_repository_context_service(self, subject: dict[str, object] | None = None) -> RepositoryContextService:
         runtime = self.get_runtime_settings()

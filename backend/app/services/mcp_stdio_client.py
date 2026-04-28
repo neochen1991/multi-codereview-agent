@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import subprocess
+from io import BufferedReader, BufferedWriter
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -12,10 +13,11 @@ logger = logging.getLogger(__name__)
 class McpStdioClient:
     """Lightweight JSON-RPC stdio client for MCP servers."""
 
-    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: int) -> None:
+    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: int, env: dict[str, str] | None = None) -> None:
         self.command = list(command)
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
+        self.env = dict(env or {})
 
     def call_many(self, requests: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         executable = self.command[0] if self.command else ""
@@ -30,31 +32,43 @@ class McpStdioClient:
             self.timeout_seconds,
             len(requests),
         )
-        payload = b"".join(self._encode_message(request) for request in requests)
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                input=payload,
                 cwd=self.cwd,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-                check=False,
+                env=self.env or None,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
         except FileNotFoundError as error:
             raise RuntimeError(
                 f"MCP 可执行命令启动失败: executable={command[0]} cwd={self.cwd} error={error}"
             ) from error
-        if completed.returncode != 0:
-            stderr = completed.stderr.decode("utf-8", errors="ignore")[-800:]
+        assert process.stdin is not None
+        assert process.stdout is not None
+        responses: dict[int, dict[str, Any]] = {}
+        try:
+            responses = self._exchange_messages(process.stdin, process.stdout, requests)
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+            _, stderr_bytes = process.communicate(timeout=self.timeout_seconds)
+        except subprocess.TimeoutExpired as error:
+            process.kill()
+            _, stderr_bytes = process.communicate()
+            raise RuntimeError(f"MCP 调用超时: timeout_seconds={self.timeout_seconds}") from error
+        if process.returncode != 0:
+            stderr = stderr_bytes.decode("utf-8", errors="ignore")[-800:]
             logger.error(
                 "mcp stdio call failed executable=%s cwd=%s return_code=%s stderr=%s",
                 command[0] if command else "",
                 self.cwd,
-                completed.returncode,
+                process.returncode,
                 stderr,
             )
-            raise RuntimeError(stderr or str(completed.returncode))
-        responses = self._decode_messages(completed.stdout)
+            raise RuntimeError(stderr or str(process.returncode))
         logger.info(
             "mcp stdio call finish executable=%s cwd=%s response_count=%s",
             command[0] if command else "",
@@ -62,6 +76,58 @@ class McpStdioClient:
             len(responses),
         )
         return responses
+
+    def _exchange_messages(
+        self,
+        stdin: BufferedWriter,
+        stdout: BufferedReader,
+        requests: list[dict[str, Any]],
+    ) -> dict[int, dict[str, Any]]:
+        responses: dict[int, dict[str, Any]] = {}
+        for request in requests:
+            stdin.write(self._encode_message(request))
+            stdin.flush()
+            request_id = request.get("id")
+            if not isinstance(request_id, int):
+                continue
+            response = self._read_response_for(stdout, request_id)
+            if response is not None:
+                responses[request_id] = response
+        return responses
+
+    def _read_response_for(self, stdout: BufferedReader, expected_id: int) -> dict[str, Any] | None:
+        while True:
+            message = self._read_one_message(stdout)
+            if message is None:
+                return None
+            message_id = message.get("id")
+            if isinstance(message_id, int):
+                return message
+
+    def _read_one_message(self, stdout: BufferedReader) -> dict[str, Any] | None:
+        header_bytes = bytearray()
+        while b"\r\n\r\n" not in header_bytes:
+            chunk = stdout.read(1)
+            if not chunk:
+                return None
+            header_bytes.extend(chunk)
+        header_blob, _, _ = header_bytes.partition(b"\r\n\r\n")
+        headers = header_blob.decode("ascii", errors="ignore")
+        length = 0
+        for line in headers.splitlines():
+            if line.lower().startswith("content-length:"):
+                length = int(line.split(":", 1)[1].strip())
+                break
+        if length <= 0:
+            return None
+        body = stdout.read(length)
+        if not body:
+            return None
+        try:
+            return json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            logger.warning("mcp stdio decode failed body=%s", body.decode("utf-8", errors="ignore")[:400])
+            return None
 
     def _encode_message(self, message: dict[str, Any]) -> bytes:
         body = json.dumps({"jsonrpc": "2.0", **message}, ensure_ascii=False).encode("utf-8")

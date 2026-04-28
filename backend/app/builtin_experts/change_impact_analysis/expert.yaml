@@ -19,7 +19,7 @@ required_checks:
   - 本次 MR 直接修改了哪些文件、模块和关键符号
   - 是否影响入口接口、任务调度、消息消费、数据访问或核心链路
   - 哪些上下游文件、调用路径或候选测试文件需要纳入回归范围
-  - GitNexus 图谱不可用时，是否明确说明降级分析的边界
+  - 哪些影响是图谱已确认的，哪些仍需人工确认
 out_of_scope:
   - 不做代码检视，不输出代码缺陷
   - 不直接裁决业务逻辑是否正确
@@ -27,6 +27,7 @@ out_of_scope:
   - 不替代测试专家评价测试断言质量
 preferred_artifacts:
   - GitNexus impact report
+  - GitNexus detect_changes/context/impact facts
   - diff hunk
   - changed files
   - repository context

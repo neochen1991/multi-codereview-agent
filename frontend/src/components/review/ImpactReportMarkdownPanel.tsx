@@ -59,6 +59,7 @@ const joinOrFallback = (items: string[], fallback = "暂无"): string => (items.
 const dedupeStrings = (items: string[]): string[] => Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
 
 const buildExecutiveSummary = (impactReport: ImpactReport): string => {
+  if (impactReport.report_summary?.trim()) return impactReport.report_summary.trim();
   const moduleText = impactReport.impacted_modules.length ? `重点波及 ${impactReport.impacted_modules.join("、")}` : "";
   const entrypointText = impactReport.external_entrypoints.length
     ? `需要重点关注入口 ${impactReport.external_entrypoints.slice(0, 3).join("、")}`
@@ -142,6 +143,9 @@ const roleLabel = (value?: string): string => {
   if (value === "incoming") return "上游调用";
   if (value === "outgoing") return "下游调用";
   if (value === "process") return "业务流程";
+  if (value === "file") return "受影响文件";
+  if (value === "module") return "受影响模块";
+  if (value === "test") return "测试建议";
   if (value === "context") return "上下文";
   return "关联节点";
 };
@@ -150,6 +154,8 @@ const nodeTone = (node: Pick<ImpactGraphNode, "role" | "risk">): string => {
   if (node.role === "changed" || node.role === "start") return "primary";
   if (node.role === "impacted") return "accent";
   if (node.role === "process") return "process";
+  if (node.role === "test") return "accent";
+  if (node.role === "module") return "process";
   if (node.risk === "high" || node.risk === "critical") return "danger";
   return "default";
 };
@@ -217,6 +223,14 @@ const buildGraphLayout = (impactReport: ImpactReport): GraphLayout | null => {
       rank.set(node.node_id, 0);
       return;
     }
+    if (node.role === "file") {
+      rank.set(node.node_id, 3);
+      return;
+    }
+    if (node.role === "module" || node.role === "test") {
+      rank.set(node.node_id, 4);
+      return;
+    }
     if (node.role === "outgoing" || node.role === "impacted") {
       rank.set(node.node_id, 2);
       return;
@@ -242,6 +256,9 @@ const buildGraphLayout = (impactReport: ImpactReport): GraphLayout | null => {
     path: 3,
     outgoing: 4,
     impacted: 5,
+    file: 6,
+    module: 7,
+    test: 8,
   };
   const nodeWidth = 220;
   const nodeHeight = 76;
@@ -309,6 +326,7 @@ const priorityLabel = (value?: string): string => {
 const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const impactReport = review?.impact_report;
   if (!review || !impactReport) return "";
+  if (impactReport.llm_markdown?.trim()) return impactReport.llm_markdown.trim();
   const sections: string[] = [
     `# 关联影响报告 - ${review.review_id}`,
     "",
@@ -658,8 +676,9 @@ const renderExecutionChecklist = (items: TestScopeRecommendation[], commands: st
 };
 
 const renderReportHeadline = (impactReport: ImpactReport) => {
-  const headline =
-    impactReport.recommended_test_scope.length > 0
+  const headline = impactReport.report_summary?.trim()
+    ? impactReport.report_summary.trim()
+    : impactReport.recommended_test_scope.length > 0
       ? `本次改动已识别出 ${impactReport.recommended_test_scope.length} 类优先测试范围，建议先围绕高风险影响面执行回归。`
       : "本次改动已完成影响分析，请结合受影响范围安排后续验证。";
   return (
@@ -710,6 +729,8 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
     () => (impactReport ? buildRelationshipInsights(impactReport) : []),
     [impactReport],
   );
+  const reportKeyPoints = useMemo(() => dedupeStrings(impactReport?.key_impact_points || []), [impactReport]);
+  const reportTestFocus = useMemo(() => dedupeStrings(impactReport?.test_focus || []), [impactReport]);
   const riskDistribution = useMemo(() => (impactReport ? buildRiskDistribution(impactReport.impacted_files) : []), [impactReport]);
   const topAttentionItems = useMemo(() => {
     if (!impactReport) return [];
@@ -741,6 +762,9 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       {impactReport ? (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           {renderReportHeadline(impactReport)}
+
+          {renderListSection("报告重点", reportKeyPoints, "当前没有额外的重点结论。")}
+          {renderListSection("优先测试建议", reportTestFocus, "当前没有额外的测试结论。")}
 
           <div className="impact-report-summary-grid">
             {summaryCards.map((item) => (

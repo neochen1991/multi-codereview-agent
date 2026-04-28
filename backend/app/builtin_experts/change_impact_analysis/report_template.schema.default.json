@@ -1,0 +1,25 @@
+{
+  "variables": [
+    { "name": "summary", "source": "llm", "required": true, "description": "一句话总结本次 MR 的核心影响范围和最优先测试项", "format": "markdown" },
+    { "name": "repo_name", "source": "system", "required": true, "description": "代码仓名称", "format": "text" },
+    { "name": "changed_file_count", "source": "system", "required": true, "description": "变更文件数", "format": "text" },
+    { "name": "changed_files", "source": "system", "required": true, "description": "变更文件清单", "format": "bullet_list" },
+    { "name": "changed_symbols", "source": "gitnexus", "required": true, "description": "关键变更类和方法", "format": "bullet_list" },
+    { "name": "fact_source", "source": "system", "required": true, "description": "图谱事实来源", "format": "text" },
+    { "name": "key_impact_points", "source": "llm", "required": true, "description": "关键关联影响要点", "format": "bullet_list" },
+    { "name": "impact_paths", "source": "gitnexus", "required": false, "description": "关键调用链路", "format": "bullet_list" },
+    { "name": "data_access_impact", "source": "system", "required": false, "description": "数据访问层影响", "format": "bullet_list" },
+    { "name": "transaction_impact", "source": "system", "required": false, "description": "事务边界影响", "format": "bullet_list" },
+    { "name": "integration_impact", "source": "system", "required": false, "description": "缓存、消息、异步任务影响", "format": "bullet_list" },
+    { "name": "impacted_files", "source": "gitnexus", "required": false, "description": "受影响文件", "format": "bullet_list" },
+    { "name": "impacted_modules", "source": "gitnexus", "required": false, "description": "受影响模块", "format": "bullet_list" },
+    { "name": "external_entrypoints", "source": "gitnexus", "required": false, "description": "入口与外部触点", "format": "bullet_list" },
+    { "name": "must_test", "source": "llm", "required": false, "description": "必须优先测试项", "format": "bullet_list" },
+    { "name": "should_test", "source": "llm", "required": false, "description": "建议补充测试项", "format": "bullet_list" },
+    { "name": "manual_checks", "source": "llm", "required": false, "description": "建议人工确认项", "format": "bullet_list" },
+    { "name": "analysis_workflow", "source": "system", "required": true, "description": "GitNexus 分析工作流", "format": "bullet_list" },
+    { "name": "queried_targets", "source": "gitnexus", "required": false, "description": "本次实际查询对象", "format": "bullet_list" },
+    { "name": "risk_level", "source": "gitnexus", "required": false, "description": "图谱确认到的风险级别", "format": "bullet_list" },
+    { "name": "limitations", "source": "system", "required": false, "description": "使用边界", "format": "bullet_list" }
+  ]
+}

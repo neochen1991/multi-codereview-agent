@@ -2413,3 +2413,47 @@ body {
   font-size: 12px;
   line-height: 1.6;
 }
+
+.template-preview-rendered {
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  padding: 18px 20px;
+}
+
+.template-preview-h1.ant-typography,
+.template-preview-h2.ant-typography,
+.template-preview-h3.ant-typography {
+  margin-bottom: 10px !important;
+}
+
+.template-preview-h1.ant-typography {
+  font-size: 22px;
+}
+
+.template-preview-h2.ant-typography {
+  margin-top: 18px !important;
+  font-size: 17px;
+}
+
+.template-preview-h3.ant-typography {
+  margin-top: 14px !important;
+  font-size: 15px;
+}
+
+.template-preview-paragraph.ant-typography {
+  margin-bottom: 10px !important;
+  color: #334155;
+  line-height: 1.75;
+}
+
+.template-preview-list {
+  margin: 0 0 12px 0;
+  padding-left: 20px;
+  color: #334155;
+}
+
+.template-preview-list li {
+  margin-bottom: 6px;
+  line-height: 1.7;
+}

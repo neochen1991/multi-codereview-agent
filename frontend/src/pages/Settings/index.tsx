@@ -1,5 +1,6 @@
 import React from "react";
-import { Alert, Button, Card, Col, Collapse, Descriptions, Form, Input, InputNumber, Row, Select, Space, Switch, Tabs, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Collapse, Descriptions, Form, Input, InputNumber, Row, Select, Space, Switch, Tabs, Tag, Typography, Upload, message } from "antd";
+import type { UploadProps } from "antd";
 
 import {
   expertApi,
@@ -8,6 +9,8 @@ import {
   type ExtensionSkill,
   type ExtensionTool,
   type GitNexusIndexStatus,
+  type ImpactReportTemplate,
+  type ImpactReportTemplatePreview,
   type PostgresDataSourceSettings,
   type RuntimeSettings,
 } from "@/services/api";
@@ -47,6 +50,85 @@ const parseJsonArray = <T,>(value: string): T[] => {
 
 const collapseExpandIconPosition = "end" as const;
 
+const renderPreviewMarkdown = (markdown: string): React.ReactNode[] => {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const nodes: React.ReactNode[] = [];
+  let bulletBuffer: string[] = [];
+  let paragraphBuffer: string[] = [];
+
+  const flushBullets = () => {
+    if (!bulletBuffer.length) return;
+    nodes.push(
+      <ul key={`ul-${nodes.length}`} className="template-preview-list">
+        {bulletBuffer.map((item, index) => (
+          <li key={`${item}-${index}`}>{item}</li>
+        ))}
+      </ul>,
+    );
+    bulletBuffer = [];
+  };
+
+  const flushParagraph = () => {
+    if (!paragraphBuffer.length) return;
+    nodes.push(
+      <Paragraph key={`p-${nodes.length}`} className="template-preview-paragraph">
+        {paragraphBuffer.join(" ")}
+      </Paragraph>,
+    );
+    paragraphBuffer = [];
+  };
+
+  lines.forEach((line, index) => {
+    const text = line.trim();
+    if (!text) {
+      flushBullets();
+      flushParagraph();
+      return;
+    }
+    if (text.startsWith("### ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(
+        <Title key={`h3-${index}`} level={5} className="template-preview-h3">
+          {text.slice(4)}
+        </Title>,
+      );
+      return;
+    }
+    if (text.startsWith("## ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(
+        <Title key={`h2-${index}`} level={4} className="template-preview-h2">
+          {text.slice(3)}
+        </Title>,
+      );
+      return;
+    }
+    if (text.startsWith("# ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(
+        <Title key={`h1-${index}`} level={3} className="template-preview-h1">
+          {text.slice(2)}
+        </Title>,
+      );
+      return;
+    }
+    if (text.startsWith("- ")) {
+      flushParagraph();
+      bulletBuffer.push(text.slice(2));
+      return;
+    }
+    flushBullets();
+    paragraphBuffer.push(text);
+  });
+
+  flushBullets();
+  flushParagraph();
+  return nodes;
+};
+
 // 设置页负责维护 config.json 对应的系统级运行参数和专家治理配置。
 const SettingsPage: React.FC = () => {
   const [form] = Form.useForm<RuntimeSettings>();
@@ -69,23 +151,33 @@ const SettingsPage: React.FC = () => {
   const [savingTool, setSavingTool] = React.useState(false);
   const [gitnexusStatus, setGitnexusStatus] = React.useState<GitNexusIndexStatus | null>(null);
   const [gitnexusRunning, setGitnexusRunning] = React.useState(false);
+  const [impactTemplate, setImpactTemplate] = React.useState<ImpactReportTemplate | null>(null);
+  const [impactTemplateContent, setImpactTemplateContent] = React.useState("");
+  const [impactTemplateSchemaContent, setImpactTemplateSchemaContent] = React.useState("");
+  const [savingImpactTemplate, setSavingImpactTemplate] = React.useState(false);
+  const [previewingImpactTemplate, setPreviewingImpactTemplate] = React.useState(false);
+  const [impactTemplatePreview, setImpactTemplatePreview] = React.useState<ImpactReportTemplatePreview | null>(null);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools, gitnexus] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus, impactTemplatePayload] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
         settingsApi.getGitNexusIndexStatus(),
+        settingsApi.getImpactReportTemplate(),
       ]);
       form.setFieldsValue(runtime);
       setExperts(expertList);
       setExtensionSkills(skills);
       setExtensionTools(tools);
       setGitnexusStatus(gitnexus);
+      setImpactTemplate(impactTemplatePayload);
+      setImpactTemplateContent(impactTemplatePayload.content || "");
+      setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
       if (skills.length > 0) {
         const first = skills[0];
         skillForm.setFieldsValue({
@@ -140,6 +232,85 @@ const SettingsPage: React.FC = () => {
       setGitnexusRunning(false);
     }
   }, [refreshGitNexusStatus]);
+
+  const handleSaveImpactTemplate = React.useCallback(async () => {
+    setSavingImpactTemplate(true);
+    try {
+      const payload = await settingsApi.updateImpactReportTemplate(impactTemplateContent, impactTemplateSchemaContent);
+      setImpactTemplate(payload);
+      setImpactTemplateContent(payload.content || "");
+      setImpactTemplateSchemaContent(payload.schema_content || "");
+      message.success("关联影响报告模板已更新");
+    } catch (error: any) {
+      message.error(error?.message || "保存关联影响报告模板失败");
+    } finally {
+      setSavingImpactTemplate(false);
+    }
+  }, [impactTemplateContent, impactTemplateSchemaContent]);
+
+  const handleResetImpactTemplate = React.useCallback(async () => {
+    setSavingImpactTemplate(true);
+    try {
+      const payload = await settingsApi.resetImpactReportTemplate();
+      setImpactTemplate(payload);
+      setImpactTemplateContent(payload.content || "");
+      setImpactTemplateSchemaContent(payload.schema_content || "");
+      message.success("已恢复默认模板");
+    } catch (error: any) {
+      message.error(error?.message || "恢复默认模板失败");
+    } finally {
+      setSavingImpactTemplate(false);
+    }
+  }, []);
+
+  const handlePreviewImpactTemplate = React.useCallback(async () => {
+    setPreviewingImpactTemplate(true);
+    try {
+      const payload = await settingsApi.previewImpactReportTemplate(impactTemplateContent, impactTemplateSchemaContent);
+      setImpactTemplatePreview(payload);
+      message.success("已生成模板预览");
+    } catch (error: any) {
+      message.error(error?.message || "生成模板预览失败");
+    } finally {
+      setPreviewingImpactTemplate(false);
+    }
+  }, [impactTemplateContent, impactTemplateSchemaContent]);
+
+  const impactTemplateUploadProps: UploadProps = React.useMemo(
+    () => ({
+      accept: ".md,text/markdown",
+      showUploadList: false,
+      beforeUpload: async (file) => {
+        try {
+          const text = await file.text();
+          setImpactTemplateContent(text);
+          message.success(`已载入模板：${file.name}`);
+        } catch {
+          message.error("读取 Markdown 模板失败");
+        }
+        return false;
+      },
+    }),
+    [],
+  );
+
+  const impactTemplateSchemaUploadProps: UploadProps = React.useMemo(
+    () => ({
+      accept: ".json,application/json,text/json",
+      showUploadList: false,
+      beforeUpload: async (file) => {
+        try {
+          const text = await file.text();
+          setImpactTemplateSchemaContent(text);
+          message.success(`已载入模板变量定义：${file.name}`);
+        } catch {
+          message.error("读取模板变量定义失败");
+        }
+        return false;
+      },
+    }),
+    [],
+  );
 
   const renderConfiguredNotice = (
     configuredField: string,
@@ -314,6 +485,132 @@ const SettingsPage: React.FC = () => {
             )}
           </Descriptions.Item>
         </Descriptions>
+      </Card>
+
+      <Card
+        className="module-card"
+        title="关联影响分析报告模板"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Upload {...impactTemplateUploadProps}>
+              <Button>上传 Markdown 模板</Button>
+            </Upload>
+            <Upload {...impactTemplateSchemaUploadProps}>
+              <Button>上传变量 Schema</Button>
+            </Upload>
+            <Button onClick={() => void handlePreviewImpactTemplate()} loading={previewingImpactTemplate}>
+              预览模板
+            </Button>
+            <Button onClick={() => void handleResetImpactTemplate()} loading={savingImpactTemplate}>
+              恢复默认模板
+            </Button>
+            <Button type="primary" loading={savingImpactTemplate} onClick={() => void handleSaveImpactTemplate()}>
+              保存模板
+            </Button>
+          </Space>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="LLM 会基于 GitNexus 返回的事实，按这里的 Markdown 模板生成最终关联影响分析报告。"
+          description="建议保留章节结构和占位语义，主要调整标题、表达风格和测试建议的展示方式。保存后会更新当前生效模板；如果改坏了，可以随时恢复到系统默认模板。"
+        />
+        <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="模板文件">
+            {impactTemplate?.template_path || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="默认模板文件">
+            {impactTemplate?.default_template_path || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="变量 Schema 文件">
+            {impactTemplate?.schema_path || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="默认变量 Schema 文件">
+            {impactTemplate?.default_schema_path || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="最近更新时间">
+            {impactTemplate?.updated_at || "暂无"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Schema 最近更新时间">
+            {impactTemplate?.schema_updated_at || "暂无"}
+          </Descriptions.Item>
+        </Descriptions>
+        <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 16 }}>
+          <Alert
+            type={impactTemplate?.undefined_placeholders?.length ? "warning" : "success"}
+            showIcon
+            message={
+              impactTemplate?.undefined_placeholders?.length
+                ? `模板里有 ${impactTemplate.undefined_placeholders.length} 个占位符还没有在 Schema 中定义`
+                : "模板占位符和 Schema 变量定义已对齐"
+            }
+            description={
+              <>
+                <div>模板占位符：{(impactTemplate?.placeholders || []).join(", ") || "暂无"}</div>
+                <div>未定义占位符：{(impactTemplate?.undefined_placeholders || []).join(", ") || "无"}</div>
+                <div>未使用变量：{(impactTemplate?.unused_variables || []).join(", ") || "无"}</div>
+              </>
+            }
+          />
+        </Space>
+        <Input.TextArea
+          value={impactTemplateContent}
+          onChange={(event) => setImpactTemplateContent(event.target.value)}
+          autoSize={{ minRows: 18, maxRows: 28 }}
+          placeholder="在这里编辑关联影响分析报告 Markdown 模板，或通过右上角上传 .md 文件覆盖。"
+        />
+        <Input.TextArea
+          style={{ marginTop: 12 }}
+          value={impactTemplateSchemaContent}
+          onChange={(event) => setImpactTemplateSchemaContent(event.target.value)}
+          autoSize={{ minRows: 12, maxRows: 22 }}
+          placeholder='在这里编辑模板变量 Schema（JSON），定义占位符名称、来源、说明和是否必填。'
+        />
+        <Card
+          size="small"
+          title="模板预览"
+          style={{ marginTop: 16, background: "#fafafa" }}
+          extra={impactTemplatePreview?.undefined_placeholders?.length ? <Tag color="warning">存在未定义占位符</Tag> : null}
+        >
+          <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            这里使用一份内置的 Java MR 示例数据渲染模板，方便检查章节结构、占位符和表达效果。
+          </Paragraph>
+          <Tabs
+            size="small"
+            items={[
+              {
+                key: "rendered",
+                label: "渲染预览",
+                children: (
+                  <div className="template-preview-rendered">
+                    {impactTemplatePreview?.markdown ? (
+                      renderPreviewMarkdown(impactTemplatePreview.markdown)
+                    ) : (
+                      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                        点击“预览模板”后，这里会显示一份按当前模板渲染出的示例关联影响分析报告。
+                      </Paragraph>
+                    )}
+                  </div>
+                ),
+              },
+              {
+                key: "raw",
+                label: "Markdown 原文",
+                children: (
+                  <Input.TextArea
+                    value={impactTemplatePreview?.markdown || ""}
+                    readOnly
+                    autoSize={{ minRows: 16, maxRows: 28 }}
+                    placeholder="点击“预览模板”后，这里会显示一份示例关联影响分析报告。"
+                  />
+                ),
+              },
+            ]}
+          />
+        </Card>
       </Card>
 
       <Card className="module-card" title="运行时设置" style={{ marginTop: 16 }} loading={loading}>

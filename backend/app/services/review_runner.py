@@ -27,6 +27,7 @@ from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
 from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.code_observation_extractor import CodeObservationExtractor
+from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
@@ -90,6 +91,7 @@ class ReviewRunner(
         self.llm_chat_service = LLMChatService()
         self.java_quality_signal_extractor = CodeObservationExtractor()
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
+        self.change_impact_report_service = ChangeImpactReportService()
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
@@ -1287,8 +1289,16 @@ class ReviewRunner(
                 payload={"expert_id": expert.expert_id, "tool_name": "gitnexus_impact_analysis"},
             )
         )
+        llm_result = None
         try:
-            impact_report = self.gitnexus_impact_service.analyze(latest.subject, runtime_settings)
+            impact_report, impact_trace = self.gitnexus_impact_service.analyze_with_trace(latest.subject, runtime_settings)
+            impact_report, llm_result = self.change_impact_report_service.synthesize(
+                expert=expert,
+                runtime_settings=runtime_settings,
+                report=impact_report,
+                trace=impact_trace,
+                review_id=latest.review_id,
+            )
         except Exception as error:
             metadata = dict(latest.subject.metadata or {})
             metadata.pop("impact_report", None)
@@ -1352,7 +1362,8 @@ class ReviewRunner(
                 issue_id="impact_report",
                 expert_id=expert.expert_id,
                 message_type="impact_report_generated",
-                content=(
+                content=impact_report.report_summary
+                or (
                     f"关联影响分析已完成：识别 {len(impact_report.changed_files)} 个变更文件，"
                     f"{len(impact_report.impacted_files)} 个候选受影响文件，"
                     f"给出 {len(impact_report.recommended_test_scope)} 条测试范围建议。"
@@ -1362,7 +1373,7 @@ class ReviewRunner(
                     "expert_id": expert.expert_id,
                     "tool_name": "gitnexus_impact_analysis",
                     "impact_report": impact_report.model_dump(mode="json"),
-                    **self._expert_llm_metadata(expert, runtime_settings),
+                    **(self._llm_message_metadata(llm_result) if llm_result is not None else self._expert_llm_metadata(expert, runtime_settings)),
                 },
             )
         )

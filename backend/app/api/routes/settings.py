@@ -125,6 +125,11 @@ class UpsertToolRequest(BaseModel):
     run_script: str = ""
 
 
+class UpdateMarkdownTemplateRequest(BaseModel):
+    content: str = ""
+    schema_content: str = ""
+
+
 @router.get("/settings/runtime")
 def get_runtime_settings() -> dict[str, object]:
     """返回设置页展示用的运行时配置，并隐藏敏感值明文。"""
@@ -196,6 +201,40 @@ def run_gitnexus_index(request: Request) -> dict[str, object]:
     """手动触发 GitNexus 建图，供公共机器部署后按项目人工刷新图谱。"""
 
     return _gitnexus_scheduler(request).trigger_manual_index()
+
+
+@router.get("/settings/impact-report-template")
+def get_change_impact_report_template() -> dict[str, object]:
+    """返回关联影响分析报告 Markdown 模板。"""
+
+    return review_service_module.review_service.get_change_impact_report_template()
+
+
+@router.put("/settings/impact-report-template")
+def update_change_impact_report_template(payload: UpdateMarkdownTemplateRequest) -> dict[str, object]:
+    """更新关联影响分析报告 Markdown 模板。"""
+
+    return review_service_module.review_service.update_change_impact_report_template(
+        payload.content,
+        payload.schema_content,
+    )
+
+
+@router.post("/settings/impact-report-template/reset")
+def reset_change_impact_report_template() -> dict[str, object]:
+    """恢复关联影响分析报告 Markdown 模板为系统默认版本。"""
+
+    return review_service_module.review_service.reset_change_impact_report_template()
+
+
+@router.post("/settings/impact-report-template/preview")
+def preview_change_impact_report_template(payload: UpdateMarkdownTemplateRequest) -> dict[str, object]:
+    """基于当前模板和变量 Schema 生成一份示例预览。"""
+
+    return review_service_module.review_service.preview_change_impact_report_template(
+        payload.content,
+        payload.schema_content,
+    )
 
 
 @router.get("/settings/extensions/skills")

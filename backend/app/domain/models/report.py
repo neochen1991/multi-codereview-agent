@@ -123,6 +123,8 @@ class ImpactReport(BaseModel):
     graph_status: str = "missing"
     graph_indexed_at: str = ""
     graph_commit: str = ""
+    fact_source: str = "gitnexus_mcp"
+    analysis_workflow: list[str] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     changed_symbols: list[ImpactSymbol] = Field(default_factory=list)
     impacted_files: list[ImpactFile] = Field(default_factory=list)
@@ -135,6 +137,11 @@ class ImpactReport(BaseModel):
     must_run_tests: list[str] = Field(default_factory=list)
     manual_verification: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    report_summary: str = ""
+    key_impact_points: list[str] = Field(default_factory=list)
+    test_focus: list[str] = Field(default_factory=list)
+    llm_markdown: str = ""
+    llm_generated: bool = False
 
 
 class ReviewReport(BaseModel):

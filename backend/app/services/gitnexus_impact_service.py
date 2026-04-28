@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ class GitNexusImpactClient(Protocol):
         repo_path: str,
         subject: ReviewSubject,
         changed_symbols: list[ImpactSymbol],
+        runtime_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """基于已建好的 GitNexus 图谱分析本次 MR 影响。"""
 
@@ -62,6 +64,7 @@ class GitNexusMcpImpactClient:
         repo_path: str,
         subject: ReviewSubject,
         changed_symbols: list[ImpactSymbol],
+        runtime_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         command = self._command()
         logger.info(
@@ -72,67 +75,47 @@ class GitNexusMcpImpactClient:
             len(changed_symbols),
             " ".join(command),
         )
-        requests: list[dict[str, Any]] = [
+        list_repos_payload = self._call_tool(command, repo_path, "list_repos", {}, runtime_env)
+        available_repos = self._extract_repo_names(list_repos_payload)
+        effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
+        detect_changes_payload = self._call_tool(
+            command,
+            repo_path,
+            "detect_changes",
             {
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "multi-codereview-agent", "version": "0.1.0"},
-                },
+                "repo": effective_repo_name,
+                "scope": "all",
             },
-            {"method": "notifications/initialized", "params": {}},
-            {
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "list_repos",
-                    "arguments": {},
-                },
-            },
-            {
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "name": "detect_changes",
-                    "arguments": {
-                        "repo": repo_name,
-                        "scope": "all",
-                    },
-                },
-            },
-        ]
-        responses = self._call_mcp(command, repo_path, requests)
-        available_repos = self._extract_repo_names(self._tool_payload(responses.get(2)))
-        detect_changes_payload = self._tool_payload(responses.get(3))
+            runtime_env,
+        )
         targets = self._build_targets(changed_symbols, detect_changes_payload)
         context_payloads: list[dict[str, Any]] = []
         impact_payloads: list[dict[str, Any]] = []
         if targets:
-            context_payloads = self._query_contexts(command, repo_name, repo_path, targets)
-            impact_payloads = self._query_impacts(command, repo_name, repo_path, targets)
+            context_payloads = self._query_contexts(command, effective_repo_name, repo_path, targets, runtime_env)
+            impact_payloads = self._query_impacts(command, effective_repo_name, repo_path, targets, runtime_env)
         logger.info(
-            "gitnexus impact finish repo=%s available_repo_count=%s detect_changes_keys=%s context_result_count=%s impact_result_count=%s queried_targets=%s",
+            "gitnexus impact finish repo=%s effective_repo=%s available_repo_count=%s detect_changes_keys=%s context_result_count=%s impact_result_count=%s queried_targets=%s",
             repo_name,
+            effective_repo_name,
             len(available_repos),
             sorted(detect_changes_payload.keys()),
             len(context_payloads),
             len(impact_payloads),
             ",".join(targets[:8]),
         )
-        if available_repos and repo_name not in available_repos:
+        if available_repos and effective_repo_name not in available_repos:
             raise RuntimeError(
-                f"GitNexus MCP 未发现仓库 {repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
+                f"GitNexus MCP 未发现仓库 {effective_repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
             )
         return {
-            "repo": repo_name,
+            "repo": effective_repo_name,
             "available_repos": available_repos,
             "detect_changes": detect_changes_payload,
             "context_results": context_payloads,
             "impact_results": impact_payloads,
             "queried_targets": targets,
-            "raw_response_count": len(responses),
+            "raw_response_count": 2 + len(context_payloads) + len(impact_payloads),
         }
 
     def _command(self) -> list[str]:
@@ -146,12 +129,43 @@ class GitNexusMcpImpactClient:
         command: list[str],
         repo_path: str,
         requests: list[dict[str, Any]],
+        runtime_env: dict[str, str] | None = None,
     ) -> dict[int, dict[str, Any]]:
-        client = McpStdioClient(command, cwd=repo_path, timeout_seconds=self.timeout_seconds)
+        client = McpStdioClient(command, cwd=repo_path, timeout_seconds=self.timeout_seconds, env=runtime_env)
         try:
             return client.call_many(requests)
         except RuntimeError as error:
             raise RuntimeError(f"GitNexus MCP 调用失败: {error}") from error
+
+    def _call_tool(
+        self,
+        command: list[str],
+        repo_path: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        logger.info("gitnexus mcp tool call tool=%s arguments=%s", tool_name, json.dumps(arguments, ensure_ascii=False))
+        responses = self._call_mcp(
+            command,
+            repo_path,
+            [
+                self._initialize_request(),
+                self._initialized_notification(),
+                {
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments,
+                    },
+                },
+            ],
+            runtime_env,
+        )
+        payload = self._tool_payload(responses.get(2))
+        logger.info("gitnexus mcp tool result tool=%s keys=%s", tool_name, sorted(payload.keys()))
+        return payload
 
     def _query_contexts(
         self,
@@ -159,27 +173,23 @@ class GitNexusMcpImpactClient:
         repo_name: str,
         repo_path: str,
         targets: list[str],
+        runtime_env: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        requests: list[dict[str, Any]] = [
-            {
-                "id": 100 + index,
-                "method": "tools/call",
-                "params": {
-                    "name": "context",
-                    "arguments": {
-                        "repo": repo_name,
-                        "name": target,
-                    },
-                },
-            }
-            for index, target in enumerate(targets[:8], start=1)
-        ]
         for target in targets[:8]:
             logger.info("gitnexus context queue request repo=%s target=%s", repo_name, target)
-        if not requests:
-            return []
-        responses = self._call_mcp(command, repo_path, [self._initialize_request(), self._initialized_notification(), *requests])
-        return [self._tool_payload(responses.get(int(request["id"]))) for request in requests]
+        return [
+            self._call_tool(
+                command,
+                repo_path,
+                "context",
+                {
+                    "repo": repo_name,
+                    "name": target,
+                },
+                runtime_env,
+            )
+            for target in targets[:8]
+        ]
 
     def _query_impacts(
         self,
@@ -187,27 +197,23 @@ class GitNexusMcpImpactClient:
         repo_name: str,
         repo_path: str,
         targets: list[str],
+        runtime_env: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        requests: list[dict[str, Any]] = [
-            {
-                "id": 200 + index,
-                "method": "tools/call",
-                "params": {
-                    "name": "impact",
-                    "arguments": {
-                        "repo": repo_name,
-                        "target": target,
-                    },
-                },
-            }
-            for index, target in enumerate(targets[:8], start=1)
-        ]
         for target in targets[:8]:
             logger.info("gitnexus impact queue request repo=%s target=%s", repo_name, target)
-        if not requests:
-            return []
-        responses = self._call_mcp(command, repo_path, [self._initialize_request(), self._initialized_notification(), *requests])
-        return [self._tool_payload(responses.get(int(request["id"]))) for request in requests]
+        return [
+            self._call_tool(
+                command,
+                repo_path,
+                "impact",
+                {
+                    "repo": repo_name,
+                    "target": target,
+                },
+                runtime_env,
+            )
+            for target in targets[:8]
+        ]
 
     def _initialize_request(self) -> dict[str, Any]:
         return {
@@ -263,17 +269,66 @@ class GitNexusMcpImpactClient:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
+            parsed = self._parse_json_text(text)
+            if parsed is None:
                 return {"text": text}
             return parsed if isinstance(parsed, dict) else {"value": parsed}
         return result
 
+    def _parse_json_text(self, text: str) -> Any | None:
+        candidates = [text]
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        candidates.extend(item.strip() for item in fenced if item.strip())
+        object_candidate = self._extract_balanced_json(text, "{", "}")
+        if object_candidate:
+            candidates.append(object_candidate)
+        array_candidate = self._extract_balanced_json(text, "[", "]")
+        if array_candidate:
+            candidates.append(array_candidate)
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _extract_balanced_json(self, text: str, opener: str, closer: str) -> str:
+        start = text.find(opener)
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1].strip()
+        return ""
+
     def _extract_repo_names(self, payload: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
+        direct_name = str(payload.get("name") or payload.get("repo") or payload.get("repo_name") or "").strip()
+        if direct_name:
+            candidates.append(direct_name)
         for key in ("repos", "repositories", "items", "results", "value"):
             raw = payload.get(key)
+            if isinstance(raw, dict):
+                raw = [raw]
             if not isinstance(raw, list):
                 continue
             for item in raw:
@@ -298,6 +353,40 @@ class GitNexusMcpImpactClient:
             deduped.append(item)
         return deduped
 
+    def _resolve_available_repo_name(self, repo_name: str, repo_path: str, payload: dict[str, Any]) -> str:
+        repo_path_resolved = str(Path(repo_path).resolve()) if repo_path else ""
+        direct_name = str(payload.get("name") or payload.get("repo") or payload.get("repo_name") or "").strip()
+        direct_path = str(payload.get("path") or payload.get("repoPath") or payload.get("repo_path") or "").strip()
+        if direct_name:
+            if repo_path_resolved and direct_path:
+                try:
+                    if str(Path(direct_path).resolve()) == repo_path_resolved:
+                        return direct_name
+                except OSError:
+                    pass
+            if direct_name == repo_name:
+                return direct_name
+        for key in ("repos", "repositories", "items", "results", "value"):
+            raw = payload.get(key)
+            if isinstance(raw, dict):
+                raw = [raw]
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                candidate_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+                candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+                if repo_path_resolved and candidate_path:
+                    try:
+                        if str(Path(candidate_path).resolve()) == repo_path_resolved and candidate_name:
+                            return candidate_name
+                    except OSError:
+                        pass
+                if candidate_name == repo_name:
+                    return candidate_name
+        return repo_name
+
 
 class GitNexusImpactService:
     """生成每个 MR 的关联影响报告。
@@ -321,11 +410,24 @@ class GitNexusImpactService:
 
     def analyze(self, subject: ReviewSubject, runtime: RuntimeSettings | None = None) -> ImpactReport:
         """返回标准化影响报告；GitNexus 不可用时直接抛错，不再生成降级报告。"""
+        report, _ = self.analyze_with_trace(subject, runtime)
+        return report
 
+    def analyze_with_trace(
+        self,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings | None = None,
+    ) -> tuple[ImpactReport, dict[str, Any]]:
         cached = self._cached_gitnexus_report(subject)
         if cached is not None:
             logger.info("gitnexus impact use cached report changed_file_count=%s", len(cached.changed_files))
-            return cached
+            return cached, {
+                "source": "cached",
+                "workflow": [
+                    "本次关联影响报告来自已缓存的 GitNexus 结果。",
+                    "未重新执行 detect_changes/context/impact。",
+                ],
+            }
         return self._gitnexus_graph_report(subject, runtime)
 
     def _cached_gitnexus_report(self, subject: ReviewSubject) -> ImpactReport | None:
@@ -338,11 +440,16 @@ class GitNexusImpactService:
         payload.setdefault("graph_status", "ready")
         return ImpactReport.model_validate(payload)
 
-    def _gitnexus_graph_report(self, subject: ReviewSubject, runtime: RuntimeSettings | None) -> ImpactReport:
+    def _gitnexus_graph_report(
+        self,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings | None,
+    ) -> tuple[ImpactReport, dict[str, Any]]:
         repo_path = self._repo_path(subject, runtime)
         if not repo_path:
             raise RuntimeError("未配置本地代码仓路径，无法执行 GitNexus 关联影响分析。")
-        graph_status = self._load_graph_status(repo_path)
+        registry = self._load_gitnexus_registry(subject, runtime)
+        graph_status = self._load_graph_status(repo_path, registry)
         logger.info(
             "gitnexus graph status repo_path=%s state=%s repo_name=%s",
             repo_path,
@@ -353,9 +460,16 @@ class GitNexusImpactService:
             raise RuntimeError("GitNexus 图谱未就绪，请先完成 gitnexus analyze 建图。")
         if shutil.which("gitnexus") is None:
             raise RuntimeError("当前机器未预装 GitNexus，可执行命令 `gitnexus` 不存在。")
-        resolved_repo_name = self._resolve_gitnexus_repo_name(repo_path, graph_status)
+        resolved_repo_name = self._resolve_gitnexus_repo_name(repo_path, graph_status, registry)
         if not resolved_repo_name:
             raise RuntimeError("GitNexus 图谱已存在，但未在官方 registry 中识别到该仓库。")
+        duplicate_paths = self._registry_paths_for_repo_name(repo_path, resolved_repo_name, registry)
+        if len(duplicate_paths) > 1:
+            raise RuntimeError(
+                "GitNexus registry 中存在重复仓库名 "
+                f"{resolved_repo_name}，对应路径有：{', '.join(duplicate_paths[:6])}。"
+                "请清理旧 registry 条目，或使用唯一仓目录名重新执行 gitnexus analyze。"
+            )
         changed_symbols = self._build_changed_symbols(subject, runtime)
         logger.info(
             "gitnexus graph analyze repo=%s repo_path=%s changed_files=%s changed_symbols=%s symbols=%s",
@@ -371,17 +485,31 @@ class GitNexusImpactService:
                 repo_path=repo_path,
                 subject=subject,
                 changed_symbols=changed_symbols,
+                runtime_env=self._gitnexus_runtime_env(subject, runtime),
             )
         except Exception as error:
             raise RuntimeError(f"GitNexus 图谱已就绪，但按官方 MCP 流程调用失败：{error}") from error
-        return self._normalize_gitnexus_payload(subject, runtime, graph_status, raw, changed_symbols)
+        report = self._normalize_gitnexus_payload(subject, runtime, graph_status, raw, changed_symbols)
+        trace = {
+            "source": "gitnexus_mcp",
+            "workflow": [
+                "list_repos",
+                "detect_changes(scope=all)",
+                "context(key symbols)",
+                "impact(key symbols)",
+            ],
+            **raw,
+        }
+        return report, trace
 
-    def _load_graph_status(self, repo_path: str) -> dict[str, Any]:
-        candidates: list[Path] = []
+    def _load_graph_status(self, repo_path: str, registry: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        repo_root = Path(repo_path)
+        candidates: list[tuple[Path, bool]] = [
+            (repo_root / ".gitnexus" / "index_status.json", True),
+        ]
         if self.storage_root is not None:
-            candidates.append(self.storage_root / "gitnexus" / "index_status.json")
-        candidates.append(Path(repo_path) / ".gitnexus" / "index_status.json")
-        for path in candidates:
+            candidates.append((self.storage_root / "gitnexus" / "index_status.json", False))
+        for path, strict_repo_match in candidates:
             if not path.exists():
                 continue
             try:
@@ -389,21 +517,54 @@ class GitNexusImpactService:
             except Exception:
                 continue
             if isinstance(status, dict):
-                return status
-        if (Path(repo_path) / ".gitnexus").exists():
+                if strict_repo_match:
+                    return status
+                if self._status_matches_repo_path(status, repo_path):
+                    return status
+                logger.info(
+                    "gitnexus graph status ignored because repo_path mismatched status_path=%s expected_repo=%s actual_repo=%s",
+                    path,
+                    repo_path,
+                    status.get("repo_path"),
+                )
+                continue
+        meta_path = repo_root / ".gitnexus" / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = read_json(meta_path)
+            except Exception:
+                meta = {}
+            if isinstance(meta, dict):
+                resolved_repo_name = self._resolve_repo_name_from_registry(repo_path, registry)
+                return {
+                    "state": "ready",
+                    "repo_path": str(meta.get("repoPath") or repo_path),
+                    "repo_name": resolved_repo_name or repo_root.name,
+                    "updated_at": str(meta.get("indexedAt") or ""),
+                    "commit": str(meta.get("lastCommit") or ""),
+                    "stats": dict(meta.get("stats") or {}),
+                }
+        if (repo_root / ".gitnexus").exists():
+            resolved_repo_name = self._resolve_repo_name_from_registry(repo_path, registry)
             return {
                 "state": "ready",
                 "repo_path": repo_path,
-                "repo_name": Path(repo_path).name,
+                "repo_name": resolved_repo_name or repo_root.name,
                 "updated_at": "",
             }
         return {}
 
-    def _resolve_gitnexus_repo_name(self, repo_path: str, graph_status: dict[str, Any]) -> str:
-        status_name = str(graph_status.get("repo_name") or "").strip()
-        if status_name:
-            return status_name
-        registry = self._load_gitnexus_registry()
+    def _status_matches_repo_path(self, status: dict[str, Any], repo_path: str) -> bool:
+        candidate_path = str(status.get("repo_path") or status.get("repoPath") or status.get("path") or "").strip()
+        if not candidate_path:
+            return False
+        try:
+            return str(Path(candidate_path).resolve()) == str(Path(repo_path).resolve())
+        except OSError:
+            return False
+
+    def _resolve_repo_name_from_registry(self, repo_path: str, registry: list[dict[str, Any]] | None = None) -> str:
+        registry = registry if registry is not None else self._load_gitnexus_registry()
         if not registry:
             return ""
         repo_path_resolved = str(Path(repo_path).resolve())
@@ -412,14 +573,66 @@ class GitNexusImpactService:
                 continue
             candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
             candidate_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
-            if not candidate_name:
-                continue
-            if candidate_path and str(Path(candidate_path).resolve()) == repo_path_resolved:
-                return candidate_name
+            if candidate_path and candidate_name:
+                try:
+                    if str(Path(candidate_path).resolve()) == repo_path_resolved:
+                        return candidate_name
+                except OSError:
+                    continue
         return ""
 
-    def _load_gitnexus_registry(self) -> list[dict[str, Any]]:
-        registry_path = Path.home() / ".gitnexus" / "registry.json"
+    def _resolve_gitnexus_repo_name(
+        self,
+        repo_path: str,
+        graph_status: dict[str, Any],
+        registry: list[dict[str, Any]] | None = None,
+    ) -> str:
+        status_name = str(graph_status.get("repo_name") or "").strip()
+        if status_name:
+            return status_name
+        return self._resolve_repo_name_from_registry(repo_path, registry)
+
+    def _registry_paths_for_repo_name(
+        self,
+        repo_path: str,
+        repo_name: str,
+        registry: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        if not repo_name:
+            return []
+        repo_path_resolved = str(Path(repo_path).resolve())
+        matched: list[str] = []
+        for item in registry if registry is not None else self._load_gitnexus_registry():
+            if not isinstance(item, dict):
+                continue
+            candidate_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+            if candidate_name != repo_name:
+                continue
+            candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+            if not candidate_path:
+                continue
+            try:
+                normalized = str(Path(candidate_path).resolve())
+            except OSError:
+                normalized = candidate_path
+            if normalized == repo_path_resolved:
+                return [normalized]
+            matched.append(normalized)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in matched:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
+
+    def _load_gitnexus_registry(
+        self,
+        subject: ReviewSubject | None = None,
+        runtime: RuntimeSettings | None = None,
+    ) -> list[dict[str, Any]]:
+        registry_path = self._gitnexus_registry_path(subject, runtime)
         if not registry_path.exists():
             return []
         try:
@@ -434,6 +647,43 @@ class GitNexusImpactService:
                 if isinstance(value, list):
                     return [item for item in value if isinstance(item, dict)]
         return []
+
+    def _gitnexus_runtime_env(
+        self,
+        subject: ReviewSubject | None,
+        runtime: RuntimeSettings | None,
+    ) -> dict[str, str] | None:
+        home_override = self._gitnexus_home(subject, runtime)
+        if not home_override:
+            return None
+        env = dict(os.environ)
+        env["HOME"] = home_override
+        env.setdefault("USERPROFILE", home_override)
+        env.setdefault("GITNEXUS_HOME", home_override)
+        return env
+
+    def _gitnexus_registry_path(
+        self,
+        subject: ReviewSubject | None,
+        runtime: RuntimeSettings | None,
+    ) -> Path:
+        metadata = dict(subject.metadata or {}) if subject is not None else {}
+        explicit = str(metadata.get("gitnexus_registry_path") or os.getenv("GITNEXUS_REGISTRY_PATH") or "").strip()
+        if explicit:
+            return Path(explicit).expanduser()
+        home_override = self._gitnexus_home(subject, runtime)
+        if home_override:
+            return Path(home_override).expanduser() / ".gitnexus" / "registry.json"
+        return Path.home() / ".gitnexus" / "registry.json"
+
+    def _gitnexus_home(
+        self,
+        subject: ReviewSubject | None,
+        runtime: RuntimeSettings | None,
+    ) -> str:
+        del runtime
+        metadata = dict(subject.metadata or {}) if subject is not None else {}
+        return str(metadata.get("gitnexus_home") or os.getenv("GITNEXUS_HOME") or "").strip()
 
     def _normalize_gitnexus_payload(
         self,
@@ -456,20 +706,26 @@ class GitNexusImpactService:
             self._test_scopes_from_gitnexus(detect_changes, impact_results),
         )
         impact_paths = self._impact_paths_from_gitnexus(impact_results, context_results)
-        impact_graph = self._build_impact_graph(changed_symbols or fallback.changed_symbols, impact_paths, context_results)
+        impacted_modules = self._dedupe(
+            [
+                *fallback.impacted_modules,
+                *[str(item) for item in list(detect_changes.get("affected_processes") or [])],
+                *[str(item) for item in list(detect_changes.get("affectedProcesses") or [])],
+            ]
+        )
+        impact_graph = self._build_impact_graph(
+            changed_symbols or fallback.changed_symbols,
+            impact_paths,
+            context_results,
+            impacted_files,
+            test_scopes,
+            impacted_modules,
+        )
         risk_level = str(detect_changes.get("risk_level") or detect_changes.get("riskLevel") or fallback.risk_level)
         logger.info(
             "gitnexus normalize report graph_status=ready impacted_files=%s impacted_modules=%s impact_paths=%s impact_graph_nodes=%s impact_graph_edges=%s test_scopes=%s",
             len(impacted_files),
-            len(
-                self._dedupe(
-                    [
-                        *fallback.impacted_modules,
-                        *[str(item) for item in list(detect_changes.get("affected_processes") or [])],
-                        *[str(item) for item in list(detect_changes.get("affectedProcesses") or [])],
-                    ]
-                )
-            ),
+            len(impacted_modules),
             len(impact_paths),
             len(impact_graph.nodes),
             len(impact_graph.edges),
@@ -479,6 +735,13 @@ class GitNexusImpactService:
             graph_status="ready",
             graph_indexed_at=str(graph_status.get("indexed_at") or graph_status.get("updated_at") or ""),
             graph_commit=str(graph_status.get("commit") or ""),
+            fact_source="gitnexus_mcp",
+            analysis_workflow=[
+                "list_repos",
+                "detect_changes(scope=all)",
+                "context(key symbols)",
+                "impact(key symbols)",
+            ],
             changed_files=self._dedupe(
                 [
                     *fallback.changed_files,
@@ -487,13 +750,7 @@ class GitNexusImpactService:
             ),
             changed_symbols=changed_symbols or fallback.changed_symbols,
             impacted_files=impacted_files,
-            impacted_modules=self._dedupe(
-                [
-                    *fallback.impacted_modules,
-                    *[str(item) for item in list(detect_changes.get("affected_processes") or [])],
-                    *[str(item) for item in list(detect_changes.get("affectedProcesses") or [])],
-                ]
-            ),
+            impacted_modules=impacted_modules,
             impact_paths=impact_paths,
             impact_graph=impact_graph,
             external_entrypoints=fallback.external_entrypoints,
@@ -555,9 +812,9 @@ class GitNexusImpactService:
 
     def _build_changed_symbols(self, subject: ReviewSubject, runtime: RuntimeSettings | None) -> list[ImpactSymbol]:
         symbols = self._extract_changed_symbols(subject.unified_diff)
-        if symbols:
-            return symbols
         repo_path = self._repo_path(subject, runtime)
+        if symbols:
+            return self._enrich_changed_symbols_from_source(repo_path, subject, symbols) if repo_path else symbols
         local_diff = self._load_local_diff_from_git(repo_path, subject) if repo_path else ""
         if local_diff:
             symbols = self._extract_changed_symbols(local_diff)
@@ -567,7 +824,7 @@ class GitNexusImpactService:
                     repo_path,
                     len(symbols),
                 )
-                return symbols
+                return self._enrich_changed_symbols_from_source(repo_path, subject, symbols)
         if repo_path:
             symbols = self._scan_changed_file_symbols(repo_path, subject)
             if symbols:
@@ -578,6 +835,33 @@ class GitNexusImpactService:
                 )
                 return symbols
         return []
+
+    def _enrich_changed_symbols_from_source(
+        self,
+        repo_path: str,
+        subject: ReviewSubject,
+        symbols: list[ImpactSymbol],
+    ) -> list[ImpactSymbol]:
+        source_candidates = self._scan_changed_file_symbols(repo_path, subject)
+        if not source_candidates:
+            return symbols
+        indexed = {(item.file_path, item.symbol): item for item in source_candidates}
+        enriched: list[ImpactSymbol] = []
+        for item in symbols:
+            source_item = indexed.get((item.file_path, item.symbol))
+            if source_item is None:
+                enriched.append(item)
+                continue
+            enriched.append(
+                item.model_copy(
+                    update={
+                        "kind": item.kind or source_item.kind,
+                        "container": item.container or source_item.container,
+                        "line_start": item.line_start or source_item.line_start,
+                    }
+                )
+            )
+        return enriched
 
     def _load_local_diff_from_git(self, repo_path: str, subject: ReviewSubject) -> str:
         repo_dir = Path(repo_path)
@@ -635,6 +919,8 @@ class GitNexusImpactService:
                     if match:
                         symbol_name = match.group(1)
                         kind = self._symbol_kind(line)
+                        if not self._is_symbol_declaration_line(line, symbol_name, kind):
+                            continue
                         symbols.append(
                             ImpactSymbol(
                                 file_path=current_file,
@@ -706,6 +992,8 @@ class GitNexusImpactService:
                     continue
                 symbol_name = match.group(1)
                 kind = self._symbol_kind(candidate)
+                if not self._is_symbol_declaration_line(candidate, symbol_name, kind):
+                    continue
                 if kind != "function":
                     continue
                 symbols.append(
@@ -851,9 +1139,10 @@ class GitNexusImpactService:
     ) -> list[ImpactPath]:
         paths: list[ImpactPath] = []
         for result in impact_results:
+            target, target_file_path = self._normalize_graph_label(result.get("target"))
             for item in list(result.get("impact_paths") or result.get("impactPaths") or result.get("paths") or []):
                 if isinstance(item, list):
-                    values = [str(value) for value in item if str(value).strip()]
+                    values = [self._normalize_graph_label(value)[0] for value in item if self._normalize_graph_label(value)[0]]
                     paths.append(
                         ImpactPath(
                             source=values[0] if values else "",
@@ -864,16 +1153,73 @@ class GitNexusImpactService:
                         )
                     )
                 elif isinstance(item, dict):
-                    values = [str(value) for value in list(item.get("path") or item.get("nodes") or []) if str(value).strip()]
+                    values = [
+                        self._normalize_graph_label(value)[0]
+                        for value in list(item.get("path") or item.get("nodes") or [])
+                        if self._normalize_graph_label(value)[0]
+                    ]
+                    source_value, _ = self._normalize_graph_label(item.get("source") or (values[0] if values else ""))
+                    target_value, _ = self._normalize_graph_label(item.get("target") or (values[-1] if values else ""))
                     paths.append(
                         ImpactPath(
-                            source=str(item.get("source") or (values[0] if values else "")),
-                            target=str(item.get("target") or (values[-1] if values else "")),
+                            source=source_value,
+                            target=target_value,
                             path=values,
                             depth=int(item.get("depth") or max(len(values) - 1, 0)),
                             risk=str(item.get("risk") or item.get("risk_level") or "medium"),
                         )
                     )
+            risk = str(result.get("risk") or result.get("risk_level") or "medium")
+            if target:
+                for process_name in [str(value).strip() for value in list(result.get("affected_processes") or []) if str(value).strip()]:
+                    paths.append(
+                        ImpactPath(
+                            source=target,
+                            target=process_name,
+                            path=[target, process_name],
+                            depth=1,
+                            risk=risk,
+                        )
+                    )
+                for module_name in [str(value).strip() for value in list(result.get("affected_modules") or []) if str(value).strip()]:
+                    paths.append(
+                        ImpactPath(
+                            source=target,
+                            target=module_name,
+                            path=[target, module_name],
+                            depth=1,
+                            risk=risk,
+                        )
+                    )
+                by_depth = result.get("byDepth")
+                if isinstance(by_depth, dict):
+                    for depth_key, raw_values in by_depth.items():
+                        depth = int(depth_key) if str(depth_key).isdigit() else 1
+                        if isinstance(raw_values, list):
+                            for raw_item in raw_values:
+                                label = ""
+                                if isinstance(raw_item, str):
+                                    label, _ = self._normalize_graph_label(raw_item)
+                                elif isinstance(raw_item, dict):
+                                    label, _ = self._normalize_graph_label(
+                                        raw_item.get("name")
+                                        or raw_item.get("symbol")
+                                        or raw_item.get("target")
+                                        or raw_item.get("module")
+                                        or raw_item.get("process")
+                                        or raw_item
+                                    )
+                                if not label:
+                                    continue
+                                paths.append(
+                                    ImpactPath(
+                                        source=target,
+                                        target=label,
+                                        path=[target, label],
+                                        depth=depth,
+                                        risk=risk,
+                                    )
+                                )
         for context in list(context_results or []):
             symbol_name = self._context_symbol_name(context)
             if not symbol_name:
@@ -913,6 +1259,9 @@ class GitNexusImpactService:
         changed_symbols: list[ImpactSymbol],
         impact_paths: list[ImpactPath],
         context_results: list[dict[str, Any]],
+        impacted_files: list[ImpactFile],
+        test_scopes: list[TestScopeRecommendation],
+        impacted_modules: list[str],
     ) -> ImpactGraph:
         nodes: dict[str, ImpactGraphNode] = {}
         edges: dict[tuple[str, str, str], ImpactGraphEdge] = {}
@@ -993,15 +1342,81 @@ class GitNexusImpactService:
                 continue
             ensure_node(symbol_name, label=symbol_name, kind="symbol", role="context")
             for link in self._context_links(context, "incoming"):
-                ensure_node(link["label"], label=link["label"], kind=link["kind"], role="incoming")
+                ensure_node(
+                    link["label"],
+                    label=link["label"],
+                    kind=link["kind"],
+                    file_path=link.get("file_path", ""),
+                    role="incoming",
+                )
                 ensure_edge(link["label"], symbol_name, link["relationship"], 0.8)
             for link in self._context_links(context, "outgoing"):
-                ensure_node(link["label"], label=link["label"], kind=link["kind"], role="outgoing")
+                ensure_node(
+                    link["label"],
+                    label=link["label"],
+                    kind=link["kind"],
+                    file_path=link.get("file_path", ""),
+                    role="outgoing",
+                )
                 ensure_edge(symbol_name, link["label"], link["relationship"], 0.8)
             for process_name in self._context_processes(context):
                 ensure_node(process_name, label=process_name, kind="process", role="process")
                 ensure_edge(process_name, symbol_name, "process_step", 0.6)
+        anchor_targets = [item.path[-1] for item in impact_paths if item.path] or [item.target for item in impact_paths if item.target]
+        changed_anchor = self._graph_symbol_id(changed_symbols[0]) if changed_symbols else ""
+        changed_anchor_by_file = {
+            item.file_path: self._graph_symbol_id(item)
+            for item in changed_symbols
+            if item.file_path and self._graph_symbol_id(item)
+        }
+        terminal_anchor = anchor_targets[0] if anchor_targets else changed_anchor
+        for file_item in impacted_files[:18]:
+            node_id = f"file::{file_item.file_path}"
+            ensure_node(
+                node_id,
+                label=Path(file_item.file_path).name or file_item.file_path,
+                kind="file",
+                file_path=file_item.file_path,
+                role="file",
+                risk=file_item.risk_level,
+            )
+            anchor = terminal_anchor
+            if file_item.relationship == "changed":
+                anchor = changed_anchor_by_file.get(file_item.file_path, changed_anchor)
+            elif file_item.relationship == "test_candidate":
+                anchor = self._anchor_for_test_candidate(file_item.file_path, changed_anchor_by_file) or terminal_anchor
+            if anchor:
+                ensure_edge(anchor, node_id, file_item.relationship or "impacts_file", 0.85)
+        for module_name in impacted_modules[:8]:
+            node_id = f"module::{module_name}"
+            ensure_node(node_id, label=module_name, kind="module", role="module", risk="medium")
+            if terminal_anchor:
+                ensure_edge(terminal_anchor, node_id, "impacts_module", 0.7)
+        for scope in test_scopes[:8]:
+            node_id = f"test::{scope.scope}"
+            ensure_node(node_id, label=scope.scope, kind="test_scope", role="test", risk=scope.priority)
+            if terminal_anchor:
+                ensure_edge(terminal_anchor, node_id, "recommended_test", 0.9)
+            for path_item in scope.paths[:6]:
+                file_node_id = f"file::{path_item}"
+                ensure_node(
+                    file_node_id,
+                    label=Path(path_item).name or path_item,
+                    kind="file",
+                    file_path=path_item,
+                    role="file",
+                    risk="medium",
+                )
+                ensure_edge(node_id, file_node_id, "covers_file", 0.7)
         return ImpactGraph(nodes=list(nodes.values())[:120], edges=list(edges.values())[:180])
+
+    def _anchor_for_test_candidate(self, file_path: str, changed_anchor_by_file: dict[str, str]) -> str:
+        candidate_name = Path(file_path).name.lower()
+        for changed_file_path, anchor in changed_anchor_by_file.items():
+            changed_name = Path(changed_file_path).stem.lower()
+            if changed_name and changed_name in candidate_name:
+                return anchor
+        return ""
 
     def _build_test_scope(
         self,
@@ -1149,6 +1564,40 @@ class GitNexusImpactService:
             return "enum"
         return "function"
 
+    def _is_symbol_declaration_line(self, line: str, symbol_name: str, kind: str) -> bool:
+        normalized = str(line or "").strip()
+        if kind in {"class", "interface", "enum"}:
+            return True
+        if kind != "function":
+            return True
+        if "=" in normalized and normalized.find("=") < normalized.find("("):
+            return False
+        if normalized.endswith(";") and "->" not in normalized:
+            return False
+        head = normalized.lstrip("+").strip()
+        prefix = head.split("(", 1)[0].strip()
+        tokens = [token for token in prefix.split() if token]
+        if any(token in {"public", "private", "protected", "static", "final", "synchronized", "abstract"} for token in tokens):
+            return True
+        return len(tokens) >= 2 and tokens[-1] == symbol_name
+
+    def _normalize_graph_label(self, raw: Any) -> tuple[str, str]:
+        if isinstance(raw, dict):
+            label = str(raw.get("name") or raw.get("symbol") or raw.get("target") or raw.get("id") or "").strip()
+            file_path = str(raw.get("filePath") or raw.get("file_path") or raw.get("path") or "").strip()
+            return label, file_path
+        text = str(raw or "").strip()
+        if not text:
+            return "", ""
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return self._normalize_graph_label(parsed)
+        return text, ""
+
     def _graph_symbol_id(self, symbol: ImpactSymbol) -> str:
         if symbol.container and symbol.symbol and symbol.container != symbol.symbol:
             return f"{symbol.container}.{symbol.symbol}"
@@ -1172,25 +1621,25 @@ class GitNexusImpactService:
         if not isinstance(payload, dict):
             return []
         items: list[dict[str, str]] = []
-        for relationship_key in ("calls", "imports", "references", "uses"):
+        for relationship_key in ("calls", "imports", "references", "uses", "has_method", "has_property", "extends", "implements"):
             for item in list(payload.get(relationship_key) or []):
                 if isinstance(item, str) and item.strip():
-                    items.append({"label": item.strip(), "kind": "symbol", "relationship": relationship_key})
+                    label, _ = self._normalize_graph_label(item)
+                    if not label:
+                        continue
+                    items.append({"label": label, "kind": "symbol", "relationship": relationship_key})
                     continue
                 if not isinstance(item, dict):
                     continue
-                label = ""
-                for key in ("name", "uid", "symbol", "target", "source", "callee", "caller"):
-                    label = str(item.get(key) or "").strip()
-                    if label:
-                        break
+                label, file_path = self._normalize_graph_label(item)
                 if not label:
                     continue
                 items.append(
                     {
                         "label": label,
-                        "kind": str(item.get("kind") or "symbol"),
+                        "kind": str(item.get("kind") or item.get("type") or "symbol"),
                         "relationship": relationship_key,
+                        "file_path": file_path,
                     }
                 )
         deduped: list[dict[str, str]] = []

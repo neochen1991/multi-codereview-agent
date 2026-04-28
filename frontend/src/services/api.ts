@@ -386,6 +386,8 @@ export interface ImpactReport {
   graph_status: string;
   graph_indexed_at?: string;
   graph_commit?: string;
+  fact_source?: string;
+  analysis_workflow?: string[];
   changed_files: string[];
   changed_symbols: ImpactSymbol[];
   impacted_files: ImpactFile[];
@@ -398,6 +400,11 @@ export interface ImpactReport {
   must_run_tests: string[];
   manual_verification: string[];
   limitations: string[];
+  report_summary?: string;
+  key_impact_points?: string[];
+  test_focus?: string[];
+  llm_markdown?: string;
+  llm_generated?: boolean;
 }
 
 export interface ReviewReport {
@@ -602,6 +609,28 @@ export interface GitNexusIndexStatus {
   stdout?: string;
   stderr?: string;
   trigger?: string;
+}
+
+export interface ImpactReportTemplate {
+  template_path: string;
+  default_template_path?: string;
+  schema_path?: string;
+  default_schema_path?: string;
+  content: string;
+  schema_content?: string;
+  updated_at?: string;
+  schema_updated_at?: string;
+  placeholders?: string[];
+  schema_variables?: Array<Record<string, any>>;
+  undefined_placeholders?: string[];
+  unused_variables?: string[];
+}
+
+export interface ImpactReportTemplatePreview {
+  markdown: string;
+  placeholders?: string[];
+  schema_variables?: Array<Record<string, any>>;
+  undefined_placeholders?: string[];
 }
 
 export interface PostgresDataSourceSettings {
@@ -1025,6 +1054,22 @@ export const settingsApi = {
   },
   async runGitNexusIndex(): Promise<GitNexusIndexStatus> {
     const { data } = await api.post("/settings/gitnexus/index/run");
+    return data;
+  },
+  async getImpactReportTemplate(): Promise<ImpactReportTemplate> {
+    const { data } = await api.get("/settings/impact-report-template");
+    return data;
+  },
+  async updateImpactReportTemplate(content: string, schemaContent: string): Promise<ImpactReportTemplate> {
+    const { data } = await api.put("/settings/impact-report-template", { content, schema_content: schemaContent });
+    return data;
+  },
+  async resetImpactReportTemplate(): Promise<ImpactReportTemplate> {
+    const { data } = await api.post("/settings/impact-report-template/reset");
+    return data;
+  },
+  async previewImpactReportTemplate(content: string, schemaContent: string): Promise<ImpactReportTemplatePreview> {
+    const { data } = await api.post("/settings/impact-report-template/preview", { content, schema_content: schemaContent });
     return data;
   },
   async listExtensionSkills(): Promise<ExtensionSkill[]> {
