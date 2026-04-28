@@ -197,3 +197,31 @@ def test_change_impact_report_service_supports_schema_driven_custom_placeholder(
 
     assert "订单入口到仓储链路属于高风险变更。" in updated.llm_markdown
     assert "本次改动影响订单创建主链路。" in updated.llm_markdown
+
+
+def test_change_impact_report_service_can_analyze_template_schema_with_llm():
+    service = ChangeImpactReportService()
+    service._llm.complete_text = lambda **kwargs: LLMTextResult(  # type: ignore[method-assign]
+        text=(
+            '{"variables":['
+            '{"name":"summary","source":"llm","required":true,"description":"总结","format":"markdown"},'
+            '{"name":"impact_paths","source":"gitnexus","required":false,"description":"调用链路","format":"bullet_list"}'
+            ']}'
+        ),
+        mode="live",
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    schema_payload = service.analyze_template_schema(
+        "# 报告\n\n{{summary}}\n\n{{impact_paths}}",
+        RuntimeSettings(),
+    )
+
+    variables = list(schema_payload.get("variables") or [])
+    assert variables[0]["name"] == "summary"
+    assert variables[0]["source"] == "llm"
+    assert variables[1]["name"] == "impact_paths"
+    assert variables[1]["source"] == "gitnexus"

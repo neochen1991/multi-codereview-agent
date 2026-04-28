@@ -316,6 +316,73 @@ const priorityRank = (value?: string): number => {
   return 0;
 };
 
+const renderTemplateMarkdown = (markdown: string): React.ReactNode[] => {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const nodes: React.ReactNode[] = [];
+  let bulletBuffer: string[] = [];
+  let paragraphBuffer: string[] = [];
+
+  const flushBullets = () => {
+    if (!bulletBuffer.length) return;
+    nodes.push(
+      <ul key={`template-ul-${nodes.length}`} className="template-preview-list">
+        {bulletBuffer.map((item, index) => (
+          <li key={`${item}-${index}`}>{item}</li>
+        ))}
+      </ul>,
+    );
+    bulletBuffer = [];
+  };
+
+  const flushParagraph = () => {
+    if (!paragraphBuffer.length) return;
+    nodes.push(
+      <Paragraph key={`template-p-${nodes.length}`} className="template-preview-paragraph">
+        {paragraphBuffer.join(" ")}
+      </Paragraph>,
+    );
+    paragraphBuffer = [];
+  };
+
+  lines.forEach((line, index) => {
+    const text = line.trim();
+    if (!text) {
+      flushBullets();
+      flushParagraph();
+      return;
+    }
+    if (text.startsWith("### ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(<Title key={`template-h3-${index}`} level={5}>{text.slice(4)}</Title>);
+      return;
+    }
+    if (text.startsWith("## ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(<Title key={`template-h2-${index}`} level={4}>{text.slice(3)}</Title>);
+      return;
+    }
+    if (text.startsWith("# ")) {
+      flushBullets();
+      flushParagraph();
+      nodes.push(<Title key={`template-h1-${index}`} level={3}>{text.slice(2)}</Title>);
+      return;
+    }
+    if (text.startsWith("- ")) {
+      flushParagraph();
+      bulletBuffer.push(text.slice(2));
+      return;
+    }
+    flushBullets();
+    paragraphBuffer.push(text);
+  });
+
+  flushBullets();
+  flushParagraph();
+  return nodes;
+};
+
 const priorityLabel = (value?: string): string => {
   if (value === "high" || value === "p0" || value === "p1") return "优先执行";
   if (value === "medium" || value === "p2") return "建议执行";
@@ -760,61 +827,65 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       }
     >
       {impactReport ? (
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          {renderReportHeadline(impactReport)}
+        impactReport.llm_markdown?.trim() ? (
+          <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
+        ) : (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {renderReportHeadline(impactReport)}
 
-          {renderListSection("报告重点", reportKeyPoints, "当前没有额外的重点结论。")}
-          {renderListSection("优先测试建议", reportTestFocus, "当前没有额外的测试结论。")}
+            {renderListSection("报告重点", reportKeyPoints, "当前没有额外的重点结论。")}
+            {renderListSection("优先测试建议", reportTestFocus, "当前没有额外的测试结论。")}
 
-          <div className="impact-report-summary-grid">
-            {summaryCards.map((item) => (
-              <div key={item.label} className={`impact-report-summary-card impact-report-summary-card-${item.tone}`}>
-                <Text type="secondary">{item.label}</Text>
-                <div className="impact-report-summary-value">{item.value}</div>
-              </div>
-            ))}
-          </div>
-
-          {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
-          {renderListSection("关联影响解读", relationshipInsights, "当前没有识别出更细的传播关系。")}
-          {renderImpactGraph(impactReport)}
-
-          <section className="impact-report-section">
-            <Title level={5}>分析基线</Title>
-            <div className="impact-report-meta-grid">
-              <div className="impact-report-meta-item">
-                <Text type="secondary">图谱时间</Text>
-                <Text>{formatTime(impactReport.graph_indexed_at)}</Text>
-              </div>
-              <div className="impact-report-meta-item">
-                <Text type="secondary">图谱提交</Text>
-                <Text>{impactReport.graph_commit || "暂无"}</Text>
-              </div>
-              <div className="impact-report-meta-item">
-                <Text type="secondary">影响模块</Text>
-                <Text>{joinOrFallback(impactReport.impacted_modules)}</Text>
-              </div>
-              <div className="impact-report-meta-item">
-                <Text type="secondary">外部入口</Text>
-                <Text>{joinOrFallback(impactReport.external_entrypoints)}</Text>
-              </div>
+            <div className="impact-report-summary-grid">
+              {summaryCards.map((item) => (
+                <div key={item.label} className={`impact-report-summary-card impact-report-summary-card-${item.tone}`}>
+                  <Text type="secondary">{item.label}</Text>
+                  <div className="impact-report-summary-value">{item.value}</div>
+                </div>
+              ))}
             </div>
-          </section>
 
-          {renderListSection("本次变更文件", impactReport.changed_files, "当前没有记录到变更文件。")}
-          {renderMiniStats("影响风险分布", riskDistribution)}
-          {renderImpactedFiles(impactReport.impacted_files)}
-          {renderImpactPaths(impactReport.impact_paths)}
-          {renderTestScope(impactReport.recommended_test_scope)}
-          {renderExecutionChecklist(
-            impactReport.recommended_test_scope,
-            impactReport.must_run_tests,
-            impactReport.manual_verification,
-          )}
-          {renderListSection("建议执行项", impactReport.must_run_tests, "当前没有额外的必跑项。")}
-          {renderListSection("人工确认项", impactReport.manual_verification, "当前没有额外的人工确认项。")}
-          {renderListSection("分析依据与边界", analysisBasis, "当前没有额外的分析说明。")}
-        </Space>
+            {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
+            {renderListSection("关联影响解读", relationshipInsights, "当前没有识别出更细的传播关系。")}
+            {renderImpactGraph(impactReport)}
+
+            <section className="impact-report-section">
+              <Title level={5}>分析基线</Title>
+              <div className="impact-report-meta-grid">
+                <div className="impact-report-meta-item">
+                  <Text type="secondary">图谱时间</Text>
+                  <Text>{formatTime(impactReport.graph_indexed_at)}</Text>
+                </div>
+                <div className="impact-report-meta-item">
+                  <Text type="secondary">图谱提交</Text>
+                  <Text>{impactReport.graph_commit || "暂无"}</Text>
+                </div>
+                <div className="impact-report-meta-item">
+                  <Text type="secondary">影响模块</Text>
+                  <Text>{joinOrFallback(impactReport.impacted_modules)}</Text>
+                </div>
+                <div className="impact-report-meta-item">
+                  <Text type="secondary">外部入口</Text>
+                  <Text>{joinOrFallback(impactReport.external_entrypoints)}</Text>
+                </div>
+              </div>
+            </section>
+
+            {renderListSection("本次变更文件", impactReport.changed_files, "当前没有记录到变更文件。")}
+            {renderMiniStats("影响风险分布", riskDistribution)}
+            {renderImpactedFiles(impactReport.impacted_files)}
+            {renderImpactPaths(impactReport.impact_paths)}
+            {renderTestScope(impactReport.recommended_test_scope)}
+            {renderExecutionChecklist(
+              impactReport.recommended_test_scope,
+              impactReport.must_run_tests,
+              impactReport.manual_verification,
+            )}
+            {renderListSection("建议执行项", impactReport.must_run_tests, "当前没有额外的必跑项。")}
+            {renderListSection("人工确认项", impactReport.manual_verification, "当前没有额外的人工确认项。")}
+            {renderListSection("分析依据与边界", analysisBasis, "当前没有额外的分析说明。")}
+          </Space>
+        )
       ) : impactFailure?.state === "failed" ? (
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Alert

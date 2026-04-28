@@ -622,6 +622,13 @@ export interface ImpactReportTemplatePreview {
   undefined_placeholders?: string[];
 }
 
+export interface ImpactReportTemplateAnalysis {
+  schema_content: string;
+  schema_variables?: Array<Record<string, any>>;
+  placeholders?: string[];
+  undefined_placeholders?: string[];
+}
+
 export interface PostgresDataSourceSettings {
   repo_url: string;
   provider: "postgres" | string;

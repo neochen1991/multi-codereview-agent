@@ -329,6 +329,42 @@ class ChangeImpactReportService:
             return []
         return [item for item in variables if isinstance(item, dict) and str(item.get("name") or "").strip()]
 
+    def analyze_template_schema(self, template_content: str, runtime_settings: RuntimeSettings) -> dict[str, Any]:
+        template = str(template_content or "").strip()
+        placeholders = self.extract_template_placeholders(template)
+        fallback_schema = self._fallback_template_schema(placeholders)
+        if not placeholders:
+            return fallback_schema
+        resolution = self._llm.resolve_main_agent(runtime_settings)
+        llm_result = self._llm.complete_text(
+            system_prompt=(
+                "你是代码审核系统的模板变量分析助手。"
+                "你的职责是分析 Markdown 模板里的占位符应该如何定义。"
+                "输出必须是 JSON。"
+            ),
+            user_prompt=(
+                "请基于下面的 Markdown 模板分析变量定义。\n"
+                "要求：\n"
+                "1. 逐个占位符给出 name、source、required、description、format。\n"
+                "2. source 只能是 system、gitnexus、llm 三种。\n"
+                "3. 已知固定字段如 repo_name、changed_files、impact_paths、risk_level 优先归到 system 或 gitnexus。\n"
+                "4. 需要总结、解释、建议、人工判断的字段归到 llm。\n"
+                "5. 输出 JSON 格式：{\"variables\":[...]}\n\n"
+                f"占位符：{json.dumps(placeholders, ensure_ascii=False)}\n\n"
+                f"模板内容：\n{template}"
+            ),
+            resolution=resolution,
+            runtime_settings=runtime_settings,
+            fallback_text=json.dumps(fallback_schema, ensure_ascii=False),
+            allow_fallback=True,
+            timeout_seconds=30.0,
+            max_attempts=2,
+            log_context={"phase": "impact_template_schema_analysis"},
+        )
+        payload = self._parse_json_payload(llm_result.text)
+        normalized = self._normalize_template_schema_payload(payload, placeholders)
+        return normalized or fallback_schema
+
     def render_preview(self, template_content: str, schema_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         preview_service = ChangeImpactReportService()
         if str(template_content or "").strip():
@@ -362,6 +398,77 @@ class ChangeImpactReportService:
             "markdown": markdown,
             "placeholders": self.extract_template_placeholders(preview_service._report_template),
             "schema_variables": preview_service._schema_variables(),
+        }
+
+    def _fallback_template_schema(self, placeholders: list[str]) -> dict[str, Any]:
+        return {
+            "variables": [self._fallback_variable_definition(name) for name in placeholders],
+        }
+
+    def _fallback_variable_definition(self, name: str) -> dict[str, Any]:
+        system_fields = {"repo_name", "changed_file_count", "changed_files", "fact_source", "analysis_workflow", "limitations"}
+        gitnexus_fields = {
+            "changed_symbols",
+            "impact_paths",
+            "impacted_files",
+            "impacted_modules",
+            "external_entrypoints",
+            "risk_level",
+            "queried_targets",
+        }
+        llm_fields = {
+            "summary",
+            "key_impact_points",
+            "must_test",
+            "should_test",
+            "manual_checks",
+            "data_access_impact",
+            "transaction_impact",
+            "integration_impact",
+        }
+        source = "llm"
+        if name in system_fields:
+            source = "system"
+        elif name in gitnexus_fields:
+            source = "gitnexus"
+        elif name in llm_fields:
+            source = "llm"
+        format_hint = "bullet_list" if any(token in name for token in ["files", "symbols", "points", "paths", "modules", "checks", "test"]) else "text"
+        return {
+            "name": name,
+            "source": source,
+            "required": name in {"summary", "repo_name"},
+            "description": f"模板变量 {name}",
+            "format": format_hint,
+        }
+
+    def _normalize_template_schema_payload(self, payload: dict[str, Any] | None, placeholders: list[str]) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        variables = payload.get("variables")
+        if not isinstance(variables, list):
+            return None
+        by_name: dict[str, dict[str, Any]] = {}
+        for item in variables:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            source = str(item.get("source") or "llm").strip().lower()
+            if source not in {"system", "gitnexus", "llm"}:
+                source = "llm"
+            by_name[name] = {
+                "name": name,
+                "source": source,
+                "required": bool(item.get("required")),
+                "description": str(item.get("description") or f"模板变量 {name}").strip(),
+                "format": str(item.get("format") or "text").strip() or "text",
+            }
+        if not by_name:
+            return None
+        return {
+            "variables": [by_name.get(name) or self._fallback_variable_definition(name) for name in placeholders],
         }
 
     @classmethod

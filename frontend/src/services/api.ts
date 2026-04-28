@@ -633,6 +633,13 @@ export interface ImpactReportTemplatePreview {
   undefined_placeholders?: string[];
 }
 
+export interface ImpactReportTemplateAnalysis {
+  schema_content: string;
+  schema_variables?: Array<Record<string, any>>;
+  placeholders?: string[];
+  undefined_placeholders?: string[];
+}
+
 export interface PostgresDataSourceSettings {
   repo_url: string;
   provider: "postgres" | string;
@@ -1070,6 +1077,10 @@ export const settingsApi = {
   },
   async previewImpactReportTemplate(content: string, schemaContent: string): Promise<ImpactReportTemplatePreview> {
     const { data } = await api.post("/settings/impact-report-template/preview", { content, schema_content: schemaContent });
+    return data;
+  },
+  async analyzeImpactReportTemplate(content: string): Promise<ImpactReportTemplateAnalysis> {
+    const { data } = await api.post("/settings/impact-report-template/analyze", { content });
     return data;
   },
   async listExtensionSkills(): Promise<ExtensionSkill[]> {

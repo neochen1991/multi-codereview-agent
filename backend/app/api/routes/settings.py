@@ -237,6 +237,13 @@ def preview_change_impact_report_template(payload: UpdateMarkdownTemplateRequest
     )
 
 
+@router.post("/settings/impact-report-template/analyze")
+def analyze_change_impact_report_template(payload: UpdateMarkdownTemplateRequest) -> dict[str, object]:
+    """自动分析模板占位符应使用的变量定义。"""
+
+    return review_service_module.review_service.analyze_change_impact_report_template(payload.content)
+
+
 @router.get("/settings/extensions/skills")
 def list_extension_skills() -> list[dict[str, object]]:
     """返回 extensions/skills 下的所有可编辑 skill。"""

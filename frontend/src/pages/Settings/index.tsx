@@ -9,6 +9,7 @@ import {
   type ExtensionSkill,
   type ExtensionTool,
   type GitNexusIndexStatus,
+  type ImpactReportTemplateAnalysis,
   type ImpactReportTemplate,
   type ImpactReportTemplatePreview,
   type PostgresDataSourceSettings,
@@ -155,8 +156,10 @@ const SettingsPage: React.FC = () => {
   const [impactTemplateContent, setImpactTemplateContent] = React.useState("");
   const [impactTemplateSchemaContent, setImpactTemplateSchemaContent] = React.useState("");
   const [savingImpactTemplate, setSavingImpactTemplate] = React.useState(false);
+  const [analyzingImpactTemplate, setAnalyzingImpactTemplate] = React.useState(false);
   const [previewingImpactTemplate, setPreviewingImpactTemplate] = React.useState(false);
   const [impactTemplatePreview, setImpactTemplatePreview] = React.useState<ImpactReportTemplatePreview | null>(null);
+  const [impactTemplateAnalysis, setImpactTemplateAnalysis] = React.useState<ImpactReportTemplateAnalysis | null>(null);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
@@ -178,6 +181,12 @@ const SettingsPage: React.FC = () => {
       setImpactTemplate(impactTemplatePayload);
       setImpactTemplateContent(impactTemplatePayload.content || "");
       setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
+      setImpactTemplateAnalysis({
+        schema_content: impactTemplatePayload.schema_content || "",
+        schema_variables: impactTemplatePayload.schema_variables || [],
+        placeholders: impactTemplatePayload.placeholders || [],
+        undefined_placeholders: impactTemplatePayload.undefined_placeholders || [],
+      });
       if (skills.length > 0) {
         const first = skills[0];
         skillForm.setFieldsValue({
@@ -240,6 +249,12 @@ const SettingsPage: React.FC = () => {
       setImpactTemplate(payload);
       setImpactTemplateContent(payload.content || "");
       setImpactTemplateSchemaContent(payload.schema_content || "");
+      setImpactTemplateAnalysis({
+        schema_content: payload.schema_content || "",
+        schema_variables: payload.schema_variables || [],
+        placeholders: payload.placeholders || [],
+        undefined_placeholders: payload.undefined_placeholders || [],
+      });
       message.success("关联影响报告模板已更新");
     } catch (error: any) {
       message.error(error?.message || "保存关联影响报告模板失败");
@@ -248,6 +263,20 @@ const SettingsPage: React.FC = () => {
     }
   }, [impactTemplateContent, impactTemplateSchemaContent]);
 
+  const handleAnalyzeImpactTemplate = React.useCallback(async () => {
+    setAnalyzingImpactTemplate(true);
+    try {
+      const payload = await settingsApi.analyzeImpactReportTemplate(impactTemplateContent);
+      setImpactTemplateAnalysis(payload);
+      setImpactTemplateSchemaContent(payload.schema_content || "");
+      message.success("模板变量已分析完成");
+    } catch (error: any) {
+      message.error(error?.message || "分析模板变量失败");
+    } finally {
+      setAnalyzingImpactTemplate(false);
+    }
+  }, [impactTemplateContent]);
+
   const handleResetImpactTemplate = React.useCallback(async () => {
     setSavingImpactTemplate(true);
     try {
@@ -255,6 +284,12 @@ const SettingsPage: React.FC = () => {
       setImpactTemplate(payload);
       setImpactTemplateContent(payload.content || "");
       setImpactTemplateSchemaContent(payload.schema_content || "");
+      setImpactTemplateAnalysis({
+        schema_content: payload.schema_content || "",
+        schema_variables: payload.schema_variables || [],
+        placeholders: payload.placeholders || [],
+        undefined_placeholders: payload.undefined_placeholders || [],
+      });
       message.success("已恢复默认模板");
     } catch (error: any) {
       message.error(error?.message || "恢复默认模板失败");
@@ -287,24 +322,6 @@ const SettingsPage: React.FC = () => {
           message.success(`已载入模板：${file.name}`);
         } catch {
           message.error("读取 Markdown 模板失败");
-        }
-        return false;
-      },
-    }),
-    [],
-  );
-
-  const impactTemplateSchemaUploadProps: UploadProps = React.useMemo(
-    () => ({
-      accept: ".json,application/json,text/json",
-      showUploadList: false,
-      beforeUpload: async (file) => {
-        try {
-          const text = await file.text();
-          setImpactTemplateSchemaContent(text);
-          message.success(`已载入模板变量定义：${file.name}`);
-        } catch {
-          message.error("读取模板变量定义失败");
         }
         return false;
       },
@@ -496,9 +513,9 @@ const SettingsPage: React.FC = () => {
             <Upload {...impactTemplateUploadProps}>
               <Button>上传 Markdown 模板</Button>
             </Upload>
-            <Upload {...impactTemplateSchemaUploadProps}>
-              <Button>上传变量 Schema</Button>
-            </Upload>
+            <Button onClick={() => void handleAnalyzeImpactTemplate()} loading={analyzingImpactTemplate}>
+              分析模板变量
+            </Button>
             <Button onClick={() => void handlePreviewImpactTemplate()} loading={previewingImpactTemplate}>
               预览模板
             </Button>
@@ -536,9 +553,6 @@ const SettingsPage: React.FC = () => {
                     <Descriptions.Item label="变量 Schema 文件">
                       {impactTemplate?.schema_path || "暂无"}
                     </Descriptions.Item>
-                    <Descriptions.Item label="默认变量 Schema 文件">
-                      {impactTemplate?.default_schema_path || "暂无"}
-                    </Descriptions.Item>
                     <Descriptions.Item label="最近更新时间">
                       {impactTemplate?.updated_at || "暂无"}
                     </Descriptions.Item>
@@ -551,14 +565,14 @@ const SettingsPage: React.FC = () => {
                       type={impactTemplate?.undefined_placeholders?.length ? "warning" : "success"}
                       showIcon
                       message={
-                        impactTemplate?.undefined_placeholders?.length
-                          ? `模板里有 ${impactTemplate.undefined_placeholders.length} 个占位符还没有在 Schema 中定义`
+                        (impactTemplateAnalysis?.undefined_placeholders || impactTemplate?.undefined_placeholders || []).length
+                          ? `模板里有 ${(impactTemplateAnalysis?.undefined_placeholders || impactTemplate?.undefined_placeholders || []).length} 个占位符还没有在 Schema 中定义`
                           : "模板占位符和 Schema 变量定义已对齐"
                       }
                       description={
                         <>
-                          <div>模板占位符：{(impactTemplate?.placeholders || []).join(", ") || "暂无"}</div>
-                          <div>未定义占位符：{(impactTemplate?.undefined_placeholders || []).join(", ") || "无"}</div>
+                          <div>模板占位符：{(impactTemplateAnalysis?.placeholders || impactTemplate?.placeholders || []).join(", ") || "暂无"}</div>
+                          <div>未定义占位符：{(impactTemplateAnalysis?.undefined_placeholders || impactTemplate?.undefined_placeholders || []).join(", ") || "无"}</div>
                           <div>未使用变量：{(impactTemplate?.unused_variables || []).join(", ") || "无"}</div>
                         </>
                       }
@@ -570,13 +584,25 @@ const SettingsPage: React.FC = () => {
                     autoSize={{ minRows: 18, maxRows: 28 }}
                     placeholder="在这里编辑关联影响分析报告 Markdown 模板，或通过右上角上传 .md 文件覆盖。"
                   />
-                  <Input.TextArea
-                    style={{ marginTop: 12 }}
-                    value={impactTemplateSchemaContent}
-                    onChange={(event) => setImpactTemplateSchemaContent(event.target.value)}
-                    autoSize={{ minRows: 12, maxRows: 22 }}
-                    placeholder='在这里编辑模板变量 Schema（JSON），定义占位符名称、来源、说明和是否必填。'
-                  />
+                  <Card size="small" title="模板变量分析结果" style={{ marginTop: 12, background: "#fafafa" }}>
+                    <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+                      这里的变量定义由系统根据当前模板自动分析生成，不需要手工填写。保存模板时会使用这份分析结果。
+                    </Paragraph>
+                    <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
+                      <Descriptions.Item label="当前占位符">
+                        {(impactTemplateAnalysis?.placeholders || impactTemplate?.placeholders || []).join(", ") || "暂无"}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="未识别占位符">
+                        {(impactTemplateAnalysis?.undefined_placeholders || impactTemplate?.undefined_placeholders || []).join(", ") || "无"}
+                      </Descriptions.Item>
+                    </Descriptions>
+                    <Input.TextArea
+                      value={stringifyJson(impactTemplateAnalysis?.schema_variables || impactTemplate?.schema_variables || [])}
+                      readOnly
+                      autoSize={{ minRows: 10, maxRows: 18 }}
+                      placeholder="点击“分析模板变量”后，这里会展示系统自动生成的变量定义。"
+                    />
+                  </Card>
                   <Card
                     size="small"
                     title="模板预览"

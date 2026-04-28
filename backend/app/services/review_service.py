@@ -1056,9 +1056,13 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         template_path.parent.mkdir(parents=True, exist_ok=True)
         normalized = str(content or "").rstrip() + "\n"
         template_path.write_text(normalized, encoding="utf-8")
-        if str(schema_content or "").strip():
-            normalized_schema = json.dumps(parse_json_object(schema_content), ensure_ascii=False, indent=2) + "\n"
-            schema_path.write_text(normalized_schema, encoding="utf-8")
+        schema_payload = (
+            parse_json_object(schema_content)
+            if str(schema_content or "").strip()
+            else ChangeImpactReportService().analyze_template_schema(normalized, self.get_runtime_settings())
+        )
+        normalized_schema = json.dumps(schema_payload, ensure_ascii=False, indent=2) + "\n"
+        schema_path.write_text(normalized_schema, encoding="utf-8")
         return self.get_change_impact_report_template()
 
     def reset_change_impact_report_template(self) -> dict[str, object]:
@@ -1075,8 +1079,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
 
     def preview_change_impact_report_template(self, content: str, schema_content: str = "") -> dict[str, object]:
         template = str(content or "").strip() or self.get_change_impact_report_template().get("content") or ""
-        schema_payload = parse_json_object(schema_content) if str(schema_content or "").strip() else parse_json_object(
-            str(self.get_change_impact_report_template().get("schema_content") or "")
+        schema_payload = (
+            parse_json_object(schema_content)
+            if str(schema_content or "").strip()
+            else ChangeImpactReportService().analyze_template_schema(str(template), self.get_runtime_settings())
         )
         preview = ChangeImpactReportService().render_preview(str(template), schema_payload)
         return {
@@ -1086,6 +1092,22 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 for name in list(preview.get("placeholders") or [])
                 if name not in {str(item.get("name") or "").strip() for item in list(preview.get("schema_variables") or []) if isinstance(item, dict)}
             ],
+        }
+
+    def analyze_change_impact_report_template(self, content: str) -> dict[str, object]:
+        template = str(content or "").strip() or str(self.get_change_impact_report_template().get("content") or "")
+        schema_payload = ChangeImpactReportService().analyze_template_schema(template, self.get_runtime_settings())
+        placeholders = ChangeImpactReportService.extract_template_placeholders(template)
+        variable_names = {
+            str(item.get("name") or "").strip()
+            for item in list(schema_payload.get("variables") or [])
+            if isinstance(item, dict)
+        }
+        return {
+            "schema_content": json.dumps(schema_payload, ensure_ascii=False, indent=2),
+            "schema_variables": list(schema_payload.get("variables") or []),
+            "placeholders": placeholders,
+            "undefined_placeholders": [name for name in placeholders if name not in variable_names],
         }
 
     def build_repository_context_service(self, subject: dict[str, object] | None = None) -> RepositoryContextService:
