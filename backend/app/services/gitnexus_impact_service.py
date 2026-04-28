@@ -146,24 +146,62 @@ class GitNexusMcpImpactClient:
         runtime_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         logger.info("gitnexus mcp tool call tool=%s arguments=%s", tool_name, json.dumps(arguments, ensure_ascii=False))
-        responses = self._call_mcp(
-            command,
-            repo_path,
-            [
-                self._initialize_request(),
-                self._initialized_notification(),
-                {
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": arguments,
+        try:
+            responses = self._call_mcp(
+                command,
+                repo_path,
+                [
+                    self._initialize_request(),
+                    self._initialized_notification(),
+                    {
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": tool_name,
+                            "arguments": arguments,
+                        },
                     },
-                },
-            ],
-            runtime_env,
-        )
-        payload = self._tool_payload(responses.get(2))
+                ],
+                runtime_env,
+            )
+        except RuntimeError as error:
+            logger.exception(
+                "gitnexus mcp tool failed tool=%s repo_path=%s command=%s arguments=%s",
+                tool_name,
+                repo_path,
+                " ".join(command),
+                json.dumps(arguments, ensure_ascii=False),
+            )
+            raise RuntimeError(f"GitNexus {tool_name} 调用失败: {error}") from error
+        response_message = responses.get(2) or {}
+        if isinstance(response_message, dict) and isinstance(response_message.get("error"), dict):
+            error_payload = dict(response_message.get("error") or {})
+            logger.error(
+                "gitnexus mcp tool returned error tool=%s repo_path=%s command=%s arguments=%s error=%s",
+                tool_name,
+                repo_path,
+                " ".join(command),
+                json.dumps(arguments, ensure_ascii=False),
+                json.dumps(error_payload, ensure_ascii=False),
+            )
+            message = str(error_payload.get("message") or "unknown error")
+            code = error_payload.get("code")
+            data = error_payload.get("data")
+            detail = f"code={code} message={message}"
+            if data not in (None, "", {}):
+                detail = f"{detail} data={json.dumps(data, ensure_ascii=False)}"
+            raise RuntimeError(f"GitNexus {tool_name} 调用失败: {detail}")
+        payload = self._tool_payload(response_message)
+        if "error" in payload:
+            logger.error(
+                "gitnexus mcp tool payload error tool=%s repo_path=%s command=%s arguments=%s payload=%s",
+                tool_name,
+                repo_path,
+                " ".join(command),
+                json.dumps(arguments, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
+            )
+            raise RuntimeError(f"GitNexus {tool_name} 调用失败: {payload.get('error')}")
         logger.info("gitnexus mcp tool result tool=%s keys=%s", tool_name, sorted(payload.keys()))
         return payload
 
@@ -488,6 +526,13 @@ class GitNexusImpactService:
                 runtime_env=self._gitnexus_runtime_env(subject, runtime),
             )
         except Exception as error:
+            logger.exception(
+                "gitnexus graph analyze failed repo=%s repo_path=%s changed_symbols=%s changed_files=%s",
+                resolved_repo_name,
+                repo_path,
+                [f"{item.container + '.' if item.container else ''}{item.symbol}" for item in changed_symbols[:12]],
+                self._changed_files(subject)[:20],
+            )
             raise RuntimeError(f"GitNexus 图谱已就绪，但按官方 MCP 流程调用失败：{error}") from error
         report = self._normalize_gitnexus_payload(subject, runtime, graph_status, raw, changed_symbols)
         trace = {

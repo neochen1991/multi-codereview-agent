@@ -42,6 +42,11 @@ class McpStdioClient:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError as error:
+            logger.exception(
+                "mcp stdio executable start failed executable=%s cwd=%s",
+                command[0] if command else "",
+                self.cwd,
+            )
             raise RuntimeError(
                 f"MCP 可执行命令启动失败: executable={command[0]} cwd={self.cwd} error={error}"
             ) from error
@@ -58,6 +63,14 @@ class McpStdioClient:
         except subprocess.TimeoutExpired as error:
             process.kill()
             _, stderr_bytes = process.communicate()
+            stderr = stderr_bytes.decode("utf-8", errors="ignore")[-800:]
+            logger.error(
+                "mcp stdio call timeout executable=%s cwd=%s timeout_seconds=%s stderr=%s",
+                command[0] if command else "",
+                self.cwd,
+                self.timeout_seconds,
+                stderr,
+            )
             raise RuntimeError(f"MCP 调用超时: timeout_seconds={self.timeout_seconds}") from error
         if process.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="ignore")[-800:]

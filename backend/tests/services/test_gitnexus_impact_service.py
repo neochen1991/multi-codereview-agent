@@ -5,7 +5,7 @@ from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.fs import write_json
-from app.services.gitnexus_impact_service import GitNexusImpactService
+from app.services.gitnexus_impact_service import GitNexusImpactService, GitNexusMcpImpactClient
 from app.services.tool_gateway import ReviewToolGateway
 
 
@@ -67,6 +67,42 @@ class CaptureGitNexusImpactClient:
 class FailingGitNexusImpactClient:
     def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
         raise RuntimeError("mcp unavailable")
+
+
+def test_gitnexus_mcp_impact_client_raises_when_detect_changes_returns_error():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+
+    responses = [
+        {2: {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}},
+        {2: {"error": {"code": -32000, "message": "detect failed", "data": {"reason": "repo not indexed"}}}},
+    ]
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        return responses.pop(0)
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        try:
+            client.analyze_mr(
+                repo_name="repo",
+                repo_path="/tmp/repo",
+                subject=subject,
+                changed_symbols=[],
+                runtime_env=None,
+            )
+        except RuntimeError as error:
+            assert "GitNexus detect_changes 调用失败" in str(error)
+            assert "detect failed" in str(error)
+        else:
+            raise AssertionError("detect_changes 返回 error 时应直接失败")
 
 
 def test_gitnexus_impact_service_builds_fallback_report(storage_root: Path):
