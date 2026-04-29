@@ -115,7 +115,9 @@ def test_change_impact_report_service_synthesizes_llm_fields():
     assert updated.report_summary == "本次改动影响订单入口和审计发布链路。"
     assert updated.key_impact_points == ["OrderController 入口新增 notifyAudit。"]
     assert updated.test_focus == ["优先回归订单创建接口。"]
-    assert updated.llm_markdown == "## 结论\n本次改动影响订单入口和审计发布链路。"
+    assert "优先回归订单创建接口。" in updated.llm_markdown
+    assert "OrderController | notifyAudit |" in updated.llm_markdown
+    assert "分析时间：" in updated.llm_markdown
     assert updated.llm_generated is True
     assert updated.analysis_workflow
 
@@ -236,7 +238,7 @@ def test_change_impact_report_service_allows_llm_to_fill_non_llm_schema_variable
     assert "OrderController.createOrder -> OrderApplicationService.createOrder -> OrderRepository.save" in updated.llm_markdown
 
 
-def test_change_impact_report_service_prefers_llm_rendered_markdown_for_intranet_template():
+def test_change_impact_report_service_renders_intranet_template_with_server_side_values():
     service = ChangeImpactReportService()
     service._report_template = "## 模板标题\n\n{{ 当前时间 }}\n\n{{ 遍历 java_methods，每行一条记录 }}"
     service._template_schema = {
@@ -274,9 +276,10 @@ def test_change_impact_report_service_prefers_llm_rendered_markdown_for_intranet
         review_id="rev_test",
     )
 
-    assert updated.llm_markdown.startswith("## 代码关联影响分析报告")
+    assert updated.llm_markdown.startswith("## 模板标题")
     assert "{{ 当前时间 }}" not in updated.llm_markdown
     assert "{{ 遍历 java_methods，每行一条记录 }}" not in updated.llm_markdown
+    assert "2026-04-28 10:00:00" not in updated.llm_markdown
     assert "OrderController | notifyAudit | modified" in updated.llm_markdown
 
 

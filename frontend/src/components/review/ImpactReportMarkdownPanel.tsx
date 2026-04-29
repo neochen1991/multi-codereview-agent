@@ -38,6 +38,12 @@ const graphStatusLabel = (value?: string): string => {
   return value || "状态未知";
 };
 
+const readImpactReportFromReview = (review: ReviewSummary | null | undefined): ImpactReport | null => {
+  const raw = review?.subject?.metadata?.impact_report;
+  if (!raw || typeof raw !== "object") return null;
+  return raw as ImpactReport;
+};
+
 const readImpactFailure = (review: ReviewSummary | null): { state: string; error_message?: string } | null => {
   const raw = review?.subject?.metadata?.impact_analysis_progress;
   if (!raw || typeof raw !== "object") return null;
@@ -104,6 +110,41 @@ const buildRelationshipInsights = (impactReport: ImpactReport): string[] => {
   }
   return dedupeStrings(insights).slice(0, 8);
 };
+
+const buildTargetDiagnostics = (
+  impactReport: ImpactReport,
+): Array<{ title: string; items: string[]; tone: "default" | "success" | "warning" }> => [
+  {
+    title: "已请求查询目标",
+    items: impactReport.queried_targets || [],
+    tone: "default",
+  },
+  {
+    title: "Context 命中目标",
+    items: impactReport.successful_context_targets || [],
+    tone: "success",
+  },
+  {
+    title: "Impact 命中目标",
+    items: impactReport.successful_impact_targets || [],
+    tone: "success",
+  },
+  {
+    title: "过滤的无效目标",
+    items: impactReport.skipped_invalid_targets || [],
+    tone: "warning",
+  },
+  {
+    title: "Context 跳过目标",
+    items: impactReport.skipped_missing_context_targets || [],
+    tone: "warning",
+  },
+  {
+    title: "Impact 跳过目标",
+    items: impactReport.skipped_missing_impact_targets || [],
+    tone: "warning",
+  },
+];
 
 const buildRiskDistribution = (items: ImpactFile[]): Array<{ label: string; count: number; tone: string }> => {
   const high = items.filter((item) => priorityRank(item.risk_level) >= 3).length;
@@ -870,6 +911,13 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     "## 本次变更文件",
     ...(impactReport.changed_files.length ? impactReport.changed_files.map((item) => `- ${item}`) : ["- 暂无"]),
     "",
+    "## 图谱查询明细",
+    ...(buildTargetDiagnostics(impactReport).flatMap((group) => [
+      `### ${group.title}`,
+      ...(group.items.length ? group.items.map((item) => `- ${item}`) : ["- 暂无"]),
+      "",
+    ])),
+    "",
     "## 影响模块",
     ...(impactReport.impacted_modules.length ? impactReport.impacted_modules.map((item) => `- ${item}`) : ["- 暂无"]),
     "",
@@ -956,6 +1004,90 @@ const renderMiniStats = (title: string, items: Array<{ label: string; count: num
     </div>
   </section>
 );
+
+const renderTargetDiagnostics = (impactReport: ImpactReport) => {
+  const groups = buildTargetDiagnostics(impactReport).filter((group) => group.items.length);
+  return (
+    <section className="impact-report-section">
+      <Title level={5}>图谱查询明细</Title>
+      {groups.length ? (
+        <div className="impact-report-file-groups">
+          {groups.map((group) => (
+            <div key={group.title} className="impact-report-file-group">
+              <div className="impact-report-test-group-head">
+                <Title level={5}>{group.title}</Title>
+                <Tag color={group.tone === "success" ? "success" : group.tone === "warning" ? "warning" : "default"}>
+                  {group.items.length}
+                </Tag>
+              </div>
+              <div className="impact-report-bullet-list">
+                {group.items.map((item) => (
+                  <div key={`${group.title}-${item}`} className="impact-report-bullet-item">
+                    <span className="impact-report-bullet-dot" />
+                    <Text>{item}</Text>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Text type="secondary">当前没有额外的图谱查询明细。</Text>
+      )}
+    </section>
+  );
+};
+
+const renderCollapsibleTargetDiagnostics = (impactReport: ImpactReport) => {
+  const groups = buildTargetDiagnostics(impactReport).filter((group) => group.items.length);
+  const requestedCount = impactReport.queried_targets?.length || 0;
+  const contextHitCount = impactReport.successful_context_targets?.length || 0;
+  const impactHitCount = impactReport.successful_impact_targets?.length || 0;
+  const skippedCount =
+    (impactReport.skipped_invalid_targets?.length || 0) +
+    (impactReport.skipped_missing_context_targets?.length || 0) +
+    (impactReport.skipped_missing_impact_targets?.length || 0);
+  const hasStructuredDiagnostics =
+    requestedCount > 0 || contextHitCount > 0 || impactHitCount > 0 || skippedCount > 0 || groups.length > 0;
+
+  if (!hasStructuredDiagnostics) {
+    return (
+      <details className="impact-report-diagnostics-details">
+        <summary className="impact-report-diagnostics-summary">
+          <div className="impact-report-diagnostics-summary-copy">
+            <span>图谱查询明细</span>
+            <Text type="secondary" className="impact-report-diagnostics-summary-text">
+              本次报告未记录 target 命中明细，当前仅保留最终影响分析结果。
+            </Text>
+          </div>
+          <Space size={8}>
+            <Tag>0 组</Tag>
+            <Tag>{graphStatusLabel(impactReport.graph_status)}</Tag>
+          </Space>
+        </summary>
+      </details>
+    );
+  }
+
+  const totalItems = groups.reduce((sum, group) => sum + group.items.length, 0);
+  return (
+    <details className="impact-report-diagnostics-details">
+      <summary className="impact-report-diagnostics-summary">
+        <div className="impact-report-diagnostics-summary-copy">
+          <span>图谱查询明细</span>
+          <Text type="secondary" className="impact-report-diagnostics-summary-text">
+            {`已请求 ${requestedCount} 个 target，Context 命中 ${contextHitCount} 个，Impact 命中 ${impactHitCount} 个，跳过 ${skippedCount} 个`}
+          </Text>
+        </div>
+        <Space size={8}>
+          <Tag>{`${groups.length} 组`}</Tag>
+          <Tag color="processing">{`${totalItems} 项`}</Tag>
+        </Space>
+      </summary>
+      <div className="impact-report-diagnostics-body">{renderTargetDiagnostics(impactReport)}</div>
+    </details>
+  );
+};
 
 const renderImpactedFiles = (items: ImpactFile[]) => (
   <section className="impact-report-section">
@@ -1238,8 +1370,12 @@ type ImpactReportMarkdownPanelProps = {
 };
 
 const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ report, review, className }) => {
-  const impactReport = report?.impact_report || null;
-  const markdown = useMemo(() => buildImpactReportMarkdown(report), [report]);
+  const impactReport = report?.impact_report || readImpactReportFromReview(review);
+  const effectiveReport = useMemo(
+    () => report || (impactReport ? ({ review_id: review?.review_id || "impact-report", impact_report: impactReport } as ReviewReport) : null),
+    [impactReport, report, review?.review_id],
+  );
+  const markdown = useMemo(() => buildImpactReportMarkdown(effectiveReport), [effectiveReport]);
   const impactFailure = useMemo(() => readImpactFailure(review || null), [review]);
 
   const summaryCards = useMemo(() => {
@@ -1283,14 +1419,17 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       className={`module-card ${className || ""}`.trim()}
       title="关联影响报告"
       extra={
-        <Button size="small" onClick={() => downloadImpactReportMarkdown(report)} disabled={!markdown}>
+        <Button size="small" onClick={() => downloadImpactReportMarkdown(effectiveReport)} disabled={!markdown}>
           导出 MD
         </Button>
       }
     >
       {impactReport ? (
         impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown) ? (
-          <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
+            {renderCollapsibleTargetDiagnostics(impactReport)}
+          </Space>
         ) : (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {renderReportHeadline(impactReport)}
@@ -1309,6 +1448,7 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
 
             {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
             {renderListSection("关联影响解读", relationshipInsights, "当前没有识别出更细的传播关系。")}
+            {renderTargetDiagnostics(impactReport)}
             {renderImpactGraph(impactReport)}
 
             <section className="impact-report-section">

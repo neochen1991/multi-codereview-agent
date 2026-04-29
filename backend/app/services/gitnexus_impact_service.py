@@ -28,6 +28,37 @@ from app.services.mcp_stdio_client import McpStdioClient
 
 logger = logging.getLogger(__name__)
 
+NON_SYMBOL_TOKENS = {
+    "public",
+    "private",
+    "protected",
+    "static",
+    "final",
+    "abstract",
+    "synchronized",
+    "native",
+    "volatile",
+    "transient",
+    "strictfp",
+    "default",
+    "void",
+    "class",
+    "interface",
+    "enum",
+    "record",
+    "return",
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "new",
+    "throw",
+    "throws",
+    "super",
+    "this",
+}
+
 
 class GitNexusImpactClient(Protocol):
     """GitNexus 图谱查询客户端。"""
@@ -80,6 +111,11 @@ class GitNexusMcpImpactClient:
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
         detect_changes_payload: dict[str, Any] = {}
         detect_changes_error = ""
+        skipped_invalid_targets: list[str] = []
+        skipped_missing_context_targets: list[str] = []
+        skipped_missing_impact_targets: list[str] = []
+        successful_context_targets: list[str] = []
+        successful_impact_targets: list[str] = []
         try:
             detect_changes_payload = self._call_tool(
                 command,
@@ -99,12 +135,16 @@ class GitNexusMcpImpactClient:
                 repo_path,
                 detect_changes_error,
             )
-        targets = self._build_targets(changed_symbols, detect_changes_payload)
+        targets, skipped_invalid_targets = self._build_targets(changed_symbols, detect_changes_payload)
         context_payloads: list[dict[str, Any]] = []
         impact_payloads: list[dict[str, Any]] = []
         if targets:
-            context_payloads = self._query_contexts(command, effective_repo_name, repo_path, targets, runtime_env)
-            impact_payloads = self._query_impacts(command, effective_repo_name, repo_path, targets, runtime_env)
+            context_payloads, skipped_missing_context_targets, successful_context_targets = self._query_contexts(
+                command, effective_repo_name, repo_path, targets, runtime_env
+            )
+            impact_payloads, skipped_missing_impact_targets, successful_impact_targets = self._query_impacts(
+                command, effective_repo_name, repo_path, targets, runtime_env
+            )
         logger.info(
             "gitnexus impact finish repo=%s effective_repo=%s available_repo_count=%s detect_changes_keys=%s context_result_count=%s impact_result_count=%s queried_targets=%s",
             repo_name,
@@ -128,6 +168,11 @@ class GitNexusMcpImpactClient:
             "queried_targets": targets,
             "raw_response_count": 2 + len(context_payloads) + len(impact_payloads),
             "detect_changes_error": detect_changes_error,
+            "skipped_invalid_targets": skipped_invalid_targets,
+            "skipped_missing_context_targets": skipped_missing_context_targets,
+            "skipped_missing_impact_targets": skipped_missing_impact_targets,
+            "successful_context_targets": successful_context_targets,
+            "successful_impact_targets": successful_impact_targets,
         }
 
     def _command(self) -> list[str]:
@@ -224,22 +269,38 @@ class GitNexusMcpImpactClient:
         repo_path: str,
         targets: list[str],
         runtime_env: dict[str, str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        results: list[dict[str, Any]] = []
+        skipped_missing_targets: list[str] = []
+        successful_targets: list[str] = []
         for target in targets[:8]:
             logger.info("gitnexus context queue request repo=%s target=%s", repo_name, target)
-        return [
-            self._call_tool(
-                command,
-                repo_path,
-                "context",
-                {
-                    "repo": repo_name,
-                    "name": target,
-                },
-                runtime_env,
-            )
-            for target in targets[:8]
-        ]
+            try:
+                results.append(
+                    self._call_tool(
+                        command,
+                        repo_path,
+                        "context",
+                        {
+                            "repo": repo_name,
+                            "name": target,
+                        },
+                        runtime_env,
+                    )
+                )
+                successful_targets.append(target)
+            except RuntimeError as error:
+                if self._is_missing_symbol_error(error):
+                    logger.warning(
+                        "gitnexus context skipped missing symbol repo=%s target=%s error=%s",
+                        repo_name,
+                        target,
+                        error,
+                    )
+                    skipped_missing_targets.append(target)
+                    continue
+                raise
+        return results, skipped_missing_targets, successful_targets
 
     def _query_impacts(
         self,
@@ -248,22 +309,38 @@ class GitNexusMcpImpactClient:
         repo_path: str,
         targets: list[str],
         runtime_env: dict[str, str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        results: list[dict[str, Any]] = []
+        skipped_missing_targets: list[str] = []
+        successful_targets: list[str] = []
         for target in targets[:8]:
             logger.info("gitnexus impact queue request repo=%s target=%s", repo_name, target)
-        return [
-            self._call_tool(
-                command,
-                repo_path,
-                "impact",
-                {
-                    "repo": repo_name,
-                    "target": target,
-                },
-                runtime_env,
-            )
-            for target in targets[:8]
-        ]
+            try:
+                results.append(
+                    self._call_tool(
+                        command,
+                        repo_path,
+                        "impact",
+                        {
+                            "repo": repo_name,
+                            "target": target,
+                        },
+                        runtime_env,
+                    )
+                )
+                successful_targets.append(target)
+            except RuntimeError as error:
+                if self._is_missing_symbol_error(error):
+                    logger.warning(
+                        "gitnexus impact skipped missing symbol repo=%s target=%s error=%s",
+                        repo_name,
+                        target,
+                        error,
+                    )
+                    skipped_missing_targets.append(target)
+                    continue
+                raise
+        return results, skipped_missing_targets, successful_targets
 
     def _initialize_request(self) -> dict[str, Any]:
         return {
@@ -279,7 +356,11 @@ class GitNexusMcpImpactClient:
     def _initialized_notification(self) -> dict[str, Any]:
         return {"method": "notifications/initialized", "params": {}}
 
-    def _build_targets(self, changed_symbols: list[ImpactSymbol], detect_changes_payload: dict[str, Any]) -> list[str]:
+    def _build_targets(
+        self,
+        changed_symbols: list[ImpactSymbol],
+        detect_changes_payload: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
         candidates: list[str] = []
         for item in changed_symbols:
             symbol = str(item.symbol or "").strip()
@@ -299,14 +380,44 @@ class GitNexusMcpImpactClient:
                     if symbol:
                         candidates.append(symbol)
         deduped: list[str] = []
+        skipped_invalid: list[str] = []
         seen: set[str] = set()
         for item in candidates:
             normalized = item.strip()
             if not normalized or normalized in seen:
                 continue
+            if not self._is_valid_symbol_target(normalized):
+                skipped_invalid.append(normalized)
+                continue
             seen.add(normalized)
             deduped.append(normalized)
-        return deduped[:12]
+        return deduped[:12], self._dedupe_strings(skipped_invalid)
+
+    def _is_missing_symbol_error(self, error: RuntimeError) -> bool:
+        message = str(error or "").lower()
+        return ("symbol " in message and " not found" in message) or (
+            "target " in message and " not found" in message
+        )
+
+    def _is_valid_symbol_target(self, target: str) -> bool:
+        normalized = str(target or "").strip()
+        if not normalized:
+            return False
+        leaf = normalized.rsplit(".", 1)[-1].strip().lower()
+        if leaf in NON_SYMBOL_TOKENS:
+            return False
+        return True
+
+    def _dedupe_strings(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
 
     def _tool_payload(self, response: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(response, dict):
@@ -446,7 +557,10 @@ class GitNexusImpactService:
     """
 
     _SYMBOL_PATTERNS = [
-        re.compile(r"^\+\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\], ?]+\s+(\w+)\s*\([^;]*\)\s*\{?"),
+        re.compile(
+            r"^\+\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*"
+            r"[\w<>\[\], ?]+\s+(\w+)\s*\([^;]*\)\s*(?:throws\s+[\w\s,<>.?]+)?\s*\{?"
+        ),
         re.compile(r"^\+\s*(?:class|interface|enum|record)\s+(\w+)"),
         re.compile(r"^\+\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\("),
         re.compile(r"^\+\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\("),
@@ -754,6 +868,20 @@ class GitNexusImpactService:
         detect_changes = dict(raw.get("detect_changes") or {})
         impact_results = [item for item in list(raw.get("impact_results") or []) if isinstance(item, dict)]
         context_results = [item for item in list(raw.get("context_results") or []) if isinstance(item, dict)]
+        queried_targets = self._dedupe([str(item).strip() for item in list(raw.get("queried_targets") or [])])
+        successful_context_targets = self._dedupe(
+            [str(item).strip() for item in list(raw.get("successful_context_targets") or [])]
+        )
+        successful_impact_targets = self._dedupe(
+            [str(item).strip() for item in list(raw.get("successful_impact_targets") or [])]
+        )
+        skipped_invalid_targets = self._dedupe([str(item).strip() for item in list(raw.get("skipped_invalid_targets") or [])])
+        skipped_missing_context_targets = self._dedupe(
+            [str(item).strip() for item in list(raw.get("skipped_missing_context_targets") or [])]
+        )
+        skipped_missing_impact_targets = self._dedupe(
+            [str(item).strip() for item in list(raw.get("skipped_missing_impact_targets") or [])]
+        )
         impacted_files = self._merge_impact_files(
             fallback.impacted_files,
             self._impact_files_from_gitnexus(detect_changes, impact_results),
@@ -815,13 +943,34 @@ class GitNexusImpactService:
             risk_level=risk_level if risk_level in {"low", "medium", "high", "critical"} else fallback.risk_level,
             recommended_test_scope=test_scopes,
             must_run_tests=fallback.must_run_tests,
+            queried_targets=queried_targets,
+            successful_context_targets=successful_context_targets,
+            successful_impact_targets=successful_impact_targets,
+            skipped_invalid_targets=skipped_invalid_targets,
+            skipped_missing_context_targets=skipped_missing_context_targets,
+            skipped_missing_impact_targets=skipped_missing_impact_targets,
             manual_verification=[
+                *(
+                    [f"以下符号在 GitNexus 图谱中未查到 context，已跳过：{', '.join(skipped_missing_context_targets[:8])}"]
+                    if skipped_missing_context_targets
+                    else []
+                ),
+                *(
+                    [f"以下符号在 GitNexus 图谱中未查到 impact，已跳过：{', '.join(skipped_missing_impact_targets[:8])}"]
+                    if skipped_missing_impact_targets
+                    else []
+                ),
                 "本次关联影响分析已使用 GitNexus 图谱，请优先核对受影响流程和测试范围。",
                 *fallback.manual_verification,
             ],
             limitations=[
                 "GitNexus 图谱已用于本次 MR 关联影响分析。",
                 "当前实现按官方 MCP 流程先查询 list_repos，再调用 detect_changes(scope=all) 和 impact。",
+                *(
+                    [f"以下疑似关键字/修饰符未作为图谱查询目标：{', '.join(skipped_invalid_targets[:8])}"]
+                    if skipped_invalid_targets
+                    else []
+                ),
                 *(
                     [f"detect_changes 未成功返回，本次主要基于 MR 变更符号继续查询 context/impact：{detect_changes_error}"]
                     if detect_changes_error
@@ -879,6 +1028,13 @@ class GitNexusImpactService:
         if symbols:
             return symbols
         if str(subject.unified_diff or "").strip():
+            mention_symbols = self._extract_symbol_mentions(subject.unified_diff)
+            if mention_symbols:
+                logger.info(
+                    "gitnexus symbol extraction used platform diff mention fallback changed_symbols=%s",
+                    len(mention_symbols),
+                )
+                return mention_symbols
             logger.info(
                 "gitnexus symbol extraction used platform diff only because unified_diff is present but produced no symbol declarations"
             )
@@ -1014,6 +1170,65 @@ class GitNexusImpactService:
             if not line.startswith("-"):
                 current_new_line += 1
         return symbols[:80]
+
+    def _extract_symbol_mentions(self, unified_diff: str) -> list[ImpactSymbol]:
+        symbols: list[ImpactSymbol] = []
+        current_file = ""
+        current_new_line = 0
+        current_class = ""
+        seen: set[tuple[str, str, str, int]] = set()
+        for line in str(unified_diff or "").splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split()
+                current_file = parts[3].removeprefix("b/") if len(parts) >= 4 else ""
+                current_new_line = 0
+                current_class = ""
+                continue
+            hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if hunk:
+                current_new_line = int(hunk.group(1))
+                continue
+            normalized_line = line[1:] if line[:1] in {"+", "-", " "} else line
+            class_match = re.search(r"\b(?:class|interface|enum|record)\s+(\w+)\b", normalized_line)
+            if class_match and not line.startswith("-"):
+                current_class = class_match.group(1)
+            if line.startswith("+") and not line.startswith("+++"):
+                for symbol_name in self._extract_inline_symbol_candidates(normalized_line):
+                    key = (current_file, symbol_name, current_class, current_new_line)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    symbols.append(
+                        ImpactSymbol(
+                            file_path=current_file,
+                            symbol=symbol_name,
+                            kind="function",
+                            container=current_class,
+                            line_start=current_new_line,
+                        )
+                    )
+            if not line.startswith("-"):
+                current_new_line += 1
+        return symbols[:80]
+
+    def _extract_inline_symbol_candidates(self, line: str) -> list[str]:
+        candidates: list[str] = []
+        text = str(line or "").strip()
+        if not text or text.startswith(("@", "//", "*")):
+            return []
+        for match in re.finditer(r"(?:\.|\b)([A-Za-z_]\w*)\s*\(", text):
+            symbol_name = str(match.group(1) or "").strip()
+            if not symbol_name:
+                continue
+            lowered = symbol_name.lower()
+            if lowered in NON_SYMBOL_TOKENS:
+                continue
+            candidates.append(symbol_name)
+        for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]*)\b", text):
+            symbol_name = str(match.group(1) or "").strip()
+            if symbol_name and symbol_name.lower() not in NON_SYMBOL_TOKENS:
+                candidates.append(symbol_name)
+        return self._dedupe(candidates)
 
     def _scan_changed_file_symbols(self, repo_path: str, subject: ReviewSubject) -> list[ImpactSymbol]:
         symbols: list[ImpactSymbol] = []
@@ -1713,6 +1928,8 @@ class GitNexusImpactService:
             return True
         if kind != "function":
             return True
+        if str(symbol_name or "").strip().lower() in NON_SYMBOL_TOKENS:
+            return False
         if "=" in normalized and normalized.find("=") < normalized.find("("):
             return False
         if normalized.endswith(";") and "->" not in normalized:

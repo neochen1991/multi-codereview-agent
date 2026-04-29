@@ -513,7 +513,10 @@ const ReviewWorkbenchPage: React.FC = () => {
     syncTabToUrl(nextTab, options?.replace ?? true);
   };
 
-  const applyReviewDetail = (detail: ReviewSummary) => {
+  const isWorkspaceLoadCurrent = (loadKey: string) => workspaceLoadRef.current.key === loadKey;
+
+  const applyReviewDetail = (detail: ReviewSummary, loadKey?: string) => {
+    if (loadKey && !isWorkspaceLoadCurrent(loadKey)) return;
     setReview((current) => {
       const currentSubject = (current || detail).subject || detail.subject;
       const currentMetadata =
@@ -558,19 +561,19 @@ const ReviewWorkbenchPage: React.FC = () => {
     });
   };
 
-  const loadReviewBase = async (targetReviewId: string) => {
+  const loadReviewBase = async (targetReviewId: string, loadKey?: string) => {
     const detail = await reviewApi.get(targetReviewId);
-    applyReviewDetail(detail);
+    applyReviewDetail(detail, loadKey);
     return detail;
   };
 
-  const loadReviewSnapshot = async (targetReviewId: string) => {
+  const loadReviewSnapshot = async (targetReviewId: string, loadKey?: string) => {
     const detail = await reviewApi.getSnapshot(targetReviewId);
-    applyReviewDetail(detail);
+    applyReviewDetail(detail, loadKey);
     return detail;
   };
 
-  const loadProcessBundle = async (targetReviewId: string) => {
+  const loadProcessBundle = async (targetReviewId: string, loadKey?: string) => {
     const isIncremental = processCursorRef.current.reviewId === targetReviewId;
     const sinceEvent = isIncremental ? processCursorRef.current.eventSince : "";
     const sinceMessage = isIncremental ? processCursorRef.current.messageSince : "";
@@ -617,6 +620,10 @@ const ReviewWorkbenchPage: React.FC = () => {
       ? mergeById(findings, nextFindings, (item) => item.finding_id)
       : nextFindings;
 
+    if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
+      return { issues: nextIssues, events: mergedEvents, messages: mergedMessages, findings: mergedFindings };
+    }
+
     setIssues(nextIssues);
     setEvents(mergedEvents);
     setMessages(mergedMessages);
@@ -631,7 +638,7 @@ const ReviewWorkbenchPage: React.FC = () => {
     return { issues: nextIssues, events: mergedEvents, messages: mergedMessages, findings: mergedFindings };
   };
 
-  const loadResultBundle = async (targetReviewId: string) => {
+  const loadResultBundle = async (targetReviewId: string, loadKey?: string) => {
     const [nextReport, artifactBundle] = await Promise.all([
       reviewApi.getReport(targetReviewId, {
         findings_limit: 800,
@@ -641,6 +648,10 @@ const ReviewWorkbenchPage: React.FC = () => {
       }),
       reviewApi.getArtifacts(targetReviewId).catch(() => null),
     ]);
+    if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
+      return { report: nextReport, artifacts: artifactBundle };
+    }
+
     setReport(nextReport);
     setIssues(nextReport.issues || []);
     setFindings(nextReport.findings || []);
@@ -651,13 +662,17 @@ const ReviewWorkbenchPage: React.FC = () => {
     return { report: nextReport, artifacts: artifactBundle };
   };
 
-  const loadImpactBundle = async (targetReviewId: string) => {
+  const loadImpactBundle = async (targetReviewId: string, loadKey?: string) => {
     const nextReport = await reviewApi.getReport(targetReviewId, {
       findings_limit: 0,
       findings_offset: 0,
       issues_limit: 0,
       issues_offset: 0,
     });
+    if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
+      return { report: nextReport };
+    }
+
     setReport(nextReport);
     setArtifacts(null);
     setIssues([]);
@@ -673,11 +688,14 @@ const ReviewWorkbenchPage: React.FC = () => {
     return { report: nextReport };
   };
 
-  const loadReplayBundle = async (targetReviewId: string) => {
+  const loadReplayBundle = async (targetReviewId: string, loadKey?: string) => {
     const replayBundle = await reviewApi.getReplay(targetReviewId);
+    if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
+      return replayBundle;
+    }
     setReplay(replayBundle);
     if (replayBundle.review) {
-      applyReviewDetail(replayBundle.review);
+      applyReviewDetail(replayBundle.review, loadKey);
     }
     setEvents(replayBundle.events || []);
     setMessages(replayBundle.messages || []);
@@ -697,19 +715,23 @@ const ReviewWorkbenchPage: React.FC = () => {
       return workspaceLoadRef.current.promise;
     }
 
+    workspaceLoadRef.current = { key: loadKey, promise: null };
     const task = (async () => {
       setLoading(true);
       try {
         const detail =
           options?.forceFullReview || !review?.subject?.unified_diff
-            ? await loadReviewBase(targetReviewId)
-            : await loadReviewSnapshot(targetReviewId);
+            ? await loadReviewBase(targetReviewId, loadKey)
+            : await loadReviewSnapshot(targetReviewId, loadKey);
+        if (!isWorkspaceLoadCurrent(loadKey)) return;
         if (activeStep === "process") {
           setResultFindingDetailsLoading(false);
           setResultFindingDetailsError("");
-          const processBundle = await loadProcessBundle(targetReviewId);
+          const processBundle = await loadProcessBundle(targetReviewId, loadKey);
+          if (!isWorkspaceLoadCurrent(loadKey)) return;
           if (processMainTab === "replay") {
-            await loadReplayBundle(targetReviewId);
+            await loadReplayBundle(targetReviewId, loadKey);
+            if (!isWorkspaceLoadCurrent(loadKey)) return;
             syncSelectionFromData(processBundle.issues || [], processBundle.findings || []);
           } else {
             setReplay(null);
@@ -718,7 +740,8 @@ const ReviewWorkbenchPage: React.FC = () => {
           return;
         }
         if (activeStep === "result") {
-          const resultBundle = await loadResultBundle(targetReviewId);
+          const resultBundle = await loadResultBundle(targetReviewId, loadKey);
+          if (!isWorkspaceLoadCurrent(loadKey)) return;
           setEvents([]);
           setMessages([]);
           processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
@@ -727,9 +750,10 @@ const ReviewWorkbenchPage: React.FC = () => {
           return;
         }
         if (activeStep === "impact") {
-          await loadImpactBundle(targetReviewId);
+          await loadImpactBundle(targetReviewId, loadKey);
           return;
         }
+        if (!isWorkspaceLoadCurrent(loadKey)) return;
         setResultFindingDetailsLoading(false);
         setResultFindingDetailsError("");
         setReplay(null);

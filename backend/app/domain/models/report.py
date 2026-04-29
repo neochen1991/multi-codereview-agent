@@ -135,6 +135,12 @@ class ImpactReport(BaseModel):
     risk_level: str = "low"
     recommended_test_scope: list[TestScopeRecommendation] = Field(default_factory=list)
     must_run_tests: list[str] = Field(default_factory=list)
+    queried_targets: list[str] = Field(default_factory=list)
+    successful_context_targets: list[str] = Field(default_factory=list)
+    successful_impact_targets: list[str] = Field(default_factory=list)
+    skipped_invalid_targets: list[str] = Field(default_factory=list)
+    skipped_missing_context_targets: list[str] = Field(default_factory=list)
+    skipped_missing_impact_targets: list[str] = Field(default_factory=list)
     manual_verification: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     report_summary: str = ""

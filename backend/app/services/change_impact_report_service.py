@@ -81,7 +81,22 @@ class ChangeImpactReportService:
         manual_checks = self._normalize_string_list(payload.get("manual_checks")) or list(report.manual_verification)
         template_variables = self._normalize_template_variable_values(payload.get("template_variables"))
         markdown_candidate = str(payload.get("markdown") or "").strip()
-        if markdown_candidate and not self._contains_unresolved_placeholders(markdown_candidate):
+        use_server_side_template = self._looks_like_intranet_template(self._report_template)
+        if use_server_side_template:
+            markdown = self._render_template(
+                report=report,
+                repo_name=str(trace.get("repo") or ""),
+                source_branch=str(trace.get("source_branch") or ""),
+                target_branch=str(trace.get("target_branch") or ""),
+                queried_targets=[str(item) for item in list(trace.get("queried_targets") or [])[:12]],
+                key_impact_points=key_impact_points,
+                test_focus=test_focus,
+                manual_checks=manual_checks,
+                summary=summary,
+                template_variables=template_variables,
+            )
+            markdown = self._normalize_intranet_markdown(markdown)
+        elif markdown_candidate and not self._contains_unresolved_placeholders(markdown_candidate):
             markdown = markdown_candidate
         else:
             markdown = self._render_template(
@@ -96,8 +111,6 @@ class ChangeImpactReportService:
                 summary=summary,
                 template_variables=template_variables,
             )
-        if self._looks_like_intranet_template(self._report_template):
-            markdown = self._normalize_intranet_markdown(markdown)
         updated = report.model_copy(
             update={
                 "report_summary": summary,

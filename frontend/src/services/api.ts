@@ -398,6 +398,12 @@ export interface ImpactReport {
   risk_level: string;
   recommended_test_scope: TestScopeRecommendation[];
   must_run_tests: string[];
+  queried_targets?: string[];
+  successful_context_targets?: string[];
+  successful_impact_targets?: string[];
+  skipped_invalid_targets?: string[];
+  skipped_missing_context_targets?: string[];
+  skipped_missing_impact_targets?: string[];
   manual_verification: string[];
   limitations: string[];
   report_summary?: string;

@@ -104,6 +104,106 @@ def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error(
     assert "GitNexus detect_changes 调用失败" in payload["detect_changes_error"]
     assert payload["context_results"]
     assert payload["impact_results"]
+    assert payload["successful_context_targets"] == ["create"]
+    assert payload["successful_impact_targets"] == ["create"]
+
+
+def test_gitnexus_mcp_impact_client_filters_invalid_symbol_targets():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    targets, skipped_invalid = client._build_targets(
+        [
+            type("ChangedSymbol", (), {"symbol": "synchronized", "container": ""})(),
+            type("ChangedSymbol", (), {"symbol": "createOrder", "container": "OrderService"})(),
+        ],
+        {"changed_symbols": ["private", "OrderController.createOrder"]},
+    )
+
+    assert "synchronized" not in targets
+    assert "private" not in targets
+    assert "OrderService.createOrder" in targets
+    assert "OrderController.createOrder" in targets
+    assert skipped_invalid == ["synchronized", "private"]
+
+
+def test_gitnexus_mcp_impact_client_skips_missing_symbol_context_and_impact():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+
+    responses = [
+        {2: {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}},
+        {2: {"result": {"content": [{"text": '{"changed_symbols":["MissingSymbol","OrderService.createOrder"]}'}]}}},
+        {2: {"error": {"code": -32001, "message": "Symbol MissingSymbol not found"}}},
+        {2: {"result": {"content": [{"text": '{"symbol":{"name":"OrderService.createOrder"}}'}]}}},
+        {2: {"error": {"code": -32001, "message": "Symbol MissingSymbol not found"}}},
+        {2: {"result": {"content": [{"text": '{"paths":[["OrderController.createOrder","OrderService.createOrder"]]}'}]}}},
+    ]
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        return responses.pop(0)
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        payload = client.analyze_mr(
+            repo_name="repo",
+            repo_path="/tmp/repo",
+            subject=subject,
+            changed_symbols=[],
+            runtime_env=None,
+        )
+
+    assert len(payload["context_results"]) == 1
+    assert len(payload["impact_results"]) == 1
+    assert payload["queried_targets"] == ["MissingSymbol", "OrderService.createOrder"]
+    assert payload["skipped_missing_context_targets"] == ["MissingSymbol"]
+    assert payload["skipped_missing_impact_targets"] == ["MissingSymbol"]
+    assert payload["successful_context_targets"] == ["OrderService.createOrder"]
+    assert payload["successful_impact_targets"] == ["OrderService.createOrder"]
+
+
+def test_gitnexus_mcp_impact_client_skips_missing_target_impact_error():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+
+    responses = [
+        {2: {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}},
+        {2: {"result": {"content": [{"text": '{"changed_symbols":["OrderApplicationService.buildOrder","OrderController.notifyAudit"]}'}]}}},
+        {2: {"result": {"content": [{"text": '{"symbol":{"name":"OrderApplicationService.buildOrder"}}'}]}}},
+        {2: {"result": {"content": [{"text": '{"symbol":{"name":"OrderController.notifyAudit"}}'}]}}},
+        {2: {"error": {"code": -32001, "message": "Target 'OrderApplicationService.buildOrder' not found"}}},
+        {2: {"result": {"content": [{"text": '{"paths":[["OrderController.createOrder","OrderController.notifyAudit"]]}'}]}}},
+    ]
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        return responses.pop(0)
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        payload = client.analyze_mr(
+            repo_name="repo",
+            repo_path="/tmp/repo",
+            subject=subject,
+            changed_symbols=[],
+            runtime_env=None,
+        )
+
+    assert len(payload["context_results"]) == 2
+    assert len(payload["impact_results"]) == 1
+    assert "OrderApplicationService.buildOrder" in payload["skipped_missing_impact_targets"]
+    assert payload["successful_impact_targets"] == ["OrderController.notifyAudit"]
 
 
 def test_gitnexus_impact_service_builds_fallback_report(storage_root: Path):
@@ -131,6 +231,59 @@ def test_gitnexus_impact_service_builds_fallback_report(storage_root: Path):
         assert "本地代码仓路径" in str(error) or "图谱未就绪" in str(error)
     else:
         raise AssertionError("GitNexus 不可用时不应再生成降级报告")
+
+
+def test_gitnexus_impact_service_surfaces_skipped_symbols_in_report(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        storage_root / "gitnexus" / "index_status.json",
+        {
+            "state": "ready",
+            "repo_path": str(repo_path),
+            "repo_name": "repo",
+            "indexed_at": "2026-04-27T00:00:00+00:00",
+            "commit": "abc123",
+        },
+    )
+    service = GitNexusImpactService(storage_root, mcp_client=FakeGitNexusImpactClient())
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/batch",
+        target_ref="main",
+        changed_files=["inventory/src/main/java/com/example/StockRepository.java"],
+        unified_diff=(
+            "diff --git a/inventory/src/main/java/com/example/StockRepository.java "
+            "b/inventory/src/main/java/com/example/StockRepository.java\n"
+            "@@ -20,2 +20,5 @@\n"
+            "+public List<Stock> findByStatus(String status) {\n"
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+            "+}\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_path)},
+    )
+
+    with patch.object(service, "_registry_paths_for_repo_name", return_value=[]):
+        report = service._normalize_gitnexus_payload(
+            subject,
+            RuntimeSettings(code_repo_local_path=str(repo_path)),
+            {"indexed_at": "2026-04-27T00:00:00+00:00", "commit": "abc123"},
+            {
+                "detect_changes": {},
+                "context_results": [],
+                "impact_results": [],
+                "skipped_invalid_targets": ["synchronized"],
+                "skipped_missing_context_targets": ["MissingSymbol"],
+                "skipped_missing_impact_targets": ["MissingSymbol"],
+            },
+            [],
+        )
+
+    assert any("synchronized" in item for item in report.limitations)
+    assert any("MissingSymbol" in item for item in report.manual_verification)
 
 
 def test_gitnexus_impact_service_uses_ready_graph_before_fallback(storage_root: Path, tmp_path: Path):
@@ -481,6 +634,46 @@ def test_gitnexus_impact_service_prefers_platform_diff_without_local_git_enrichm
         symbols = service._build_changed_symbols(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
 
     assert any(item.symbol == "createOrder" and item.container == "OrderController" for item in symbols)
+
+
+def test_gitnexus_impact_service_extracts_symbols_from_diff_mentions_when_no_declaration(storage_root: Path):
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderController.java "
+            "b/src/main/java/com/example/OrderController.java\n"
+            "@@ -10,0 +10,4 @@\n"
+            " public class OrderController {\n"
+            "+  orderService.createOrder(command);\n"
+            "+  auditPublisher.publish(event);\n"
+            " }\n"
+        ),
+    )
+
+    symbols = service._build_changed_symbols(subject, RuntimeSettings())
+
+    extracted = {item.symbol for item in symbols}
+    assert "createOrder" in extracted
+    assert "publish" in extracted
+
+
+def test_gitnexus_impact_service_extracts_synchronized_java_method_name(storage_root: Path):
+    service = GitNexusImpactService(storage_root)
+    symbols = service._extract_changed_symbols(
+        "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+        "@@ -1,0 +1,3 @@\n"
+        " public class OrderService {\n"
+        "+  public synchronized OrderDTO createOrder(Command command) {\n"
+        "+  }\n"
+    )
+
+    assert any(item.symbol == "createOrder" for item in symbols)
 
 
 def test_gitnexus_local_git_diff_resolves_available_refs_before_running(storage_root: Path, tmp_path: Path):
