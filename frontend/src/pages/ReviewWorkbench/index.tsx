@@ -1157,6 +1157,22 @@ const ReviewWorkbenchPage: React.FC = () => {
       ? "当前是审核记录查看模式，可核对当时提交的审核对象、候选专家、大模型判定的参与专家与 diff 上下文。"
       : currentTab.hint;
 
+  const handleFormChange = useCallback((patch: Partial<ReviewFormState>) => {
+    setForm((prev) => {
+      const next = { ...prev, ...patch };
+      if (Object.prototype.hasOwnProperty.call(patch, "mr_url")) {
+        const previousMrUrl = prev.mr_url.trim();
+        const nextMrUrl = String(patch.mr_url || "").trim();
+        const currentTitle = prev.title.trim();
+        const canAutoFillTitle = !currentTitle || currentTitle === previousMrUrl;
+        if (canAutoFillTitle) {
+          next.title = nextMrUrl;
+        }
+      }
+      return next;
+    });
+  }, []);
+
   const createPayload = (): Parameters<typeof reviewApi.create>[0] => ({
     subject_type: form.subject_type,
     analysis_mode: form.analysis_mode,
@@ -1431,7 +1447,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 readonly={isReadonlyOverview}
                 experts={experts}
                 expertSelectionSummary={overviewExpertSelectionSummary}
-                onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+                onChange={handleFormChange}
                 onStart={() => void (reviewId ? startExistingReview() : createReview(true))}
                 onCreateOnly={() => void createReview(false)}
               />
