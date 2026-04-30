@@ -129,11 +129,18 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         analysis_mode = str(payload.pop("analysis_mode", runtime_settings.default_analysis_mode or "standard")).strip()
         if analysis_mode not in {"standard", "light"}:
             analysis_mode = runtime_settings.default_analysis_mode or "standard"
-        selected_experts = [
+        requested_experts = [
             str(expert_id).strip()
             for expert_id in payload.pop("selected_experts", []) or []
             if str(expert_id).strip()
         ]
+        request_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        manual_expert_selection = (
+            bool(request_metadata.get("manual_expert_selection"))
+            if "manual_expert_selection" in request_metadata
+            else bool(requested_experts)
+        )
+        selected_experts = list(requested_experts)
         design_docs = [
             item
             for item in payload.pop("design_docs", []) or []
@@ -151,6 +158,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                     selected_experts.append(expert_id)
         subject.metadata = {
             **dict(subject.metadata or {}),
+            "manual_expert_selection": manual_expert_selection,
             # API 直接创建且缺少 diff/changed_files 时，允许走兜底派工，避免回放/报告页完全无数据。
             "allow_empty_diff_fallback": bool(dict(subject.metadata or {}).get("allow_empty_diff_fallback", True)),
         }

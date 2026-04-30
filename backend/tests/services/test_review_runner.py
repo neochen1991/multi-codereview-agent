@@ -59,6 +59,7 @@ def test_change_impact_analysis_runs_in_dedicated_flow(storage_root: Path, monke
     review = runner.review_repo.get(review_id)
     assert review is not None
     review.selected_experts = ["change_impact_analysis"]
+    review.subject.metadata = {**dict(review.subject.metadata or {}), "manual_expert_selection": True}
     runner.review_repo.save(review)
 
     def _should_not_build_manual_routing(*_args, **_kwargs):
@@ -67,27 +68,30 @@ def test_change_impact_analysis_runs_in_dedicated_flow(storage_root: Path, monke
     monkeypatch.setattr(runner, "_build_manual_routing_plan", _should_not_build_manual_routing)
     monkeypatch.setattr(
         runner.gitnexus_impact_service,
-        "analyze",
-        lambda subject, runtime: ImpactReport(
-            graph_status="ready",
-            risk_level="medium",
-            changed_files=list(subject.changed_files or []),
-            impacted_files=[],
-            impacted_modules=["order"],
-            changed_symbols=[],
-            impact_paths=[],
-            external_entrypoints=["OrderController#create"],
+        "analyze_with_trace",
+        lambda subject, runtime: (
+            ImpactReport(
+                graph_status="ready",
+                risk_level="medium",
+                changed_files=list(subject.changed_files or []),
+                impacted_files=[],
+                impacted_modules=["order"],
+                changed_symbols=[],
+                impact_paths=[],
+                external_entrypoints=["OrderController#create"],
                 recommended_test_scope=[
-                ImpactTestScopeRecommendation(
-                    scope="订单创建接口回归",
-                    reason="入口调用链命中订单创建主流程",
-                    paths=["OrderController -> OrderService -> OrderRepository"],
-                    priority="high",
-                )
-            ],
-            must_run_tests=["OrderControllerTest#create"],
-            manual_verification=["验证订单创建后库存联动"],
-            limitations=[],
+                    ImpactTestScopeRecommendation(
+                        scope="订单创建接口回归",
+                        reason="入口调用链命中订单创建主流程",
+                        paths=["OrderController -> OrderService -> OrderRepository"],
+                        priority="high",
+                    )
+                ],
+                must_run_tests=["OrderControllerTest#create"],
+                manual_verification=["验证订单创建后库存联动"],
+                limitations=[],
+            ),
+            {},
         ),
     )
 
@@ -106,11 +110,12 @@ def test_change_impact_analysis_failure_does_not_emit_fallback_report(storage_ro
     review = runner.review_repo.get(review_id)
     assert review is not None
     review.selected_experts = ["change_impact_analysis"]
+    review.subject.metadata = {**dict(review.subject.metadata or {}), "manual_expert_selection": True}
     runner.review_repo.save(review)
 
     monkeypatch.setattr(
         runner.gitnexus_impact_service,
-        "analyze",
+        "analyze_with_trace",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("gitnexus mcp timeout")),
     )
 
@@ -261,6 +266,7 @@ def test_review_runner_skips_llm_expert_selection_when_user_selected_experts(sto
     review = runner.review_repo.get(review_id)
     assert review is not None
     review.selected_experts = ["correctness_business"]
+    review.subject.metadata = {**dict(review.subject.metadata or {}), "manual_expert_selection": True}
     runner.review_repo.save(review)
 
     def _should_not_be_called(*_args, **_kwargs):
@@ -280,6 +286,7 @@ def test_review_runner_skips_routing_plan_llm_when_user_selected_experts(storage
     review = runner.review_repo.get(review_id)
     assert review is not None
     review.selected_experts = ["correctness_business"]
+    review.subject.metadata = {**dict(review.subject.metadata or {}), "manual_expert_selection": True}
     runner.review_repo.save(review)
 
     def _should_not_select(*_args, **_kwargs):
@@ -295,6 +302,61 @@ def test_review_runner_skips_routing_plan_llm_when_user_selected_experts(storage
     messages = runner.message_repo.list(review_id)
     routing_ready = next(item for item in messages if item.message_type == "main_agent_routing_ready")
     assert routing_ready.metadata.get("selected_expert_ids") == ["correctness_business"]
+
+
+def test_review_runner_still_calls_llm_selection_when_only_system_default_impact_expert_exists(
+    storage_root: Path, monkeypatch
+):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.selected_experts = ["change_impact_analysis"]
+    review.subject.metadata = {**dict(review.subject.metadata or {}), "manual_expert_selection": False}
+    runner.review_repo.save(review)
+
+    llm_called = {"value": False}
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        llm_called["value"] = True
+        assert requested_expert_ids == ["change_impact_analysis"]
+        return {
+            "requested_expert_ids": list(requested_expert_ids or []),
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": ["correctness_business", "change_impact_analysis"],
+            "selected_experts": [
+                {
+                    "expert_id": "correctness_business",
+                    "expert_name": "业务正确性专家",
+                    "reason": "主Agent 判定该 MR 需要业务正确性检视",
+                    "confidence": 0.92,
+                },
+                {
+                    "expert_id": "change_impact_analysis",
+                    "expert_name": "关联性影响分析专家",
+                    "reason": "系统默认参与每一次 MR 检视",
+                    "confidence": 1.0,
+                },
+            ],
+            "skipped_experts": [],
+            "llm": {
+                "provider": "test",
+                "model": "test",
+                "base_url": "http://llm.test",
+                "api_key_env": "TEST_KEY",
+                "mode": "live",
+                "error": "",
+            },
+        }
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+
+    runner.run_once(review_id)
+
+    assert llm_called["value"] is True
+    messages = runner.message_repo.list(review_id)
+    selection = next(item for item in messages if item.message_type == "main_agent_expert_selection")
+    assert selection.metadata.get("mode") == "live"
 
 
 def test_review_runner_batches_rule_screening_once_per_expert(storage_root: Path, monkeypatch):

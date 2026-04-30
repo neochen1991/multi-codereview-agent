@@ -93,6 +93,14 @@ type ResultMainTabKey = "issues";
 const { Paragraph, Text, Title } = Typography;
 const DEFAULT_SELECTED_EXPERTS = ["change_impact_analysis"];
 
+const normalizeDefaultSelectedExperts = (subjectType: "mr" | "branch", selectedExperts: string[]): string[] => {
+  const deduped = Array.from(new Set((selectedExperts || []).filter(Boolean)));
+  if (subjectType === "mr") {
+    return deduped.includes("change_impact_analysis") ? deduped : ["change_impact_analysis", ...deduped];
+  }
+  return deduped.filter((expertId) => expertId !== "change_impact_analysis");
+};
+
 const defaultFormState: ReviewFormState = {
   subject_type: "mr",
   analysis_mode: "standard",
@@ -100,6 +108,7 @@ const defaultFormState: ReviewFormState = {
   title: "",
   source_ref: "",
   target_ref: "",
+  expert_selection_mode: "auto",
   design_docs: [],
   selected_experts: DEFAULT_SELECTED_EXPERTS,
 };
@@ -551,10 +560,14 @@ const ReviewWorkbenchPage: React.FC = () => {
       title: detail.subject.title || "",
       source_ref: detail.subject.source_ref || "",
       target_ref: detail.subject.target_ref || "main",
-      selected_experts:
+      selected_experts: normalizeDefaultSelectedExperts(
+        detail.subject.subject_type === "branch" ? "branch" : "mr",
         detail.selected_experts && detail.selected_experts.length > 0
           ? detail.selected_experts
           : defaultFormState.selected_experts,
+      ),
+      expert_selection_mode:
+        Boolean(((detail.subject.metadata || {}) as Record<string, unknown>).manual_expert_selection) ? "manual" : "auto",
       design_docs: normalizeDesignDocs(
         ((detail.subject.metadata || {}) as Record<string, unknown>).design_docs,
       ),
@@ -795,7 +808,9 @@ const ReviewWorkbenchPage: React.FC = () => {
             analysis_mode: current.analysis_mode || runtime.default_analysis_mode || "standard",
             target_ref: current.target_ref || runtime.default_target_branch || "",
             selected_experts:
-              current.selected_experts.length > 0 ? current.selected_experts : defaultFormState.selected_experts,
+              current.selected_experts.length > 0
+                ? normalizeDefaultSelectedExperts(current.subject_type, current.selected_experts)
+                : defaultFormState.selected_experts,
           }));
         }
       })
@@ -823,6 +838,7 @@ const ReviewWorkbenchPage: React.FC = () => {
         ...defaultFormState,
         analysis_mode: runtimeSettings?.default_analysis_mode || "standard",
         target_ref: runtimeSettings?.default_target_branch || "",
+        selected_experts: normalizeDefaultSelectedExperts("mr", defaultFormState.selected_experts),
       });
       setKnowledgeDocs([]);
       setSelectedIssueId("");
@@ -847,7 +863,9 @@ const ReviewWorkbenchPage: React.FC = () => {
       analysis_mode: current.analysis_mode || runtimeSettings.default_analysis_mode || "standard",
       target_ref: current.target_ref || runtimeSettings.default_target_branch || "",
       selected_experts:
-        current.selected_experts.length > 0 ? current.selected_experts : defaultFormState.selected_experts,
+        current.selected_experts.length > 0
+          ? normalizeDefaultSelectedExperts(current.subject_type, current.selected_experts)
+          : defaultFormState.selected_experts,
     }));
   }, [reviewId, runtimeSettings]);
 
@@ -1147,6 +1165,9 @@ const ReviewWorkbenchPage: React.FC = () => {
     source_ref: form.source_ref.trim(),
     target_ref: form.target_ref.trim() || "main",
     selected_experts: form.selected_experts,
+    metadata: {
+      manual_expert_selection: form.expert_selection_mode === "manual",
+    },
     design_docs: form.design_docs,
   });
 

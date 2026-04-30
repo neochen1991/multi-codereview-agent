@@ -67,6 +67,27 @@ def test_create_review_defaults_to_change_impact_expert_for_mr(tmp_path: Path):
     )
 
     assert review.selected_experts == ["change_impact_analysis"]
+    assert dict(review.subject.metadata or {}).get("manual_expert_selection") is False
+
+
+def test_create_review_marks_manual_expert_selection_when_user_specifies_candidates(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_manual",
+            "project_id": "proj_manual",
+            "source_ref": "feature/manual",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/2",
+            "title": "manual experts",
+            "selected_experts": ["correctness_business"],
+            "metadata": {"manual_expert_selection": True},
+        }
+    )
+
+    assert review.selected_experts == ["correctness_business", "change_impact_analysis"]
+    assert dict(review.subject.metadata or {}).get("manual_expert_selection") is True
 
 
 def test_create_review_keeps_branch_review_experts_empty_by_default(tmp_path: Path):

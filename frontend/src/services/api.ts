@@ -787,6 +787,7 @@ export const reviewApi = {
     mr_url?: string;
     repo_url?: string;
     selected_experts?: string[];
+    metadata?: Record<string, unknown>;
     design_docs?: ReviewDesignDocumentInput[];
   }): Promise<{ review_id: string; status: string }> {
     const { data } = await api.post("/reviews", payload);

@@ -215,9 +215,10 @@ class ReviewRunner(
         requested_selected_ids = [
             item for item in review.selected_experts if isinstance(item, str) and item.strip()
         ]
+        manual_expert_selection = bool(dict(review.subject.metadata or {}).get("manual_expert_selection"))
         enabled_experts = self.registry.list_enabled()
         selection_started_at = time.perf_counter()
-        if requested_selected_ids:
+        if requested_selected_ids and manual_expert_selection:
             selection_plan = self._build_manual_expert_selection_plan(
                 requested_expert_ids=requested_selected_ids,
                 enabled_experts=enabled_experts,
