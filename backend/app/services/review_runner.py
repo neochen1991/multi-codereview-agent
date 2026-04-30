@@ -36,7 +36,7 @@ from app.services.main_agent_service import MainAgentService
 from app.services.memory_probe import MemoryProbe
 from app.services.orchestrator.graph import build_review_graph
 from app.services.prompt_budget_planner import PromptBudgetPlanner
-from app.services.repository_context_service import RepositoryContextService
+from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
 from app.services.review_runner_common import ReviewRunnerCommonMixin
@@ -84,6 +84,7 @@ class ReviewRunner(
         self.message_repo = repository_factory.create_message_repository()
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
+        self.repository_resolver = RepositoryConfigResolver()
         self.artifact_service = ArtifactService(self.storage_root)
         self.diff_excerpt_service = DiffExcerptService()
         self.capability_service = ExpertCapabilityService()
@@ -4407,14 +4408,7 @@ class ReviewRunner(
         if cached is not None:
             return cached
         runtime = self.runtime_settings_service.get()
-        service = RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        service = self.repository_resolver.build_context_service(runtime, subject)
         if not service.is_ready():
             return ""
         context = service.load_file_context(file_path, max(1, line_start), radius=radius)
@@ -4806,14 +4800,7 @@ class ReviewRunner(
         if cached is not None:
             return dict(cached)
         runtime = self.runtime_settings_service.get()
-        service = RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        service = self.repository_resolver.build_context_service(runtime, subject)
         if not service.is_ready():
             return {}
         context = service.load_file_range(

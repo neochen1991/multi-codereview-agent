@@ -141,7 +141,7 @@ export GITNEXUS_INDEX_INTERVAL_SECONDS=3600
 export GITNEXUS_INDEX_TIMEOUT_SECONDS=900
 ```
 
-同时在 `config.json` 或设置页里配置本地代码仓路径：
+同时在 `config.json` 或设置页里配置本地代码仓路径。单仓部署可以继续使用旧字段：
 
 ```json
 {
@@ -152,7 +152,32 @@ export GITNEXUS_INDEX_TIMEOUT_SECONDS=900
 }
 ```
 
-后端启动后，`GitNexusIndexScheduler` 会按间隔在该仓库目录执行：
+多项目公共机器部署建议使用 `code_repositories`，每个仓库单独配置 `repository_id`、平台地址、本地路径和是否启用自动审核：
+
+```json
+{
+  "default_repository_id": "ipc-fnd-service",
+  "code_repositories": [
+    {
+      "repository_id": "ipc-fnd-service",
+      "name": "IPC FND Service",
+      "provider": "codehub",
+      "clone_url": "https://codehub.example.com/ipc/ipc-fnd-service.git",
+      "web_url_prefixes": ["https://codehub.example.com/ipc/ipc-fnd-service"],
+      "local_path": "D:/workspace/ipc-fnd-service",
+      "default_branch": "master",
+      "enabled": true,
+      "auto_review_enabled": true,
+      "auto_review_poll_interval_seconds": 120,
+      "auto_sync": false,
+      "gitnexus_enabled": true,
+      "database_source_ids": []
+    }
+  ]
+}
+```
+
+后端启动后，`GitNexusIndexScheduler` 会按仓库维度在本地代码仓目录执行：
 
 ```bash
 gitnexus analyze
@@ -162,20 +187,23 @@ gitnexus analyze
 
 1. 进入「设置」页。
 2. 找到「GitNexus 代码图谱」卡片。
-3. 点击「手动建立图谱」。
-4. 点击「刷新状态」查看 `running / ready / failed / skipped` 状态。
+3. 多仓配置下，每个仓库卡片都有独立的「手动建立图谱」入口。
+4. 点击「刷新全部状态」或单仓「刷新」查看 `running / ready / failed / skipped` 状态。
 
 对应后端接口为：
 
 ```http
 GET /api/settings/gitnexus/index/status
 POST /api/settings/gitnexus/index/run
+GET /api/settings/repositories/{repository_id}/gitnexus/status
+POST /api/settings/repositories/{repository_id}/gitnexus/index/run
 ```
 
 建图状态会写到：
 
 ```text
 backend/app/storage/gitnexus/index_status.json
+backend/app/storage/gitnexus/{repository_id}/index_status.json
 ```
 
 建图成功时，状态文件会包含：
@@ -621,6 +649,24 @@ Windows 启动脚本还会检查后端依赖是否完整，尤其会校验 `http
     "default_branch": "main",
     "auto_sync": false
   },
+  "default_repository_id": "main-service",
+  "code_repositories": [
+    {
+      "repository_id": "main-service",
+      "name": "主业务服务",
+      "provider": "codehub",
+      "clone_url": "https://codehub.example.com/team/main-service.git",
+      "web_url_prefixes": ["https://codehub.example.com/team/main-service"],
+      "local_path": "/data/repos/main-service",
+      "default_branch": "master",
+      "enabled": true,
+      "auto_review_enabled": true,
+      "auto_review_poll_interval_seconds": 120,
+      "auto_sync": false,
+      "gitnexus_enabled": true,
+      "database_source_ids": []
+    }
+  ],
   "runtime": {
     "default_target_branch": "main",
     "allow_llm_fallback": false,

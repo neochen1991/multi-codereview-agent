@@ -63,20 +63,38 @@ def sync_auto_review_queue() -> dict[str, object]:
     """手动触发一次开放 MR 同步并尝试启动下一条队列任务。"""
 
     runtime = review_service_module.review_service.get_runtime_settings()
-    repo_url = review_service_module.review_service.resolve_auto_review_repo_url(runtime)
-    if not repo_url:
+    repositories = review_service_module.review_service.resolve_auto_review_repositories(runtime)
+    if not repositories:
         return {
             "enabled": runtime.auto_review_enabled,
             "repo_url": "",
+            "repositories": [],
             "created_count": 0,
             "started_review_id": "",
             "message": "未配置自动审核仓库地址",
         }
-    created = review_service_module.review_service.enqueue_open_merge_requests(repo_url)
+    created = []
+    repo_payload = []
+    for repository in repositories:
+        repo_created = review_service_module.review_service.enqueue_open_merge_requests(
+            repository.clone_url,
+            repository.repository_id,
+        )
+        created.extend(repo_created)
+        repo_payload.append(
+            {
+                "repository_id": repository.repository_id,
+                "name": repository.name,
+                "repo_url": repository.clone_url,
+                "created_count": len(repo_created),
+                "created_review_ids": [item.review_id for item in repo_created],
+            }
+        )
     started = review_service_module.review_service.start_next_pending_review()
     return {
         "enabled": runtime.auto_review_enabled,
-        "repo_url": repo_url,
+        "repo_url": ",".join(item.clone_url for item in repositories),
+        "repositories": repo_payload,
         "created_count": len(created),
         "created_review_ids": [item.review_id for item in created],
         "started_review_id": started.review_id if started else "",

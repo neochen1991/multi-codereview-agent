@@ -52,6 +52,71 @@ def test_enqueue_open_merge_requests_creates_pending_reviews_and_deduplicates(tm
     assert queue[0].created_at <= queue[1].created_at
 
 
+def test_multi_repository_auto_queue_scans_each_enabled_repository(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    runtime = service.update_runtime_settings(
+        {
+            "default_repository_id": "repo-a",
+            "code_repositories": [
+                {
+                    "repository_id": "repo-a",
+                    "name": "Repo A",
+                    "clone_url": "https://codehub.example.com/team/repo-a.git",
+                    "local_path": "/tmp/repo-a",
+                    "default_branch": "main",
+                    "enabled": True,
+                    "auto_review_enabled": True,
+                },
+                {
+                    "repository_id": "repo-b",
+                    "name": "Repo B",
+                    "clone_url": "https://codehub.example.com/team/repo-b.git",
+                    "local_path": "/tmp/repo-b",
+                    "default_branch": "master",
+                    "enabled": True,
+                    "auto_review_enabled": True,
+                },
+            ],
+        }
+    )
+    assert [item.repository_id for item in service.resolve_auto_review_repositories(runtime)] == ["repo-a", "repo-b"]
+
+    service.platform_adapter.normalize = lambda subject, runtime_settings=None: subject.model_copy(  # type: ignore[method-assign]
+        update={
+            "repo_id": subject.repo_id or str(subject.metadata.get("repository_id") or ""),
+            "project_id": subject.project_id or "team",
+            "title": subject.title or "Auto MR",
+        }
+    )
+
+    def fake_list_open_merge_requests(repo_url, access_token, runtime_settings=None):
+        suffix = "a" if str(repo_url).endswith("repo-a.git") else "b"
+        return [
+            OpenMergeRequest(
+                mr_url=f"https://codehub.example.com/team/repo-{suffix}/merge_requests/1",
+                title=f"MR repo {suffix}",
+                source_ref=f"feature/repo-{suffix}",
+                target_ref="",
+                number="1",
+                head_sha=f"sha-{suffix}",
+            )
+        ]
+
+    service.platform_adapter.list_open_merge_requests = fake_list_open_merge_requests  # type: ignore[method-assign]
+
+    created = []
+    for repository in service.resolve_auto_review_repositories(runtime):
+        created.extend(service.enqueue_open_merge_requests(repository.clone_url, repository.repository_id))
+
+    assert len(created) == 2
+    metadata_by_repo = {str(item.subject.metadata.get("repository_id")): item for item in created}
+    assert set(metadata_by_repo) == {"repo-a", "repo-b"}
+    assert metadata_by_repo["repo-a"].subject.target_ref == "main"
+    assert metadata_by_repo["repo-b"].subject.target_ref == "master"
+    assert metadata_by_repo["repo-a"].subject.metadata["workspace_repo_path"] == "/tmp/repo-a"
+    assert metadata_by_repo["repo-b"].subject.metadata["workspace_repo_path"] == "/tmp/repo-b"
+
+
 def test_create_review_defaults_to_change_impact_expert_for_mr(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     review = service.create_review(
@@ -68,6 +133,48 @@ def test_create_review_defaults_to_change_impact_expert_for_mr(tmp_path: Path):
 
     assert review.selected_experts == ["change_impact_analysis"]
     assert dict(review.subject.metadata or {}).get("manual_expert_selection") is False
+
+
+def test_create_review_uses_repository_default_branch_when_target_ref_missing(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    service.update_runtime_settings(
+        {
+            "default_target_branch": "main",
+            "default_repository_id": "repo-a",
+            "code_repositories": [
+                {
+                    "repository_id": "repo-a",
+                    "clone_url": "https://example.com/team/repo-a.git",
+                    "local_path": "/tmp/repo-a",
+                    "default_branch": "main",
+                    "enabled": True,
+                },
+                {
+                    "repository_id": "repo-b",
+                    "clone_url": "https://example.com/team/repo-b.git",
+                    "local_path": "/tmp/repo-b",
+                    "default_branch": "release",
+                    "enabled": True,
+                },
+            ],
+        }
+    )
+
+    review = service.create_review(
+            {
+                "subject_type": "mr",
+                "repo_id": "",
+                "project_id": "",
+                "repo_url": "https://example.com/team/repo-b.git",
+                "mr_url": "https://example.com/team/repo-b/merge_requests/12",
+                "source_ref": "feature/repo-b",
+                "target_ref": "",
+                "title": "repo b review",
+            }
+        )
+
+    assert review.subject.target_ref == "release"
+    assert review.subject.metadata["repository_id"] == "repo-b"
 
 
 def test_create_review_marks_manual_expert_selection_when_user_specifies_candidates(tmp_path: Path):

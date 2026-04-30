@@ -31,6 +31,8 @@ class RuntimeSettingsService:
             "auto_review_enabled",
             "auto_review_repo_url",
             "auto_review_poll_interval_seconds",
+            "default_repository_id",
+            "code_repositories",
             "database_sources",
             "default_llm_provider",
             "default_llm_base_url",
@@ -215,8 +217,10 @@ class RuntimeSettingsService:
         merged_config.code_repo.auto_review_enabled = runtime.auto_review_enabled
         merged_config.code_repo.auto_review_repo_url = runtime.auto_review_repo_url
         merged_config.code_repo.auto_review_poll_interval_seconds = runtime.auto_review_poll_interval_seconds
-
         next_config = AppConfig.from_runtime_settings(runtime)
+        merged_config.code_repositories = next_config.code_repositories
+        merged_config.default_repository_id = runtime.default_repository_id
+
         merged_config.database_sources = next_config.database_sources
 
         merged_config.network.verify_ssl = runtime.verify_ssl

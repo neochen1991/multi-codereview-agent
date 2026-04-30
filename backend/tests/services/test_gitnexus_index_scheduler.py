@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.repositories.fs import write_json
+from app.domain.models.runtime_settings import CodeRepositorySettings
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 from app.services.review_service import ReviewService
 
@@ -101,3 +102,61 @@ def test_gitnexus_index_scheduler_uses_resolved_gitnexus_binary(storage_root: Pa
 
     assert status["state"] == "ready"
     assert captured[0] == ["C:\\GitNexus\\gitnexus.exe", "analyze"]
+
+
+def test_gitnexus_index_scheduler_does_not_fallback_for_unknown_repository_id(storage_root: Path, tmp_path: Path, monkeypatch):
+    legacy_repo = tmp_path / "legacy-repo"
+    configured_repo = tmp_path / "configured-repo"
+    legacy_repo.mkdir()
+    configured_repo.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "code_repo_local_path": str(legacy_repo),
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="configured",
+                    clone_url="https://example.com/configured.git",
+                    local_path=str(configured_repo),
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick("missing")
+
+    assert status["state"] == "skipped"
+    assert status["repository_id"] == "missing"
+    assert "本地代码仓路径" in str(status["message"])
+    assert "repo_path" not in status
+
+
+def test_gitnexus_manual_index_skips_unknown_repository_without_spawning(storage_root: Path, tmp_path: Path, monkeypatch):
+    configured_repo = tmp_path / "configured-repo"
+    configured_repo.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="configured",
+                    clone_url="https://example.com/configured.git",
+                    local_path=str(configured_repo),
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.trigger_manual_index("missing")
+
+    assert status["state"] == "skipped"
+    assert status["repository_id"] == "missing"
+    assert status["trigger"] == "manual"

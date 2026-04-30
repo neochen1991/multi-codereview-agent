@@ -2376,6 +2376,35 @@ body {
   color: #64748b;
 }
 
+.settings-form-block {
+  margin-bottom: 24px;
+  padding: 16px;
+  border: 1px solid #d8e3f2;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f7fafc 100%);
+}
+
+.settings-form-block-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-repo-edit-card,
+.settings-gitnexus-repo-card {
+  border-color: #d8e3f2;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.settings-gitnexus-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .settings-actions {
   display: flex;
   justify-content: flex-end;
@@ -2431,6 +2460,10 @@ body {
   }
 
   .settings-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-gitnexus-grid {
     grid-template-columns: 1fr;
   }
 

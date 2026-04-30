@@ -5,6 +5,7 @@ import type { UploadProps } from "antd";
 import {
   expertApi,
   settingsApi,
+  type CodeRepositorySettings,
   type ExpertProfile,
   type ExtensionSkill,
   type ExtensionTool,
@@ -47,6 +48,13 @@ const parseJsonArray = <T,>(value: string): T[] => {
   } catch {
     return [];
   }
+};
+
+const normalizeCodeRepositories = (value: unknown): CodeRepositorySettings[] => {
+  if (Array.isArray(value)) {
+    return value as CodeRepositorySettings[];
+  }
+  return parseJsonArray<CodeRepositorySettings>(String(value || ""));
 };
 
 const collapseExpandIconPosition = "end" as const;
@@ -169,6 +177,8 @@ const SettingsPage: React.FC = () => {
   const [savingTool, setSavingTool] = React.useState(false);
   const [gitnexusStatus, setGitnexusStatus] = React.useState<GitNexusIndexStatus | null>(null);
   const [gitnexusRunning, setGitnexusRunning] = React.useState(false);
+  const [repositoryGitnexusStatuses, setRepositoryGitnexusStatuses] = React.useState<Record<string, GitNexusIndexStatus>>({});
+  const [repositoryGitnexusRunning, setRepositoryGitnexusRunning] = React.useState<Record<string, boolean>>({});
   const [impactTemplate, setImpactTemplate] = React.useState<ImpactReportTemplate | null>(null);
   const [impactTemplateContent, setImpactTemplateContent] = React.useState("");
   const [impactTemplateSchemaContent, setImpactTemplateSchemaContent] = React.useState("");
@@ -177,6 +187,35 @@ const SettingsPage: React.FC = () => {
   const [previewingImpactTemplate, setPreviewingImpactTemplate] = React.useState(false);
   const [impactTemplatePreview, setImpactTemplatePreview] = React.useState<ImpactReportTemplatePreview | null>(null);
   const [impactTemplateAnalysis, setImpactTemplateAnalysis] = React.useState<ImpactReportTemplateAnalysis | null>(null);
+
+  const refreshRepositoryGitNexusStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
+    const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
+      String(repo?.repository_id || "").trim(),
+    );
+    if (!repoList.length) {
+      setRepositoryGitnexusStatuses({});
+      return;
+    }
+    const results = await Promise.all(
+      repoList.map(async (repo) => {
+        const repositoryId = String(repo.repository_id || "").trim();
+        try {
+          const status = await settingsApi.getRepositoryGitNexusIndexStatus(repositoryId);
+          return [repositoryId, status] as const;
+        } catch (error: any) {
+          return [
+            repositoryId,
+            {
+              repository_id: repositoryId,
+              state: "failed",
+              message: error?.message || "读取 GitNexus 图谱状态失败",
+            } satisfies GitNexusIndexStatus,
+          ] as const;
+        }
+      }),
+    );
+    setRepositoryGitnexusStatuses(Object.fromEntries(results));
+  }, [form]);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
@@ -191,6 +230,7 @@ const SettingsPage: React.FC = () => {
         settingsApi.getImpactReportTemplate(),
       ]);
       form.setFieldsValue(runtime);
+      void refreshRepositoryGitNexusStatuses(runtime.code_repositories || []);
       setExperts(expertList);
       setExtensionSkills(skills);
       setExtensionTools(tools);
@@ -232,7 +272,7 @@ const SettingsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [form, skillForm, toolForm]);
+  }, [form, refreshRepositoryGitNexusStatuses, skillForm, toolForm]);
 
   React.useEffect(() => {
     void loadPage();
@@ -241,7 +281,8 @@ const SettingsPage: React.FC = () => {
   const refreshGitNexusStatus = React.useCallback(async () => {
     const status = await settingsApi.getGitNexusIndexStatus();
     setGitnexusStatus(status);
-  }, []);
+    await refreshRepositoryGitNexusStatuses();
+  }, [refreshRepositoryGitNexusStatuses]);
 
   const handleRunGitNexusIndex = React.useCallback(async () => {
     setGitnexusRunning(true);
@@ -258,6 +299,34 @@ const SettingsPage: React.FC = () => {
       setGitnexusRunning(false);
     }
   }, [refreshGitNexusStatus]);
+
+  const handleRefreshRepositoryGitNexusStatus = React.useCallback(async (repositoryId: string) => {
+    const id = String(repositoryId || "").trim();
+    if (!id) return;
+    const status = await settingsApi.getRepositoryGitNexusIndexStatus(id);
+    setRepositoryGitnexusStatuses((prev) => ({ ...prev, [id]: status }));
+  }, []);
+
+  const handleRunRepositoryGitNexusIndex = React.useCallback(async (repositoryId: string) => {
+    const id = String(repositoryId || "").trim();
+    if (!id) {
+      message.warning("请先填写仓库 ID");
+      return;
+    }
+    setRepositoryGitnexusRunning((prev) => ({ ...prev, [id]: true }));
+    try {
+      const status = await settingsApi.runRepositoryGitNexusIndex(id);
+      setRepositoryGitnexusStatuses((prev) => ({ ...prev, [id]: status }));
+      message.success(`GitNexus 建图任务已触发：${id}`);
+      window.setTimeout(() => {
+        void handleRefreshRepositoryGitNexusStatus(id);
+      }, 1500);
+    } catch (error: any) {
+      message.error(error?.message || `触发 ${id} GitNexus 建图失败`);
+    } finally {
+      setRepositoryGitnexusRunning((prev) => ({ ...prev, [id]: false }));
+    }
+  }, [handleRefreshRepositoryGitNexusStatus]);
 
   const handleSaveImpactTemplate = React.useCallback(async () => {
     setSavingImpactTemplate(true);
@@ -372,6 +441,8 @@ const SettingsPage: React.FC = () => {
         const mode = String(form.getFieldValue("default_analysis_mode") || "standard");
         const targetBranch = String(form.getFieldValue("default_target_branch") || "main");
         const repoUrl = String(form.getFieldValue("code_repo_clone_url") || "").trim();
+        const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
+        const enabledRepositoryCount = repositories.filter((repo) => repo?.enabled !== false).length;
         const autoReviewEnabled = Boolean(form.getFieldValue("auto_review_enabled"));
         const priorityThreshold = String(form.getFieldValue("issue_min_priority_level") || "P2");
         return (
@@ -383,9 +454,9 @@ const SettingsPage: React.FC = () => {
             </div>
             <div className="settings-summary-card">
               <span className="settings-summary-label">代码仓</span>
-              <strong>{repoUrl ? "已配置" : "未配置"}</strong>
-              <span className="settings-summary-meta" title={repoUrl || "尚未配置代码仓地址"}>
-                {repoUrl || "尚未配置代码仓地址"}
+              <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : repoUrl ? "单仓兼容" : "未配置"}</strong>
+              <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || repoUrl || "尚未配置代码仓地址"}>
+                {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || repoUrl || "尚未配置代码仓地址"}
               </span>
             </div>
             <div className="settings-summary-card">
@@ -457,9 +528,9 @@ const SettingsPage: React.FC = () => {
         style={{ marginTop: 16 }}
         extra={
           <Space>
-            <Button onClick={() => void refreshGitNexusStatus()}>刷新状态</Button>
+            <Button onClick={() => void refreshGitNexusStatus()}>刷新全部状态</Button>
             <Button type="primary" loading={gitnexusRunning} onClick={() => void handleRunGitNexusIndex()}>
-              手动建立图谱
+              兼容单仓建图
             </Button>
           </Space>
         }
@@ -471,54 +542,115 @@ const SettingsPage: React.FC = () => {
           message="GitNexus 图谱用于每个 MR 的关联影响分析"
           description="部署机器需要预先安装 GitNexus。后台定时任务和手工入口只负责调用已安装的 gitnexus analyze 建图；建图完成后，结果页“关联影响报告”会直接展示 GitNexus 的影响分析结果。如果建图或调用失败，页面会明确提示失败原因，不再自动降级。"
         />
-        <Descriptions column={1} size="small">
-          <Descriptions.Item label="状态">
-            <Space wrap>
-              <Tag color={gitnexusStateColor(gitnexusStatus?.state)}>{gitnexusStatus?.state || "idle"}</Tag>
-              <span>{gitnexusStatus?.message || "尚未执行 GitNexus 建图。"}</span>
-            </Space>
-          </Descriptions.Item>
-          <Descriptions.Item label="安装状态">
-            <Space wrap>
-              <Tag color={gitnexusStatus?.gitnexus_installed ? "success" : "error"}>
-                {gitnexusStatus?.gitnexus_installed ? "已预装" : "未安装"}
-              </Tag>
-              <span>{gitnexusStatus?.gitnexus_path || "当前机器未发现 gitnexus 可执行命令"}</span>
-            </Space>
-          </Descriptions.Item>
-          <Descriptions.Item label="执行命令">
-            {gitnexusStatus?.gitnexus_command || "gitnexus analyze"}
-          </Descriptions.Item>
-          <Descriptions.Item label="代码仓路径">
-            {gitnexusStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
-          </Descriptions.Item>
-          <Descriptions.Item label="图谱目录">
-            {gitnexusStatus?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
-            {typeof gitnexusStatus?.graph_dir_exists === "boolean" ? (
-              <Tag style={{ marginLeft: 8 }} color={gitnexusStatus.graph_dir_exists ? "success" : "warning"}>
-                {gitnexusStatus.graph_dir_exists ? "目录存在" : "目录不存在"}
-              </Tag>
-            ) : null}
-          </Descriptions.Item>
-                    <Descriptions.Item label="最近更新时间">
-                      {formatBeijingTime(gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at)}
-                    </Descriptions.Item>
-          <Descriptions.Item label="当前 commit">
-            {gitnexusStatus?.commit || "暂无"}
-          </Descriptions.Item>
-          <Descriptions.Item label="官方 Registry">
-            {gitnexusStatus?.registry_path ? (
-              <Space wrap>
-                <Tag color={gitnexusStatus.registry_registered ? "success" : "warning"}>
-                  {gitnexusStatus.registry_registered ? "已注册" : "未注册"}
-                </Tag>
-                <span>{gitnexusStatus.registry_path}</span>
-              </Space>
-            ) : (
-              "暂无"
-            )}
-          </Descriptions.Item>
-        </Descriptions>
+        <Form.Item noStyle shouldUpdate>
+          {() => {
+            const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
+            if (!repositories.length) {
+              return (
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="状态">
+                    <Space wrap>
+                      <Tag color={gitnexusStateColor(gitnexusStatus?.state)}>{gitnexusStatus?.state || "idle"}</Tag>
+                      <span>{gitnexusStatus?.message || "尚未执行 GitNexus 建图。"}</span>
+                    </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="安装状态">
+                    <Space wrap>
+                      <Tag color={gitnexusStatus?.gitnexus_installed ? "success" : "error"}>
+                        {gitnexusStatus?.gitnexus_installed ? "已预装" : "未安装"}
+                      </Tag>
+                      <span>{gitnexusStatus?.gitnexus_path || "当前机器未发现 gitnexus 可执行命令"}</span>
+                    </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="执行命令">{gitnexusStatus?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
+                  <Descriptions.Item label="代码仓路径">
+                    {gitnexusStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="图谱目录">
+                    {gitnexusStatus?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
+                    {typeof gitnexusStatus?.graph_dir_exists === "boolean" ? (
+                      <Tag style={{ marginLeft: 8 }} color={gitnexusStatus.graph_dir_exists ? "success" : "warning"}>
+                        {gitnexusStatus.graph_dir_exists ? "目录存在" : "目录不存在"}
+                      </Tag>
+                    ) : null}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="最近更新时间">
+                    {formatBeijingTime(gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="当前 commit">{gitnexusStatus?.commit || "暂无"}</Descriptions.Item>
+                </Descriptions>
+              );
+            }
+            return (
+              <div className="settings-gitnexus-grid">
+                {repositories.map((repo, index) => {
+                  const repositoryId = String(repo.repository_id || "").trim();
+                  const status = repositoryId ? repositoryGitnexusStatuses[repositoryId] : undefined;
+                  return (
+                    <Card
+                      key={repositoryId || `repo-${index}`}
+                      size="small"
+                      className="settings-gitnexus-repo-card"
+                      title={
+                        <Space wrap>
+                          <span>{repo.name || repositoryId || `代码仓 ${index + 1}`}</span>
+                          <Tag>{repo.provider || "generic"}</Tag>
+                          {repo.enabled === false ? <Tag color="warning">未启用</Tag> : null}
+                        </Space>
+                      }
+                      extra={
+                        <Space>
+                          <Button size="small" disabled={!repositoryId} onClick={() => void handleRefreshRepositoryGitNexusStatus(repositoryId)}>
+                            刷新
+                          </Button>
+                          <Button
+                            size="small"
+                            type="primary"
+                            disabled={!repositoryId || repo.gitnexus_enabled === false}
+                            loading={Boolean(repositoryGitnexusRunning[repositoryId])}
+                            onClick={() => void handleRunRepositoryGitNexusIndex(repositoryId)}
+                          >
+                            手动建立图谱
+                          </Button>
+                        </Space>
+                      }
+                    >
+                      <Descriptions column={1} size="small">
+                        <Descriptions.Item label="仓库 ID">{repositoryId || "未填写"}</Descriptions.Item>
+                        <Descriptions.Item label="状态">
+                          <Space wrap>
+                            <Tag color={gitnexusStateColor(status?.state)}>{status?.state || "idle"}</Tag>
+                            <span>{status?.message || "尚未读取该仓库的 GitNexus 状态。"}</span>
+                          </Space>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="本地路径">{status?.repo_path || repo.local_path || "未配置"}</Descriptions.Item>
+                        <Descriptions.Item label="安装状态">
+                          <Space wrap>
+                            <Tag color={status?.gitnexus_installed ? "success" : "error"}>
+                              {status?.gitnexus_installed ? "已预装" : "未确认"}
+                            </Tag>
+                            <span>{status?.gitnexus_path || "刷新后显示 gitnexus 命令路径"}</span>
+                          </Space>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="执行命令">{status?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
+                        <Descriptions.Item label="图谱目录">
+                          {status?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
+                          {typeof status?.graph_dir_exists === "boolean" ? (
+                            <Tag style={{ marginLeft: 8 }} color={status.graph_dir_exists ? "success" : "warning"}>
+                              {status.graph_dir_exists ? "目录存在" : "目录不存在"}
+                            </Tag>
+                          ) : null}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="最近更新时间">{formatBeijingTime(status?.indexed_at || status?.updated_at)}</Descriptions.Item>
+                        <Descriptions.Item label="当前 commit">{status?.commit || "暂无"}</Descriptions.Item>
+                      </Descriptions>
+                    </Card>
+                  );
+                })}
+              </div>
+            );
+          }}
+        </Form.Item>
       </Card>
 
       <Card
@@ -676,7 +808,7 @@ const SettingsPage: React.FC = () => {
           onFinish={async (values) => {
             setSaving(true);
             try {
-              await settingsApi.updateRuntime({
+              const updatedRuntime = await settingsApi.updateRuntime({
                 default_target_branch: values.default_target_branch,
                 default_analysis_mode: values.default_analysis_mode || "standard",
                 storage_backend: values.storage_backend || "sqlite",
@@ -695,6 +827,8 @@ const SettingsPage: React.FC = () => {
                 auto_review_enabled: Boolean(values.auto_review_enabled),
                 auto_review_repo_url: values.code_repo_clone_url || "",
                 auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
+                default_repository_id: values.default_repository_id || "",
+                code_repositories: normalizeCodeRepositories(values.code_repositories),
                 database_sources: parseJsonArray<PostgresDataSourceSettings>(String(values.database_sources || "")),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
@@ -744,6 +878,8 @@ const SettingsPage: React.FC = () => {
                 ca_bundle_path: values.ca_bundle_path || "",
               });
               message.success("运行时设置已更新");
+              form.setFieldsValue(updatedRuntime);
+              void refreshRepositoryGitNexusStatuses(updatedRuntime.code_repositories || []);
               form.setFieldValue("default_llm_api_key", "");
               form.setFieldValue("storage_pg_password", "");
               form.setFieldValue("code_repo_access_token", "");
@@ -837,6 +973,11 @@ const SettingsPage: React.FC = () => {
                           <Input placeholder="main" />
                         </Form.Item>
                       </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="default_repository_id" label="默认代码仓 ID">
+                          <Input placeholder="ipc-fnd-service" />
+                        </Form.Item>
+                      </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item name="code_repo_auto_sync" label="自动同步代码仓" valuePropName="checked">
                           <Switch />
@@ -865,6 +1006,131 @@ const SettingsPage: React.FC = () => {
                         <Form.Item name="auto_review_poll_interval_seconds" label="自动拉取轮询间隔（秒）">
                           <InputNumber min={15} max={3600} style={{ width: "100%" }} />
                         </Form.Item>
+                      </Col>
+                      <Col xs={24}>
+                        <div className="settings-form-block">
+                          <div className="settings-form-block-header">
+                            <div>
+                              <strong>多代码仓配置</strong>
+                              <Paragraph className="settings-section-tip" style={{ marginBottom: 0 }}>
+                                自动审核会逐个扫描启用自动审核的仓库；审核任务会按 repository_id 定位本地仓、GitNexus 图谱和数据源。旧的单仓字段仍作为兼容默认仓。
+                              </Paragraph>
+                            </div>
+                          </div>
+                          <Form.List name="code_repositories">
+                            {(fields, { add, remove }) => (
+                              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                                {fields.map((field, index) => (
+                                  <Card
+                                    key={field.key}
+                                    size="small"
+                                    className="settings-repo-edit-card"
+                                    title={`代码仓 ${index + 1}`}
+                                    extra={
+                                      <Button danger size="small" onClick={() => remove(field.name)}>
+                                        删除
+                                      </Button>
+                                    }
+                                  >
+                                    <Row gutter={[12, 0]}>
+                                      <Col xs={24} xl={8}>
+                                        <Form.Item name={[field.name, "repository_id"]} label="仓库 ID" rules={[{ required: true, message: "请填写仓库 ID" }]}>
+                                          <Input placeholder="ipc-fnd-service" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24} xl={8}>
+                                        <Form.Item name={[field.name, "name"]} label="展示名称">
+                                          <Input placeholder="IPC FND Service" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24} xl={8}>
+                                        <Form.Item name={[field.name, "provider"]} label="平台类型">
+                                          <Select
+                                            options={[
+                                              { label: "CodeHub", value: "codehub" },
+                                              { label: "GitHub", value: "github" },
+                                              { label: "GitLab", value: "gitlab" },
+                                              { label: "通用 Git", value: "generic" },
+                                            ]}
+                                          />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24}>
+                                        <Form.Item name={[field.name, "clone_url"]} label="Git 地址" rules={[{ required: true, message: "请填写 Git 地址" }]}>
+                                          <Input placeholder="https://codehub.example.com/ipc/ipc-fnd-service.git" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24}>
+                                        <Form.Item name={[field.name, "web_url_prefixes"]} label="MR/网页 URL 前缀">
+                                          <Select mode="tags" tokenSeparators={[",", "\n"]} placeholder="https://codehub.example.com/ipc/ipc-fnd-service" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24} xl={12}>
+                                        <Form.Item name={[field.name, "local_path"]} label="本地代码仓目录" rules={[{ required: true, message: "请填写本地代码仓目录" }]}>
+                                          <Input placeholder="D:/workspace/ipc-fnd-service" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24} xl={6}>
+                                        <Form.Item name={[field.name, "default_branch"]} label="默认目标分支">
+                                          <Input placeholder="master" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24} xl={6}>
+                                        <Form.Item name={[field.name, "auto_review_poll_interval_seconds"]} label="轮询间隔（秒）">
+                                          <InputNumber min={15} max={3600} style={{ width: "100%" }} />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24}>
+                                        <Form.Item name={[field.name, "database_source_ids"]} label="绑定数据源 ID">
+                                          <Select mode="tags" tokenSeparators={[",", "\n"]} placeholder="留空则按 repo_url 自动匹配；也可以填写 pg-main 等数据源 ID" />
+                                        </Form.Item>
+                                      </Col>
+                                      <Col xs={24}>
+                                        <Space wrap size={[24, 8]}>
+                                          <Form.Item name={[field.name, "enabled"]} label="启用仓库" valuePropName="checked">
+                                            <Switch />
+                                          </Form.Item>
+                                          <Form.Item name={[field.name, "auto_review_enabled"]} label="自动拉取 MR" valuePropName="checked">
+                                            <Switch />
+                                          </Form.Item>
+                                          <Form.Item name={[field.name, "auto_sync"]} label="自动同步本地仓" valuePropName="checked">
+                                            <Switch />
+                                          </Form.Item>
+                                          <Form.Item name={[field.name, "gitnexus_enabled"]} label="启用 GitNexus 图谱" valuePropName="checked">
+                                            <Switch />
+                                          </Form.Item>
+                                        </Space>
+                                      </Col>
+                                    </Row>
+                                  </Card>
+                                ))}
+                                <Button
+                                  type="dashed"
+                                  onClick={() =>
+                                    add({
+                                      repository_id: "",
+                                      name: "",
+                                      provider: "codehub",
+                                      clone_url: "",
+                                      web_url_prefixes: [],
+                                      local_path: "",
+                                      default_branch: form.getFieldValue("code_repo_default_branch") || form.getFieldValue("default_target_branch") || "master",
+                                      enabled: true,
+                                      auto_review_enabled: true,
+                                      auto_review_poll_interval_seconds: Number(form.getFieldValue("auto_review_poll_interval_seconds") || 120),
+                                      auto_sync: false,
+                                      gitnexus_enabled: true,
+                                      database_source_ids: [],
+                                    })
+                                  }
+                                  block
+                                >
+                                  新增代码仓
+                                </Button>
+                              </Space>
+                            )}
+                          </Form.List>
+                        </div>
                       </Col>
                       <Col xs={24}>
                         <Form.Item

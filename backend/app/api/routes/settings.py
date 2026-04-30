@@ -5,7 +5,7 @@ from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
 from app.config import settings
-from app.domain.models.runtime_settings import PostgresDataSourceSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 import app.services.review_service as review_service_module
 
@@ -40,6 +40,8 @@ class RuntimeSettingsRequest(BaseModel):
     auto_review_enabled: bool = False
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
+    default_repository_id: str = ""
+    code_repositories: list[CodeRepositorySettings] = Field(default_factory=list)
     database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)
@@ -196,11 +198,25 @@ def get_gitnexus_index_status(request: Request) -> dict[str, object]:
     return _gitnexus_scheduler(request).status()
 
 
+@router.get("/settings/repositories/{repository_id}/gitnexus/status")
+def get_repository_gitnexus_index_status(repository_id: str, request: Request) -> dict[str, object]:
+    """返回指定代码仓最近一次 GitNexus 建图状态。"""
+
+    return _gitnexus_scheduler(request).status(repository_id)
+
+
 @router.post("/settings/gitnexus/index/run", status_code=status.HTTP_202_ACCEPTED)
 def run_gitnexus_index(request: Request) -> dict[str, object]:
     """手动触发 GitNexus 建图，供公共机器部署后按项目人工刷新图谱。"""
 
     return _gitnexus_scheduler(request).trigger_manual_index()
+
+
+@router.post("/settings/repositories/{repository_id}/gitnexus/index/run", status_code=status.HTTP_202_ACCEPTED)
+def run_repository_gitnexus_index(repository_id: str, request: Request) -> dict[str, object]:
+    """手动触发指定代码仓的 GitNexus 建图。"""
+
+    return _gitnexus_scheduler(request).trigger_manual_index(repository_id)
 
 
 @router.get("/settings/impact-report-template")

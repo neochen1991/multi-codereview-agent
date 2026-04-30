@@ -535,6 +535,8 @@ export interface RuntimeSettings {
   auto_review_enabled: boolean;
   auto_review_repo_url: string;
   auto_review_poll_interval_seconds: number;
+  default_repository_id: string;
+  code_repositories: CodeRepositorySettings[];
   database_sources: PostgresDataSourceSettings[];
   tool_allowlist: string[];
   mcp_allowlist: string[];
@@ -585,7 +587,24 @@ export interface RuntimeSettings {
   ca_bundle_path: string;
 }
 
+export interface CodeRepositorySettings {
+  repository_id: string;
+  name?: string;
+  provider?: "codehub" | "github" | "gitlab" | "generic";
+  clone_url: string;
+  web_url_prefixes?: string[];
+  local_path: string;
+  default_branch?: string;
+  enabled?: boolean;
+  auto_review_enabled?: boolean;
+  auto_review_poll_interval_seconds?: number;
+  auto_sync?: boolean;
+  gitnexus_enabled?: boolean;
+  database_source_ids?: string[];
+}
+
 export interface GitNexusIndexStatus {
+  repository_id?: string;
   state: "idle" | "running" | "ready" | "failed" | "skipped" | "unknown" | string;
   message: string;
   gitnexus_installed?: boolean;

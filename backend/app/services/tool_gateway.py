@@ -20,6 +20,7 @@ from app.services.memory_probe import MemoryProbe
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.postgres_metadata_service import PostgresMetadataService
 from app.services.repository_context_service import RepositoryContextService
+from app.services.repository_config_resolver import RepositoryConfigResolver
 
 
 class ReviewToolGateway:
@@ -49,6 +50,7 @@ class ReviewToolGateway:
         self._java_ddd_context_assembler = JavaDddContextAssembler()
         self._postgres_metadata = PostgresMetadataService()
         self._gitnexus_impact = GitNexusImpactService(root)
+        self._repository_resolver = RepositoryConfigResolver()
         self._plugin_loader = ToolPluginLoader(Path(__file__).resolve().parents[3] / "extensions" / "tools")
         self._register_defaults()
 
@@ -409,14 +411,7 @@ class ReviewToolGateway:
         )
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
         subject = ReviewSubject.model_validate(dict(payload.get("subject") or {}))
-        service = RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        service = self._repository_resolver.build_context_service(runtime, subject)
         file_path = str(payload.get("file_path") or "")
         line_start = int(payload.get("line_start") or 1)
         related_files = [
@@ -798,27 +793,13 @@ class ReviewToolGateway:
         }
 
     def _repo_context_enabled(self, runtime: RuntimeSettings, subject: ReviewSubject) -> bool:
-        service = RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        service = self._repository_resolver.build_context_service(runtime, subject)
         return service.is_ready()
 
     def _build_repository_context_service(self, payload: dict[str, Any]) -> RepositoryContextService:
         runtime = RuntimeSettings.model_validate(dict(payload.get("runtime") or {}))
         subject = dict(payload.get("subject") or {})
-        return RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        return self._repository_resolver.build_context_service(runtime, subject)
 
     def _extract_java_ddd_context(self, payload: dict[str, Any]) -> dict[str, Any]:
         service = self._build_repository_context_service(payload)

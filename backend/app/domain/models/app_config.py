@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import settings
-from app.domain.models.runtime_settings import PostgresDataSourceSettings, RuntimeSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings, RuntimeSettings
 
 
 class ServerConfig(BaseModel):
@@ -45,6 +45,24 @@ class CodeRepoConfig(BaseModel):
     # 仅保留向后兼容读取；自动审核仓库地址统一复用 clone_url。
     auto_review_repo_url: str = ""
     auto_review_poll_interval_seconds: int = 120
+
+
+class CodeRepositoryConfig(BaseModel):
+    """定义多代码仓配置项。"""
+
+    repository_id: str = ""
+    name: str = ""
+    provider: Literal["codehub", "github", "gitlab", "generic"] = "generic"
+    clone_url: str = ""
+    web_url_prefixes: list[str] = Field(default_factory=list)
+    local_path: str = ""
+    default_branch: str = "main"
+    enabled: bool = True
+    auto_review_enabled: bool = False
+    auto_review_poll_interval_seconds: int = 120
+    auto_sync: bool = False
+    gitnexus_enabled: bool = True
+    database_source_ids: list[str] = Field(default_factory=list)
 
 
 class PostgresDataSourceConfig(BaseModel):
@@ -134,6 +152,8 @@ class AppConfig(BaseModel):
     llm: LlmConfig = Field(default_factory=LlmConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     code_repo: CodeRepoConfig = Field(default_factory=CodeRepoConfig)
+    code_repositories: list[CodeRepositoryConfig] = Field(default_factory=list)
+    default_repository_id: str = ""
     database_sources: list[PostgresDataSourceConfig] = Field(default_factory=list)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
@@ -149,6 +169,13 @@ class AppConfig(BaseModel):
             if isinstance(value, PostgresDataSourceSettings):
                 return PostgresDataSourceConfig.model_validate(value.model_dump(mode="json"))
             return PostgresDataSourceConfig.model_validate(value)
+
+        def _to_repo_config(value: object) -> CodeRepositoryConfig:
+            if isinstance(value, CodeRepositoryConfig):
+                return value
+            if isinstance(value, CodeRepositorySettings):
+                return CodeRepositoryConfig.model_validate(value.model_dump(mode="json"))
+            return CodeRepositoryConfig.model_validate(value)
 
         return cls(
             llm=LlmConfig(
@@ -173,6 +200,8 @@ class AppConfig(BaseModel):
                 auto_review_repo_url=runtime.code_repo_clone_url or runtime.auto_review_repo_url,
                 auto_review_poll_interval_seconds=runtime.auto_review_poll_interval_seconds,
             ),
+            code_repositories=[_to_repo_config(item) for item in list(runtime.code_repositories)],
+            default_repository_id=runtime.default_repository_id,
             database_sources=[_to_pg_config(item) for item in list(runtime.database_sources)],
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
@@ -225,6 +254,13 @@ class AppConfig(BaseModel):
                 return PostgresDataSourceSettings.model_validate(value.model_dump(mode="json"))
             return PostgresDataSourceSettings.model_validate(value)
 
+        def _to_repo_runtime(value: object) -> CodeRepositorySettings:
+            if isinstance(value, CodeRepositorySettings):
+                return value
+            if isinstance(value, CodeRepositoryConfig):
+                return CodeRepositorySettings.model_validate(value.model_dump(mode="json"))
+            return CodeRepositorySettings.model_validate(value)
+
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
             default_analysis_mode=self.runtime.default_analysis_mode,
@@ -244,6 +280,8 @@ class AppConfig(BaseModel):
             auto_review_enabled=self.code_repo.auto_review_enabled,
             auto_review_repo_url=self.code_repo.clone_url or self.code_repo.auto_review_repo_url,
             auto_review_poll_interval_seconds=self.code_repo.auto_review_poll_interval_seconds,
+            default_repository_id=self.default_repository_id,
+            code_repositories=[_to_repo_runtime(item) for item in list(self.code_repositories)],
             database_sources=[_to_pg_runtime(item) for item in list(self.database_sources)],
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),

@@ -16,12 +16,12 @@ from app.services.review_service import ReviewService
 logger = logging.getLogger(__name__)
 
 
-def _run_gitnexus_index_in_subprocess(storage_root: str) -> None:
+def _run_gitnexus_index_in_subprocess(storage_root: str, repository_id: str = "") -> None:
     """在独立子进程中执行一次 GitNexus 建图，避免阻塞主服务进程。"""
 
     service = ReviewService(storage_root=Path(storage_root))
     scheduler = GitNexusIndexScheduler(service)
-    scheduler.tick()
+    scheduler.tick(repository_id)
 
 
 class GitNexusIndexScheduler:
@@ -43,6 +43,7 @@ class GitNexusIndexScheduler:
         self._thread: threading.Thread | None = None
         self._manual_lock = threading.Lock()
         self._manual_process: mp.Process | None = None
+        self._manual_repository_id = ""
 
     def start(self) -> None:
         if os.getenv("PYTEST_CURRENT_TEST"):
@@ -66,22 +67,34 @@ class GitNexusIndexScheduler:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.tick()
+                runtime = self._review_service.get_runtime_settings()
+                repositories = [
+                    repo
+                    for repo in runtime.enabled_repositories()
+                    if bool(getattr(repo, "gitnexus_enabled", True)) and str(getattr(repo, "repository_id", "") or "").strip()
+                ]
+                if repositories:
+                    for repository in repositories:
+                        self.tick(str(repository.repository_id))
+                else:
+                    self.tick()
             except Exception as error:
                 logger.exception("gitnexus index scheduler tick failed error=%s", error)
                 MemoryProbe.log("gitnexus_index_scheduler.error", error=error.__class__.__name__)
             interval = max(60, int(os.getenv("GITNEXUS_INDEX_INTERVAL_SECONDS", "3600") or 3600))
             self._stop_event.wait(interval)
 
-    def tick(self) -> dict[str, object]:
+    def tick(self, repository_id: str = "") -> dict[str, object]:
         runtime = self._review_service.get_runtime_settings()
-        repo_path = self._resolve_repo_path(runtime)
-        status_path = self._status_path()
+        resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
+        repo_path = self._resolve_repo_path(runtime, resolved_repository_id)
+        status_path = self._status_path(resolved_repository_id)
         binary_path = shutil.which("gitnexus") or ""
         if not repo_path:
             status = self._status(
                 "skipped",
                 "未配置本地代码仓路径，跳过 GitNexus 建图。",
+                repository_id=resolved_repository_id,
                 gitnexus_installed=bool(binary_path),
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path=binary_path,
@@ -93,6 +106,7 @@ class GitNexusIndexScheduler:
             status = self._status(
                 "failed",
                 f"配置的本地代码仓路径不存在：{repo_dir}",
+                repository_id=resolved_repository_id,
                 repo_path=str(repo_dir),
                 repo_name=repo_dir.name,
                 gitnexus_installed=bool(binary_path),
@@ -106,6 +120,7 @@ class GitNexusIndexScheduler:
             status = self._status(
                 "failed",
                 f"配置的本地代码仓路径不是目录：{repo_dir}",
+                repository_id=resolved_repository_id,
                 repo_path=str(repo_dir),
                 repo_name=repo_dir.name,
                 gitnexus_installed=bool(binary_path),
@@ -119,6 +134,7 @@ class GitNexusIndexScheduler:
             status = self._status(
                 "skipped",
                 "当前机器未预装 GitNexus，跳过建图。请先安装 GitNexus CLI，再执行图谱建立。",
+                repository_id=resolved_repository_id,
                 repo_path=str(repo_dir),
                 repo_name=repo_dir.name,
                 gitnexus_installed=False,
@@ -147,6 +163,7 @@ class GitNexusIndexScheduler:
                     f" 请优先检查 GitNexus 可执行命令是否可用，以及本地代码仓路径是否有效。"
                     f" executable={executable} repo_path={repo_dir} raw_error={error}"
                 ),
+                repository_id=resolved_repository_id,
                 repo_path=str(repo_dir),
                 repo_name=repo_dir.name,
                 gitnexus_installed=bool(binary_path),
@@ -173,6 +190,7 @@ class GitNexusIndexScheduler:
         status = self._status(
             state,
             message,
+            repository_id=resolved_repository_id,
             repo_path=str(repo_dir),
             repo_name=repo_dir.name,
             indexed_at=datetime.now(UTC).isoformat() if completed.returncode == 0 else "",
@@ -191,15 +209,18 @@ class GitNexusIndexScheduler:
         write_json(status_path, status)
         return status
 
-    def status(self) -> dict[str, object]:
+    def status(self, repository_id: str = "") -> dict[str, object]:
         """返回最近一次 GitNexus 建图状态，供设置页展示。"""
 
-        status_path = self._status_path()
+        runtime = self._review_service.get_runtime_settings()
+        resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
+        status_path = self._status_path(resolved_repository_id)
         if not status_path.exists():
             binary_path = shutil.which("gitnexus") or ""
             return self._status(
                 "idle",
                 "尚未执行 GitNexus 建图。",
+                repository_id=resolved_repository_id,
                 gitnexus_installed=bool(binary_path),
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path=binary_path,
@@ -211,6 +232,7 @@ class GitNexusIndexScheduler:
             return self._status(
                 "unknown",
                 "GitNexus 建图状态文件读取失败。",
+                repository_id=resolved_repository_id,
                 gitnexus_installed=bool(binary_path),
                 gitnexus_command="gitnexus analyze",
                 gitnexus_path=binary_path,
@@ -219,30 +241,46 @@ class GitNexusIndexScheduler:
             payload.setdefault("gitnexus_installed", bool(shutil.which("gitnexus") or ""))
             payload.setdefault("gitnexus_command", "gitnexus analyze")
             payload.setdefault("gitnexus_path", shutil.which("gitnexus") or "")
+            payload.setdefault("repository_id", resolved_repository_id)
             return dict(payload)
         binary_path = shutil.which("gitnexus") or ""
         return self._status(
             "unknown",
             "GitNexus 建图状态格式异常。",
+            repository_id=resolved_repository_id,
             gitnexus_installed=bool(binary_path),
             gitnexus_command="gitnexus analyze",
             gitnexus_path=binary_path,
         )
 
-    def trigger_manual_index(self) -> dict[str, object]:
+    def trigger_manual_index(self, repository_id: str = "") -> dict[str, object]:
         """手动触发一次建图，避免用户只能等待后台定时任务。"""
 
         with self._manual_lock:
             if self._manual_process and self._manual_process.is_alive():
-                return self.status()
+                return self.status(repository_id)
             runtime = self._review_service.get_runtime_settings()
-            repo_path = self._resolve_repo_path(runtime)
+            resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
+            repo_path = self._resolve_repo_path(runtime, resolved_repository_id)
             binary_path = shutil.which("gitnexus") or ""
+            if not repo_path:
+                skipped = self._status(
+                    "skipped",
+                    "未配置本地代码仓路径，无法触发 GitNexus 手动建图。",
+                    repository_id=resolved_repository_id,
+                    trigger="manual",
+                    gitnexus_installed=bool(binary_path),
+                    gitnexus_command="gitnexus analyze",
+                    gitnexus_path=binary_path,
+                )
+                write_json(self._status_path(resolved_repository_id), skipped)
+                return skipped
             running_status = self._status(
                 "running",
                 "GitNexus 手动建图已触发，后台子进程正在执行。",
                 repo_path=repo_path,
                 repo_name=Path(repo_path).name if repo_path else "",
+                repository_id=resolved_repository_id,
                 trigger="manual",
                 gitnexus_installed=bool(binary_path),
                 gitnexus_command="gitnexus analyze",
@@ -252,7 +290,7 @@ class GitNexusIndexScheduler:
                 process_ctx = mp.get_context("spawn")
                 process = process_ctx.Process(
                     target=_run_gitnexus_index_in_subprocess,
-                    args=(str(self._review_service.storage_root),),
+                    args=(str(self._review_service.storage_root), resolved_repository_id),
                     name="gitnexus-manual-index",
                     daemon=False,
                 )
@@ -263,19 +301,21 @@ class GitNexusIndexScheduler:
                     f"GitNexus 手动建图子进程启动失败：{error}",
                     repo_path=repo_path,
                     repo_name=Path(repo_path).name if repo_path else "",
+                    repository_id=resolved_repository_id,
                     trigger="manual",
                     gitnexus_installed=bool(binary_path),
                     gitnexus_command="gitnexus analyze",
                     gitnexus_path=binary_path,
                     error_type=error.__class__.__name__,
                 )
-                write_json(self._status_path(), failed)
+                write_json(self._status_path(resolved_repository_id), failed)
                 logger.exception("gitnexus manual index process start failed error=%s", error)
                 return failed
 
             running_status["worker_pid"] = int(process.pid or 0)
-            write_json(self._status_path(), running_status)
+            write_json(self._status_path(resolved_repository_id), running_status)
             self._manual_process = process
+            self._manual_repository_id = resolved_repository_id
             threading.Thread(target=self._watch_manual_process, name="gitnexus-manual-index-watch", daemon=True).start()
             return running_status
 
@@ -286,12 +326,14 @@ class GitNexusIndexScheduler:
         try:
             process.join()
             if int(process.exitcode or 0) != 0:
-                current = self.status()
+                repository_id = self._manual_repository_id
+                current = self.status(repository_id)
                 if str(current.get("state") or "") == "running":
                     binary_path = shutil.which("gitnexus") or ""
                     failed = self._status(
                         "failed",
                         f"GitNexus 手动建图子进程异常退出，exit_code={process.exitcode}",
+                        repository_id=repository_id,
                         repo_path=str(current.get("repo_path") or ""),
                         repo_name=str(current.get("repo_name") or ""),
                         trigger="manual",
@@ -301,7 +343,7 @@ class GitNexusIndexScheduler:
                         error_type="SubprocessExit",
                         worker_pid=int(process.pid or 0),
                     )
-                    write_json(self._status_path(), failed)
+                    write_json(self._status_path(str(current.get("repository_id") or "")), failed)
                 logger.error(
                     "gitnexus manual index subprocess exited abnormally pid=%s exit_code=%s",
                     process.pid,
@@ -311,17 +353,32 @@ class GitNexusIndexScheduler:
             with self._manual_lock:
                 if self._manual_process is process:
                     self._manual_process = None
+                    self._manual_repository_id = ""
 
     def _enabled(self) -> bool:
         return str(os.getenv("GITNEXUS_INDEX_ENABLED", "")).strip().lower() in {"1", "true", "on", "yes"}
 
-    def _resolve_repo_path(self, runtime) -> str:
-        raw = str(getattr(runtime, "code_repo_local_path", "") or "").strip()
+    def _resolve_repository_id(self, runtime, repository_id: str = "") -> str:
+        raw = str(repository_id or "").strip()
+        if raw:
+            return raw
+        return str(getattr(runtime, "default_repository_id", "") or "").strip()
+
+    def _resolve_repo_path(self, runtime, repository_id: str = "") -> str:
+        normalized_repository_id = str(repository_id or "").strip()
+        repositories = list(getattr(runtime, "code_repositories", []) or [])
+        if normalized_repository_id and repositories and not any(repo.repository_id == normalized_repository_id for repo in repositories):
+            return ""
+        repository = runtime.resolve_repository(repository_id=normalized_repository_id)
+        raw = str((repository.local_path if repository is not None else "") or getattr(runtime, "code_repo_local_path", "") or "").strip()
         if not raw:
             return ""
         return str(Path(raw).expanduser())
 
-    def _status_path(self) -> Path:
+    def _status_path(self, repository_id: str = "") -> Path:
+        normalized = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(repository_id or "").strip())
+        if normalized:
+            return self._review_service.storage_root / "gitnexus" / normalized / "index_status.json"
         return self._review_service.storage_root / "gitnexus" / "index_status.json"
 
     def _current_commit(self, repo_path: str) -> str:

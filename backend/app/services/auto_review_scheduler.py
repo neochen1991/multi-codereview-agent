@@ -60,16 +60,23 @@ class AutoReviewScheduler:
             auto_review_enabled=runtime.auto_review_enabled,
             poll_interval=runtime.auto_review_poll_interval_seconds,
         )
-        if not runtime.auto_review_enabled:
+        repositories = self._review_service.resolve_auto_review_repositories(runtime)
+        if not runtime.auto_review_enabled and not repositories:
             MemoryProbe.log("scheduler.tick.auto_review_disabled")
             return
-        repo_url = self._review_service.resolve_auto_review_repo_url(runtime)
-        if not repo_url:
+        if not repositories:
             logger.warning("auto review enabled but repo url is empty, skip this tick")
             MemoryProbe.log("scheduler.tick.empty_repo_url")
             return
-        created = self._review_service.enqueue_open_merge_requests(repo_url)
-        MemoryProbe.log("scheduler.tick.after_enqueue", created_count=len(created), repo_url=repo_url)
+        created = []
+        for repository in repositories:
+            created.extend(self._review_service.enqueue_open_merge_requests(repository.clone_url, repository.repository_id))
+        MemoryProbe.log(
+            "scheduler.tick.after_enqueue",
+            created_count=len(created),
+            repo_count=len(repositories),
+            repo_url=",".join(item.clone_url for item in repositories),
+        )
         if created:
             logger.info(
                 "auto review queue received %s new items review_ids=%s",
@@ -89,7 +96,8 @@ class AutoReviewScheduler:
             interval = 120
             try:
                 runtime = self._review_service.get_runtime_settings()
-                interval = max(15, int(runtime.auto_review_poll_interval_seconds or 120))
+                intervals = [item.auto_review_poll_interval_seconds for item in runtime.auto_review_repositories()]
+                interval = max(15, int(min(intervals) if intervals else runtime.auto_review_poll_interval_seconds or 120))
                 MemoryProbe.log("scheduler.loop.before_tick", interval=interval)
                 self.tick()
                 MemoryProbe.log("scheduler.loop.after_tick", interval=interval)

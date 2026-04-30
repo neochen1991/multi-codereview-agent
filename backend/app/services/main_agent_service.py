@@ -18,6 +18,7 @@ from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.main_agent_prompting import MainAgentPromptingMixin
 from app.services.repo_review_instruction_service import RepoReviewInstructionService
 from app.services.repository_context_service import RepositoryContextService
+from app.services.repository_config_resolver import RepositoryConfigResolver
 
 
 class MainAgentService(MainAgentPromptingMixin):
@@ -38,6 +39,7 @@ class MainAgentService(MainAgentPromptingMixin):
         self._capability_service = ExpertCapabilityService()
         self._java_quality_signal_extractor = CodeObservationExtractor()
         self._repo_review_instruction_service = RepoReviewInstructionService()
+        self._repository_resolver = RepositoryConfigResolver()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
     def build_command(
@@ -1026,14 +1028,7 @@ class MainAgentService(MainAgentPromptingMixin):
         runtime_settings: RuntimeSettings,
         subject: ReviewSubject | None = None,
     ) -> RepositoryContextService:
-        return RepositoryContextService.from_review_context(
-            clone_url=runtime_settings.code_repo_clone_url,
-            local_path=runtime_settings.code_repo_local_path,
-            default_branch=runtime_settings.code_repo_default_branch or runtime_settings.default_target_branch,
-            access_token=runtime_settings.code_repo_access_token,
-            auto_sync=runtime_settings.code_repo_auto_sync,
-            subject=subject,
-        )
+        return self._repository_resolver.build_context_service(runtime_settings, subject)
 
     def _search_related_repo_context(
         self,
@@ -1191,7 +1186,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

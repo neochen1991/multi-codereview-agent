@@ -33,6 +33,7 @@ from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
+from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.repository_context_service import RepositoryContextService
 from app.services.review_service_projection import ReviewServiceProjectionMixin
 from app.services.review_service_report import ReviewServiceReportMixin
@@ -93,6 +94,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
+        self.repository_resolver = RepositoryConfigResolver()
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
         self._active_reviews_lock = threading.Lock()
@@ -146,22 +148,32 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             for item in payload.pop("design_docs", []) or []
             if isinstance(item, dict) and str(item.get("content") or "").strip()
         ]
+        requested_target_ref = str(payload.get("target_ref") or "").strip()
         if not str(payload.get("access_token") or "").strip():
             review_url = str(payload.get("mr_url") or payload.get("repo_url") or "")
             configured_token = self._resolve_git_access_token(review_url, runtime_settings)
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        resolved_repository = self.repository_resolver.resolve(runtime_settings, subject)
         if subject.subject_type == "mr":
             for expert_id in DEFAULT_MR_EXPERTS:
                 if expert_id not in selected_experts:
                     selected_experts.append(expert_id)
         subject.metadata = {
             **dict(subject.metadata or {}),
+            "repository_id": resolved_repository.repository_id,
+            "repository_name": resolved_repository.name,
+            "repository_provider": resolved_repository.provider,
+            "workspace_repo_path": resolved_repository.local_path,
+            "repository_clone_url": resolved_repository.clone_url,
             "manual_expert_selection": manual_expert_selection,
             # API 直接创建且缺少 diff/changed_files 时，允许走兜底派工，避免回放/报告页完全无数据。
             "allow_empty_diff_fallback": bool(dict(subject.metadata or {}).get("allow_empty_diff_fallback", True)),
         }
+        subject.repo_id = subject.repo_id or resolved_repository.repository_id
+        subject.repo_url = subject.repo_url or resolved_repository.clone_url
+        subject.target_ref = requested_target_ref or resolved_repository.default_branch or subject.target_ref
         if design_docs:
             subject.metadata = {
                 **subject.metadata,
@@ -405,6 +417,19 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         current = runtime or self.get_runtime_settings()
         return str(current.code_repo_clone_url or current.auto_review_repo_url or "").strip()
 
+    def resolve_auto_review_repositories(self, runtime: RuntimeSettings | None = None):
+        """返回启用自动审核的仓库列表；没有多仓配置时回退到旧单仓。"""
+
+        current = runtime or self.get_runtime_settings()
+        repositories = current.auto_review_repositories()
+        if repositories:
+            return repositories
+        repo_url = self.resolve_auto_review_repo_url(current)
+        if not current.auto_review_enabled or not repo_url:
+            return []
+        repo = current.resolve_repository(repo_url=repo_url)
+        return [repo] if repo is not None else []
+
     def _mark_failed(self, review_id: str, reason: str) -> ReviewTask:
         """统一把后台异常收口成 review 的 failed 状态。"""
         review = self.get_review(review_id)
@@ -587,20 +612,22 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             )
         return response
 
-    def enqueue_open_merge_requests(self, repo_url: str) -> list[ReviewTask]:
+    def enqueue_open_merge_requests(self, repo_url: str, repository_id: str = "") -> list[ReviewTask]:
         """拉取仓库开放 MR/PR，并去重后加入待处理队列。"""
 
         runtime = self.get_runtime_settings()
-        token = self._resolve_git_access_token(repo_url, runtime)
-        merge_requests = self.platform_adapter.list_open_merge_requests(repo_url, token, runtime)
+        repository = runtime.resolve_repository(repository_id=repository_id, repo_url=repo_url)
+        effective_repo_url = str(repository.clone_url if repository is not None else repo_url).strip()
+        token = self._resolve_git_access_token(effective_repo_url, runtime)
+        merge_requests = self.platform_adapter.list_open_merge_requests(effective_repo_url, token, runtime)
         if not merge_requests:
-            logger.info("auto queue scan returned no open merge requests repo_url=%s", repo_url)
+            logger.info("auto queue scan returned no open merge requests repo_url=%s repository_id=%s", effective_repo_url, repository_id)
             return []
 
         existing_keys = self._existing_auto_queue_keys()
         created: list[ReviewTask] = []
         for item in merge_requests:
-            queue_key = self._auto_queue_key(item)
+            queue_key = self._auto_queue_key(item, repository.repository_id if repository is not None else repository_id)
             if queue_key in existing_keys:
                 continue
             review = self.create_review(
@@ -610,13 +637,16 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                     "repo_id": "",
                     "project_id": "",
                     "mr_url": item.mr_url,
+                    "repo_url": effective_repo_url,
                     "source_ref": item.source_ref or "",
-                    "target_ref": item.target_ref or runtime.default_target_branch or "main",
+                    "target_ref": item.target_ref or (repository.default_branch if repository is not None else "") or runtime.default_target_branch or "main",
                     "title": item.title,
                     "metadata": {
                         "trigger_source": "auto_scheduler",
                         "auto_queue_key": queue_key,
-                        "auto_queue_repo_url": repo_url,
+                        "auto_queue_repo_url": effective_repo_url,
+                        "repository_id": repository.repository_id if repository is not None else repository_id,
+                        "repository_name": repository.name if repository is not None else "",
                         "auto_queue_mr_number": item.number,
                         "auto_queue_head_sha": item.head_sha,
                     },
@@ -629,7 +659,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             logger.info(
                 "auto queue enqueued %s merge requests repo_url=%s review_ids=%s",
                 len(created),
-                repo_url,
+                effective_repo_url,
                 [item.review_id for item in created],
             )
         return created
@@ -1125,14 +1155,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
 
     def build_repository_context_service(self, subject: dict[str, object] | None = None) -> RepositoryContextService:
         runtime = self.get_runtime_settings()
-        return RepositoryContextService.from_review_context(
-            clone_url=runtime.code_repo_clone_url,
-            local_path=runtime.code_repo_local_path,
-            default_branch=runtime.code_repo_default_branch or runtime.default_target_branch,
-            access_token=runtime.code_repo_access_token,
-            auto_sync=runtime.code_repo_auto_sync,
-            subject=subject,
-        )
+        return self.repository_resolver.build_context_service(runtime, subject)
 
     def get_artifacts(self, review_id: str) -> dict[str, object]:
         try:
@@ -1200,10 +1223,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 keys.add(f"url:{mr_url}")
         return keys
 
-    def _auto_queue_key(self, merge_request: OpenMergeRequest) -> str:
+    def _auto_queue_key(self, merge_request: OpenMergeRequest, repository_id: str = "") -> str:
+        prefix = f"repo:{repository_id}:" if repository_id else ""
         if merge_request.head_sha:
-            return f"url:{merge_request.mr_url}#sha:{merge_request.head_sha}"
-        return f"url:{merge_request.mr_url}"
+            return f"{prefix}url:{merge_request.mr_url}#sha:{merge_request.head_sha}"
+        return f"{prefix}url:{merge_request.mr_url}"
 
     def record_human_decision(
         self, review_id: str, issue_id: str, decision: str, comment: str
