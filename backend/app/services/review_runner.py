@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_EXPERT_ID = "architecture_design"
 DDD_ARCHITECTURE_EXPERT_IDS = {"ddd_architecture", "ddd_specification"}
+CHANGE_IMPACT_EXPERT_ID = "change_impact_analysis"
 
 
 class ReviewClosedError(RuntimeError):
@@ -231,6 +232,11 @@ class ReviewRunner(
                 effective_runtime_settings,
                 requested_expert_ids=requested_selected_ids,
             )
+        selection_plan = self._ensure_required_mr_experts(
+            subject=review.subject,
+            selection_plan=selection_plan,
+            enabled_experts=enabled_experts,
+        )
         MemoryProbe.log(
             "review_runner.after_expert_selection",
             review_id=review.review_id,
@@ -244,8 +250,8 @@ class ReviewRunner(
             if isinstance(expert_id, str) and expert_id.strip()
         ]
         experts = [expert for expert in enabled_experts if expert.expert_id in selected_ids]
-        impact_analysis_expert = next((expert for expert in experts if expert.expert_id == "change_impact_analysis"), None)
-        review_experts = [expert for expert in experts if expert.expert_id != "change_impact_analysis"]
+        impact_analysis_expert = next((expert for expert in experts if expert.expert_id == CHANGE_IMPACT_EXPERT_ID), None)
+        review_experts = [expert for expert in experts if expert.expert_id != CHANGE_IMPACT_EXPERT_ID]
         review.selected_experts = selected_ids
         review.subject.metadata = {
             **review.subject.metadata,
@@ -2234,6 +2240,62 @@ class ReviewRunner(
                 "mode": "user_selected_direct",
                 "error": "",
             },
+        }
+
+    def _ensure_required_mr_experts(
+        self,
+        *,
+        subject: ReviewSubject,
+        selection_plan: dict[str, object],
+        enabled_experts: list[ExpertProfile],
+    ) -> dict[str, object]:
+        """MR 任务必须保留关联影响专家，避免 LLM 自动选择时把它排除。"""
+
+        if subject.subject_type != "mr":
+            return selection_plan
+        enabled_by_id = {expert.expert_id: expert for expert in enabled_experts}
+        impact_expert = enabled_by_id.get(CHANGE_IMPACT_EXPERT_ID)
+        if impact_expert is None:
+            return selection_plan
+        selected_ids = [
+            str(expert_id).strip()
+            for expert_id in list(selection_plan.get("selected_expert_ids", []) or [])
+            if str(expert_id).strip()
+        ]
+        selected_entries = [
+            dict(item)
+            for item in list(selection_plan.get("selected_experts", []) or [])
+            if isinstance(item, dict)
+        ]
+        if CHANGE_IMPACT_EXPERT_ID not in selected_ids:
+            selected_ids.append(CHANGE_IMPACT_EXPERT_ID)
+            selected_entries.append(
+                {
+                    "expert_id": CHANGE_IMPACT_EXPERT_ID,
+                    "expert_name": impact_expert.name_zh,
+                    "reason": "每个 MR 都需要输出关联影响报告，系统固定保留关联性影响分析专家。",
+                    "confidence": 1.0,
+                    "source": "system_required",
+                }
+            )
+        skipped_entries = [
+            dict(item)
+            for item in list(selection_plan.get("skipped_experts", []) or [])
+            if isinstance(item, dict) and str(item.get("expert_id") or "") != CHANGE_IMPACT_EXPERT_ID
+        ]
+        requested_ids = [
+            str(expert_id).strip()
+            for expert_id in list(selection_plan.get("requested_expert_ids", []) or [])
+            if str(expert_id).strip()
+        ]
+        if CHANGE_IMPACT_EXPERT_ID not in requested_ids:
+            requested_ids.append(CHANGE_IMPACT_EXPERT_ID)
+        return {
+            **selection_plan,
+            "requested_expert_ids": requested_ids,
+            "selected_expert_ids": selected_ids,
+            "selected_experts": selected_entries,
+            "skipped_experts": skipped_entries,
         }
 
     def _build_manual_routing_plan(

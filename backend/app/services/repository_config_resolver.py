@@ -32,6 +32,15 @@ class RepositoryConfigResolver:
             repo_url=subject.repo_url,
             mr_url=subject.mr_url,
         )
+        url_repo = self._resolve_by_url(runtime, repo_url=subject.repo_url, mr_url=subject.mr_url)
+        if (
+            repo is not None
+            and url_repo is not None
+            and repo.repository_id
+            and url_repo.repository_id
+            and repo.repository_id != url_repo.repository_id
+        ):
+            repo = url_repo
         if repo is None:
             repo = CodeRepositorySettings(
                 repository_id=repository_id or runtime.default_repository_id or "default-repository",
@@ -51,6 +60,16 @@ class RepositoryConfigResolver:
             auto_sync=repo.auto_sync,
             gitnexus_enabled=repo.gitnexus_enabled,
         )
+
+    def _resolve_by_url(self, runtime: RuntimeSettings, *, repo_url: str = "", mr_url: str = "") -> CodeRepositorySettings | None:
+        candidates = [str(repo_url or "").strip(), str(mr_url or "").strip()]
+        for value in [item for item in candidates if item]:
+            lowered = value.lower()
+            for repo in runtime.code_repositories:
+                urls = [repo.clone_url, *repo.web_url_prefixes]
+                if any(url and (lowered == url.lower() or lowered.startswith(url.lower().rstrip("/") + "/")) for url in urls):
+                    return repo
+        return None
 
     def build_context_service(
         self,

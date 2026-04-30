@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Col, Row, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -38,12 +38,13 @@ const HomePage: React.FC = () => {
   const [syncingQueue, setSyncingQueue] = useState(false);
   const [queueStartingId, setQueueStartingId] = useState("");
   const [gitnexusStatus, setGitnexusStatus] = useState<GitNexusIndexStatus | null>(null);
+  const initialLoadStartedRef = useRef(false);
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
   };
 
-  const loadReviews = async () => {
+  const loadReviews = useCallback(async () => {
     setLoading(true);
     try {
       const [allReviews, queueRows, gitnexus] = await Promise.all([
@@ -59,11 +60,15 @@ const HomePage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    if (initialLoadStartedRef.current) {
+      return;
+    }
+    initialLoadStartedRef.current = true;
     void loadReviews();
-  }, []);
+  }, [loadReviews]);
 
   const stats = useMemo(() => {
     const total = reviews.length;

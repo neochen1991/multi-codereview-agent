@@ -2,7 +2,7 @@ from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
-from app.domain.models.runtime_settings import PostgresDataSourceSettings, RuntimeSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings, RuntimeSettings
 from app.services.tool_gateway import ReviewToolGateway
 
 
@@ -119,6 +119,85 @@ def test_skill_gateway_repo_context_search_returns_related_contexts(tmp_path: Pa
     assert all("__tests__" not in item for item in repo_result["reference_hits"])
     assert repo_result["symbol_match_strategy"] == "文本检索命中 + 轻量定义特征判断"
     assert "不是 AST 级静态分析" in repo_result["symbol_match_explanation"]
+
+
+def test_skill_gateway_repo_context_search_uses_matching_repository_in_multi_repo(tmp_path: Path):
+    storage_root = tmp_path / "storage"
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    target_a = repo_a / "src" / "service.ts"
+    target_b = repo_b / "src" / "service.ts"
+    target_a.parent.mkdir(parents=True)
+    target_b.parent.mkdir(parents=True)
+    target_a.write_text("export const marker = 'repo-a-wrong-context'\n", encoding="utf-8")
+    target_b.write_text("export const marker = 'repo-b-correct-context'\n", encoding="utf-8")
+
+    gateway = ReviewToolGateway(storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务规则"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-b",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="release",
+        repo_url="https://example.com/team/repo-b.git",
+        mr_url="https://example.com/team/repo-b/merge_requests/1",
+        changed_files=["src/service.ts"],
+        unified_diff=(
+            "diff --git a/src/service.ts b/src/service.ts\n"
+            "--- a/src/service.ts\n"
+            "+++ b/src/service.ts\n"
+            "@@ -1 +1 @@\n"
+            "-export const marker = 'old'\n"
+            "+export const marker = 'repo-b-correct-context'\n"
+        ),
+        metadata={
+            "repository_id": "repo-b",
+            "repository_clone_url": "https://example.com/team/repo-b.git",
+        },
+    )
+    runtime = RuntimeSettings(
+        default_repository_id="repo-a",
+        code_repositories=[
+            CodeRepositorySettings(
+                repository_id="repo-a",
+                clone_url="https://example.com/team/repo-a.git",
+                local_path=str(repo_a),
+                default_branch="main",
+                enabled=True,
+            ),
+            CodeRepositorySettings(
+                repository_id="repo-b",
+                clone_url="https://example.com/team/repo-b.git",
+                web_url_prefixes=["https://example.com/team/repo-b"],
+                local_path=str(repo_b),
+                default_branch="release",
+                enabled=True,
+            ),
+        ],
+        runtime_tool_allowlist=["repo_context_search"],
+    )
+
+    results = gateway.invoke_for_expert(
+        expert,
+        subject,
+        runtime,
+        file_path="src/service.ts",
+        line_start=1,
+    )
+
+    repo_result = next(item for item in results if item["tool_name"] == "repo_context_search")
+    assert "repo-b-correct-context" in str(repo_result["primary_context"].get("snippet") or "")
+    assert "repo-a-wrong-context" not in str(repo_result)
 
 
 def test_skill_gateway_repo_context_search_uses_workspace_fallback_for_manual_review(tmp_path: Path, monkeypatch):

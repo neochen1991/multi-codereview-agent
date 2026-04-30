@@ -359,6 +359,79 @@ def test_review_runner_still_calls_llm_selection_when_only_system_default_impact
     assert selection.metadata.get("mode") == "live"
 
 
+def test_review_runner_forces_change_impact_expert_for_mr_even_when_llm_skips_it(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    enabled_experts = runner.registry.list_enabled()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="project",
+        source_ref="feature/demo",
+        target_ref="main",
+        title="MR review",
+    )
+
+    plan = runner._ensure_required_mr_experts(
+        subject=subject,
+        enabled_experts=enabled_experts,
+        selection_plan={
+            "requested_expert_ids": ["change_impact_analysis"],
+            "candidate_expert_ids": [expert.expert_id for expert in enabled_experts],
+            "selected_expert_ids": ["correctness_business"],
+            "selected_experts": [
+                {
+                    "expert_id": "correctness_business",
+                    "expert_name": "业务正确性专家",
+                    "reason": "LLM 判定业务专家参与",
+                    "confidence": 0.9,
+                }
+            ],
+            "skipped_experts": [
+                {
+                    "expert_id": "change_impact_analysis",
+                    "reason": "LLM 误判无需参与",
+                }
+            ],
+            "llm": {"mode": "live"},
+        },
+    )
+
+    assert "change_impact_analysis" in plan["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in plan["selected_experts"]}
+    assert selected["change_impact_analysis"]["source"] == "system_required"
+    assert all(item.get("expert_id") != "change_impact_analysis" for item in plan["skipped_experts"])
+
+
+def test_review_runner_does_not_force_change_impact_expert_for_branch_review(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    enabled_experts = runner.registry.list_enabled()
+    subject = ReviewSubject(
+        subject_type="branch",
+        repo_id="repo",
+        project_id="project",
+        source_ref="feature/demo",
+        target_ref="main",
+        title="Branch review",
+    )
+    selection_plan = {
+        "requested_expert_ids": [],
+        "candidate_expert_ids": [expert.expert_id for expert in enabled_experts],
+        "selected_expert_ids": ["correctness_business"],
+        "selected_experts": [{"expert_id": "correctness_business"}],
+        "skipped_experts": [],
+        "llm": {"mode": "live"},
+    }
+
+    plan = runner._ensure_required_mr_experts(
+        subject=subject,
+        enabled_experts=enabled_experts,
+        selection_plan=selection_plan,
+    )
+
+    assert plan is selection_plan
+    assert "change_impact_analysis" not in plan["selected_expert_ids"]
+
+
 def test_review_runner_batches_rule_screening_once_per_expert(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()

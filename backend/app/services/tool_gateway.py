@@ -170,12 +170,16 @@ class ReviewToolGateway:
                 "target_ref": subject.target_ref,
                 "title": subject.title,
                 "mr_url": subject.mr_url,
+                "repo_url": subject.repo_url,
+                "access_token": subject.access_token,
                 "changed_files": list(subject.changed_files),
                 "unified_diff": subject.unified_diff,
                 "metadata": self._build_builtin_subject_metadata(subject),
             },
             "runtime": {
                 "default_target_branch": runtime.default_target_branch,
+                "default_repository_id": runtime.default_repository_id,
+                "code_repositories": [item.model_dump(mode="json") for item in runtime.code_repositories],
                 "code_repo_clone_url": runtime.code_repo_clone_url,
                 "code_repo_local_path": runtime.code_repo_local_path,
                 "code_repo_default_branch": runtime.code_repo_default_branch,
@@ -189,6 +193,10 @@ class ReviewToolGateway:
         metadata = dict(subject.metadata or {})
         allowed_keys = {
             "trigger_source",
+            "repository_id",
+            "repository_name",
+            "repository_provider",
+            "repository_clone_url",
             "workspace_repo_path",
             "repo_context_workspace_path",
             "workspace_repo",
