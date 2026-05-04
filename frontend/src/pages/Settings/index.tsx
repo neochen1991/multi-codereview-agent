@@ -602,6 +602,22 @@ const SettingsPage: React.FC = () => {
             }
           </Form.Item>
           {runtimeOverview}
+          {(() => {
+            const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
+            return (
+              <Alert
+                type={installDisplay.label === "已预装" ? "success" : installDisplay.label === "未安装" ? "warning" : "info"}
+                showIcon
+                message={
+                  <Space wrap>
+                    <span>本机 GitNexus</span>
+                    <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
+                  </Space>
+                }
+                description={installDisplay.path}
+              />
+            );
+          })()}
         </Space>
       </Card>
 
@@ -1017,7 +1033,7 @@ const SettingsPage: React.FC = () => {
                 children: (
                   <div className="settings-collapse-content">
                     <Paragraph className="settings-section-tip">
-                      先完成这里的代码仓、默认模式和自动审核配置，系统就能正常启动审核任务。
+                      这里保留运行模式、存储和审核开关。代码仓地址、本地目录和 GitNexus 开关统一在下方“多代码仓配置”中维护。
                     </Paragraph>
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={12}>
@@ -1070,37 +1086,21 @@ const SettingsPage: React.FC = () => {
                           "未填写新密码时，系统会继续使用当前已保存的 PG 密码。",
                         )}
                       </Col>
-                      <Col xs={24}>
-                        <Form.Item name="code_repo_clone_url" label="代码仓 Git 地址">
-                          <Input placeholder="https://github.com/org/repo.git" />
-                        </Form.Item>
-                      </Col>
                       <Col xs={24} xl={12}>
-                        <Form.Item name="code_repo_local_path" label="本地代码仓目录">
-                          <Input placeholder="/Users/neochen/code/repo" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="code_repo_default_branch" label="代码仓默认分支">
-                          <Input placeholder="main" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="default_repository_id" label="默认代码仓 ID">
+                        <Form.Item
+                          name="default_repository_id"
+                          label="默认代码仓 ID"
+                          extra="填写下方多代码仓列表中的仓库 ID；为空时默认使用列表第一项。"
+                        >
                           <Input placeholder="ipc-fnd-service" />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} xl={8}>
-                        <Form.Item name="code_repo_auto_sync" label="自动同步代码仓" valuePropName="checked">
-                          <Switch />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={8}>
+                      <Col xs={24} xl={6}>
                         <Form.Item name="auto_review_enabled" label="启用自动审核队列" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} xl={8}>
+                      <Col xs={24} xl={6}>
                         <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
                           <Switch />
                         </Form.Item>
@@ -1110,8 +1110,8 @@ const SettingsPage: React.FC = () => {
                           type="info"
                           showIcon
                           style={{ marginBottom: 16 }}
-                          message="自动审核会直接复用上面的代码仓地址"
-                          description="系统启动后拉取开放中的 MR/PR 时，不再单独维护自动审核仓库地址，统一使用 config.json 中已经配置的代码仓地址。"
+                          message="代码仓信息只有一个主入口"
+                          description="请在“多代码仓配置”里维护 Git 地址、本地目录、默认分支、自动同步和 GitNexus 开关。历史单仓字段仍会由默认仓库自动同步保存，只作为兼容回退，不再单独展示。"
                         />
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1125,7 +1125,7 @@ const SettingsPage: React.FC = () => {
                             <div>
                               <strong>多代码仓配置</strong>
                               <Paragraph className="settings-section-tip" style={{ marginBottom: 0 }}>
-                                自动审核会逐个扫描启用自动审核的仓库；审核任务会按 repository_id 定位本地仓、GitNexus 图谱和数据源。旧的单仓字段仍作为兼容默认仓。
+                                这是代码仓配置的唯一主入口。审核任务会按 repository_id 定位本地仓、GitNexus 图谱和数据源；自动审核会逐个扫描启用自动审核的仓库。
                               </Paragraph>
                             </div>
                           </div>
