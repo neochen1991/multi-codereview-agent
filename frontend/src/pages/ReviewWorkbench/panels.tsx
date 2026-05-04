@@ -7,6 +7,7 @@ import type {
   ExpertSelectionSummary,
   RoutingExpertItem,
 } from "@/pages/ReviewWorkbench/helpers";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -30,7 +31,7 @@ export const RoutingExpertTags: React.FC<{
       <Space size={[8, 8]} wrap>
         {items.map((item) => (
           <Tag key={`${title}-${item.expert_id}-${item.file_path || "none"}`} color={color}>
-            {item.expert_name || item.expert_id}
+            {item.expert_name || humanizeExpertId(item.expert_id)}
           </Tag>
         ))}
       </Space>
@@ -61,7 +62,7 @@ export const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               {summary.skipped_experts.map((item) => (
                 <div key={`skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
-                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text strong>{item.expert_name || humanizeExpertId(item.expert_id)}</Text>
                   <Text type="secondary">
                     {item.reason || "当前变更未命中该角色的有效审查线索"}
                     {item.file_path ? ` · ${item.file_path}${item.line_start ? `:${item.line_start}` : ""}` : ""}
@@ -85,15 +86,15 @@ export const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummar
           <Card key={item.expert_id} size="small">
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               <Space wrap>
-                <Tag color="geekblue">{item.expert_name}</Tag>
+                <Tag color="geekblue">{item.expert_name || humanizeExpertId(item.expert_id)}</Tag>
                 <Tag color="purple">{`总规则 ${item.rule_screening.total_rules}`}</Tag>
                 <Tag>{`启用 ${item.rule_screening.enabled_rules || item.rule_screening.total_rules}`}</Tag>
                 <Tag color="magenta">{`命中 ${item.rule_screening.matched_rule_count}`}</Tag>
                 <Tag color="volcano">{`强命中 ${item.rule_screening.must_review_count}`}</Tag>
                 <Tag color="blue">{`候选 ${item.rule_screening.possible_hit_count}`}</Tag>
                 {item.rule_screening.batch_count ? <Tag>{`批次 ${item.rule_screening.batch_count}`}</Tag> : null}
-                {item.rule_screening.screening_mode ? <Tag>{item.rule_screening.screening_mode}</Tag> : null}
-                {item.rule_screening.screening_fallback_used ? <Tag color="orange">fallback</Tag> : null}
+                {item.rule_screening.screening_mode ? <Tag>{humanizeReviewText(item.rule_screening.screening_mode)}</Tag> : null}
+                {item.rule_screening.screening_fallback_used ? <Tag color="orange">备用流程</Tag> : null}
               </Space>
               {item.rule_screening.matched_rules_for_llm?.length ? (
                 <Space wrap>
@@ -130,7 +131,7 @@ export const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | 
             <Space size={[8, 8]} wrap>
               {summary.requested_expert_ids.map((item) => (
                 <Tag key={`requested-${item}`} color="blue">
-                  {item}
+                  {humanizeExpertId(item)}
                 </Tag>
               ))}
             </Space>
@@ -142,7 +143,7 @@ export const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | 
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               {summary.skipped_experts.map((item) => (
                 <div key={`selection-skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
-                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text strong>{item.expert_name || humanizeExpertId(item.expert_id)}</Text>
                   <Text type="secondary">{item.reason || "系统未将其纳入本次 MR 的审核集合"}</Text>
                 </div>
               ))}

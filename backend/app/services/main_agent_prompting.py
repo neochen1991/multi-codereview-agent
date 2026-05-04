@@ -4,6 +4,7 @@ import json
 
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.cross_file_impact import build_cross_file_impact_hints
+from app.services.main_agent_routing_support import filter_primary_signals_for_expert
 
 
 class MainAgentPromptingMixin:
@@ -538,6 +539,14 @@ class MainAgentPromptingMixin:
         signal_set = {str(item).strip() for item in java_quality_signals if str(item).strip()}
         if not signal_set:
             return selected_ids, selected_entries, skipped_entries
+        available_expert_ids = set(requested_expert_ids) & set(experts_by_id)
+
+        def _primary_signals(expert_id: str, signals: set[str]) -> set[str]:
+            return filter_primary_signals_for_expert(
+                signals=signals & signal_set,
+                expert_id=expert_id,
+                available_expert_ids=available_expert_ids,
+            )
 
         def _add_if_requested(expert_id: str, reason: str, confidence: float) -> None:
             if expert_id in selected_ids:
@@ -556,27 +565,27 @@ class MainAgentPromptingMixin:
                 }
             )
 
-        if {"factory_bypass", "event_ordering_risk"} & signal_set:
+        if _primary_signals("ddd_architecture", {"factory_bypass", "event_ordering_risk"}):
             _add_if_requested(
                 "ddd_architecture",
                 "检测到聚合工厂绕过或事件发布顺序风险，系统补入DDD架构专家复核聚合边界、应用编排和事件顺序。",
                 0.81,
             )
 
-        if "loop_call_amplification" in signal_set:
+        if _primary_signals("performance_reliability", {"loop_call_amplification"}):
             _add_if_requested(
                 "performance_reliability",
                 "检测到循环内调用放大，系统补入性能与可靠性专家复核数据库往返、远程调用和超时风险。",
                 0.84,
             )
-        if "unbounded_query_risk" in signal_set:
+        if _primary_signals("database_analysis", {"unbounded_query_risk"}):
             _add_if_requested(
                 "database_analysis",
                 "检测到查询边界缺失，系统补入数据库专家复核查询路径、索引命中和批量访问模式。",
                 0.8,
             )
 
-        if {"comment_contract_unimplemented"} & signal_set:
+        if _primary_signals("correctness_business", {"comment_contract_unimplemented"}):
             _add_if_requested(
                 "correctness_business",
                 "检测到注释或 TODO 承诺未落地，系统补入正确性与业务专家复核承诺与实现是否一致。",
@@ -590,44 +599,54 @@ class MainAgentPromptingMixin:
                 0.82,
             )
 
-        if "query_semantics_weakened" in signal_set:
+        if _primary_signals("database_analysis", {"query_semantics_weakened"}):
             _add_if_requested(
                 "database_analysis",
                 "检测到查询语义放宽，系统补入数据库专家复核结果集扩大、索引命中和访问边界。",
                 0.76,
             )
 
-        if {"idempotency_guard_removed", "lock_guard_removed", "bulk_processing_risk", "transactional_side_effect"} & signal_set:
+        if _primary_signals(
+            "performance_reliability",
+            {"idempotency_guard_removed", "lock_guard_removed", "bulk_processing_risk", "transactional_side_effect"},
+        ):
             _add_if_requested(
                 "performance_reliability",
                 "检测到幂等/锁/批量/事务副作用风险，系统补入性能与可靠性专家复核并发、超时和失败语义。",
                 0.82,
             )
 
-        if {
-            "naming_convention_violation",
-            "magic_value_literal",
-            "exception_swallowed",
-            "comment_contract_unimplemented",
-            "python_mutable_default_arg",
-            "go_unchecked_error_return",
-            "typescript_any_type",
-            "typescript_non_null_assertion",
-        } & signal_set:
+        maintainability_signals = _primary_signals(
+            "maintainability_code_health",
+            {
+                "naming_convention_violation",
+                "magic_value_literal",
+                "exception_swallowed",
+                "comment_contract_unimplemented",
+                "python_mutable_default_arg",
+                "go_unchecked_error_return",
+                "typescript_any_type",
+                "typescript_non_null_assertion",
+            },
+        )
+        if maintainability_signals:
             _add_if_requested(
                 "maintainability_code_health",
                 "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
                 0.72,
             )
 
-        if {"python_mutable_default_arg", "go_unchecked_error_return", "typescript_non_null_assertion"} & signal_set:
+        if _primary_signals(
+            "correctness_business",
+            {"python_mutable_default_arg", "go_unchecked_error_return", "typescript_non_null_assertion"},
+        ):
             _add_if_requested(
                 "correctness_business",
                 "检测到可变默认参数、错误返回被忽略或非空断言等正确性风险，系统补入正确性与业务专家复核运行时行为。",
                 0.77,
             )
 
-        if {"go_goroutine_leak_risk"} & signal_set:
+        if _primary_signals("performance_reliability", {"go_goroutine_leak_risk"}):
             _add_if_requested(
                 "performance_reliability",
                 "检测到 goroutine 生命周期控制不足，系统补入性能与可靠性专家复核资源释放和退出路径。",

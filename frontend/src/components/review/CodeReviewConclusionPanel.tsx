@@ -7,6 +7,7 @@ import type {
   ReviewFinding,
   RuleScreeningMetadata,
 } from "@/services/api";
+import { humanizeExpertId, humanizeReviewStatus, humanizeSeverity } from "@/utils/displayText";
 
 const { Paragraph } = Typography;
 
@@ -205,12 +206,12 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           {
             key: "severity",
             label: "问题级别",
-            children: <Tag color={severityColor(finding.severity)}>{finding.severity}</Tag>,
+            children: <Tag color={severityColor(finding.severity)}>{humanizeSeverity(finding.severity)}</Tag>,
           },
           {
             key: "expert",
             label: "检查角色",
-            children: <Tag color="geekblue">{finding.expert_id}</Tag>,
+            children: <Tag color="geekblue">{humanizeExpertId(finding.expert_id)}</Tag>,
           },
           {
             key: "status",
@@ -220,9 +221,9 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                 {issue ? (
                   <>
                     <Tag color={issue.status === "resolved" ? "success" : issue.needs_human ? "error" : "processing"}>
-                      {issue.status}
+                      {humanizeReviewStatus(issue.status)}
                     </Tag>
-                    <Tag>{issue.resolution || "pending"}</Tag>
+                    <Tag>{humanizeReviewStatus(issue.resolution || "pending")}</Tag>
                   </>
                 ) : (
                   <>

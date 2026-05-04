@@ -1236,12 +1236,12 @@ const SettingsPage: React.FC = () => {
                     <Row gutter={[16, 0]}>
                       <Col xs={24}>
                         <Form.Item name="code_repo_access_token" label="代码仓访问凭据">
-                          <Input.Password placeholder="留空则保持当前已配置的代码仓 token" />
+                          <Input.Password placeholder="留空则保持当前已配置的代码仓访问凭据" />
                         </Form.Item>
                         {renderConfiguredNotice(
                           "code_repo_access_token_configured",
                           "当前已在配置文件中保存代码仓访问凭据",
-                          "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
+                          "已保存的访问凭据不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1251,7 +1251,7 @@ const SettingsPage: React.FC = () => {
                         {renderConfiguredNotice(
                           "github_access_token_configured",
                           "当前已在配置文件中保存 GitHub 访问凭据",
-                          "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
+                          "已保存的访问凭据不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1261,7 +1261,7 @@ const SettingsPage: React.FC = () => {
                         {renderConfiguredNotice(
                           "gitlab_access_token_configured",
                           "当前已在配置文件中保存 GitLab 访问凭据",
-                          "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
+                          "已保存的访问凭据不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1271,7 +1271,7 @@ const SettingsPage: React.FC = () => {
                         {renderConfiguredNotice(
                           "codehub_access_token_configured",
                           "当前已在配置文件中保存 CodeHub 访问凭据",
-                          "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
+                          "已保存的访问凭据不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1668,7 +1668,7 @@ const SettingsPage: React.FC = () => {
         </Form>
       </Card>
 
-      <Card className="module-card" title="专家 Tool / Skill / 知识源配置" style={{ marginTop: 16 }} loading={loading}>
+      <Card className="module-card" title="检查角色、工具与知识源配置" style={{ marginTop: 16 }} loading={loading}>
         <Paragraph className="settings-section-tip">
           每个专家的知识源、工具绑定和运行时工具绑定收拢到单独折叠项里，避免整页展开时信息过载。
         </Paragraph>
@@ -1681,7 +1681,7 @@ const SettingsPage: React.FC = () => {
               <div className="settings-expert-header">
                 <div className="settings-expert-title">
                   <strong>{expert.name_zh}</strong>
-                  <span>{expert.expert_id}</span>
+                  <span>{`角色标识：${expert.expert_id}`}</span>
                 </div>
                 <Space wrap size={[8, 8]}>
                   <Tag>{`知识 ${expert.knowledge_sources.length}`}</Tag>
@@ -1710,7 +1710,7 @@ const SettingsPage: React.FC = () => {
                     message.success(`${expert.name_zh} 配置已更新`);
                     await loadPage();
                   } catch (error: any) {
-                    message.error(error?.message || "更新专家配置失败");
+                    message.error(error?.message || "更新检查角色配置失败");
                   } finally {
                     setSavingExpertId("");
                   }
@@ -1734,7 +1734,7 @@ const SettingsPage: React.FC = () => {
                   </Col>
                 </Row>
                 <Button type="primary" htmlType="submit" loading={savingExpertId === expert.expert_id}>
-                  保存该专家配置
+                  保存该角色配置
                 </Button>
               </Form>
             ),
@@ -1742,16 +1742,16 @@ const SettingsPage: React.FC = () => {
         />
       </Card>
 
-      <Card className="module-card" title="扩展 Skill / Tool 编辑（extensions）" style={{ marginTop: 16 }} loading={loading}>
+      <Card className="module-card" title="扩展能力与扩展工具编辑" style={{ marginTop: 16 }} loading={loading}>
         <Paragraph className="settings-section-tip">
-          扩展编辑保留页签结构，但只聚焦 skill / tool 本身，和上面的运行时设置、专家绑定分层展示。
+          扩展编辑保留页签结构，但只聚焦扩展能力和扩展工具本身，和上面的运行时设置、角色绑定分层展示。
         </Paragraph>
         <Tabs
           defaultActiveKey="skills"
           items={[
             {
               key: "skills",
-              label: "Skill 编辑",
+              label: "扩展能力编辑",
               children: (
                 <Form
                   form={skillForm}
@@ -1759,7 +1759,7 @@ const SettingsPage: React.FC = () => {
                   onFinish={async (values) => {
                     const skillId = String(values.skill_id || "").trim();
                     if (!skillId) {
-                      message.warning("请先填写 skill_id");
+                      message.warning("请先填写能力标识");
                       return;
                     }
                     setSavingSkill(true);
@@ -1781,19 +1781,19 @@ const SettingsPage: React.FC = () => {
                         output_contract: {},
                         prompt_body: String(values.prompt_body || ""),
                       });
-                      message.success(`Skill ${skillId} 已保存`);
+                      message.success(`扩展能力 ${skillId} 已保存`);
                       await loadPage();
                     } catch (error: any) {
-                      message.error(error?.message || "保存 Skill 失败");
+                      message.error(error?.message || "保存扩展能力失败");
                     } finally {
                       setSavingSkill(false);
                     }
                   }}
                 >
-                  <Form.Item label="加载已有 Skill">
+                  <Form.Item label="加载已有扩展能力">
                     <Select
                       allowClear
-                      placeholder="选择一个已有 skill 加载到编辑器"
+                      placeholder="选择一个已有扩展能力加载到编辑器"
                       options={extensionSkills.map((item) => ({ label: `${item.name} (${item.skill_id})`, value: item.skill_id }))}
                       onChange={(value) => {
                         const selected = extensionSkills.find((item) => item.skill_id === value);
@@ -1811,19 +1811,19 @@ const SettingsPage: React.FC = () => {
                       }}
                     />
                   </Form.Item>
-                  <Form.Item name="skill_id" label="skill_id" rules={[{ required: true, message: "请输入 skill_id" }]}>
+                  <Form.Item name="skill_id" label="能力标识" rules={[{ required: true, message: "请输入能力标识" }]}>
                     <Input placeholder="design-consistency-check" />
                   </Form.Item>
                   <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
                     <Input placeholder="详细设计一致性检查" />
                   </Form.Item>
                   <Form.Item name="description" label="说明">
-                    <Input placeholder="该 skill 在专家审查中的职责说明" />
+                    <Input placeholder="该扩展能力在检查流程中的职责说明" />
                   </Form.Item>
-                  <Form.Item name="bound_experts_text" label="绑定专家（逗号分隔 expert_id）">
+                  <Form.Item name="bound_experts_text" label="绑定检查角色（逗号分隔角色标识）">
                     <Input placeholder="correctness_business, architecture_design" />
                   </Form.Item>
-                  <Form.Item name="required_tools_text" label="依赖工具（逗号分隔 tool_id）">
+                  <Form.Item name="required_tools_text" label="依赖工具（逗号分隔工具标识）">
                     <Input placeholder="design_spec_alignment, repo_context_search" />
                   </Form.Item>
                   <Form.Item name="activation_hints_text" label="激活提示词（逗号分隔）">
@@ -1833,23 +1833,23 @@ const SettingsPage: React.FC = () => {
                     <Select
                       mode="multiple"
                       options={[
-                        { label: "standard", value: "standard" },
-                        { label: "light", value: "light" },
+                        { label: "标准模式", value: "standard" },
+                        { label: "轻量模式", value: "light" },
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name="prompt_body" label="SKILL.md 内容">
-                    <Input.TextArea rows={14} placeholder="在这里编辑 SKILL.md 内容" />
+                  <Form.Item name="prompt_body" label="能力说明内容">
+                    <Input.TextArea rows={14} placeholder="在这里编辑扩展能力说明与执行要求" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" loading={savingSkill}>
-                    保存 Skill
+                    保存扩展能力
                   </Button>
                 </Form>
               ),
             },
             {
               key: "tools",
-              label: "Tool 编辑",
+              label: "工具编辑",
               children: (
                 <Form
                   form={toolForm}
@@ -1857,7 +1857,7 @@ const SettingsPage: React.FC = () => {
                   onFinish={async (values) => {
                     const toolId = String(values.tool_id || "").trim();
                     if (!toolId) {
-                      message.warning("请先填写 tool_id");
+                      message.warning("请先填写工具标识");
                       return;
                     }
                     setSavingTool(true);
@@ -1875,19 +1875,19 @@ const SettingsPage: React.FC = () => {
                         output_schema: parseJsonObject(String(values.output_schema_text || "")),
                         run_script: String(values.run_script || ""),
                       });
-                      message.success(`Tool ${toolId} 已保存`);
+                      message.success(`扩展工具 ${toolId} 已保存`);
                       await loadPage();
                     } catch (error: any) {
-                      message.error(error?.message || "保存 Tool 失败");
+                      message.error(error?.message || "保存扩展工具失败");
                     } finally {
                       setSavingTool(false);
                     }
                   }}
                 >
-                  <Form.Item label="加载已有 Tool">
+                  <Form.Item label="加载已有扩展工具">
                     <Select
                       allowClear
-                      placeholder="选择一个已有 tool 加载到编辑器"
+                      placeholder="选择一个已有扩展工具加载到编辑器"
                       options={extensionTools.map((item) => ({ label: `${item.name} (${item.tool_id})`, value: item.tool_id }))}
                       onChange={(value) => {
                         const selected = extensionTools.find((item) => item.tool_id === value);
@@ -1906,14 +1906,14 @@ const SettingsPage: React.FC = () => {
                       }}
                     />
                   </Form.Item>
-                  <Form.Item name="tool_id" label="tool_id" rules={[{ required: true, message: "请输入 tool_id" }]}>
+                  <Form.Item name="tool_id" label="工具标识" rules={[{ required: true, message: "请输入工具标识" }]}>
                     <Input placeholder="design_spec_alignment" />
                   </Form.Item>
                   <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
                     <Input placeholder="详细设计一致性检查工具" />
                   </Form.Item>
                   <Form.Item name="description" label="说明">
-                    <Input placeholder="该 tool 的执行目的与输出说明" />
+                    <Input placeholder="该扩展工具的执行目的与输出说明" />
                   </Form.Item>
                   <Form.Item name="runtime" label="运行时">
                     <Input placeholder="python" />
@@ -1924,10 +1924,10 @@ const SettingsPage: React.FC = () => {
                   <Form.Item name="timeout_seconds" label="超时（秒）">
                     <InputNumber min={5} max={600} style={{ width: "100%" }} />
                   </Form.Item>
-                  <Form.Item name="allowed_experts_text" label="允许专家（逗号分隔 expert_id）">
+                  <Form.Item name="allowed_experts_text" label="允许检查角色（逗号分隔角色标识）">
                     <Input placeholder="correctness_business" />
                   </Form.Item>
-                  <Form.Item name="bound_skills_text" label="绑定 Skill（逗号分隔 skill_id）">
+                  <Form.Item name="bound_skills_text" label="绑定扩展能力（逗号分隔能力标识）">
                     <Input placeholder="design-consistency-check" />
                   </Form.Item>
                   <Form.Item name="input_schema_text" label="输入 Schema（JSON）">
@@ -1940,7 +1940,7 @@ const SettingsPage: React.FC = () => {
                     <Input.TextArea rows={14} placeholder="在这里编辑 run.py 内容" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" loading={savingTool}>
-                    保存 Tool
+                    保存扩展工具
                   </Button>
                 </Form>
               ),

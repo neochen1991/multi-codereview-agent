@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import threading
 import logging
@@ -10,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.repositories.fs import read_json, write_json
+from app.services.command_resolver import resolve_executable
 from app.services.gitnexus_impact_service import _normalize_path_for_compare, _parse_command_text
 from app.services.memory_probe import MemoryProbe
 from app.services.review_service import ReviewService
@@ -372,7 +372,7 @@ class GitNexusIndexScheduler:
         binary = str(os.getenv("GITNEXUS_BIN") or "").strip()
         if binary:
             return [binary, "analyze"]
-        binary = shutil.which("gitnexus") or "gitnexus"
+        binary = resolve_executable("gitnexus") or "gitnexus"
         return [binary, "analyze"]
 
     def _command_text(self, command: list[str]) -> str:
@@ -382,15 +382,13 @@ class GitNexusIndexScheduler:
         executable = str(command[0] if command else "").strip()
         if not executable:
             return ""
-        return shutil.which(executable) or executable
+        return resolve_executable(executable) or executable
 
     def _command_available(self, command: list[str]) -> bool:
         executable = str(command[0] if command else "").strip()
         if not executable:
             return False
-        if Path(executable).exists():
-            return True
-        return shutil.which(executable) is not None
+        return bool(resolve_executable(executable))
 
     def _resolve_repository_id(self, runtime, repository_id: str = "") -> str:
         raw = str(repository_id or "").strip()

@@ -2,6 +2,7 @@ import React from "react";
 import { Button, Card, Empty, Input, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewSummary } from "@/services/api";
+import { humanizeExpertId, humanizeReviewStatus, humanizeReviewText, stripReviewSupplementSections } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -37,7 +38,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         <div className="human-gate-status-row">
           <Tag color={humanStatus === "requested" ? "error" : humanStatus === "approved" ? "success" : "default"}>
-            {humanStatus}
+            {humanizeReviewStatus(humanStatus)}
           </Tag>
           <Text type="secondary">
             待人工确认 {review?.pending_human_issue_ids?.length || 0} 个
@@ -54,12 +55,12 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
             ) : null}
             <div className="human-gate-issue-box">
               <div className="human-gate-issue-head">
-                <Text strong>{selectedIssue.title}</Text>
+                <Text strong>{humanizeReviewText(selectedIssue.title)}</Text>
                 {selectedIssue.needs_human ? <Tag color="error">高风险</Tag> : <Tag>常规</Tag>}
               </div>
-              <Paragraph style={{ marginBottom: 8 }}>{selectedIssue.summary}</Paragraph>
+              <Paragraph style={{ marginBottom: 8 }}>{stripReviewSupplementSections(selectedIssue.summary)}</Paragraph>
               <Text type="secondary">
-                当前状态 {selectedIssue.status} · 主责角色 {selectedIssue.primary_expert_id || selectedIssue.participant_expert_ids[0] || "-"} · 参与角色 {selectedIssue.participant_expert_ids.join("、") || "-"}
+                当前状态 {humanizeReviewStatus(selectedIssue.status)} · 主责角色 {humanizeExpertId(selectedIssue.primary_expert_id || selectedIssue.participant_expert_ids[0])} · 参与角色 {selectedIssue.participant_expert_ids.map((expertId) => humanizeExpertId(expertId)).join("、") || "-"}
               </Text>
             </div>
             <Input.TextArea

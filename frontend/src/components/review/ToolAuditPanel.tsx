@@ -2,6 +2,7 @@ import React from "react";
 import { Card, Descriptions, Empty, List, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -60,15 +61,15 @@ const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="Verifier">
-                {issue.verifier_name || "builtin_verifier"}
+              <Descriptions.Item label="核验器">
+                {humanizeReviewText(issue.verifier_name || "builtin_verifier")}
               </Descriptions.Item>
-              <Descriptions.Item label="Tool">
-                {issue.tool_name ? <Tag color="processing">{issue.tool_name}</Tag> : "-"}
+              <Descriptions.Item label="工具">
+                {issue.tool_name ? <Tag color="processing">{humanizeReviewText(issue.tool_name)}</Tag> : "-"}
               </Descriptions.Item>
               <Descriptions.Item label="结果">
                 <Tag color={issue.tool_verified ? "success" : "warning"}>
-                  {issue.tool_verified ? "tool_verified" : "not_verified"}
+                  {humanizeReviewText(issue.tool_verified ? "tool_verified" : "not_verified")}
                 </Tag>
               </Descriptions.Item>
             </Descriptions>
@@ -81,9 +82,9 @@ const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
                     <Space direction="vertical" size={2} style={{ width: "100%" }}>
                       <Space wrap>
                         <Tag color="blue">{stepLabel(step.step)}</Tag>
-                        <Tag color={statusColor(step.status)}>{step.status || "-"}</Tag>
+                        <Tag color={statusColor(step.status)}>{humanizeReviewText(step.status || "-")}</Tag>
                       </Space>
-                      <Text type="secondary">{stepDescription(step)}</Text>
+                      <Text type="secondary">{humanizeReviewText(stepDescription(step))}</Text>
                     </Space>
                   </List.Item>
                 )}

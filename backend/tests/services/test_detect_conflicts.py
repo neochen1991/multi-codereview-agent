@@ -733,6 +733,47 @@ def test_detect_conflicts_splits_findings_on_different_lines():
     assert ("fdg_semantic_name",) in conflict_finding_ids
 
 
+def test_detect_conflicts_promotes_high_value_design_concern():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.95,
+            "issue_confidence_threshold_p1": 0.85,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_design_boundary",
+                "expert_id": "ddd_architecture",
+                "title": "应用服务职责边界被绕开",
+                "summary": "当前改动让 Controller 直接编排仓储和领域事件，破坏应用服务职责边界。",
+                "finding_type": "design_concern",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verification_needed": True,
+                "file_path": "src/main/java/com/example/order/OrderController.java",
+                "line_start": 42,
+                "evidence": ["Controller 直接调用 repository.save", "Controller 直接发布 domain event"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["DDD-BOUNDARY-001"],
+                "violated_guidelines": ["应用服务职责边界不能泄漏到 Controller"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_design_boundary"
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_merges_same_line_same_problem_into_single_issue():
     state = {
         "issue_filter_config": {

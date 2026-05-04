@@ -2,6 +2,7 @@ import React from "react";
 import { Card, List, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
+import { humanizeExpertId, humanizeReviewStatus, humanizeReviewText, stripReviewSupplementSections } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -42,7 +43,7 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
                   title={
                     <div className="review-finding-title">
                       <Tag color={selectedIssueId === item.issue_id ? "processing" : "default"}>
-                        {item.status}
+                        {humanizeReviewStatus(item.status)}
                       </Tag>
                       {item.needs_human ? <Tag color="error">需人工</Tag> : null}
                       <Tag color={item.verified ? "success" : "warning"}>
@@ -54,13 +55,13 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
                           {languageGuidancePresent ? "语言规范已注入" : "语言规范未知"}
                         </Tag>
                       ) : null}
-                      <span>{item.title}</span>
+                      <span>{humanizeReviewText(item.title)}</span>
                     </div>
                   }
                   description={
                     <>
                       <Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 8 }}>
-                        {item.summary}
+                        {stripReviewSupplementSections(item.summary)}
                       </Paragraph>
                       {hunkHeader ? (
                         <Paragraph ellipsis={{ rows: 1 }} type="secondary" style={{ marginBottom: 4 }}>
@@ -73,8 +74,8 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
                         </Paragraph>
                       ) : null}
                       <Text type="secondary">
-                        {`主责 ${item.primary_expert_id || item.participant_expert_ids[0] || "-"} · 参与 ${
-                          item.participant_expert_ids.join(" · ") || "暂无参与专家"
+                        {`主责 ${humanizeExpertId(item.primary_expert_id || item.participant_expert_ids[0])} · 参与 ${
+                          item.participant_expert_ids.map((expertId) => humanizeExpertId(expertId)).join(" · ") || "暂无参与角色"
                         } · 置信度 `}
                         {(item.confidence * 100).toFixed(0)}%
                       </Text>

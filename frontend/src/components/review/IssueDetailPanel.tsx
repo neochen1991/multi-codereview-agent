@@ -2,7 +2,13 @@ import React from "react";
 import { Alert, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
-import { humanizeReviewText } from "@/utils/displayText";
+import {
+  humanizeExpertId,
+  humanizeReviewStatus,
+  humanizeReviewText,
+  humanizeSeverity,
+  stripReviewSupplementSections,
+} from "@/utils/displayText";
 
 const { Paragraph } = Typography;
 
@@ -37,7 +43,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       finding?.suggested_code ||
       (finding?.code_context && Object.keys(finding.code_context).length > 0),
   );
-  const issueDescription = humanizeReviewText(issue?.summary || finding?.summary || "-");
+  const issueDescription = stripReviewSupplementSections(issue?.summary || finding?.summary || "-");
   const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-");
   const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-");
   const issueSteps = uniqueList(issue?.remediation_steps).length
@@ -86,16 +92,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </Descriptions.Item>
               <Descriptions.Item label="状态">
                 <Tag color={issue.status === "needs_human" ? "error" : issue.status === "resolved" ? "success" : "processing"}>
-                  {issue.status}
+                  {humanizeReviewStatus(issue.status)}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="严重度">
                 <Tag color={issue.severity === "blocker" || issue.severity === "high" ? "error" : "processing"}>
-                  {issue.severity}
+                  {humanizeSeverity(issue.severity)}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="复核路径">
-                {issue.resolution || (issue.needs_human ? "human_gate" : "judge_merge")}
+                {humanizeReviewStatus(issue.resolution || (issue.needs_human ? "needs_human_review" : "judge_accepted"))}
               </Descriptions.Item>
               <Descriptions.Item label="是否复核">
                 <Tag color={issue.needs_debate ? "processing" : "default"}>
@@ -106,10 +112,10 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 {issue.file_path ? `${issue.file_path}:${issue.line_start || 1}` : "-"}
               </Descriptions.Item>
               <Descriptions.Item label="主责角色">
-                {primaryExpertId || "-"}
+                {humanizeExpertId(primaryExpertId)}
               </Descriptions.Item>
               <Descriptions.Item label="参与角色">
-                {participantExperts.join("、") || (primaryExpertId ? "仅主责角色参与" : "-")}
+                {participantExperts.map((item) => humanizeExpertId(item)).join("、") || (primaryExpertId ? "仅主责角色参与" : "-")}
               </Descriptions.Item>
               <Descriptions.Item label="证据">
                 {issue.evidence.map((item) => humanizeReviewText(item)).join("、") || "-"}
@@ -222,7 +228,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>关联代码上下文</Paragraph>
                 <Descriptions column={1} size="small">
-                  <Descriptions.Item label="检查角色">{finding.expert_id}</Descriptions.Item>
+                  <Descriptions.Item label="检查角色">{humanizeExpertId(finding.expert_id)}</Descriptions.Item>
                   <Descriptions.Item label="路由原因">
                     {codeContext?.routing_reason || "当前未记录路由原因"}
                   </Descriptions.Item>

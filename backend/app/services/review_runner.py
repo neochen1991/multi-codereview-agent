@@ -1159,6 +1159,17 @@ class ReviewRunner(
             runtime_settings=effective_runtime_settings,
             llm_request_options=llm_request_options,
         )
+        issues, auto_confirmed_issue_ids = self._auto_confirm_high_confidence_issues(issues)
+        if auto_confirmed_issue_ids:
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review_id,
+                    event_type="high_confidence_issues_auto_confirmed",
+                    phase="judge",
+                    message="高置信直证据问题已自动进入正式处理清单",
+                    payload={"issue_ids": auto_confirmed_issue_ids},
+                )
+            )
         self.issue_repo.save_all(review_id, issues)
         for issue in issues:
             self._abort_if_closed(review_id)
@@ -1668,7 +1679,8 @@ class ReviewRunner(
                 "remediation_suggestion": "优先把循环内仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
                 "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
                 "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
-                "confidence_floor": 0.86,
+                "confidence_min": 0.65,
+                "confidence_cap": 0.78,
             },
             "declared_intent_without_implementation": {
                 "expert_id": "correctness_business",
@@ -1682,7 +1694,8 @@ class ReviewRunner(
                 "remediation_suggestion": "先确认该承诺是否仍然成立；如果成立就补齐实现，如果不再成立就删除失效承诺并同步修正文档或命名。",
                 "remediation_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释、TODO 或接口说明"],
                 "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
-                "confidence_floor": 0.88,
+                "confidence_min": 0.65,
+                "confidence_cap": 0.78,
             },
             "error_handling_weakened": {
                 "expert_id": "correctness_business",
@@ -1696,7 +1709,8 @@ class ReviewRunner(
                 "remediation_suggestion": "不要保留空 catch。结合当前组件语义选择 logger.error、重新抛出或补偿处理，并补充异常分支回归测试。",
                 "remediation_steps": ["恢复 catch 分支中的错误处理", "补充包含事件名/聚合 ID 的错误上下文", "增加异常分支测试覆盖"],
                 "suggested_code": "catch (Exception e) {\n    logger.error(\"Failed to consume domain event\", e);\n    throw e;\n}",
-                "confidence_floor": 0.9,
+                "confidence_min": 0.68,
+                "confidence_cap": 0.8,
             },
         }
 
@@ -1742,16 +1756,19 @@ class ReviewRunner(
                 expert_id=str(profile["expert_id"]),
                 title=str(profile["title"]),
                 summary=str(profile["summary"]),
-                finding_type="direct_defect",
+                finding_type="risk_hypothesis",
                 normalized_issue_type=normalized_issue_type,
                 category_label=self._category_label_for_finding(
-                    finding_type="direct_defect",
+                    finding_type="risk_hypothesis",
                     issue_type=normalized_issue_type,
                     expert_id=str(profile["expert_id"]),
                 ),
                 severity="high",
-                confidence=max(float(observation.get("confidence") or 0.0), float(profile.get("confidence_floor") or 0.85)),
-                confidence_rationale="确定性规则信号；结构化观察信号；直接代码证据；仍需结合业务上下文复核",
+                confidence=min(
+                    max(float(observation.get("confidence") or 0.0), float(profile.get("confidence_min") or 0.65)),
+                    float(profile.get("confidence_cap") or 0.78),
+                ),
+                confidence_rationale="结构化观察信号；需要补充上下文或二次验证后再升级为确定缺陷",
                 file_path=file_path,
                 line_start=line_start,
                 evidence=evidence[:3] or [claim],
@@ -1768,9 +1785,12 @@ class ReviewRunner(
                     "deterministic_signal": normalized_issue_type,
                     "observation_id": str(observation.get("observation_id") or "").strip(),
                     "observation_kind": kind,
+                    "verification_profile": "observation_signal_requires_review",
                 },
                 suggested_code=str(profile["suggested_code"]),
                 suggested_code_language="java",
+                verification_needed=True,
+                verification_plan="该 finding 由结构化观察信号补充生成，需要结合完整上下文、调用规模或业务契约进行二次验证。",
             )
             self.finding_repo.save(review.review_id, finding)
             finding_payloads.append(finding.model_dump(mode="json"))
@@ -6275,6 +6295,52 @@ class ReviewRunner(
                 },
             )
         )
+
+    def _auto_confirm_high_confidence_issues(self, issues: list[DebateIssue]) -> tuple[list[DebateIssue], list[str]]:
+        """Allow strong direct-evidence issues to skip the human gate.
+
+        The issue still remains in the formal issue list; this only prevents
+        high-confidence, well-anchored defects from blocking the whole review
+        behind manual confirmation.
+        """
+
+        confirmed_ids: list[str] = []
+        updated: list[DebateIssue] = []
+        for issue in issues:
+            next_issue = issue.model_copy(deep=True)
+            if self._can_auto_confirm_issue(next_issue):
+                next_issue.needs_human = False
+                next_issue.status = "resolved"
+                next_issue.resolution = "auto_confirmed_direct_evidence"
+                next_issue.verified = True
+                next_issue.updated_at = datetime.now(UTC)
+                confirmed_ids.append(next_issue.issue_id)
+            updated.append(next_issue)
+        return updated, confirmed_ids
+
+    def _can_auto_confirm_issue(self, issue: DebateIssue) -> bool:
+        if not issue.needs_human or issue.status == "resolved":
+            return False
+        if float(issue.confidence or 0.0) < 0.92:
+            return False
+        if len(issue.evidence_chain or []) < 2:
+            return False
+        if not (issue.direct_evidence or issue.verified or issue.tool_verified or issue.sast_cross_validated):
+            return False
+        if issue.consistency_conflicts or issue.remediation_alignment_conflicts:
+            return False
+        if issue.remediation_filtered:
+            return False
+        blocked_statuses = {"downgraded", "validator_failed"}
+        if str(issue.consistency_check_status or "").strip().lower() in blocked_statuses:
+            return False
+        if str(issue.resolution or "").strip().lower() in {
+            "consistency_validation_failed",
+            "human_rejected",
+            "llm_judge_rejected",
+        }:
+            return False
+        return True
 
     def _build_design_skill_summary(self, design_alignment: dict[str, object]) -> dict[str, object]:
         """把 design_spec_alignment 结果压成对话流可读摘要。"""

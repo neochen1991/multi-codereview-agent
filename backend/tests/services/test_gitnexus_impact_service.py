@@ -998,7 +998,10 @@ def test_gitnexus_impact_service_requires_preinstalled_gitnexus(storage_root: Pa
         metadata={"workspace_repo_path": str(repo_path)},
     )
 
-    with patch("app.services.gitnexus_impact_service.shutil.which", return_value=None):
+    with patch("app.services.gitnexus_impact_service.shutil.which", return_value=None), patch(
+        "app.services.command_resolver._resolve_with_system_where",
+        return_value="",
+    ):
         report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
 
     assert report.graph_status == "degraded"
@@ -1075,6 +1078,47 @@ def test_gitnexus_preflight_reports_ready_when_windows_sensitive_inputs_match(
     assert result["recommended_actions"] == []
 
 
+def test_gitnexus_preflight_finds_windows_npm_cmd_when_service_path_is_stale(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_path = tmp_path / "Repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        repo_path / ".gitnexus" / "index_status.json",
+        {"state": "ready", "repo_path": str(repo_path), "repo_name": "repo", "commit": "abc123"},
+    )
+    registry_path = tmp_path / "registry.json"
+    write_json(registry_path, [{"name": "repo", "path": str(repo_path)}])
+    appdata = tmp_path / "AppData" / "Roaming"
+    fake_bin = appdata / "npm" / "gitnexus.cmd"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr("app.services.command_resolver.shutil.which", lambda command: None)
+    monkeypatch.setattr("app.services.gitnexus_impact_service.shutil.which", lambda command: "/usr/bin/git" if command == "git" else None)
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        metadata={"workspace_repo_path": str(repo_path), "gitnexus_registry_path": str(registry_path)},
+    )
+
+    result = service.preflight(subject, RuntimeSettings())
+
+    checks = {item["name"]: item for item in result["checks"]}
+    assert checks["gitnexus_command"]["status"] == "passed"
+    assert str(fake_bin) in checks["gitnexus_command"]["message"]
+    assert result["status"] == "ready"
+
+
 def test_gitnexus_preflight_reports_actionable_failures(storage_root: Path):
     service = GitNexusImpactService(storage_root)
     subject = ReviewSubject(
@@ -1087,7 +1131,10 @@ def test_gitnexus_preflight_reports_actionable_failures(storage_root: Path):
         metadata={},
     )
 
-    with patch("app.services.gitnexus_impact_service.shutil.which", return_value=None):
+    with patch("app.services.gitnexus_impact_service.shutil.which", return_value=None), patch(
+        "app.services.command_resolver._resolve_with_system_where",
+        return_value="",
+    ):
         result = service.preflight(subject, RuntimeSettings())
 
     assert result["status"] == "failed"
@@ -1251,6 +1298,28 @@ def test_gitnexus_impact_service_extracts_removed_java_signatures_as_changed_sym
     )
 
 
+def test_gitnexus_impact_service_extracts_java_constructor_as_changed_symbol(storage_root: Path):
+    service = GitNexusImpactService(storage_root)
+
+    symbols = service._extract_changed_symbols(
+        "diff --git a/src/main/java/com/example/OrderService.java "
+        "b/src/main/java/com/example/OrderService.java\n"
+        "@@ -12,7 +12,7 @@ public class OrderService {\n"
+        " public class OrderService {\n"
+        "-  public OrderService(PaymentClient paymentClient) {\n"
+        "+  public OrderService(PaymentClient paymentClient, MeterRegistry meterRegistry) {\n"
+        "   }\n"
+    )
+
+    assert any(
+        item.symbol == "OrderService"
+        and item.container == "OrderService"
+        and item.kind == "function"
+        and item.line_start == 13
+        for item in symbols
+    )
+
+
 def test_gitnexus_impact_service_extracts_interface_method_signatures(storage_root: Path):
     service = GitNexusImpactService(storage_root)
 
@@ -1385,6 +1454,30 @@ def test_gitnexus_impact_service_extracts_synchronized_java_method_name(storage_
     )
 
     assert any(item.symbol == "createOrder" for item in symbols)
+
+
+def test_gitnexus_source_scan_includes_java_constructor(storage_root: Path):
+    service = GitNexusImpactService(storage_root)
+
+    symbols = service._extract_symbols_from_source(
+        "src/main/java/com/example/OrderService.java",
+        "\n".join(
+            [
+                "package com.example;",
+                "public class OrderService {",
+                "  public OrderService(PaymentClient paymentClient) {",
+                "    this.paymentClient = paymentClient;",
+                "  }",
+                "  public OrderDTO createOrder(Command command) {",
+                "    return new OrderDTO();",
+                "  }",
+                "}",
+            ]
+        ),
+    )
+
+    assert any(item.symbol == "OrderService" and item.container == "OrderService" for item in symbols)
+    assert any(item.symbol == "createOrder" and item.container == "OrderService" for item in symbols)
 
 
 def test_gitnexus_local_git_diff_resolves_available_refs_before_running(storage_root: Path, tmp_path: Path):

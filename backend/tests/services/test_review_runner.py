@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import app.services.review_runner as review_runner_module
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeDocumentSection
@@ -21,6 +23,89 @@ PERFORMANCE_SPEC_PATH = (
     / "performance_reliability"
     / "performance-reliability-ultra-spec.md"
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_llm_calls_for_review_runner_tests(monkeypatch):
+    """Keep review-runner tests on the mandatory LLM path without real API keys."""
+
+    def _result(text: str, phase: str) -> LLMTextResult:
+        return LLMTextResult(
+            text=text,
+            mode="live",
+            provider="test",
+            model=f"test-{phase or 'llm'}",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id=f"test-{phase or 'llm'}",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    def _fake_complete_text(
+        _self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        resolution: LLMResolution,
+        runtime_settings=None,
+        fallback_text: str,
+        temperature: float = 0.2,
+        allow_fallback: bool = False,
+        timeout_seconds: float = 60.0,
+        max_attempts: int = 3,
+        log_context: dict[str, object] | None = None,
+    ) -> LLMTextResult:
+        phase = str((log_context or {}).get("phase") or "").strip()
+        if phase in {"expert_selection", "routing_plan"}:
+            return _result(fallback_text, phase)
+        if phase == "expert_review":
+            return _result(
+                """
+                {
+                  "findings": [
+                    {
+                      "title": "新增分支缺少失败路径处理",
+                      "claim": "新增订单创建分支在保存失败时没有返回明确错误，调用方可能误判为创建成功。",
+                      "finding_type": "direct_defect",
+                      "normalized_issue_type": "missing_failure_handling",
+                      "severity": "high",
+                      "confidence": 0.93,
+                      "line_start": 18,
+                      "line_end": 18,
+                      "evidence": ["新增 create 调用没有处理 repository.save 失败或异常语义。", "当前 diff 命中订单创建主流程。"],
+                      "cross_file_evidence": [],
+                      "assumptions": [],
+                      "context_files": [],
+                      "matched_rules": ["失败路径必须显式处理"],
+                      "violated_guidelines": ["业务失败语义不能被吞掉"],
+                      "rule_based_reasoning": "新增业务分支改变成功/失败语义时，应明确处理失败路径。",
+                      "fix_strategy": "在保存失败时返回明确错误或抛出领域异常。",
+                      "suggested_fix": "补齐保存失败的错误处理，并用测试覆盖失败分支。",
+                      "change_steps": ["捕获或判断保存失败结果", "返回明确错误语义", "补充失败路径单元测试"],
+                      "suggested_code": "if (!repository.save(order)) { throw new OrderCreateException(\\\"create failed\\\"); }",
+                      "verification_needed": false,
+                      "verification_plan": ""
+                    }
+                  ]
+                }
+                """.strip(),
+                phase,
+            )
+        if phase == "debate":
+            return _result(
+                "回应主Agent: 已复核。\n风险结论: 该问题有直接代码证据。\n修复建议: 补齐失败路径处理。",
+                phase,
+            )
+        if phase == "final_summary":
+            return _result("主Agent收敛完成：本轮已形成稳定检视结果，请优先处理高风险议题。", phase)
+        return _result(fallback_text or "测试 LLM 响应", phase)
+
+    monkeypatch.setattr(
+        "app.services.llm_chat_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
 
 
 def test_review_runner_emits_finding_created_event(storage_root: Path):
@@ -1629,7 +1714,7 @@ def test_review_runner_runs_observation_followup_when_first_pass_misses_observat
     assert "expert_observation_followup" in llm_calls
 
 
-def test_review_runner_forces_loop_finding_when_llm_misses_observation(storage_root: Path, monkeypatch):
+def test_review_runner_adds_loop_risk_when_llm_misses_observation(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
         expert_id="performance_reliability",
@@ -1732,7 +1817,9 @@ def test_review_runner_forces_loop_finding_when_llm_misses_observation(storage_r
     assert len(findings) == 1
     assert findings[0].title == "循环调用放大"
     assert findings[0].expert_id == "performance_reliability"
-    assert findings[0].finding_type == "direct_defect"
+    assert findings[0].finding_type == "risk_hypothesis"
+    assert findings[0].verification_needed is True
+    assert float(findings[0].confidence) <= 0.78
 
 
 def test_review_runner_observation_followup_keeps_multiple_distinct_findings(storage_root: Path, monkeypatch):
@@ -3167,11 +3254,11 @@ def test_review_runner_uses_forced_ddd_observation_when_expert_fails(storage_roo
 
     assert finding is not None
     assert finding.finding_type == "risk_hypothesis"
-    assert finding.severity == "blocker"
+    assert finding.severity == "high"
     assert finding.verification_needed is True
     assert finding.confidence <= 0.78
     assert finding.assumptions == []
-    assert "聚合工厂绕过" in finding.title
+    assert "创建路径变更风险" in finding.title
     assert "DDD-JDDD-001" in finding.matched_rules
     assert (finding.code_context or {}).get("observation_ids") == ["obs_factory_001"]
     assert (finding.code_context or {}).get("direct_evidence") is False
@@ -3289,7 +3376,7 @@ def test_review_runner_enriches_ddd_finding_with_canonical_terms(storage_root: P
         },
     )
 
-    assert "aggregate factory bypass" in str(stabilized["title"]).lower()
+    assert "创建路径变更风险" in str(stabilized["title"])
     claim = str(stabilized["claim"]).lower()
     assert "course.create" in claim
     assert "aggregate" in claim
@@ -3659,7 +3746,7 @@ def test_review_runner_keeps_loop_amplification_finding_without_timeout_keywords
     assert runner._should_skip_finding("performance_reliability", finding) is False
 
 
-def test_review_runner_strengthens_comment_contract_unimplemented_for_correctness(storage_root: Path):
+def test_review_runner_marks_comment_contract_signal_as_verification_risk(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     stabilized = runner._enrich_java_quality_signal_language(
         {
@@ -3678,14 +3765,14 @@ def test_review_runner_strengthens_comment_contract_unimplemented_for_correctnes
     assert "承诺未落地" in str(stabilized["title"])
     assert "create 逻辑存在实现缺口" in str(stabilized["summary"])
     assert any("注释/待办承诺未实现" in item for item in list(stabilized["evidence"]))
-    assert stabilized["finding_type"] == "direct_defect"
-    assert stabilized["verification_needed"] is False
-    assert stabilized["direct_evidence"] is True
+    assert stabilized["finding_type"] == "risk_hypothesis"
+    assert stabilized["verification_needed"] is True
+    assert stabilized["direct_evidence"] is False
     assert stabilized["severity"] == "high"
-    assert float(stabilized["confidence"]) >= 0.88
+    assert float(stabilized["confidence"]) <= 0.78
 
 
-def test_review_runner_promotes_comment_contract_unimplemented_to_direct_finding(storage_root: Path):
+def test_review_runner_keeps_comment_contract_signal_as_risk_hypothesis(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
         {
@@ -3707,16 +3794,16 @@ def test_review_runner_promotes_comment_contract_unimplemented_to_direct_finding
         input_completeness={},
     )
 
-    assert result["verification_needed"] is False
-    assert result["finding_type"] == "direct_defect"
-    assert result["direct_evidence"] is True
+    assert result["verification_needed"] is True
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["direct_evidence"] is False
     assert result["severity"] == "high"
-    assert float(result["confidence"]) >= 0.88
+    assert float(result["confidence"]) <= 0.78
     assert "承诺未落地" in str(result["title"])
     assert any("注释/待办承诺未实现" in item for item in list(result["evidence"]))
 
 
-def test_review_runner_promotes_loop_amplification_to_direct_finding(storage_root: Path):
+def test_review_runner_keeps_loop_amplification_as_risk_hypothesis(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
         {
@@ -3738,16 +3825,16 @@ def test_review_runner_promotes_loop_amplification_to_direct_finding(storage_roo
         input_completeness={},
     )
 
-    assert result["finding_type"] == "direct_defect"
-    assert result["verification_needed"] is False
-    assert result["direct_evidence"] is True
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["verification_needed"] is True
+    assert result["direct_evidence"] is False
     assert result["severity"] == "high"
-    assert float(result["confidence"]) >= 0.86
+    assert float(result["confidence"]) <= 0.78
     assert "循环调用放大" in str(result["title"])
     assert any("检测到循环内调用放大" in item for item in list(result["evidence"]))
 
 
-def test_review_runner_promotes_exception_swallowed_to_direct_finding(storage_root: Path):
+def test_review_runner_keeps_exception_swallowed_as_risk_hypothesis(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
         {
@@ -3776,16 +3863,16 @@ def test_review_runner_promotes_exception_swallowed_to_direct_finding(storage_ro
         input_completeness={},
     )
 
-    assert result["finding_type"] == "direct_defect"
-    assert result["verification_needed"] is False
-    assert result["direct_evidence"] is True
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["verification_needed"] is True
+    assert result["direct_evidence"] is False
     assert result["severity"] == "high"
-    assert float(result["confidence"]) >= 0.87
+    assert float(result["confidence"]) <= 0.8
     assert "静默吞掉异常" in str(result["title"])
     assert any("静默吞掉异常" in item for item in list(result["evidence"]))
 
 
-def test_review_runner_promotes_exception_semantics_weakened_to_direct_finding(storage_root: Path):
+def test_review_runner_keeps_exception_semantics_weakened_as_risk_hypothesis(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
         {
@@ -3815,11 +3902,11 @@ def test_review_runner_promotes_exception_semantics_weakened_to_direct_finding(s
         input_completeness={},
     )
 
-    assert result["finding_type"] == "direct_defect"
-    assert result["verification_needed"] is False
-    assert result["direct_evidence"] is True
+    assert result["finding_type"] == "risk_hypothesis"
+    assert result["verification_needed"] is True
+    assert result["direct_evidence"] is False
     assert result["severity"] == "high"
-    assert float(result["confidence"]) >= 0.88
+    assert float(result["confidence"]) <= 0.8
     assert "异常返回语义被弱化" in str(result["title"])
     assert any("返回语义被弱化" in item for item in list(result["evidence"]))
 
@@ -3933,15 +4020,52 @@ def test_review_runner_builds_forced_ddd_factory_bypass_candidate(storage_root: 
     )
 
     assert len(forced) == 1
-    assert forced[0]["title"] == "聚合工厂绕过"
+    assert forced[0]["title"] == "创建路径变更风险"
     assert forced[0]["finding_type"] == "risk_hypothesis"
     assert forced[0]["verification_needed"] is True
     assert forced[0]["direct_evidence"] is False
     assert forced[0]["evidence_source"] == "observation_signal"
-    assert forced[0]["severity"] == "blocker"
+    assert forced[0]["severity"] == "high"
     assert float(forced[0]["confidence"]) <= 0.78
     assert "DDD-JDDD-001" in forced[0]["matched_rules"]
     assert forced[0]["observation_ids"] == ["obs_factory_001"]
+
+
+def test_review_runner_builds_forced_security_guard_candidate_as_verification_risk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全合规专家",
+        role="security",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_guard_001",
+                "kind": "security_guard_removed",
+                "file_path": "src/main/java/com/example/OrderController.java",
+                "line_start": 31,
+                "summary": "@PreAuthorize 被移除",
+                "evidence": ["- @PreAuthorize(\"hasRole('ADMIN')\")", "+ public Order create(...)"],
+                "related_symbols": ["@PreAuthorize", "create"],
+                "confidence": 0.77,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "入口保护变更风险"
+    assert forced[0]["finding_type"] == "risk_hypothesis"
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["direct_evidence"] is False
+    assert forced[0]["evidence_source"] == "observation_signal"
+    assert float(forced[0]["confidence"]) <= 0.8
 
 
 def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):
@@ -6276,6 +6400,61 @@ def test_review_runner_coalesces_same_root_cause_issues_before_final_judge(stora
     assert set(merged.participant_expert_ids) == {"correctness_business", "database_analysis"}
     assert merged.confidence == 0.99
     assert merged.severity == "blocker"
+
+
+def test_review_runner_auto_confirms_high_confidence_direct_evidence_issue(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_direct",
+        title="精确查询被改成模糊查询",
+        summary="builder.equal 被改成 builder.like，代码证据直接成立。",
+        finding_type="direct_defect",
+        file_path="src/Query.java",
+        line_start=42,
+        status="needs_human",
+        severity="blocker",
+        confidence=0.97,
+        needs_human=True,
+        direct_evidence=True,
+        evidence_chain=[{"step": "anchor"}, {"step": "verifier"}],
+        consistency_check_status="passed",
+    )
+
+    updated, confirmed_ids = runner._auto_confirm_high_confidence_issues([issue])
+
+    assert confirmed_ids == ["iss_direct"]
+    assert updated[0].needs_human is False
+    assert updated[0].status == "resolved"
+    assert updated[0].resolution == "auto_confirmed_direct_evidence"
+    assert updated[0].verified is True
+
+
+def test_review_runner_keeps_conflicted_issue_in_human_gate(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_conflicted",
+        title="修复建议与问题位置不一致",
+        summary="问题证据和修复建议存在冲突。",
+        finding_type="direct_defect",
+        file_path="src/Query.java",
+        line_start=42,
+        status="needs_human",
+        severity="high",
+        confidence=0.98,
+        needs_human=True,
+        direct_evidence=True,
+        evidence_chain=[{"step": "anchor"}, {"step": "verifier"}],
+        consistency_check_status="downgraded",
+        consistency_conflicts=["修复建议指向另一个文件"],
+    )
+
+    updated, confirmed_ids = runner._auto_confirm_high_confidence_issues([issue])
+
+    assert confirmed_ids == []
+    assert updated[0].needs_human is True
+    assert updated[0].status == "needs_human"
 
 
 def test_review_runner_coalesces_duplicate_event_consumer_exception_issues(storage_root: Path):

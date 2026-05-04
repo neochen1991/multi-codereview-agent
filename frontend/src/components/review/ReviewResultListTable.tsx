@@ -3,6 +3,7 @@ import { Card, Input, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 import type { IssueFilterDecision } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText, humanizeSeverity, stripReviewSupplementSections } from "@/utils/displayText";
 
 export type ReviewResultListRow = {
   id: string;
@@ -238,7 +239,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
   const severityOptions = useMemo(
     () =>
       Array.from(new Set(rows.map((item) => item.severity).filter(Boolean))).map((value) => ({
-        label: value,
+        label: humanizeSeverity(value),
         value,
       })),
     [rows],
@@ -334,52 +335,56 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         key: "summary",
         width: columnWidths.summary,
         onHeaderCell: () => ({ width: columnWidths.summary, onResize: (delta: number) => resizeColumn("summary", delta) }),
-        render: (value: string, item: ReviewResultListRow) => (
-          <Tooltip
-            placement="topLeft"
-            title={
-              <div style={{ maxWidth: 720, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>{item.title}</div>
-                <div>{value}</div>
-                {item.metaSummary ? <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>{item.metaSummary}</div> : null}
-              </div>
-            }
-          >
-            <div className="review-summary-cell">
-              <div className="review-summary-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {item.title}
-              </div>
-              <div
-                className="review-summary-text"
-                style={{
-                  lineHeight: 1.6,
-                  overflow: "hidden",
-                  display: "-webkit-box",
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: "vertical",
-                }}
-              >
-                {value}
-              </div>
-              {item.metaSummary ? (
+        render: (value: string, item: ReviewResultListRow) => {
+          const titleText = humanizeReviewText(item.title);
+          const summaryText = stripReviewSupplementSections(value);
+          return (
+            <Tooltip
+              placement="topLeft"
+              title={
+                <div style={{ maxWidth: 720, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 8 }}>{titleText}</div>
+                  <div>{summaryText}</div>
+                  {item.metaSummary ? <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>{humanizeReviewText(item.metaSummary)}</div> : null}
+                </div>
+              }
+            >
+              <div className="review-summary-cell">
+                <div className="review-summary-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {titleText}
+                </div>
                 <div
                   className="review-summary-text"
                   style={{
-                    marginTop: 6,
-                    color: "var(--text-muted)",
-                    lineHeight: 1.5,
+                    lineHeight: 1.6,
                     overflow: "hidden",
                     display: "-webkit-box",
                     WebkitLineClamp: 2,
                     WebkitBoxOrient: "vertical",
                   }}
                 >
-                  {item.metaSummary}
+                  {summaryText}
                 </div>
-              ) : null}
-            </div>
-          </Tooltip>
-        ),
+                {item.metaSummary ? (
+                  <div
+                    className="review-summary-text"
+                    style={{
+                      marginTop: 6,
+                      color: "var(--text-muted)",
+                      lineHeight: 1.5,
+                      overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                    }}
+                  >
+                    {humanizeReviewText(item.metaSummary)}
+                  </div>
+                ) : null}
+              </div>
+            </Tooltip>
+          );
+        },
       },
       {
         title: "置信度",
@@ -413,7 +418,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         key: "severity",
         width: columnWidths.severity,
         onHeaderCell: () => ({ width: columnWidths.severity, onResize: (delta: number) => resizeColumn("severity", delta) }),
-        render: (value: string) => <Tag color={getSeverityColor(value)}>{value}</Tag>,
+        render: (value: string) => <Tag color={getSeverityColor(value)}>{humanizeSeverity(value)}</Tag>,
       },
       {
         title: "检查角色",
@@ -422,11 +427,12 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         width: columnWidths.expert_labels,
         onHeaderCell: () => ({ width: columnWidths.expert_labels, onResize: (delta: number) => resizeColumn("expert_labels", delta) }),
         render: (value: string[]) => {
-          if (!value.length) return <Tag color="default">-</Tag>;
-          const visible = value.slice(0, 2);
-          const hiddenCount = Math.max(value.length - visible.length, 0);
+          const labels = Array.from(new Set((value || []).map((entry) => humanizeExpertId(entry)).filter((entry) => entry && entry !== "-")));
+          if (!labels.length) return <Tag color="default">-</Tag>;
+          const visible = labels.slice(0, 2);
+          const hiddenCount = Math.max(labels.length - visible.length, 0);
           return (
-            <Tooltip placement="topLeft" title={value.join("、")}>
+            <Tooltip placement="topLeft" title={labels.join("、")}>
               <div
                 style={{
                   display: "flex",

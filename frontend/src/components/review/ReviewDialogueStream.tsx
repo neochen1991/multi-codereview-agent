@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Avatar, Button, Empty, Segmented, Select, Space, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -736,13 +737,16 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
       ? (metadata.target_hunk as Record<string, unknown>)
       : null;
   const hunkHeader = typeof targetHunk?.hunk_header === "string" ? targetHunk.hunk_header : "";
+  const messageExpertName = humanizeExpertId(message.expert_id);
+  const targetExpertLabel = targetExpertName || (targetExpertId ? humanizeExpertId(targetExpertId) : "");
+  const replyToExpertLabel = replyToExpertId ? humanizeExpertId(replyToExpertId) : "";
   const summaryParts: string[] = [];
   if (eventType === "main_agent_command") {
-    summaryParts.push(`审核调度指派 ${targetExpertName || targetExpertId} 处理这段代码`);
+    summaryParts.push(`审核调度指派 ${targetExpertLabel} 处理这段代码`);
   } else if (eventType === "expert_ack") {
-    summaryParts.push(`${message.expert_id} 已接单，准备开始分析`);
+    summaryParts.push(`${messageExpertName} 已接单，准备开始分析`);
   } else if (eventType === "expert_analysis") {
-    summaryParts.push(`${message.expert_id} 已提交首轮分析`);
+    summaryParts.push(`${messageExpertName} 已提交首轮分析`);
   } else if (eventType === "expert_rule_screening_batch") {
     const batch = metadata.rule_screening_batch && typeof metadata.rule_screening_batch === "object"
       ? (metadata.rule_screening_batch as Record<string, unknown>)
@@ -750,14 +754,14 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     const batchIndex = typeof batch?.batch_index === "number" ? batch.batch_index : 0;
     const batchCount = typeof batch?.batch_count === "number" ? batch.batch_count : 0;
     summaryParts.push(
-      `${message.expert_id} 已完成规则筛选${batchIndex && batchCount ? `第 ${batchIndex}/${batchCount} 批` : ""}`,
+      `${messageExpertName} 已完成规则筛选${batchIndex && batchCount ? `第 ${batchIndex}/${batchCount} 批` : ""}`,
     );
   } else if (eventType === "expert_tool_call") {
-    summaryParts.push(`${message.expert_id} 正在调用工具 ${String(metadata.tool_name || "")}`);
+    summaryParts.push(`${messageExpertName} 正在调用工具 ${String(metadata.tool_name || "")}`);
   } else if (eventType === "expert_skill_call") {
-    summaryParts.push(`${message.expert_id} 正在调用运行时工具 ${String(metadata.tool_name || metadata.skill_name || "")}`);
+    summaryParts.push(`${messageExpertName} 正在调用运行时工具 ${String(metadata.tool_name || metadata.skill_name || "")}`);
   } else if (eventType === "debate_message") {
-    summaryParts.push(`${message.expert_id} 正在回应 ${replyToExpertId || "上一位专家"}`);
+    summaryParts.push(`${messageExpertName} 正在回应 ${replyToExpertLabel || "上一位检查角色"}`);
   } else if (eventType === "judge_summary") {
     summaryParts.push("结果复核正在收敛本轮问题");
   } else if (eventType === "judge_consistency_validation") {
@@ -792,7 +796,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("系统已生成关联影响报告");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
-  if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · fallback" : ""}`);
+  if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · 备用流程" : ""}`);
   if (filePath) summaryParts.push(`定位：${filePath}${lineStart ? `:${lineStart}` : ""}`);
   if (hunkHeader) summaryParts.push(`Hunk：${hunkHeader}`);
   const messageStatus =
@@ -801,7 +805,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   return {
     id: message.message_id,
     timeText: new Date(message.created_at).toLocaleString("zh-CN"),
-    agentName: message.expert_id,
+    agentName: messageExpertName,
     side: message.expert_id === "main_agent" || message.expert_id === "judge" ? "system" : "agent",
     isMainAgent: message.expert_id === "main_agent",
     messageKind,
@@ -809,16 +813,16 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     phase: String(metadata.phase || (message.expert_id === "judge" ? "judge" : "review")),
     eventType,
     status: messageStatus,
-    summary: summaryParts.join(" · ") || message.content.trim(),
-    detail,
+    summary: humanizeReviewText(summaryParts.join(" · ") || message.content.trim()),
+    detail: humanizeReviewText(detail),
     metadata,
     headerNote:
       eventType === "main_agent_command"
-        ? `派工给 ${targetExpertName || targetExpertId || "指定专家"}`
+        ? `派工给 ${targetExpertLabel || "指定检查角色"}`
         : eventType === "impact_analysis_started" || eventType === "impact_report_generated"
           ? "独立报告流程"
         : replyToExpertId
-          ? `回应 ${replyToExpertId}`
+          ? `回应 ${replyToExpertLabel}`
           : undefined,
   };
 };
@@ -986,7 +990,7 @@ const buildStructuredGroups = (
         .map((item) => {
           if (!item || typeof item !== "object") return "";
           const payload = item as Record<string, unknown>;
-          const expertName = String(payload.expert_name || payload.expert_id || "").trim();
+          const expertName = String(payload.expert_name || "").trim() || humanizeExpertId(String(payload.expert_id || ""));
           const reason = String(payload.reason || "").trim();
           if (expertName && reason) return `${expertName} · ${reason}`;
           return expertName || reason;
@@ -1032,7 +1036,7 @@ const buildStructuredGroups = (
           title: "派工准备",
           sections: [
             { label: "分析模式", values: normalizeSingleValue(metadata.analysis_mode) },
-            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids).map((item) => humanizeExpertId(item)) },
             {
               label: "变更文件数",
               values:
@@ -1061,7 +1065,7 @@ const buildStructuredGroups = (
                   : [],
             },
             { label: "分析模式", values: normalizeSingleValue(metadata.analysis_mode) },
-            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids).map((item) => humanizeExpertId(item)) },
           ].filter((section) => section.values.length > 0),
         },
       ],
@@ -1089,7 +1093,7 @@ const buildStructuredGroups = (
                   ? [String(metadata.expert_job_count)]
                   : [],
             },
-            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids) },
+            { label: "已选专家", values: normalizeValueList(metadata.selected_expert_ids).map((item) => humanizeExpertId(item)) },
           ].filter((section) => section.values.length > 0),
         },
       ],
@@ -1270,7 +1274,7 @@ const StructuredMessageCard: React.FC<{ row: ReviewDialogueViewMessage }> = ({ r
                   <div className="dialogue-structured-values">
                     {section.values.map((value, index) => (
                       <div key={`${row.id}-${group.title}-${section.label}-${index}`} className="dialogue-structured-item">
-                        {value}
+                        {humanizeReviewText(value)}
                       </div>
                     ))}
                   </div>
@@ -1507,11 +1511,11 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                           : "对话"}
                 </Tag>
                 {row.headerNote ? <Tag className="dialogue-tag dialogue-tag-focus">{row.headerNote}</Tag> : null}
-                <Tag className="dialogue-tag">{row.eventType}</Tag>
-                {targetExpertId ? <Tag className="dialogue-tag dialogue-tag-target">{`to ${targetExpertName || targetExpertId}`}</Tag> : null}
-                {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`reply ${replyToExpertId}`}</Tag> : null}
-                {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`tool ${toolName}`}</Tag> : null}
-                {skillName ? <Tag className="dialogue-tag dialogue-tag-skill">{`skill ${skillName}`}</Tag> : null}
+                <Tag className="dialogue-tag">{humanizeReviewText(row.eventType)}</Tag>
+                {targetExpertId ? <Tag className="dialogue-tag dialogue-tag-target">{`指派 ${targetExpertName || humanizeExpertId(targetExpertId)}`}</Tag> : null}
+                {replyToExpertId ? <Tag className="dialogue-tag dialogue-tag-reply">{`回应 ${humanizeExpertId(replyToExpertId)}`}</Tag> : null}
+                {toolName ? <Tag className="dialogue-tag dialogue-tag-target">{`工具 ${toolName}`}</Tag> : null}
+                {skillName ? <Tag className="dialogue-tag dialogue-tag-skill">{`能力 ${skillName}`}</Tag> : null}
                 {filePath ? <Tag className="dialogue-tag dialogue-tag-path">{filePath}</Tag> : null}
                 {lineLabel ? <Tag className="dialogue-tag">{lineLabel}</Tag> : null}
                 {hunkHeader ? <Tag className="dialogue-tag">{hunkHeader}</Tag> : null}
@@ -1527,7 +1531,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                           : "dialogue-tag-live"
                     }`}
                   >
-                    {mode}
+                    {humanizeReviewText(mode)}
                   </Tag>
                 ) : null}
               </div>
@@ -1583,7 +1587,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
               {ruleBasedReasoning ? <Paragraph className="dialogue-rule-reason">{ruleBasedReasoning}</Paragraph> : null}
               <StructuredMessageCard row={row} />
               <pre className={`dialogue-content dialogue-content-${row.messageKind}`}>
-                {isExpanded ? row.detail : compact.text || "暂无更多上下文"}
+                {humanizeReviewText(isExpanded ? row.detail : compact.text || "暂无更多上下文")}
               </pre>
               {(compact.truncated || row.detail.length > compact.text.length) && (
                 <Button

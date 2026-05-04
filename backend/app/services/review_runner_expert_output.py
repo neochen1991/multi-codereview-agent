@@ -431,8 +431,8 @@ class ReviewRunnerExpertOutputMixin:
                 '仅输出 JSON：{"findings":[{...}]}',
                 'finding 字段至少包含: file_path, line_start, line_end, title, finding_type, claim, evidence, '
                 'fix_strategy, suggested_fix, change_steps, suggested_code, confidence, verification_needed, observation_ids',
-                "verification_needed 默认应为 false；只有结论仍依赖缺失上下文、外部条件或人工确认时才设为 true。",
-                "如果 evidence 已直接指向变更代码，或 SAST/linter/规则/观察信号已交叉佐证，请保持 verification_needed=false。",
+                "observation 只能作为候选风险线索，默认 finding_type=risk_hypothesis、verification_needed=true、direct_evidence=false。",
+                "只有当你能从源码上下文独立证明缺陷成立，并且证据链不依赖 observation 本身时，才允许升级为 direct_defect。",
             ]
         )
         return "\n".join(lines)
@@ -470,7 +470,7 @@ class ReviewRunnerExpertOutputMixin:
                         "severity": "high",
                         "matched_rules": [],
                         "violated_guidelines": [],
-                        "rule_based_reasoning": "循环体内逐条调用仓储、远程服务或消息发送，会把单次调用成本放大到批量路径，属于需要直接修正的性能缺陷。",
+                        "rule_based_reasoning": "循环体内逐条调用仓储、远程服务或消息发送，可能把单次调用成本放大到批量路径，需要结合调用规模和依赖成本复核。",
                         "evidence": evidence[:3] or [summary or "检测到循环体中的外部依赖调用。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
@@ -493,25 +493,26 @@ class ReviewRunnerExpertOutputMixin:
                         "file_path": file_path,
                         "line_start": line_start,
                         "line_end": line_start,
-                        "title": "聚合工厂绕过",
+                        "title": "创建路径变更风险",
                         "finding_type": "risk_hypothesis",
-                        "claim": f"当前变更把原本的工厂创建路径替换成直接构造（{symbol_display}），可能绕过聚合根内的不变量和领域事件记录。",
-                        "severity": "blocker",
+                        "normalized_issue_type": "construction_path_changed",
+                        "claim": f"当前变更改变了对象创建路径（{symbol_display}），需要复核原创建入口是否承载不变量校验、领域事件或其他副作用。",
+                        "severity": "high",
                         "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
-                        "violated_guidelines": ["聚合根必须在领域层内守护不变量", "ApplicationService 只能编排流程，不应绕过聚合工厂"],
-                        "rule_based_reasoning": "从 diff 可直接看到工厂方法调用被删除并改为 new 构造；在 DDD 代码中，聚合工厂通常承载不变量检查和领域事件记录，应用层绕过它属于确定性架构缺陷。",
-                        "evidence": evidence[:3] or [summary or "检测到工厂方法调用被直接构造替代。"],
+                        "violated_guidelines": ["领域对象创建入口变更时必须确认不变量、领域事件和副作用仍被保留"],
+                        "rule_based_reasoning": "创建路径变化本身不是自动缺陷；只有原创建入口确实承载不变量、领域事件或副作用且新路径未保留时，才应升级为确定问题。",
+                        "evidence": evidence[:3] or [summary or "检测到对象创建路径发生变化。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
-                        "fix_strategy": "恢复通过聚合根工厂方法创建对象，保证不变量和领域事件仍在领域层内完成。",
-                        "suggested_fix": "把直接 new 聚合根的代码改回调用原有 create 工厂方法；如工厂方法被删除，应在聚合根内恢复该工厂方法并保留领域事件记录。",
-                        "change_steps": ["定位被替换的工厂方法调用", "恢复调用聚合根工厂方法", "确认工厂方法内仍记录必要领域事件"],
-                        "suggested_code": "// TODO: 恢复为 Course.create(...) 这类聚合工厂调用，避免绕过领域事件记录",
+                        "fix_strategy": "对比原创建入口与新创建路径，确认不变量校验、领域事件和副作用是否仍然完整。",
+                        "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
+                        "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
+                        "suggested_code": "// TODO: 对比原创建入口与新构造路径，保留不变量校验和领域事件语义",
                         "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认被替换的工厂方法是否确实承载不变量校验或领域事件记录。",
+                        "verification_plan": "该问题来自结构化观察信号，需要确认原创建入口是否确实承载不变量校验、领域事件记录或其他副作用。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -528,7 +529,7 @@ class ReviewRunnerExpertOutputMixin:
                         "severity": "high",
                         "matched_rules": [],
                         "violated_guidelines": [],
-                        "rule_based_reasoning": "注释、接口说明或 TODO 对外表达的是代码语义承诺；如果实现中没有对应动作，属于直接的业务正确性缺口，不应仅作为提示保留。",
+                        "rule_based_reasoning": "注释、接口说明或 TODO 可能表达代码语义承诺；如果仍是有效业务契约且实现中没有对应动作，才应升级为业务正确性问题。",
                         "evidence": evidence[:3] or [summary or "检测到注释、TODO 或方法意图与实现不一致。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
@@ -611,27 +612,27 @@ class ReviewRunnerExpertOutputMixin:
                         "file_path": file_path,
                         "line_start": line_start,
                         "line_end": line_start,
-                        "title": "入口保护被删除",
-                        "finding_type": "direct_defect",
+                        "title": "入口保护变更风险",
+                        "finding_type": "risk_hypothesis",
                         "normalized_issue_type": "security_guard_removed",
-                        "claim": f"当前变更删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），可能扩大未授权或非法输入的进入面。",
+                        "claim": f"当前变更疑似删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），需要确认该校验是否仍由其他层覆盖。",
                         "severity": "high",
                         "matched_rules": [],
                         "violated_guidelines": [],
-                        "rule_based_reasoning": "入口校验和权限判断属于安全边界。diff 中删除这类保护时，应直接作为高风险安全问题处理，而不是依赖后续人工猜测。",
+                        "rule_based_reasoning": "入口校验和权限判断可能属于安全边界；删除或迁移这类保护时，需要确认是否存在等价保护，避免把合法重构误判为缺陷。",
                         "evidence": evidence[:3] or [summary or "检测到入口保护或权限校验被删除。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
-                        "fix_strategy": "恢复入口校验、权限判断或身份一致性检查。",
-                        "suggested_fix": "保留原有校验，并为异常输入/越权输入补充回归测试。",
-                        "change_steps": ["恢复被删除的校验", "确认错误响应语义", "补充越权或非法输入测试"],
-                        "suggested_code": "// TODO: 恢复入口校验/权限保护，避免非法输入绕过",
-                        "confidence": max(float(item.get("confidence") or 0.0), 0.86),
+                        "fix_strategy": "确认被删除或迁移的入口保护是否仍由 Controller、Filter、Interceptor、注解或下游服务等价覆盖。",
+                        "suggested_fix": "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。",
+                        "change_steps": ["定位原入口保护职责", "确认新路径是否存在等价保护", "补充非法输入或越权路径测试"],
+                        "suggested_code": "// TODO: 确认入口保护是否仍由等价路径覆盖；缺失时恢复校验或权限判断",
+                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.68), 0.8),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认被删除的校验是否属于当前接口的有效安全边界。",
-                        "direct_evidence": True,
+                        "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
                 )
@@ -1098,9 +1099,16 @@ class ReviewRunnerExpertOutputMixin:
         else:
             # 仅缺失源码上下文时保留原始 finding 类型/置信度，避免把有效问题整体降为“提示性”导致 issue 为空。
             has_evidence = bool(result.get("evidence") or result.get("cross_file_evidence"))
-            result["finding_type"] = str(result.get("finding_type") or "risk_hypothesis")
-            result["verification_needed"] = bool(result.get("verification_needed", False)) and not has_strong_java_signal
-            result["direct_evidence"] = bool(has_evidence)
+            finding_type = str(result.get("finding_type") or "risk_hypothesis")
+            original_direct_evidence = bool(result.get("direct_evidence"))
+            clear_verification = (
+                has_strong_java_signal
+                and finding_type in {"direct_defect", "direct_code_issue"}
+                and original_direct_evidence
+            )
+            result["finding_type"] = finding_type
+            result["verification_needed"] = bool(result.get("verification_needed", False)) and not clear_verification
+            result["direct_evidence"] = original_direct_evidence or bool(has_evidence and not result["verification_needed"])
             result["confidence"] = float(result.get("confidence") or 0.0)
             if (not has_evidence) and str(result.get("severity") or "").lower() in {"blocker", "critical"}:
                 result["severity"] = "high"
@@ -1195,22 +1203,22 @@ class ReviewRunnerExpertOutputMixin:
 
         needs_course_create = "course.create" not in text_blob
         needs_aggregate = "aggregate" not in text_blob
-        needs_factory = "factory" not in text_blob
+        needs_factory = "factory" not in text_blob and "工厂" not in text_blob
         needs_domain_event = "domain event" not in text_blob
 
         if needs_aggregate or needs_factory:
-            suffix = "Aggregate factory bypass"
+            suffix = "创建路径变更风险"
             if suffix.lower() not in title.lower():
                 title = f"{title} ({suffix})" if title else suffix
         result["title"] = title
 
         additions: list[str] = []
         if needs_course_create:
-            additions.append("当前变更绕过了 Course.create")
+            additions.append("需要对比原 Course.create 创建入口")
         if needs_aggregate or needs_factory:
-            additions.append("这属于 aggregate factory bypass")
+            additions.append("确认原创建入口是否承载 aggregate/factory 语义或不变量校验")
         if needs_domain_event:
-            additions.append("并可能让 domain event 录制/发布语义退化")
+            additions.append("确认 domain event 录制/发布语义是否仍被保留")
         if additions:
             claim = claim.rstrip("。")
             suffix = "；".join(additions)
@@ -1322,15 +1330,16 @@ class ReviewRunnerExpertOutputMixin:
             if expert_id in {"correctness_business", "performance_reliability"}:
                 if "静默吞掉异常" not in title:
                     title = f"{title}（静默吞掉异常）" if title else "静默吞掉异常"
-                result["finding_type"] = "direct_defect"
-                result["verification_needed"] = False
-                result["direct_evidence"] = True
+                if str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+                    result["finding_type"] = "risk_hypothesis"
+                    result["verification_needed"] = True
+                    result["direct_evidence"] = False
+                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.68), 0.8)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
                     else result.get("severity")
                 )
-                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.87)
 
         if "exception_semantics_weakened" in signal_set and "伪装成成功" not in claim_blob and "返回语义" not in claim_blob:
             semantics_terms = [term for term in list(signal_terms.get("exception_semantics_weakened") or []) if term]
@@ -1347,15 +1356,16 @@ class ReviewRunnerExpertOutputMixin:
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
             if expert_id in {"correctness_business", "performance_reliability"}:
-                result["finding_type"] = "direct_defect"
-                result["verification_needed"] = False
-                result["direct_evidence"] = True
+                if str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+                    result["finding_type"] = "risk_hypothesis"
+                    result["verification_needed"] = True
+                    result["direct_evidence"] = False
+                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.68), 0.8)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
                     else result.get("severity")
                 )
-                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.88)
 
         if "loop_call_amplification" in signal_set and expert_id in {"performance_reliability", "database_analysis"}:
             loop_terms = [term for term in list(signal_terms.get("loop_call_amplification") or []) if term]
@@ -1371,15 +1381,16 @@ class ReviewRunnerExpertOutputMixin:
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
             if expert_id == "performance_reliability":
-                result["finding_type"] = "direct_defect"
-                result["verification_needed"] = False
-                result["direct_evidence"] = True
+                if str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+                    result["finding_type"] = "risk_hypothesis"
+                    result["verification_needed"] = True
+                    result["direct_evidence"] = False
+                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.65), 0.78)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
                     else result.get("severity")
                 )
-                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.86)
 
         if "comment_contract_unimplemented" in signal_set and expert_id in {"correctness_business", "maintainability_code_health"}:
             contract_terms = [term for term in list(signal_terms.get("comment_contract_unimplemented") or []) if term]
@@ -1395,15 +1406,16 @@ class ReviewRunnerExpertOutputMixin:
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
             if expert_id == "correctness_business":
-                result["finding_type"] = "direct_defect"
-                result["verification_needed"] = False
-                result["direct_evidence"] = True
+                if str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+                    result["finding_type"] = "risk_hypothesis"
+                    result["verification_needed"] = True
+                    result["direct_evidence"] = False
+                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.65), 0.78)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
                     else result.get("severity")
                 )
-                result["confidence"] = max(float(result.get("confidence") or 0.0), 0.88)
 
         result["title"] = title
         if summary_parts:

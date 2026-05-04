@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Button, Card, Empty, Segmented, Space, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ReviewSummary } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -49,7 +50,7 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
     ? metadata.design_doc_titles.map((item) => String(item)).filter(Boolean)
     : [];
   const titles: Record<Exclude<LaneCategory, "all">, string> = {
-    command: `接收命令${targetExpertId ? ` · ${targetExpertId}` : ""}`,
+    command: `接收命令${targetExpertId ? ` · ${humanizeExpertId(targetExpertId)}` : ""}`,
     skill: `激活技能 ${toolName || "skill"}`,
     tool: `调用工具 ${toolName || "tool"}`,
     chat: message.message_type === "expert_analysis" ? "输出分析结论" : "过程记录",
@@ -68,7 +69,7 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
   summaryParts.push(message.content.trim());
   return {
     id: message.message_id,
-    expertId: message.expert_id,
+    expertId: humanizeExpertId(message.expert_id),
     timeText: new Date(message.created_at).toLocaleString("zh-CN"),
     category,
     title: titles[category],
@@ -88,7 +89,7 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
           .filter((value) => value && value !== "main_agent" && value !== "judge" && value !== "change_impact_analysis"),
       ),
     );
-    return Array.from(new Set([...selected, ...fromMessages]));
+    return Array.from(new Set([...selected, ...fromMessages].map((expertId) => humanizeExpertId(expertId))));
   }, [messages, review?.selected_experts]);
   const laneEntries = useMemo(() => messages.map(buildLaneEntry), [messages]);
   const rowsByExpert = useMemo(() => {
@@ -133,7 +134,7 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
               return (
                 <div key={expertId} className="expert-lane-column">
                   <div className="expert-lane-header">
-                    <Tag color="blue">{expertId}</Tag>
+                    <Tag color="blue">{humanizeExpertId(expertId)}</Tag>
                     <Text type="secondary">{rows.length > 0 ? `${rows.length} 条记录` : "暂无记录"}</Text>
                   </div>
                   <div className="expert-lane-body">
@@ -158,7 +159,7 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
                       visibleRows.map((row) => (
                         <div key={row.id} className={`expert-lane-node expert-lane-node-${row.category}`}>
                           <div className="expert-lane-node-meta">
-                            <Tag className="expert-lane-node-tag">{row.category}</Tag>
+                            <Tag className="expert-lane-node-tag">{humanizeReviewText(row.category)}</Tag>
                             <Text type="secondary">{row.timeText}</Text>
                           </div>
                           <Text strong className="expert-lane-node-title">

@@ -2,6 +2,7 @@ import React from "react";
 import { Card, Empty, List, Tag, Typography } from "antd";
 
 import type { ConversationMessage } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -28,8 +29,8 @@ const ConversationMessageList: React.FC<ConversationMessageListProps> = ({
               <List.Item.Meta
                 title={
                   <div className="review-event-title">
-                    <Tag color="geekblue">{item.expert_id}</Tag>
-                    <span>{item.message_type}</span>
+                    <Tag color="geekblue">{humanizeExpertId(item.expert_id)}</Tag>
+                    <span>{humanizeReviewText(item.message_type)}</span>
                   </div>
                 }
                 description={

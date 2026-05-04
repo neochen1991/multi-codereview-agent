@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Tag } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
+import { humanizeExpertId } from "@/utils/displayText";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 type FindingsPanelProps = {
@@ -112,7 +113,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           finding_type_labels: buildFindingTypeLabels(finding),
           severity: finding.severity,
           confidence: finding.confidence,
-          expert_labels: finding.expert_id ? [finding.expert_id] : [],
+          expert_labels: finding.expert_id ? [humanizeExpertId(finding.expert_id)] : [],
           mergeImpact: getMergeImpact(issue, finding),
           priority: getPriority(finding),
           issueStatus: issue?.status || "finding_only",

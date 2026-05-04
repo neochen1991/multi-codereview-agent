@@ -31,7 +31,7 @@ import {
   type GitNexusIndexStatus,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
-import { humanizeReviewText } from "@/utils/displayText";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const CodeReviewConclusionPanel = lazy(() => import("@/components/review/CodeReviewConclusionPanel"));
@@ -118,6 +118,23 @@ const defaultFormState: ReviewFormState = {
 const WORKSPACE_TAB_KEYS: WorkspaceTabKey[] = ["overview", "process", "result", "impact"];
 const PROCESS_INCREMENTAL_LIMIT = 500;
 const PROCESS_CLIENT_CACHE_LIMIT = 4000;
+
+const mergeProcessItemsById = <T extends { created_at?: string }>(
+  base: T[],
+  incoming: T[],
+  getId: (item: T) => string,
+): T[] => {
+  const map = new Map<string, T>();
+  for (const item of base) {
+    map.set(getId(item), item);
+  }
+  for (const item of incoming) {
+    map.set(getId(item), item);
+  }
+  return Array.from(map.values())
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .slice(-PROCESS_CLIENT_CACHE_LIMIT);
+};
 
 const WorkbenchPanelFallback: React.FC<{ description?: string }> = ({ description = "模块加载中..." }) => (
   <Card className="module-card">
@@ -286,6 +303,18 @@ const THRESHOLD_RULE_CODES = new Set([
   "below_priority_confidence_threshold",
 ]);
 
+const parseFindingCountFromSummary = (value?: string | null): number => {
+  const text = String(value || "");
+  const match = text.match(/(?:共收敛|收敛)\s*(\d+)\s*条\s*(?:发现|findings?|检视发现)/i);
+  if (!match) return 0;
+  const count = Number(match[1]);
+  return Number.isFinite(count) ? count : 0;
+};
+
+const isFormalIssueForDisplay = (issue: DebateIssue): boolean =>
+  String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
+  String(issue.resolution || "").trim().toLowerCase() !== "human_rejected";
+
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
 ): ReviewOverviewExpertSelectionSummary | null => {
@@ -317,7 +346,7 @@ const RoutingExpertTags: React.FC<{
       <Space size={[8, 8]} wrap>
         {items.map((item) => (
           <Tag key={`${title}-${item.expert_id}-${item.file_path || "none"}`} color={color}>
-            {item.expert_name || item.expert_id}
+            {item.expert_name || humanizeExpertId(item.expert_id)}
           </Tag>
         ))}
       </Space>
@@ -348,7 +377,7 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               {summary.skipped_experts.map((item) => (
                 <div key={`skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
-                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text strong>{item.expert_name || humanizeExpertId(item.expert_id)}</Text>
                   <Text type="secondary">
                     {item.reason || "当前变更未命中该角色的有效审查线索"}
                     {item.file_path ? ` · ${item.file_path}${item.line_start ? `:${item.line_start}` : ""}` : ""}
@@ -372,15 +401,15 @@ const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> 
           <Card key={item.expert_id} size="small">
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               <Space wrap>
-                <Tag color="geekblue">{item.expert_name}</Tag>
+                <Tag color="geekblue">{item.expert_name || humanizeExpertId(item.expert_id)}</Tag>
                 <Tag color="purple">{`总规则 ${item.rule_screening.total_rules}`}</Tag>
                 <Tag>{`启用 ${item.rule_screening.enabled_rules || item.rule_screening.total_rules}`}</Tag>
                 <Tag color="magenta">{`命中 ${item.rule_screening.matched_rule_count}`}</Tag>
                 <Tag color="volcano">{`强命中 ${item.rule_screening.must_review_count}`}</Tag>
                 <Tag color="blue">{`候选 ${item.rule_screening.possible_hit_count}`}</Tag>
                 {item.rule_screening.batch_count ? <Tag>{`批次 ${item.rule_screening.batch_count}`}</Tag> : null}
-                {item.rule_screening.screening_mode ? <Tag>{item.rule_screening.screening_mode}</Tag> : null}
-                {item.rule_screening.screening_fallback_used ? <Tag color="orange">fallback</Tag> : null}
+                {item.rule_screening.screening_mode ? <Tag>{humanizeReviewText(item.rule_screening.screening_mode)}</Tag> : null}
+                {item.rule_screening.screening_fallback_used ? <Tag color="orange">备用流程</Tag> : null}
               </Space>
               {item.rule_screening.matched_rules_for_llm?.length ? (
                 <Space wrap>
@@ -417,7 +446,7 @@ const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }>
             <Space size={[8, 8]} wrap>
               {summary.requested_expert_ids.map((item) => (
                 <Tag key={`requested-${item}`} color="blue">
-                  {item}
+                  {humanizeExpertId(item)}
                 </Tag>
               ))}
             </Space>
@@ -429,7 +458,7 @@ const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }>
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               {summary.skipped_experts.map((item) => (
                 <div key={`selection-skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
-                  <Text strong>{item.expert_name || item.expert_id}</Text>
+                  <Text strong>{item.expert_name || humanizeExpertId(item.expert_id)}</Text>
                   <Text type="secondary">{item.reason || "系统未将其纳入本次 MR 的审核集合"}</Text>
                 </div>
               ))}
@@ -486,6 +515,10 @@ const ReviewWorkbenchPage: React.FC = () => {
   const [form, setForm] = useState<ReviewFormState>(defaultFormState);
   const autoStartTriggeredRef = useRef<string>("");
   const workspaceLoadRef = useRef<{ key: string; promise: Promise<void> | null }>({ key: "", promise: null });
+  // SSE / 轮询回调可能持有旧渲染闭包；过程记录用 ref 作为合并基线，避免增量响应覆盖完整列表。
+  const processEventsRef = useRef<ReviewReplayBundle["events"]>([]);
+  const processMessagesRef = useRef<ReviewReplayBundle["messages"]>([]);
+  const processFindingsRef = useRef<ReviewFinding[]>([]);
   const processCursorRef = useRef<{
     reviewId: string;
     eventSince: string;
@@ -508,6 +541,21 @@ const ReviewWorkbenchPage: React.FC = () => {
     const value = search.get("tab");
     return isWorkspaceTabKey(value) ? value : null;
   }, [location.search]);
+
+  const replaceEvents = useCallback((nextEvents: ReviewReplayBundle["events"]) => {
+    processEventsRef.current = nextEvents;
+    setEvents(nextEvents);
+  }, []);
+
+  const replaceMessages = useCallback((nextMessages: ReviewReplayBundle["messages"]) => {
+    processMessagesRef.current = nextMessages;
+    setMessages(nextMessages);
+  }, []);
+
+  const replaceFindings = useCallback((nextFindings: ReviewFinding[]) => {
+    processFindingsRef.current = nextFindings;
+    setFindings(nextFindings);
+  }, []);
 
   const syncTabToUrl = (nextTab: WorkspaceTabKey, replace = true) => {
     const search = new URLSearchParams(location.search);
@@ -608,31 +656,14 @@ const ReviewWorkbenchPage: React.FC = () => {
         limit: PROCESS_INCREMENTAL_LIMIT,
       }),
     ]);
-    const mergeById = <T extends { created_at?: string }>(
-      base: T[],
-      incoming: T[],
-      getId: (item: T) => string,
-    ): T[] => {
-      const map = new Map<string, T>();
-      for (const item of base) {
-        map.set(getId(item), item);
-      }
-      for (const item of incoming) {
-        map.set(getId(item), item);
-      }
-      return Array.from(map.values())
-        .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
-        .slice(-PROCESS_CLIENT_CACHE_LIMIT);
-    };
-
     const mergedEvents = isIncremental
-      ? mergeById(events, nextEvents, (item) => item.event_id)
+      ? mergeProcessItemsById(processEventsRef.current, nextEvents, (item) => item.event_id)
       : nextEvents;
     const mergedMessages = isIncremental
-      ? mergeById(messages, nextMessages, (item) => item.message_id)
+      ? mergeProcessItemsById(processMessagesRef.current, nextMessages, (item) => item.message_id)
       : nextMessages;
     const mergedFindings = isIncremental
-      ? mergeById(findings, nextFindings, (item) => item.finding_id)
+      ? mergeProcessItemsById(processFindingsRef.current, nextFindings, (item) => item.finding_id)
       : nextFindings;
 
     if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
@@ -640,9 +671,9 @@ const ReviewWorkbenchPage: React.FC = () => {
     }
 
     setIssues(nextIssues);
-    setEvents(mergedEvents);
-    setMessages(mergedMessages);
-    setFindings(mergedFindings);
+    replaceEvents(mergedEvents);
+    replaceMessages(mergedMessages);
+    replaceFindings(mergedFindings);
 
     processCursorRef.current = {
       reviewId: targetReviewId,
@@ -669,7 +700,7 @@ const ReviewWorkbenchPage: React.FC = () => {
 
     setReport(nextReport);
     setIssues(nextReport.issues || []);
-    setFindings(nextReport.findings || []);
+    replaceFindings(nextReport.findings || []);
     setArtifacts(artifactBundle);
     setResultFindingDetailCache({});
     setResultFindingDetailsLoading(false);
@@ -691,9 +722,9 @@ const ReviewWorkbenchPage: React.FC = () => {
     setReport(nextReport);
     setArtifacts(null);
     setIssues([]);
-    setFindings([]);
-    setEvents([]);
-    setMessages([]);
+    replaceFindings([]);
+    replaceEvents([]);
+    replaceMessages([]);
     setReplay(null);
     processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
     setResultFindingDetailCache({});
@@ -712,8 +743,8 @@ const ReviewWorkbenchPage: React.FC = () => {
     if (replayBundle.review) {
       applyReviewDetail(replayBundle.review, loadKey);
     }
-    setEvents(replayBundle.events || []);
-    setMessages(replayBundle.messages || []);
+    replaceEvents(replayBundle.events || []);
+    replaceMessages(replayBundle.messages || []);
     return replayBundle;
   };
 
@@ -757,8 +788,8 @@ const ReviewWorkbenchPage: React.FC = () => {
         if (activeStep === "result") {
           const resultBundle = await loadResultBundle(targetReviewId, loadKey);
           if (!isWorkspaceLoadCurrent(loadKey)) return;
-          setEvents([]);
-          setMessages([]);
+          replaceEvents([]);
+          replaceMessages([]);
           processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
           setReplay(null);
           syncSelectionFromData(resultBundle.report?.issues || [], resultBundle.report?.findings || []);
@@ -775,9 +806,9 @@ const ReviewWorkbenchPage: React.FC = () => {
         setReport(null);
         setArtifacts(null);
         setIssues([]);
-        setEvents([]);
-        setMessages([]);
-        setFindings([]);
+        replaceEvents([]);
+        replaceMessages([]);
+        replaceFindings([]);
         processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
         setResultFindingDetailCache({});
         syncSelectionFromData([], []);
@@ -831,9 +862,9 @@ const ReviewWorkbenchPage: React.FC = () => {
       setReport(null);
       setArtifacts(null);
       setIssues([]);
-      setEvents([]);
-      setMessages([]);
-      setFindings([]);
+      replaceEvents([]);
+      replaceMessages([]);
+      replaceFindings([]);
       processCursorRef.current = { reviewId: "", eventSince: "", messageSince: "", findingSince: "" };
       setResultFindingDetailCache({});
       setForm({
@@ -1005,6 +1036,17 @@ const ReviewWorkbenchPage: React.FC = () => {
         return true;
       }),
     [findings, issueByFindingId, issueFilterDecisionByFindingId],
+  );
+  const formalIssueCount = useMemo(() => issues.filter(isFormalIssueForDisplay).length, [issues]);
+  const overviewFindingCount = useMemo(
+    () =>
+      Math.max(
+        findings.length,
+        visibleFindings.length,
+        parseFindingCountFromSummary(review?.report_summary),
+        parseFindingCountFromSummary(report?.summary),
+      ),
+    [findings.length, report?.summary, review?.report_summary, visibleFindings.length],
   );
   const selectedFindingGovernanceDecision = useMemo(
     () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
@@ -1437,8 +1479,8 @@ const ReviewWorkbenchPage: React.FC = () => {
               review?.selected_experts?.length ||
               form.selected_experts.length
             }
-            findingCount={visibleFindings.length}
-            issueCount={issues.length}
+            findingCount={overviewFindingCount}
+            issueCount={formalIssueCount}
             humanGateCount={review?.pending_human_issue_ids?.length || 0}
             onStatusClick={focusProcessDialogue}
             onPhaseClick={focusProcessDialogue}

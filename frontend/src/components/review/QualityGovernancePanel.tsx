@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Card, Col, Empty, List, Row, Space, Statistic, Tag, Typography } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewReport, ReviewSummary } from "@/services/api";
-import { humanizeReviewText } from "@/utils/displayText";
+import { humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -107,7 +107,7 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
                           {humanizeReviewText(item.rule_label || item.rule_code)}
                         </Tag>
                       ) : null}
-                      {item.severity ? <Tag>{item.severity}</Tag> : null}
+                      {item.severity ? <Tag>{humanizeSeverity(item.severity)}</Tag> : null}
                     </Space>
                     {item.reason ? <Text type="secondary">{humanizeReviewText(item.reason)}</Text> : null}
                     {item.finding_titles?.length ? (

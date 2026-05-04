@@ -3,6 +3,7 @@ import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
+import { humanizeExpertId, humanizeSeverity, stripReviewSupplementSections } from "@/utils/displayText";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
@@ -128,7 +129,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         const metaSummaryParts = [
           "问题聚合",
           `关联发现 ${issue.finding_ids.length}`,
-          `主责角色 ${issue.primary_expert_id || issue.participant_expert_ids[0] || "-"}`,
+          `主责角色 ${humanizeExpertId(issue.primary_expert_id || issue.participant_expert_ids[0])}`,
           `参与角色 ${issue.participant_expert_ids.length}`,
         ];
         if ((issue.aggregated_titles || []).length > 1) {
@@ -142,7 +143,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           file_path: filePath,
           line_start: lineStart,
           title: issue.title,
-          summary: issue.summary,
+          summary: stripReviewSupplementSections(issue.summary),
           metaSummary: metaSummaryParts.join(" · "),
           finding_types:
             issue.aggregated_finding_types && issue.aggregated_finding_types.length > 0
@@ -161,7 +162,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           expert_labels: Array.from(
             new Set(
               [issue.primary_expert_id, ...(issue.participant_expert_ids || [])]
-                .map((item) => String(item || "").trim())
+                .map((item) => humanizeExpertId(item))
                 .filter(Boolean),
             ),
           ),
@@ -241,7 +242,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
             {exportResult.items.map((item) => (
               <div key={item.issue_id} className="review-summary-cell">
                 <div className="review-finding-title">
-                  <Tag color="volcano">{item.severity}</Tag>
+                  <Tag color="volcano">{humanizeSeverity(item.severity)}</Tag>
                   <span>{item.title}</span>
                 </div>
                 <Paragraph strong style={{ marginBottom: 8 }}>

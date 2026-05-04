@@ -29,17 +29,28 @@ HIGH_VALUE_CONTRACT_MISMATCH_TOKENS = {
     "comment_contract_unimplemented",
 }
 
-HIGH_VALUE_DIRECT_DEFECT_TOKENS = {
-    "aggregate factory bypass",
-    "factory bypass",
-    "聚合工厂绕过",
-    "聚合根创建绕过",
-    "绕过聚合工厂",
-    "绕过工厂方法",
-    "领域事件丢失",
+HIGH_VALUE_DESIGN_CONCERN_TOKENS = {
+    "架构边界",
+    "职责边界",
+    "分层边界",
+    "依赖方向",
+    "循环依赖",
+    "聚合边界",
+    "聚合不变量",
+    "领域不变量",
+    "领域事件",
+    "应用服务职责",
+    "跨层调用",
+    "边界泄漏",
+    "architecture boundary",
+    "layer boundary",
+    "dependency direction",
+    "cyclic dependency",
+    "aggregate boundary",
+    "aggregate invariant",
+    "domain invariant",
     "domain event",
-    "domainevent",
-    "事件不再被记录",
+    "application service responsibility",
 }
 
 HIGH_PRIORITY_OVERRIDE_TOKENS = {
@@ -929,7 +940,7 @@ def _classify_issue_candidate(
     ).lower()
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
     high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
-    high_value_direct_defect = any(token in text_blob for token in HIGH_VALUE_DIRECT_DEFECT_TOKENS)
+    high_value_design_concern = any(token in text_blob for token in HIGH_VALUE_DESIGN_CONCERN_TOKENS)
     high_priority_override = any(token in text_blob for token in HIGH_PRIORITY_OVERRIDE_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
     observation_signal = _has_observation_signal(items)
@@ -963,6 +974,10 @@ def _classify_issue_candidate(
         bool(config.get("suppress_low_risk_hint_issues", True))
         and finding_types <= {"design_concern"}
         and highest_severity in {"low", "medium"}
+        and not high_value_design_concern
+        and not high_priority_override
+        and not observation_signal
+        and not sast_cross_validated
     ):
         return {
             "rule_code": "design_concern_only",
@@ -982,6 +997,7 @@ def _classify_issue_candidate(
         and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
         and hint_like
         and not high_value_contract_mismatch
+        and not high_value_design_concern
         and not high_priority_override
         and not observation_signal
         and not sast_cross_validated
@@ -1003,12 +1019,17 @@ def _classify_issue_candidate(
         and highest_severity in {"blocker", "critical", "high"}
         and effective_confidence >= priority_confidence_threshold
         and evidence_strength >= 3
-        and (high_value_contract_mismatch or high_value_direct_defect)
     )
     verification_supported_issue = (
         (direct_evidence and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
         or (sast_cross_validated and evidence_strength >= 1 and effective_confidence >= priority_confidence_threshold)
         or (observation_signal and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
+        or (
+            high_value_design_concern
+            and finding_types <= {"design_concern"}
+            and evidence_strength >= 2
+            and effective_confidence >= priority_confidence_threshold
+        )
     )
 
     if all_need_verification and not (strong_direct_code_issue or verification_supported_issue):

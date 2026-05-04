@@ -1968,6 +1968,63 @@ def test_main_agent_readds_correctness_for_typescript_comment_contract_signal():
     assert selected["correctness_business"]["source"] == "heuristic_selected"
 
 
+def test_main_agent_uses_primary_owner_for_comment_contract_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务规则"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="通用编码规范专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["代码健康"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/comment-contract-owner",
+        target_ref="main",
+        changed_files=["frontend/src/order/submitOrder.ts"],
+        unified_diff=(
+            "diff --git a/frontend/src/order/submitOrder.ts b/frontend/src/order/submitOrder.ts\n"
+            "--- a/frontend/src/order/submitOrder.ts\n"
+            "+++ b/frontend/src/order/submitOrder.ts\n"
+            "@@ -12,0 +12,2 @@\n"
+            "+// 创建订单后发送通知\n"
+            "+return orderRepository.save(order);\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [],
+            "skipped_experts": [
+                {"expert_id": "correctness_business", "reason": "LLM 未识别业务正确性风险"},
+                {"expert_id": "maintainability_code_health", "reason": "LLM 未识别代码健康风险"},
+            ],
+        },
+        fallback_ids=[],
+    )
+
+    assert merged["selected_expert_ids"] == ["correctness_business"]
+    assert {item["expert_id"] for item in merged["skipped_experts"]} == {"maintainability_code_health"}
+
+
 def test_main_agent_readds_maintainability_for_magic_value_and_naming_signals():
     agent = MainAgentService()
     experts = [

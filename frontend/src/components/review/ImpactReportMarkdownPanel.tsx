@@ -56,6 +56,21 @@ const graphStatusLabel = (value?: string): string => {
   return value || "状态未知";
 };
 
+const countTestActionItems = (impactReport: ImpactReport): number =>
+  dedupeStrings([
+    ...impactReport.recommended_test_scope.map((item) => item.scope || item.reason),
+    ...impactReport.must_run_tests,
+  ]).length;
+
+const buildGitNexusRepairTips = (impactReport: ImpactReport): string[] => {
+  if (impactReport.graph_status === "ready") return [];
+  return [
+    "在目标仓库目录执行 gitnexus analyze，等待建图完成后重新运行检视。",
+    "Windows PowerShell 如安装路径包含空格，建议在设置页配置 GITNEXUS_BIN 或 GITNEXUS_MCP_COMMAND，并使用带引号的完整路径。",
+    "确认 GITNEXUS_HOME、registry 和当前 repo_path 指向同一份本地仓库，避免盘符或路径大小写不一致。",
+  ];
+};
+
 const readImpactReportFromReview = (review: ReviewSummary | null | undefined): ImpactReport | null => {
   const raw = review?.subject?.metadata?.impact_report;
   if (!raw || typeof raw !== "object") return null;
@@ -111,7 +126,7 @@ const buildRelationshipInsights = (impactReport: ImpactReport): string[] => {
   const insights: string[] = [];
   for (const item of impactReport.impacted_files) {
     if (item.relationship === "changed") continue;
-    insights.push(`${item.file_path} 被标记为 ${item.relationship}，原因是：${item.reason}`);
+    insights.push(`${item.file_path} 被标记为${relationshipLabel(item.relationship)}，原因是：${item.reason}`);
   }
   for (const scope of impactReport.recommended_test_scope) {
     if (!scope.paths.length) continue;
@@ -282,13 +297,12 @@ const buildImpactQualitySummary = (impactReport: ImpactReport): ImpactQualitySum
   const hitBase = requestedCount || contextHitCount + impactHitCount + skippedCount;
   const hitRate = hitBase > 0 ? Math.round(((contextHitCount + impactHitCount) / (hitBase * 2)) * 100) : 0;
   const highRiskCount = impactReport.impacted_files.filter((item) => priorityRank(item.risk_level) >= 3).length;
-  const executableTestCount =
-    impactReport.recommended_test_scope.filter((item) => item.paths.length || item.reason).length + impactReport.must_run_tests.length;
+  const executableTestCount = countTestActionItems(impactReport);
   const blindSpotCount = skippedCount + impactReport.limitations.length + (impactReport.graph_status === "ready" ? 0 : 1);
   const graphTone = impactReport.graph_status === "ready" && hitRate > 0 ? "success" : impactReport.graph_status === "failed" ? "error" : "warning";
   const nextActions = dedupeStrings([
     highRiskCount > 0 ? `先验证 ${highRiskCount} 个高风险影响文件` : "",
-    executableTestCount > 0 ? `按优先级执行 ${executableTestCount} 条测试动作` : "",
+    executableTestCount > 0 ? `按优先级执行 ${executableTestCount} 条建议测试项` : "",
     blindSpotCount > 0 ? `补齐 ${blindSpotCount} 个图谱/上下文盲区` : "",
     impactReport.manual_verification.length > 0 ? `人工确认 ${impactReport.manual_verification.length} 项边界条件` : "",
   ]).slice(0, 3);
@@ -298,7 +312,7 @@ const buildImpactQualitySummary = (impactReport: ImpactReport): ImpactQualitySum
       : highRiskCount > 0
         ? "已命中高风险影响面，合并前应优先跑完核心回归。"
         : executableTestCount > 0
-          ? "影响范围可执行，建议按测试动作完成验证后再合并。"
+          ? "影响范围可执行，建议按建议测试项完成验证后再合并。"
           : "当前影响面较轻，但仍需确认报告边界。";
   return {
     verdict,
@@ -786,7 +800,7 @@ const MermaidBlock = ({ chart }: { chart: string }) => {
           </span>
           <span className="template-preview-mermaid-legend-item">
             <span className="template-preview-mermaid-legend-swatch template-preview-mermaid-legend-swatch-test" />
-            测试建议
+            建议测试项
           </span>
         </div>
         <Space size={8} className="template-preview-mermaid-actions">
@@ -1081,6 +1095,32 @@ const priorityLabel = (value?: string): string => {
   return "一般";
 };
 
+const riskLabel = (value?: string): string => {
+  if (value === "critical") return "严重";
+  if (value === "high") return "高";
+  if (value === "medium") return "中";
+  if (value === "low") return "低";
+  return "未知";
+};
+
+const relationshipLabel = (value?: string): string => {
+  if (value === "changed") return "本次修改";
+  if (value === "test_candidate") return "候选测试";
+  if (value === "impacted") return "受影响";
+  if (value === "caller") return "上游调用";
+  if (value === "callee") return "下游调用";
+  if (value === "impact_path") return "影响路径";
+  return value || "关联";
+};
+
+const symbolKindLabel = (value?: string): string => {
+  if (value === "function" || value === "method") return "方法";
+  if (value === "class") return "类";
+  if (value === "field") return "字段";
+  if (value === "symbol") return "符号";
+  return value || "符号";
+};
+
 const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const impactReport = review?.impact_report;
   if (!review || !impactReport) return "";
@@ -1090,7 +1130,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const sections: string[] = [
     `# 影响范围报告 - ${review.review_id}`,
     "",
-    `- 风险等级: ${impactReport.risk_level || "unknown"}`,
+    `- 风险等级: ${riskLabel(impactReport.risk_level)}`,
     `- 图谱状态: ${graphStatusLabel(impactReport.graph_status)}`,
     `- 图谱时间: ${impactReport.graph_indexed_at ? formatTime(impactReport.graph_indexed_at) : "暂无"}`,
     `- 图谱提交: ${impactReport.graph_commit || "暂无"}`,
@@ -1117,7 +1157,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     "## 受影响文件",
     ...(impactReport.impacted_files.length
       ? impactReport.impacted_files.map(
-          (item) => `- ${item.file_path} | ${item.relationship} | 风险 ${item.risk_level} | ${item.reason}`,
+          (item) => `- ${item.file_path} | ${relationshipLabel(item.relationship)} | 风险 ${riskLabel(item.risk_level)} | ${item.reason}`,
         )
       : ["- 暂无"]),
     "",
@@ -1127,7 +1167,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
           const pathText = item.path?.length ? item.path.join(" -> ") : `${item.source} -> ${item.target}`;
           const confidence = item.confidence_label ? ` | 可信度 ${item.confidence_label}` : "";
           const reason = item.confirmation_reason ? ` | ${item.confirmation_reason}` : "";
-          return `- ${pathText} | 深度 ${item.depth || 0} | 风险 ${item.risk || "unknown"}${confidence}${reason}`;
+          return `- ${pathText} | 深度 ${item.depth || 0} | 风险 ${riskLabel(item.risk)}${confidence}${reason}`;
         })
       : ["- 暂无"]),
     "",
@@ -1162,10 +1202,10 @@ const buildExecutionChecklistMarkdown = (
     `## GitNexus 影响分析执行清单`,
     "",
     `- Review ID: ${reviewId}`,
-    `- 风险等级: ${impactReport.risk_level || "unknown"}`,
+    `- 风险等级: ${riskLabel(impactReport.risk_level)}`,
     `- 图谱状态: ${graphStatusLabel(impactReport.graph_status)}`,
     `- 影响文件: ${impactReport.impacted_files.length}`,
-    `- 测试建议: ${impactReport.recommended_test_scope.length}`,
+    `- 建议测试项: ${countTestActionItems(impactReport)}`,
     "",
     "### 建议执行顺序",
     ...(
@@ -1246,7 +1286,7 @@ const renderChangedSymbols = (items: ImpactSymbol[]) => (
             <div className="impact-report-symbol-main">
               <Text strong>{formatImpactSymbol(item)}</Text>
               <Space size={6} wrap>
-                <Tag>{item.kind || "symbol"}</Tag>
+                <Tag>{symbolKindLabel(item.kind || "symbol")}</Tag>
                 {item.line_start ? <Tag color="default">L{item.line_start}</Tag> : null}
               </Space>
             </div>
@@ -1289,7 +1329,7 @@ const renderImpactQualitySummary = (summary: ImpactQualitySummary) => (
         <strong>{summary.highRiskCount}</strong>
       </div>
       <div>
-        <Text type="secondary">测试动作</Text>
+        <Text type="secondary">建议测试项</Text>
         <strong>{summary.executableTestCount}</strong>
       </div>
       <div>
@@ -1417,8 +1457,8 @@ const renderImpactedFiles = (
                       <div className="impact-report-file-head">
                         <Text strong>{item.file_path}</Text>
                         <Space size={8} wrap>
-                          <Tag>{item.relationship || "关联"}</Tag>
-                          <Tag color={riskColor(item.risk_level)}>{`风险 ${item.risk_level || "unknown"}`}</Tag>
+                          <Tag>{relationshipLabel(item.relationship)}</Tag>
+                          <Tag color={riskColor(item.risk_level)}>{`风险 ${riskLabel(item.risk_level)}`}</Tag>
                         </Space>
                       </div>
                       <Paragraph type="secondary" style={{ marginBottom: 0 }}>
@@ -1458,7 +1498,7 @@ const renderImpactPaths = (
                 <Text strong>{`路径 ${index + 1}`}</Text>
                 <Space size={8} wrap>
                   <Tag>{`深度 ${item.depth || 0}`}</Tag>
-                  <Tag color={riskColor(item.risk)}>{`风险 ${item.risk || "unknown"}`}</Tag>
+                  <Tag color={riskColor(item.risk)}>{`风险 ${riskLabel(item.risk)}`}</Tag>
                   <Tag color={confidenceLabelColor(item.confidence_label)}>
                     {confidenceLabelText(item.confidence_label)}
                   </Tag>
@@ -1531,7 +1571,7 @@ const renderImpactGraph = (impactReport: ImpactReport) => {
                   <g key={`${edge.source}-${edge.target}-${edge.relationship}`}>
                     <path d={path} className="impact-graph-edge" markerEnd="url(#impact-graph-arrow)" />
                     <text x={midX} y={(edge.fromY + edge.toY) / 2 - 6} className="impact-graph-edge-label">
-                      {edge.relationship}
+                      {relationshipLabel(edge.relationship)}
                     </text>
                   </g>
                 );
@@ -1673,7 +1713,7 @@ const renderReportHeadline = (impactReport: ImpactReport) => {
         <div className="impact-report-hero-badge">
           <Text type="secondary">本次整体风险</Text>
           <div className="impact-report-hero-risk">
-            <Tag color={riskColor(impactReport.risk_level)}>{impactReport.risk_level || "unknown"}</Tag>
+            <Tag color={riskColor(impactReport.risk_level)}>{riskLabel(impactReport.risk_level)}</Tag>
           </div>
         </div>
       </div>
@@ -1706,11 +1746,11 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
   const summaryCards = useMemo(() => {
     if (!impactReport) return [];
     return [
-      { label: "风险等级", value: impactReport.risk_level || "unknown", tone: riskColor(impactReport.risk_level) },
+      { label: "风险等级", value: riskLabel(impactReport.risk_level), tone: riskColor(impactReport.risk_level) },
       { label: "图谱状态", value: graphStatusLabel(impactReport.graph_status), tone: impactReport.graph_status === "ready" ? "success" : "default" },
       { label: "变更文件", value: `${impactReport.changed_files.length}`, tone: "default" },
       { label: "影响文件", value: `${impactReport.impacted_files.length}`, tone: "default" },
-      { label: "测试建议", value: `${impactReport.recommended_test_scope.length}`, tone: "default" },
+      { label: "建议测试项", value: `${countTestActionItems(impactReport)}`, tone: "default" },
     ];
   }, [impactReport]);
 
@@ -1724,6 +1764,10 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
   const riskDistribution = useMemo(() => (impactReport ? buildRiskDistribution(impactReport.impacted_files) : []), [impactReport]);
   const impactQualitySummary = useMemo(
     () => (impactReport ? buildImpactQualitySummary(impactReport) : null),
+    [impactReport],
+  );
+  const gitNexusRepairTips = useMemo(
+    () => (impactReport ? buildGitNexusRepairTips(impactReport) : []),
     [impactReport],
   );
   const executionChecklist = useMemo(
@@ -1813,6 +1857,20 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
         hasConfirmedGraphFacts && impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown) ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {impactQualitySummary ? renderImpactQualitySummary(impactQualitySummary) : null}
+            {gitNexusRepairTips.length ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="GitNexus 图谱未完全可用"
+                description={
+                  <div>
+                    {gitNexusRepairTips.map((item) => (
+                      <div key={item}>{item}</div>
+                    ))}
+                  </div>
+                }
+              />
+            ) : null}
             {renderExecutionChecklist(executionChecklist, copyExecutionChecklist)}
             <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
             {renderCollapsibleTargetDiagnostics(impactReport)}
@@ -1824,6 +1882,20 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {renderReportHeadline(impactReport)}
             {impactQualitySummary ? renderImpactQualitySummary(impactQualitySummary) : null}
+            {gitNexusRepairTips.length ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="GitNexus 图谱未完全可用"
+                description={
+                  <div>
+                    {gitNexusRepairTips.map((item) => (
+                      <div key={item}>{item}</div>
+                    ))}
+                  </div>
+                }
+              />
+            ) : null}
 
             {renderListSection("报告重点", reportKeyPoints, "当前没有额外的重点结论。")}
             {renderListSection("优先测试建议", reportTestFocus, "当前没有额外的测试结论。")}

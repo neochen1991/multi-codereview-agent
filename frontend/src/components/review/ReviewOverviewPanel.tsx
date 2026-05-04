@@ -3,6 +3,7 @@ import { Alert, Button, Card, Divider, Input, Select, Space, Tag, Typography, Up
 import { UploadOutlined } from "@ant-design/icons";
 
 import type { ExpertProfile, ReviewDesignDocumentInput } from "@/services/api";
+import { humanizeExpertId } from "@/utils/displayText";
 
 const { Text } = Typography;
 const DEFAULT_REQUIRED_EXPERT_ID = "change_impact_analysis";
@@ -376,14 +377,14 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                           <Space wrap style={{ width: "100%", marginTop: 8 }}>
                             {selectedExperts.map((item) => (
                               <Tag key={`selected-${item.expert_id}`} color="green">
-                                {item.expert_name || expertNameById.get(item.expert_id) || item.expert_id}
+                                {item.expert_name || expertNameById.get(item.expert_id) || humanizeExpertId(item.expert_id)}
                               </Tag>
                             ))}
                           </Space>
                           <Space direction="vertical" size={6} style={{ width: "100%", marginTop: 8 }}>
                             {selectedExperts.map((item) => (
                               <Text key={`selected-reason-${item.expert_id}`} type="secondary">
-                                {(item.expert_name || expertNameById.get(item.expert_id) || item.expert_id) + "："}
+                                {(item.expert_name || expertNameById.get(item.expert_id) || humanizeExpertId(item.expert_id)) + "："}
                                 {item.reason || "与当前 MR 变更高度相关"}
                               </Text>
                             ))}
@@ -404,7 +405,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                             {selectedFromCandidates.length > 0 ? (
                               selectedFromCandidates.map((expertId) => (
                                 <Tag key={`candidate-hit-${expertId}`} color="green">
-                                  {expertNameById.get(expertId) || expertId}
+                                  {expertNameById.get(expertId) || humanizeExpertId(expertId)}
                                 </Tag>
                               ))
                             ) : (
@@ -418,7 +419,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                             {removedFromCandidates.length > 0 ? (
                               removedFromCandidates.map((expertId) => (
                                 <Tag key={`candidate-drop-${expertId}`} color="orange">
-                                  {expertNameById.get(expertId) || expertId}
+                                  {expertNameById.get(expertId) || humanizeExpertId(expertId)}
                                 </Tag>
                               ))
                             ) : (
@@ -432,7 +433,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                             <Space wrap style={{ width: "100%", marginTop: 8 }}>
                               {addedByModel.map((item) => (
                                 <Tag key={`candidate-added-${item.expert_id}`} color="cyan">
-                                  {item.expert_name || expertNameById.get(item.expert_id) || item.expert_id}
+                                  {item.expert_name || expertNameById.get(item.expert_id) || humanizeExpertId(item.expert_id)}
                                 </Tag>
                               ))}
                             </Space>
@@ -447,7 +448,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                       <Space direction="vertical" size={6} style={{ width: "100%", marginTop: 8 }}>
                         {skippedExperts.map((item) => (
                           <Text key={`skipped-${item.expert_id}`} type="secondary">
-                            {(item.expert_name || expertNameById.get(item.expert_id) || item.expert_id) + "："}
+                            {(item.expert_name || expertNameById.get(item.expert_id) || humanizeExpertId(item.expert_id)) + "："}
                             {item.reason || "系统未将其纳入本次参与集合"}
                           </Text>
                         ))}

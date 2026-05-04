@@ -27,6 +27,7 @@ def test_gitnexus_index_scheduler_skips_without_gitnexus_binary(storage_root: Pa
     runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
     monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
     monkeypatch.setattr("shutil.which", lambda command: None)
+    monkeypatch.setattr("app.services.command_resolver._resolve_with_system_where", lambda executable: "")
 
     scheduler = GitNexusIndexScheduler(service)
     status = scheduler.tick()
@@ -116,6 +117,42 @@ def test_gitnexus_index_scheduler_uses_gitnexus_bin_with_space_path(storage_root
     fake_bin.parent.mkdir(parents=True)
     fake_bin.write_text("", encoding="utf-8")
     monkeypatch.setenv("GITNEXUS_BIN", str(fake_bin))
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: None)
+
+    captured: list[object] = []
+
+    def _fake_run(command, **kwargs):
+        captured.append(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    assert status["gitnexus_installed"] is True
+    assert status["gitnexus_path"] == str(fake_bin)
+    assert captured[0] == [str(fake_bin), "analyze"]
+
+
+def test_gitnexus_index_scheduler_finds_windows_npm_cmd_when_service_path_is_stale(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    appdata = tmp_path / "AppData" / "Roaming"
+    fake_bin = appdata / "npm" / "gitnexus.cmd"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
 

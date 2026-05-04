@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Alert, Card, Descriptions, Empty, Space, Steps, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ImpactReport, ReviewSummary } from "@/services/api";
+import { humanizeExpertId, humanizeReviewStatus, humanizeSeverity } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -104,9 +105,9 @@ const ImpactAnalysisProcessPanel: React.FC<Props> = ({ review, messages }) => {
         {progress ? (
           <>
             <Space wrap>
-              <Tag color="blue">{progress.expert_name || progress.expert_id || "change_impact_analysis"}</Tag>
+              <Tag color="blue">{progress.expert_name || humanizeExpertId(progress.expert_id || "change_impact_analysis")}</Tag>
               {progress.graph_status ? <Tag color={progress.graph_status === "ready" ? "success" : progress.graph_status === "failed" ? "error" : "warning"}>{graphStatusLabel(progress.graph_status)}</Tag> : null}
-              {progress.risk_level ? <Tag color={riskColor(progress.risk_level)}>{`风险 ${progress.risk_level}`}</Tag> : null}
+              {progress.risk_level ? <Tag color={riskColor(progress.risk_level)}>{`风险 ${humanizeSeverity(progress.risk_level)}`}</Tag> : null}
               {typeof progress.changed_file_count === "number" ? <Tag>{`变更文件 ${progress.changed_file_count}`}</Tag> : null}
               {typeof progress.impacted_file_count === "number" ? <Tag>{`影响文件 ${progress.impacted_file_count}`}</Tag> : null}
               {typeof progress.recommended_test_scope_count === "number" ? <Tag>{`测试建议 ${progress.recommended_test_scope_count}`}</Tag> : null}
@@ -123,7 +124,7 @@ const ImpactAnalysisProcessPanel: React.FC<Props> = ({ review, messages }) => {
               size="small"
               column={2}
               items={[
-                { key: "state", label: "当前状态", children: progress.state || "unknown" },
+                { key: "state", label: "当前状态", children: humanizeReviewStatus(progress.state || "unknown") },
                 { key: "started", label: "开始时间", children: formatTime(progress.started_at) },
                 { key: "completed", label: progress.state === "failed" ? "失败时间" : "完成时间", children: formatTime(progress.state === "failed" ? progress.failed_at : progress.completed_at) },
                 { key: "graph", label: "图谱状态", children: graphStatusLabel(progress.graph_status) },

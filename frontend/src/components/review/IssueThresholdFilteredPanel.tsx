@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Card, Empty, Table, Tag, Typography } from "antd";
 
 import type { IssueFilterDecision, ReviewFinding } from "@/services/api";
-import { humanizeReviewText } from "@/utils/displayText";
+import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -110,14 +110,14 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             dataIndex: "expert_id",
             key: "expert_id",
             width: 210,
-            render: (value: string) => <Tag color="geekblue">{value}</Tag>,
+            render: (value: string) => <Tag color="geekblue">{humanizeExpertId(value)}</Tag>,
           },
           {
             title: "级别",
             dataIndex: "severity",
             key: "severity",
             width: 110,
-            render: (value: string) => <Tag color={value === "high" || value === "critical" || value === "blocker" ? "volcano" : value === "medium" ? "gold" : "blue"}>{value}</Tag>,
+            render: (value: string) => <Tag color={value === "high" || value === "critical" || value === "blocker" ? "volcano" : value === "medium" ? "gold" : "blue"}>{humanizeSeverity(value)}</Tag>,
           },
           {
             title: "置信度",

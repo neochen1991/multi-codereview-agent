@@ -25,6 +25,7 @@ from app.domain.models.report import (
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.fs import read_json
+from app.services.command_resolver import resolve_executable
 from app.services.cross_file_impact import _detect_signature_change
 from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.mcp_stdio_client import McpStdioClient
@@ -368,7 +369,7 @@ class GitNexusMcpImpactClient:
         binary = str(os.getenv("GITNEXUS_BIN") or "").strip()
         if binary:
             return [binary, "mcp"]
-        return ["gitnexus", "mcp"]
+        return [resolve_executable("gitnexus") or "gitnexus", "mcp"]
 
     def _coerce_limit(self, value: int, default: int, *, allow_zero: bool = False) -> int:
         try:
@@ -1214,15 +1215,13 @@ class GitNexusImpactService:
         binary = str(os.getenv("GITNEXUS_BIN") or "").strip()
         if binary:
             return [binary, "mcp"]
-        return ["gitnexus", "mcp"]
+        return [resolve_executable("gitnexus") or "gitnexus", "mcp"]
 
     def _gitnexus_command_available(self, command: list[str]) -> bool:
         executable = str(command[0] if command else "").strip()
         if not executable:
             return False
-        if Path(executable).exists():
-            return True
-        return shutil.which(executable) is not None
+        return bool(resolve_executable(executable))
 
     def analyze_with_trace(
         self,
@@ -1986,6 +1985,20 @@ class GitNexusImpactService:
                 current_class = class_match.group(1)
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
                 candidate_line = "+" + line[1:]
+                is_removed = line.startswith("-")
+                container = current_old_class if is_removed else current_class
+                constructor_name = self._java_constructor_name(candidate_line, container)
+                if constructor_name:
+                    symbols.append(
+                        ImpactSymbol(
+                            file_path=current_file,
+                            symbol=constructor_name,
+                            kind="function",
+                            container=container,
+                            line_start=current_old_line if is_removed else current_new_line,
+                        )
+                    )
+                    continue
                 for pattern in self._SYMBOL_PATTERNS:
                     match = pattern.match(candidate_line)
                     if match:
@@ -1993,8 +2006,6 @@ class GitNexusImpactService:
                         kind = self._symbol_kind(candidate_line)
                         if not self._is_symbol_declaration_line(candidate_line, symbol_name, kind):
                             continue
-                        is_removed = line.startswith("-")
-                        container = current_old_class if is_removed else current_class
                         symbols.append(
                             ImpactSymbol(
                                 file_path=current_file,
@@ -2245,6 +2256,18 @@ class GitNexusImpactService:
             stripped = line.strip()
             if not stripped or stripped.startswith(("@", "//", "*")):
                 continue
+            constructor_name = self._java_constructor_name(f"+{stripped}", current_class)
+            if constructor_name:
+                symbols.append(
+                    ImpactSymbol(
+                        file_path=file_path,
+                        symbol=constructor_name,
+                        kind="function",
+                        container=current_class,
+                        line_start=index,
+                    )
+                )
+                continue
             for pattern in self._SYMBOL_PATTERNS:
                 candidate = f"+{stripped}"
                 match = pattern.match(candidate)
@@ -2275,6 +2298,20 @@ class GitNexusImpactService:
             seen.add(key)
             deduped.append(item)
         return deduped[:12]
+
+    def _java_constructor_name(self, line: str, current_class: str) -> str:
+        class_name = str(current_class or "").strip()
+        if not class_name:
+            return ""
+        normalized = str(line or "").lstrip("+").strip()
+        if not normalized or normalized.startswith(("@", "//", "*")):
+            return ""
+        pattern = (
+            r"^(?:(?:public|private|protected)\s+)?"
+            f"{re.escape(class_name)}"
+            r"\s*\([^;]*\)\s*(?:throws\s+[\w\s,<>.?]+)?\s*\{?"
+        )
+        return class_name if re.match(pattern, normalized) else ""
 
     def _build_impacted_files(self, changed_files: list[str]) -> list[ImpactFile]:
         impacted: list[ImpactFile] = []

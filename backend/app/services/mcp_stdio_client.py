@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 from io import BufferedReader, BufferedWriter
 from typing import Any
+
+from app.services.command_resolver import resolve_executable
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,8 @@ class McpStdioClient:
 
     def open_session(self) -> "McpStdioSession":
         executable = self.command[0] if self.command else ""
-        resolved_executable = shutil.which(executable) if executable else None
-        if executable and resolved_executable is None:
+        resolved_executable = resolve_executable(executable) if executable else None
+        if executable and not resolved_executable:
             raise RuntimeError(f"MCP 可执行命令不存在: {executable}")
         command = [resolved_executable or executable, *self.command[1:]]
         return McpStdioSession(command, cwd=self.cwd, timeout_seconds=self.timeout_seconds, env=self.env or None)

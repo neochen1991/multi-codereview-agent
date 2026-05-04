@@ -2,6 +2,7 @@ import React from "react";
 import { Card, Empty, List, Space, Tag, Typography } from "antd";
 
 import type { KnowledgeDocument } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -25,14 +26,14 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
                 <List.Item.Meta
                   title={
                     <div className="review-finding-title">
-                      <Tag color="blue">{item.expert_id}</Tag>
-                      <span>{item.title}</span>
+                      <Tag color="blue">{humanizeExpertId(item.expert_id)}</Tag>
+                      <span>{humanizeReviewText(item.title)}</span>
                     </div>
                   }
                   description={
                     <Space direction="vertical" style={{ width: "100%" }} size={8}>
                       <Paragraph ellipsis={{ rows: item.matched_sections.length ? 2 : 3 }} style={{ marginBottom: 0 }}>
-                        {item.content}
+                        {humanizeReviewText(item.content)}
                       </Paragraph>
                       {item.matched_sections.length ? (
                         <div className="knowledge-match-group">
@@ -40,13 +41,13 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
                           <div className="knowledge-match-list">
                             {item.matched_sections.map((section) => (
                               <div key={`${item.doc_id}-${section.node_id}`} className="knowledge-match-item">
-                                <div className="knowledge-match-path">{section.path || section.title}</div>
-                                {section.summary ? <div className="knowledge-match-summary">{section.summary}</div> : null}
+                                <div className="knowledge-match-path">{humanizeReviewText(section.path || section.title)}</div>
+                                {section.summary ? <div className="knowledge-match-summary">{humanizeReviewText(section.summary)}</div> : null}
                                 {section.matched_terms?.length ? (
                                   <div className="knowledge-match-keywords">
                                     {section.matched_terms.map((term) => (
                                       <Tag key={`${section.node_id}-${term}`} color="geekblue">
-                                        {term}
+                                        {humanizeReviewText(term)}
                                       </Tag>
                                     ))}
                                   </div>
@@ -55,7 +56,7 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
                                   <div className="knowledge-match-signals">
                                     {section.matched_signals.map((signal) => (
                                       <Tag key={`${section.node_id}-${signal}`} color="cyan">
-                                        {signal}
+                                        {humanizeReviewText(signal)}
                                       </Tag>
                                     ))}
                                   </div>
@@ -70,7 +71,7 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
                           <div className="knowledge-outline-list">
                             {item.indexed_outline.slice(0, 8).map((outline) => (
                               <div key={`${item.doc_id}-${outline}`} className="knowledge-outline-item">
-                                {outline}
+                                {humanizeReviewText(outline)}
                               </div>
                             ))}
                           </div>
@@ -78,7 +79,7 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
                       ) : null}
                       <Space wrap size={[6, 6]}>
                         {item.tags.map((tag) => (
-                          <Tag key={tag}>{tag}</Tag>
+                          <Tag key={tag}>{humanizeReviewText(tag)}</Tag>
                         ))}
                       </Space>
                     </Space>
