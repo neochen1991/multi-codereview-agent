@@ -1028,69 +1028,19 @@ const SettingsPage: React.FC = () => {
             items={[
               {
                 key: "basic",
-                label: "核心设置",
+                label: "多代码仓设置",
                 extra: <Tag color="processing">最常用</Tag>,
                 children: (
                   <div className="settings-collapse-content">
                     <Paragraph className="settings-section-tip">
-                      这里保留运行模式、存储和审核开关。代码仓地址、本地目录和 GitNexus 开关统一在下方“多代码仓配置”中维护。
+                      在这里维护所有可审核代码仓。Git 地址、本地目录、默认分支、自动同步和 GitNexus 开关都以这份列表为准。
                     </Paragraph>
                     <Row gutter={[16, 0]}>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="default_target_branch" label="默认目标分支">
-                          <Input placeholder="main" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="default_analysis_mode" label="默认审核模式">
-                          <Select
-                            options={[
-                              { label: "标准模式", value: "standard" },
-                              { label: "轻量模式", value: "light" },
-                            ]}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="storage_backend" label="底层存储后端">
-                          <Select
-                            options={[
-                              { label: "SQLite（默认）", value: "sqlite" },
-                              { label: "PostgreSQL", value: "postgres" },
-                            ]}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="storage_pg_url" label="PG 连接 URL">
-                          <Input placeholder="postgresql://127.0.0.1:5432/review_db" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={6}>
-                        <Form.Item name="storage_pg_schema" label="PG Schema">
-                          <Input placeholder="public" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={6}>
-                        <Form.Item name="storage_pg_user" label="PG 用户">
-                          <Input placeholder="review_user" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="storage_pg_password" label="PG 密码">
-                          <Input.Password placeholder="留空则保持当前已配置的 PG 密码" />
-                        </Form.Item>
-                        {renderConfiguredNotice(
-                          "storage_pg_password_configured",
-                          "PG 密码已配置",
-                          "未填写新密码时，系统会继续使用当前已保存的 PG 密码。",
-                        )}
-                      </Col>
                       <Col xs={24} xl={12}>
                         <Form.Item
                           name="default_repository_id"
                           label="默认代码仓 ID"
-                          extra="填写下方多代码仓列表中的仓库 ID；为空时默认使用列表第一项。"
+                          extra="填写下方列表中的仓库 ID；为空时默认使用列表第一项。"
                         >
                           <Input placeholder="ipc-fnd-service" />
                         </Form.Item>
@@ -1100,18 +1050,13 @@ const SettingsPage: React.FC = () => {
                           <Switch />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} xl={6}>
-                        <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
-                          <Switch />
-                        </Form.Item>
-                      </Col>
                       <Col xs={24}>
                         <Alert
                           type="info"
                           showIcon
                           style={{ marginBottom: 16 }}
-                          message="代码仓信息只有一个主入口"
-                          description="请在“多代码仓配置”里维护 Git 地址、本地目录、默认分支、自动同步和 GitNexus 开关。历史单仓字段仍会由默认仓库自动同步保存，只作为兼容回退，不再单独展示。"
+                          message="代码仓信息统一维护在下方列表"
+                          description="新增、删除或调整代码仓时，只修改这份列表即可。系统会按 repository_id 定位本地仓、GitNexus 图谱和数据源。"
                         />
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1125,7 +1070,7 @@ const SettingsPage: React.FC = () => {
                             <div>
                               <strong>多代码仓配置</strong>
                               <Paragraph className="settings-section-tip" style={{ marginBottom: 0 }}>
-                                这是代码仓配置的唯一主入口。审核任务会按 repository_id 定位本地仓、GitNexus 图谱和数据源；自动审核会逐个扫描启用自动审核的仓库。
+                                可以添加一个或多个代码仓；自动审核会逐个扫描启用自动审核的仓库。
                               </Paragraph>
                             </div>
                           </div>
@@ -1255,6 +1200,75 @@ const SettingsPage: React.FC = () => {
                             rows={10}
                             placeholder={`[\n  {\n    "repo_url": "https://github.com/org/repo.git",\n    "provider": "postgres",\n    "enabled": true,\n    "host": "127.0.0.1",\n    "port": 5432,\n    "database": "review_db",\n    "user": "review_user",\n    "password_env": "PG_REVIEW_PASSWORD",\n    "schema_allowlist": ["public"],\n    "ssl_mode": "prefer",\n    "connect_timeout_seconds": 5,\n    "statement_timeout_ms": 3000\n  }\n]`}
                           />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </div>
+                ),
+              },
+              {
+                key: "runtime",
+                label: "系统运行设置",
+                extra: <Tag>按需配置</Tag>,
+                children: (
+                  <div className="settings-collapse-content">
+                    <Paragraph className="settings-section-tip">
+                      这里配置默认审核模式、存储后端和人工确认开关；日常新增代码仓不需要改这里。
+                    </Paragraph>
+                    <Row gutter={[16, 0]}>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="default_target_branch" label="默认目标分支">
+                          <Input placeholder="main" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="default_analysis_mode" label="默认审核模式">
+                          <Select
+                            options={[
+                              { label: "标准模式", value: "standard" },
+                              { label: "轻量模式", value: "light" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_backend" label="底层存储后端">
+                          <Select
+                            options={[
+                              { label: "SQLite（默认）", value: "sqlite" },
+                              { label: "PostgreSQL", value: "postgres" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_pg_url" label="PG 连接 URL">
+                          <Input placeholder="postgresql://127.0.0.1:5432/review_db" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="storage_pg_schema" label="PG Schema">
+                          <Input placeholder="public" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="storage_pg_user" label="PG 用户">
+                          <Input placeholder="review_user" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={12}>
+                        <Form.Item name="storage_pg_password" label="PG 密码">
+                          <Input.Password placeholder="留空则保持当前已配置的 PG 密码" />
+                        </Form.Item>
+                        {renderConfiguredNotice(
+                          "storage_pg_password_configured",
+                          "PG 密码已配置",
+                          "未填写新密码时，系统会继续使用当前已保存的 PG 密码。",
+                        )}
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
+                          <Switch />
                         </Form.Item>
                       </Col>
                     </Row>
