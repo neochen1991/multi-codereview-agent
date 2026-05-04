@@ -178,6 +178,39 @@ def test_gitnexus_index_scheduler_finds_windows_npm_cmd_when_service_path_is_sta
     assert captured[0] == [str(fake_bin), "analyze"]
 
 
+def test_gitnexus_index_status_refreshes_stale_installation_flag(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    appdata = tmp_path / "AppData" / "Roaming"
+    fake_bin = appdata / "npm" / "gitnexus.cmd"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr("shutil.which", lambda command: None)
+
+    service = ReviewService(storage_root=storage_root)
+    status_path = storage_root / "gitnexus" / "index_status.json"
+    write_json(
+        status_path,
+        {
+            "state": "skipped",
+            "message": "当前机器未预装 GitNexus，跳过建图。",
+            "gitnexus_installed": False,
+            "gitnexus_command": "gitnexus analyze",
+            "gitnexus_path": "",
+        },
+    )
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.status()
+
+    assert status["gitnexus_installed"] is True
+    assert status["gitnexus_path"] == str(fake_bin)
+    assert status["gitnexus_command"] == f"{fake_bin} analyze"
+
+
 def test_gitnexus_index_scheduler_accepts_json_analyze_command(storage_root: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
     fake_bin = tmp_path / "Tools With Spaces" / "gitnexus.exe"

@@ -241,11 +241,18 @@ class GitNexusIndexScheduler:
                 gitnexus_path=binary_path,
             )
         if isinstance(payload, dict):
-            payload.setdefault("gitnexus_installed", command_available)
-            payload.setdefault("gitnexus_command", command_text)
-            payload.setdefault("gitnexus_path", binary_path)
-            payload.setdefault("repository_id", resolved_repository_id)
-            return dict(payload)
+            refreshed = dict(payload)
+            refreshed["gitnexus_installed"] = command_available
+            refreshed["gitnexus_command"] = command_text
+            refreshed["gitnexus_path"] = binary_path
+            refreshed["repository_id"] = resolved_repository_id
+            stale_missing_message = any(
+                token in str(refreshed.get("message") or "")
+                for token in ("未预装 GitNexus", "未安装 GitNexus", "未发现 gitnexus", "未发现 GitNexus")
+            )
+            if command_available and stale_missing_message:
+                refreshed["message"] = "已检测到 GitNexus，可手动建立图谱更新最近状态。"
+            return refreshed
         return self._status(
             "unknown",
             "GitNexus 建图状态格式异常。",

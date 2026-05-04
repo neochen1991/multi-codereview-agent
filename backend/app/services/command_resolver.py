@@ -41,6 +41,9 @@ def _resolve_gitnexus_from_common_windows_locations(executable: str) -> str:
             os.getenv("LOCALAPPDATA", ""),
             os.getenv("ProgramFiles", ""),
             os.getenv("ProgramFiles(x86)", ""),
+            os.getenv("ProgramData", ""),
+            os.getenv("ChocolateyInstall", ""),
+            os.getenv("SCOOP", ""),
         ]
         if str(value or "").strip()
     ]
@@ -52,6 +55,8 @@ def _resolve_gitnexus_from_common_windows_locations(executable: str) -> str:
                 root / "AppData" / "Roaming" / "npm",
                 root / "AppData" / "Local" / "Microsoft" / "WindowsApps",
                 root / "AppData" / "Local" / "Programs" / "GitNexus",
+                root / "AppData" / "Local" / "Programs" / "GitNexus" / "bin",
+                root / "scoop" / "shims",
             ]
         )
     expanded_dirs: list[Path] = []
@@ -59,7 +64,10 @@ def _resolve_gitnexus_from_common_windows_locations(executable: str) -> str:
         expanded_dirs.append(base_dir)
         expanded_dirs.append(base_dir / "npm")
         expanded_dirs.append(base_dir / "GitNexus")
+        expanded_dirs.append(base_dir / "GitNexus" / "bin")
         expanded_dirs.append(base_dir / "Microsoft" / "WindowsApps")
+        expanded_dirs.append(base_dir / "chocolatey" / "bin")
+        expanded_dirs.append(base_dir / "shims")
 
     for directory in expanded_dirs:
         for suffix in WINDOWS_EXECUTABLE_SUFFIXES:

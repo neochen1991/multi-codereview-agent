@@ -528,6 +528,16 @@ const SettingsPage: React.FC = () => {
     return "default";
   };
 
+  const gitnexusInstallDisplay = (status?: GitNexusIndexStatus | null) => {
+    if (status?.gitnexus_installed === true) {
+      return { color: "success", label: "已预装", path: status.gitnexus_path || "已检测到 gitnexus 命令" };
+    }
+    if (status?.gitnexus_installed === false) {
+      return { color: "error", label: "未安装", path: status.gitnexus_path || "当前机器未发现 gitnexus 可执行命令" };
+    }
+    return { color: "default", label: "未确认", path: status?.gitnexus_path || "刷新后显示 gitnexus 命令路径" };
+  };
+
   const renderGitNexusPreflight = (diagnostic?: GitNexusPreflightStatus | null) => {
     if (!diagnostic) {
       return <span>暂无诊断结果，点击刷新后查看。</span>;
@@ -616,6 +626,7 @@ const SettingsPage: React.FC = () => {
           {() => {
             const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
             if (!repositories.length) {
+              const installDisplay = gitnexusInstallDisplay(gitnexusStatus);
               return (
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="状态">
@@ -626,10 +637,8 @@ const SettingsPage: React.FC = () => {
                   </Descriptions.Item>
                   <Descriptions.Item label="安装状态">
                     <Space wrap>
-                      <Tag color={gitnexusStatus?.gitnexus_installed ? "success" : "error"}>
-                        {gitnexusStatus?.gitnexus_installed ? "已预装" : "未安装"}
-                      </Tag>
-                      <span>{gitnexusStatus?.gitnexus_path || "当前机器未发现 gitnexus 可执行命令"}</span>
+                      <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
+                      <span>{installDisplay.path}</span>
                     </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="执行命令">{gitnexusStatus?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
@@ -658,6 +667,7 @@ const SettingsPage: React.FC = () => {
                   const repositoryId = String(repo.repository_id || "").trim();
                   const status = repositoryId ? repositoryGitnexusStatuses[repositoryId] : undefined;
                   const diagnostic = repositoryId ? repositoryGitnexusPreflights[repositoryId] : undefined;
+                  const installDisplay = gitnexusInstallDisplay(status);
                   return (
                     <Card
                       key={repositoryId || `repo-${index}`}
@@ -698,10 +708,8 @@ const SettingsPage: React.FC = () => {
                         <Descriptions.Item label="本地路径">{status?.repo_path || repo.local_path || "未配置"}</Descriptions.Item>
                         <Descriptions.Item label="安装状态">
                           <Space wrap>
-                            <Tag color={status?.gitnexus_installed ? "success" : "error"}>
-                              {status?.gitnexus_installed ? "已预装" : "未确认"}
-                            </Tag>
-                            <span>{status?.gitnexus_path || "刷新后显示 gitnexus 命令路径"}</span>
+                            <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
+                            <span>{installDisplay.path}</span>
                           </Space>
                         </Descriptions.Item>
                         <Descriptions.Item label="执行命令">{status?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
