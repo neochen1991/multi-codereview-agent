@@ -13,14 +13,14 @@ const AppHeader: React.FC = () => {
           <RobotOutlined />
         </span>
         <div className="app-header-title-wrap">
-          <div className="app-header-title">多专家协同代码审核系统</div>
-          <div className="app-header-subtitle">FastAPI + LangGraph-style Runtime</div>
+          <div className="app-header-title">代码检视协同平台</div>
+          <div className="app-header-subtitle">质量检视 · 影响范围 · 人工确认</div>
         </div>
       </Space>
 
       <Space size={12} className="app-header-actions">
         <Tag color="processing" style={{ margin: 0 }}>
-          expert-review
+          review-ready
         </Tag>
         <a
           href="https://github.com"

@@ -3166,14 +3166,15 @@ def test_review_runner_uses_forced_ddd_observation_when_expert_fails(storage_roo
     )
 
     assert finding is not None
-    assert finding.finding_type == "direct_defect"
+    assert finding.finding_type == "risk_hypothesis"
     assert finding.severity == "blocker"
-    assert finding.verification_needed is False
-    assert finding.confidence >= 0.9
+    assert finding.verification_needed is True
+    assert finding.confidence <= 0.78
     assert finding.assumptions == []
     assert "聚合工厂绕过" in finding.title
     assert "DDD-JDDD-001" in finding.matched_rules
     assert (finding.code_context or {}).get("observation_ids") == ["obs_factory_001"]
+    assert (finding.code_context or {}).get("direct_evidence") is False
 
 
 def test_review_runner_builds_signal_aware_fallback_finding_when_expert_fails(storage_root: Path):

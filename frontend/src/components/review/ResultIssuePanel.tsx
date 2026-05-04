@@ -31,8 +31,8 @@ const getMergeImpact = (issue: DebateIssue): string => {
 const buildRecommendedAction = (issue: DebateIssue): string => {
   if (issue.needs_human && issue.status !== "resolved") return "提交人工复核";
   if (issue.resolution === "human_approved" || issue.resolution === "judge_accepted") return "进入修复清单";
-  if (issue.resolution === "human_rejected") return "关闭议题并补证据";
-  if (issue.needs_debate && issue.status !== "resolved") return "继续专家辩论";
+  if (issue.resolution === "human_rejected") return "关闭问题并补证据";
+  if (issue.needs_debate && issue.status !== "resolved") return "继续复核";
   if (issue.verified) return "按核验证据整改";
   return "补充证据后再裁决";
 };
@@ -91,9 +91,19 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
     return map;
   }, [findings]);
 
+  const formalIssues = useMemo(
+    () =>
+      issues.filter(
+        (issue) =>
+          String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
+          String(issue.resolution || "").trim().toLowerCase() !== "human_rejected",
+      ),
+    [issues],
+  );
+
   const rows = useMemo<ReviewResultListRow[]>(
     () =>
-      issues.map((issue) => {
+      formalIssues.map((issue) => {
         const relatedFindings = issue.finding_ids
           .map((findingId) => findingById.get(findingId))
           .filter(Boolean) as ReviewFinding[];
@@ -116,13 +126,13 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           issue.line_start ||
           (distinctFiles.length <= 1 ? primaryFinding?.line_start : undefined);
         const metaSummaryParts = [
-          "议题聚合",
+          "问题聚合",
           `关联发现 ${issue.finding_ids.length}`,
-          `主责专家 ${issue.primary_expert_id || issue.participant_expert_ids[0] || "-"}`,
-          `参与专家 ${issue.participant_expert_ids.length}`,
+          `主责角色 ${issue.primary_expert_id || issue.participant_expert_ids[0] || "-"}`,
+          `参与角色 ${issue.participant_expert_ids.length}`,
         ];
         if ((issue.aggregated_titles || []).length > 1) {
-          metaSummaryParts.push(`聚合问题 ${issue.aggregated_titles?.length || 0}`);
+          metaSummaryParts.push(`合并问题 ${issue.aggregated_titles?.length || 0}`);
         }
         if (distinctFiles.length > 1) {
           metaSummaryParts.push(`涉及文件 ${distinctFiles.length}`);
@@ -168,7 +178,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           hasDesignEvidence: relatedFindings.some((finding) => hasDesignEvidence(finding)),
         };
       }),
-    [findingById, issues],
+    [findingById, formalIssues],
   );
 
   const submitSelectedIssues = async () => {
@@ -178,9 +188,9 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
       const result = await reviewApi.exportIssuesToCodehub(reviewId, { issue_ids: selectedIssueIds });
       setExportResult(result);
       setPreviewOpen(true);
-      message.success(`已模拟提交 ${result.submitted_count} 条正式议题到 CodeHub`);
+      message.success(`已模拟提交 ${result.submitted_count} 条正式问题到缺陷平台`);
     } catch (error: any) {
-      message.error(error?.message || "模拟提交到 CodeHub 失败");
+      message.error(error?.message || "模拟提交到缺陷平台失败");
     } finally {
       setSubmitting(false);
     }
@@ -192,11 +202,11 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
     <>
       <ReviewResultListTable
         cardClassName="review-result-issue-card"
-        title={`正式议题清单 (${issues.length})`}
-        extra={<Text type="secondary">这里只展示真正进入议题收敛流程的问题</Text>}
+        title={`正式问题清单 (${formalIssues.length})`}
+        extra={<Text type="secondary">这里只展示已确认需要进入处理流程的问题</Text>}
         toolbarExtra={
           <Space wrap>
-            <Tag color={selectedCount > 0 ? "processing" : "default"}>{selectedCount > 0 ? `已选 ${selectedCount} 条` : "未选择议题"}</Tag>
+            <Tag color={selectedCount > 0 ? "processing" : "default"}>{selectedCount > 0 ? `已选 ${selectedCount} 条` : "未选择问题"}</Tag>
             <Button onClick={() => setSelectedIssueIds(rows.map((item) => item.id))} disabled={rows.length === 0}>
               全选
             </Button>
@@ -204,7 +214,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
               清空选择
             </Button>
             <Button type="primary" onClick={() => void submitSelectedIssues()} disabled={selectedCount === 0 || !reviewId} loading={submitting}>
-              提交到 CodeHub
+              提交到缺陷平台
             </Button>
           </Space>
         }
@@ -213,11 +223,11 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         onSelectRow={onSelectIssue}
         selectedRowIds={selectedIssueIds}
         onSelectedRowIdsChange={setSelectedIssueIds}
-        emptyText="当前没有正式议题。若发现项未达到阈值，会保留在审核发现清单或阈值过滤清单中。"
+        emptyText="当前没有正式问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
         disableHorizontalScroll
       />
       <Modal
-        title="CodeHub 模拟提交结果"
+        title="缺陷平台模拟提交结果"
         open={previewOpen}
         onCancel={() => setPreviewOpen(false)}
         footer={null}
@@ -226,7 +236,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         {exportResult ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             <Text type="secondary">
-              本次仅为 mock 提交，当前返回的是后端组装后的 payload，后续你可以直接把这条接口替换成真实 CodeHub 能力。
+              本次仅为模拟提交，当前返回的是后端组装后的提交内容，后续可以把这条接口替换成真实缺陷平台能力。
             </Text>
             {exportResult.items.map((item) => (
               <div key={item.issue_id} className="review-summary-cell">

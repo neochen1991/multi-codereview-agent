@@ -36,7 +36,7 @@ const GovernancePage: React.FC = () => {
     <div className="page-container">
       <Card className="module-card" title="治理中心" loading={loading}>
         <Paragraph>
-          这一页对齐设计文档里的治理层，先提供最关键的质量指标：工具确认率、辩论存活率、人工 gate 体量和误报反馈。
+          这一页对齐设计文档里的治理层，先提供最关键的质量指标：工具确认率、复核保留率、人工确认量和误报反馈。
         </Paragraph>
         <Row gutter={[16, 16]}>
           <Col xs={24} md={8} xl={4}>
@@ -46,7 +46,7 @@ const GovernancePage: React.FC = () => {
           </Col>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
-              <Statistic title="议题总数" value={metrics?.issue_count || 0} />
+              <Statistic title="正式问题数" value={metrics?.issue_count || 0} />
             </Card>
           </Col>
           <Col xs={24} md={8} xl={4}>
@@ -56,12 +56,12 @@ const GovernancePage: React.FC = () => {
           </Col>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
-              <Statistic title="辩论存活率" value={((metrics?.debate_survival_rate || 0) * 100).toFixed(0)} suffix="%" />
+              <Statistic title="复核保留率" value={((metrics?.debate_survival_rate || 0) * 100).toFixed(0)} suffix="%" />
             </Card>
           </Col>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
-              <Statistic title="人工 Gate" value={metrics?.needs_human_count || 0} suffix={<Tag color="error">human</Tag>} />
+              <Statistic title="人工确认" value={metrics?.needs_human_count || 0} suffix={<Tag color="error">待确认</Tag>} />
             </Card>
           </Col>
           <Col xs={24} md={8} xl={4}>
@@ -134,9 +134,9 @@ const GovernancePage: React.FC = () => {
         ) : null}
       </Card>
 
-      <Card className="module-card" title="LLM Timeout 观测" style={{ marginTop: 16 }} loading={loading}>
+      <Card className="module-card" title="模型调用超时观测" style={{ marginTop: 16 }} loading={loading}>
         <Paragraph>
-          这里聚合最近一段时间后端日志里的 LLM 超时与耗时分布，优先帮助定位是建连慢、读流慢，还是并发池等待。
+          这里聚合最近一段时间后端日志里的模型调用超时与耗时分布，优先帮助定位是建连慢、读流慢，还是并发池等待。
         </Paragraph>
         <Row gutter={[16, 16]}>
           <Col xs={24} md={8} xl={4}>
@@ -191,7 +191,7 @@ const GovernancePage: React.FC = () => {
               ))}
             </Space>
           ) : (
-            <Empty description="最近没有捕获到 LLM timeout。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            <Empty description="最近没有捕获到模型调用超时。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
           )}
         </Card>
       </Card>

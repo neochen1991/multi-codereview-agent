@@ -2,6 +2,7 @@ import React from "react";
 import { Alert, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue, ReviewFinding } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph } = Typography;
 
@@ -36,9 +37,9 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       finding?.suggested_code ||
       (finding?.code_context && Object.keys(finding.code_context).length > 0),
   );
-  const issueDescription = issue?.summary || finding?.summary || "-";
-  const issueStrategy = issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-";
-  const issueSuggestion = issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-";
+  const issueDescription = humanizeReviewText(issue?.summary || finding?.summary || "-");
+  const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-");
+  const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-");
   const issueSteps = uniqueList(issue?.remediation_steps).length
     ? uniqueList(issue?.remediation_steps)
     : aggregatedSteps.length
@@ -48,10 +49,10 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const participantExperts = uniqueList(issue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
 
   return (
-    <Card className="module-card process-sidebar-card process-sidebar-card-md" title="议题详情">
+    <Card className="module-card process-sidebar-card process-sidebar-card-md" title="问题详情">
       <div className="process-card-scroll">
         {!issue ? (
-          <Empty description="选择一个议题后，这里会展示裁决信息、主责专家、证据和参与专家。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="选择一个问题后，这里会展示复核信息、主责角色、证据和参与角色。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
             {findingDetailsLoading && finding && !hasFullFindingDetails ? (
@@ -60,7 +61,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 showIcon
                 style={{ marginBottom: 16 }}
                 message="完整关联上下文加载中"
-                description="当前先展示议题摘要，完整的代码上下文会在后台补全后自动更新。"
+                description="当前先展示问题摘要，完整的代码上下文会在后台补全后自动更新。"
               />
             ) : null}
             {!findingDetailsLoading && findingDetailsError && finding && !hasFullFindingDetails ? (
@@ -69,12 +70,12 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 showIcon
                 style={{ marginBottom: 16 }}
                 message="完整关联上下文暂未加载成功"
-                description={`${findingDetailsError}。这不会影响当前议题结论本身。`}
+                description={`${findingDetailsError}。这不会影响当前问题结论本身。`}
               />
             ) : null}
             <Descriptions column={1} size="small">
               <Descriptions.Item label="问题标题">
-                {issue.title || "-"}
+                {humanizeReviewText(issue.title || "-")}
               </Descriptions.Item>
               <Descriptions.Item label="问题描述">
                 <div>
@@ -93,27 +94,27 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   {issue.severity}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="裁决路径">
+              <Descriptions.Item label="复核路径">
                 {issue.resolution || (issue.needs_human ? "human_gate" : "judge_merge")}
               </Descriptions.Item>
-              <Descriptions.Item label="是否辩论">
+              <Descriptions.Item label="是否复核">
                 <Tag color={issue.needs_debate ? "processing" : "default"}>
-                  {issue.needs_debate ? "debated" : "direct-merge"}
+                  {issue.needs_debate ? "已复核" : "直接收敛"}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="问题位置">
                 {issue.file_path ? `${issue.file_path}:${issue.line_start || 1}` : "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="主责专家">
+              <Descriptions.Item label="主责角色">
                 {primaryExpertId || "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="参与专家">
-                {participantExperts.join("、") || (primaryExpertId ? "仅主责专家参与" : "-")}
+              <Descriptions.Item label="参与角色">
+                {participantExperts.join("、") || (primaryExpertId ? "仅主责角色参与" : "-")}
               </Descriptions.Item>
               <Descriptions.Item label="证据">
-                {issue.evidence.join("、") || "-"}
+                {issue.evidence.map((item) => humanizeReviewText(item)).join("、") || "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="关联 findings">
+              <Descriptions.Item label="关联发现">
                 {issue.finding_ids.join("、") || "-"}
               </Descriptions.Item>
               <Descriptions.Item label="置信度">
@@ -125,7 +126,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               {issue.confidence_rationale ? (
                 <Descriptions.Item label="置信度理由">
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                    {issue.confidence_rationale}
+                    {humanizeReviewText(issue.confidence_rationale)}
                   </Paragraph>
                 </Descriptions.Item>
               ) : null}
@@ -165,7 +166,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       <Space wrap>
                         {aggregatedTitles.map((title) => (
                           <Tag key={title} color="blue">
-                            {title}
+                            {humanizeReviewText(title)}
                           </Tag>
                         ))}
                       </Space>
@@ -178,7 +179,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                           .filter((summary) => summary !== issueDescription)
                           .map((summary) => (
                           <Paragraph key={summary} style={{ marginBottom: 8 }}>
-                            {summary}
+                            {humanizeReviewText(summary)}
                           </Paragraph>
                           ))}
                       </div>
@@ -207,7 +208,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       <div>
                         {issueSteps.map((item, index) => (
                           <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
-                            {index + 1}. {item}
+                            {index + 1}. {humanizeReviewText(item)}
                           </Paragraph>
                         ))}
                       </div>
@@ -221,7 +222,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>关联代码上下文</Paragraph>
                 <Descriptions column={1} size="small">
-                  <Descriptions.Item label="提出专家">{finding.expert_id}</Descriptions.Item>
+                  <Descriptions.Item label="检查角色">{finding.expert_id}</Descriptions.Item>
                   <Descriptions.Item label="路由原因">
                     {codeContext?.routing_reason || "当前未记录路由原因"}
                   </Descriptions.Item>

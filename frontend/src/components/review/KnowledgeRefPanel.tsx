@@ -16,7 +16,7 @@ const KnowledgeRefPanel: React.FC<KnowledgeRefPanelProps> = ({ documents, loadin
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="知识引用" loading={loading}>
       <div className="process-card-scroll">
         {documents.length === 0 ? (
-          <Empty description="当前议题还没有匹配到知识条目。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="当前问题还没有匹配到知识条目。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <List
             dataSource={documents}

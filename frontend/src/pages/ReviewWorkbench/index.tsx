@@ -31,6 +31,7 @@ import {
   type GitNexusIndexStatus,
 } from "@/services/api";
 import { subscribeReviewEventStream } from "@/services/stream";
+import { humanizeReviewText } from "@/utils/displayText";
 import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const CodeReviewConclusionPanel = lazy(() => import("@/components/review/CodeReviewConclusionPanel"));
@@ -330,12 +331,12 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
   const bannerTone = summary.system_added_experts.length > 0 ? "warning" : hasAdjustments ? "info" : "default";
   const heading =
     summary.system_added_experts.length > 0
-      ? "专家与代码不完全匹配，系统已自动补入兜底专家继续审查"
+      ? "检查角色与代码不完全匹配，系统已自动补入兜底角色继续检视"
       : hasAdjustments
-        ? "部分已选择专家与当前变更相关性较低，系统已自动跳过"
-        : "本轮专家路由已完成";
+        ? "部分已选择角色与当前变更相关性较低，系统已自动跳过"
+        : "本轮检查角色匹配已完成";
   return (
-    <Card className={`module-card expert-routing-card expert-routing-card-${bannerTone}`} title="专家路由提示">
+    <Card className={`module-card expert-routing-card expert-routing-card-${bannerTone}`} title="检查角色匹配">
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Paragraph className="expert-routing-summary">{heading}</Paragraph>
         <RoutingExpertTags title="用户选择" items={summary.user_selected_experts} color="blue" />
@@ -349,7 +350,7 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
                 <div key={`skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
                   <Text strong>{item.expert_name || item.expert_id}</Text>
                   <Text type="secondary">
-                    {item.reason || "当前变更未命中该专家的有效审查线索"}
+                    {item.reason || "当前变更未命中该角色的有效审查线索"}
                     {item.file_path ? ` · ${item.file_path}${item.line_start ? `:${item.line_start}` : ""}` : ""}
                   </Text>
                 </div>
@@ -365,7 +366,7 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
 const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> = ({ items }) => {
   if (items.length === 0) return null;
   return (
-    <Card className="module-card" title="专家规则命中统计">
+    <Card className="module-card" title="检查规则命中统计">
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         {items.map((item) => (
           <Card key={item.expert_id} size="small">
@@ -402,14 +403,14 @@ const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> 
 
 const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }> = ({ summary }) => {
   return (
-    <Card className="module-card expert-routing-card expert-routing-card-info" title="专家参与判定">
+    <Card className="module-card expert-routing-card expert-routing-card-info" title="参与角色判定">
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Paragraph className="expert-routing-summary">
           {summary
-            ? "主Agent 已基于当前 MR 信息、完整 diff 和专家画像，先由大模型判定本次真正需要参与审核的专家集合。"
-            : "主Agent 正在结合当前 MR、完整 diff 和专家画像判定本轮需要参与审核的专家，请稍候。"}
+            ? "审核调度已基于当前 MR 信息、完整 diff 和角色职责，判定本次真正需要参与审核的检查角色。"
+            : "审核调度正在结合当前 MR、完整 diff 和角色职责判定本轮需要参与审核的检查角色，请稍候。"}
         </Paragraph>
-        {summary ? <RoutingExpertTags title="大模型选中" items={summary.selected_experts} color="green" /> : null}
+        {summary ? <RoutingExpertTags title="系统选中" items={summary.selected_experts} color="green" /> : null}
         {summary?.requested_expert_ids.length ? (
           <div className="routing-group">
             <Text className="routing-group-title">原始候选</Text>
@@ -429,13 +430,13 @@ const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }>
               {summary.skipped_experts.map((item) => (
                 <div key={`selection-skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
                   <Text strong>{item.expert_name || item.expert_id}</Text>
-                  <Text type="secondary">{item.reason || "大模型未将其纳入本次 MR 的审核集合"}</Text>
+                  <Text type="secondary">{item.reason || "系统未将其纳入本次 MR 的审核集合"}</Text>
                 </div>
               ))}
             </Space>
           </div>
         ) : !summary ? (
-          <Tag color="processing">正在判定参与专家</Tag>
+          <Tag color="processing">正在判定参与角色</Tag>
         ) : null}
       </Space>
     </Card>
@@ -891,7 +892,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [requestedTab, review, reviewId]);
 
   useEffect(() => {
-    // 过程页使用 SSE 增量刷新，保证主 Agent / 专家消息尽快出现在界面上。
+    // 过程页使用 SSE 增量刷新，保证审核调度 / 检查角色消息尽快出现在界面上。
     if (!reviewId || activeStep !== "process") return;
     return subscribeReviewEventStream(buildReviewEventStreamUrl(reviewId), () => {
       void loadWorkspaceData(reviewId);
@@ -1123,7 +1124,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [selectedIssue, review?.subject.changed_files]);
 
   const headerTitle = useMemo(() => {
-    if (!review) return "多专家代码审核工作台";
+  if (!review) return "代码检视工作台";
     return review.subject.title || `${review.subject.source_ref} -> ${review.subject.target_ref}`;
   }, [review]);
   const processElapsedLabel = useMemo(() => {
@@ -1144,22 +1145,22 @@ const ReviewWorkbenchPage: React.FC = () => {
     () => [
       {
         key: "overview",
-        label: "概览与启动",
+        label: "提交检视",
         hint: "先录入 MR 链接或分支信息，确认审核是否已创建并启动。",
       },
       {
         key: "process",
-        label: "审核过程",
-        hint: "查看主 Agent 调度、专家发言、代码定位和裁决轨迹。",
+        label: "检视过程",
+        hint: "查看审核调度、检查角色输出、代码定位和复核轨迹。",
       },
       {
         key: "result",
-        label: "结论与行动",
-        hint: "查看最终 Code Review 报告、问题清单、人工裁决和修复建议。",
+        label: "检视结果",
+        hint: "查看最终检视报告、问题清单、人工确认和修复建议。",
       },
       {
         key: "impact",
-        label: "关联影响报告",
+        label: "影响范围",
         hint: "查看 GitNexus 生成的影响范围、受波及对象和建议测试范围。",
       },
     ],
@@ -1169,7 +1170,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const currentTab = workspaceTabs.find((item) => item.key === activeStep) || workspaceTabs[0];
   const currentTabHint =
     reviewId && activeStep === "overview"
-      ? "当前是审核记录查看模式，可核对当时提交的审核对象、候选专家、大模型判定的参与专家与 diff 上下文。"
+      ? "当前是审核记录查看模式，可核对当时提交的审核对象、候选角色、系统判定的参与角色与 diff 上下文。"
       : currentTab.hint;
 
   const handleFormChange = useCallback((patch: Partial<ReviewFormState>) => {
@@ -1365,7 +1366,7 @@ const ReviewWorkbenchPage: React.FC = () => {
       ) : null}
       <Card className="module-card review-hero-card" loading={loading}>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Tag color="processing">Code Review Workbench</Tag>
+          <Tag color="processing">代码检视工作台</Tag>
           <Space wrap>
             <Tag
               color={
@@ -1376,19 +1377,19 @@ const ReviewWorkbenchPage: React.FC = () => {
             </Tag>
             <Tag color={review?.human_review_status === "requested" ? "error" : "success"}>
               {review?.human_review_status === "requested"
-                ? "人工裁决中"
+                ? "等待人工确认"
                 : review?.human_review_status === "approved"
                   ? "人工已批准"
                   : review?.human_review_status === "rejected"
                     ? "人工已驳回"
-                    : "无需人工裁决"}
+                    : "无需人工确认"}
             </Tag>
           </Space>
           <Title level={3} style={{ margin: 0 }}>
             {headerTitle}
           </Title>
           {review?.report_summary ? (
-            <Paragraph className="review-inline-summary">{review.report_summary}</Paragraph>
+            <Paragraph className="review-inline-summary">{humanizeReviewText(review.report_summary)}</Paragraph>
           ) : null}
           <Space wrap>
             {reviewId ? <Text type="secondary">Review ID: {reviewId}</Text> : <Text type="secondary">尚未创建审核</Text>}
@@ -1514,11 +1515,11 @@ const ReviewWorkbenchPage: React.FC = () => {
                     items={[
                       {
                         key: "issues",
-                        label: "议题与工具",
+                        label: "问题与工具",
                         children: (
                           <Space direction="vertical" size={16} style={{ width: "100%" }}>
                             <div ref={processIssuesRef}>
-                              <Suspense fallback={<WorkbenchPanelFallback description="Issue 列表加载中..." />}>
+                              <Suspense fallback={<WorkbenchPanelFallback description="问题列表加载中..." />}>
                                 <IssueThreadList
                                   issues={issues}
                                   issueFindingMap={issueFindingMap}
@@ -1527,7 +1528,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                                 />
                               </Suspense>
                             </div>
-                            <Suspense fallback={<WorkbenchPanelFallback description="Issue 详情加载中..." />}>
+                            <Suspense fallback={<WorkbenchPanelFallback description="问题详情加载中..." />}>
                             <IssueDetailPanel issue={selectedIssue} finding={selectedIssueFinding} />
                             </Suspense>
                             <Suspense fallback={<WorkbenchPanelFallback description="工具轨迹加载中..." />}>
@@ -1564,16 +1565,16 @@ const ReviewWorkbenchPage: React.FC = () => {
                 items={[
                   {
                     key: "dialogue",
-                    label: "专家对话流",
+                    label: "过程记录",
                     children: (
                       <div ref={processDialogueRef}>
-                        <Card className="module-card process-dialogue-card" title="专家对话流">
+                        <Card className="module-card process-dialogue-card" title="过程记录">
                           {reviewId ? (
-                            <Suspense fallback={<Empty description="专家对话流加载中..." image={Empty.PRESENTED_IMAGE_SIMPLE} />}>
+                            <Suspense fallback={<Empty description="过程记录加载中..." image={Empty.PRESENTED_IMAGE_SIMPLE} />}>
                               <ReviewDialogueStream messages={allMessages} review={review} events={events} />
                             </Suspense>
                           ) : (
-                            <Empty description="请先在“概览与启动”创建一个审核任务。" />
+                            <Empty description="请先在“提交检视”创建一个审核任务。" />
                           )}
                         </Card>
                       </div>
@@ -1581,9 +1582,9 @@ const ReviewWorkbenchPage: React.FC = () => {
                   },
                   {
                     key: "lanes",
-                    label: "专家泳道",
+                    label: "角色视图",
                     children: (
-                      <Suspense fallback={<WorkbenchPanelFallback description="专家泳道加载中..." />}>
+                      <Suspense fallback={<WorkbenchPanelFallback description="角色视图加载中..." />}>
                         <ExpertLaneBoard review={review} messages={allMessages} />
                       </Suspense>
                     ),
@@ -1652,7 +1653,7 @@ const ReviewWorkbenchPage: React.FC = () => {
               </Col>
               <Col xs={24} xl={9}>
                 <div ref={resultHumanRef}>
-                  <Suspense fallback={<WorkbenchPanelFallback description="人工门禁加载中..." />}>
+                  <Suspense fallback={<WorkbenchPanelFallback description="人工确认加载中..." />}>
                     <HumanGatePanel
                       className="result-top-card"
                       review={review}
@@ -1668,7 +1669,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                         try {
                           targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
                           if (!targetIssue) {
-                            message.warning("当前没有待人工裁决的议题，已刷新列表");
+                            message.warning("当前没有待人工确认的问题，已刷新列表");
                             return;
                           }
                           await reviewApi.submitHumanDecision(reviewId, {
@@ -1692,7 +1693,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                         try {
                           targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
                           if (!targetIssue) {
-                            message.warning("当前没有待人工裁决的议题，已刷新列表");
+                            message.warning("当前没有待人工确认的问题，已刷新列表");
                             return;
                           }
                           await reviewApi.submitHumanDecision(reviewId, {
@@ -1722,19 +1723,11 @@ const ReviewWorkbenchPage: React.FC = () => {
               items={[
                 {
                   key: "issues",
-                  label: "有效问题清单",
+                  label: "正式问题清单",
                   children: (
                     <Space direction="vertical" size={16} style={{ width: "100%" }}>
                       <ExpertRuleCoveragePanel items={expertRuleCoverage} />
-                      <Suspense fallback={<WorkbenchPanelFallback description="质量治理信息加载中..." />}>
-                        <QualityGovernancePanel
-                          report={report}
-                          review={review}
-                          issues={issues}
-                          issueFilterDecisions={issueFilterDecisions}
-                        />
-                      </Suspense>
-                      <Suspense fallback={<WorkbenchPanelFallback description="有效问题清单加载中..." />}>
+                      <Suspense fallback={<WorkbenchPanelFallback description="正式问题清单加载中..." />}>
                         <ResultIssuePanel
                           reviewId={reviewId}
                           issues={issues}
@@ -1752,7 +1745,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                           }}
                         />
                       </Suspense>
-                      <Suspense fallback={<WorkbenchPanelFallback description="阈值过滤问题清单加载中..." />}>
+                      <Suspense fallback={<WorkbenchPanelFallback description="保留观察清单加载中..." />}>
                         <IssueThresholdFilteredPanel
                           findings={findings}
                           issueFilterDecisions={issueFilterDecisions}
@@ -1780,6 +1773,14 @@ const ReviewWorkbenchPage: React.FC = () => {
                           />
                         </Suspense>
                       </div>
+                      <Suspense fallback={<WorkbenchPanelFallback description="质量治理信息加载中..." />}>
+                        <QualityGovernancePanel
+                          report={report}
+                          review={review}
+                          issues={issues}
+                          issueFilterDecisions={issueFilterDecisions}
+                        />
+                      </Suspense>
                       <ReviewSubjectPanel review={review} />
                       <ArtifactSummaryPanel artifacts={artifacts} />
                     </Space>
@@ -1824,7 +1825,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 description={impactFailureSummary.error_message || "GitNexus 调用失败，本次审核没有可用的关联影响报告。"}
               />
             ) : null}
-            <Suspense fallback={<WorkbenchPanelFallback description="关联影响报告加载中..." />}>
+            <Suspense fallback={<WorkbenchPanelFallback description="影响范围报告加载中..." />}>
               <ImpactReportMarkdownPanel report={report} review={review} />
             </Suspense>
           </Space>

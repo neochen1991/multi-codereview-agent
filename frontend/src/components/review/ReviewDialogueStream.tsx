@@ -296,12 +296,12 @@ const buildIssueFilterGroup = (value: unknown): StructuredGroup | null => {
   const decisions = normalizeIssueFilterDecisionEntries(value);
   if (!decisions.length) return null;
   return {
-    title: "Issue 治理结果",
+    title: "问题治理结果",
     sections: [
       { label: "治理规则", values: decisions.map((item) => `${item.ruleLabel}${item.ruleCode ? ` (${item.ruleCode})` : ""}`) },
       { label: "保留原因", values: decisions.map((item) => item.reason) },
-      { label: "保留的 finding", values: decisions.flatMap((item) => item.findingTitles) },
-      { label: "涉及专家", values: decisions.flatMap((item) => item.expertIds) },
+      { label: "保留的发现", values: decisions.flatMap((item) => item.findingTitles) },
+      { label: "涉及角色", values: decisions.flatMap((item) => item.expertIds) },
       {
         label: "定位主题",
         values: decisions
@@ -698,7 +698,7 @@ const hasDesignEvidencePayload = (payload: Record<string, unknown>): boolean =>
 
 const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => {
   // 把后端原始消息统一映射成聊天视图模型，
-  // 这样主 Agent、专家、Judge、工具调用都能复用同一种渲染壳。
+  // 这样审核调度、检查角色、结果复核、工具调用都能复用同一种渲染壳。
   const metadata = message.metadata || {};
   const eventType = message.message_type;
   const activeSkills = Array.isArray(metadata.active_skills)
@@ -738,7 +738,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   const hunkHeader = typeof targetHunk?.hunk_header === "string" ? targetHunk.hunk_header : "";
   const summaryParts: string[] = [];
   if (eventType === "main_agent_command") {
-    summaryParts.push(`主Agent 点名 ${targetExpertName || targetExpertId} 处理这段代码`);
+    summaryParts.push(`审核调度指派 ${targetExpertName || targetExpertId} 处理这段代码`);
   } else if (eventType === "expert_ack") {
     summaryParts.push(`${message.expert_id} 已接单，准备开始分析`);
   } else if (eventType === "expert_analysis") {
@@ -759,7 +759,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   } else if (eventType === "debate_message") {
     summaryParts.push(`${message.expert_id} 正在回应 ${replyToExpertId || "上一位专家"}`);
   } else if (eventType === "judge_summary") {
-    summaryParts.push("Judge 正在收敛本轮议题");
+    summaryParts.push("结果复核正在收敛本轮问题");
   } else if (eventType === "judge_consistency_validation") {
     const validationStatus = typeof metadata.validation_status === "string" ? metadata.validation_status : "";
     const updatedFields = Array.isArray(metadata.updated_fields)
@@ -768,24 +768,24 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     const conflicts = Array.isArray(metadata.consistency_conflicts)
       ? metadata.consistency_conflicts.map((item) => String(item)).filter(Boolean)
       : [];
-    summaryParts.push("Judge 已完成正式 issue 一致性校验");
+    summaryParts.push("结果复核已完成正式问题一致性校验");
     if (validationStatus) summaryParts.push(`结果：${validationStatus}`);
     if (updatedFields.length) summaryParts.push(`修正字段 ${updatedFields.join(" / ")}`);
     if (conflicts.length) summaryParts.push(`冲突 ${conflicts.length} 项`);
   } else if (eventType === "main_agent_summary") {
-    summaryParts.push("主Agent 已输出最终收敛播报");
+    summaryParts.push("审核调度已输出最终收敛播报");
   } else if (eventType === "main_agent_intake") {
-    summaryParts.push("主Agent 已接收并整理本次审核输入");
+    summaryParts.push("审核调度已接收并整理本次审核输入");
   } else if (eventType === "main_agent_expert_selection") {
-    summaryParts.push("主Agent 已基于 MR 信息判定本次参与审核的专家");
+    summaryParts.push("审核调度已基于 MR 信息判定本次参与审核的检查角色");
   } else if (eventType === "main_agent_routing_preparing") {
-    summaryParts.push("主Agent 正在构建派工上下文");
+    summaryParts.push("审核调度正在构建派工上下文");
   } else if (eventType === "main_agent_routing_ready") {
-    summaryParts.push("主Agent 已完成派工规划，准备下发专家任务");
+    summaryParts.push("审核调度已完成派工规划，准备下发检查任务");
   } else if (eventType === "main_agent_expert_execution_completed") {
-    summaryParts.push("专家审查执行阶段已完成");
+    summaryParts.push("专项检视执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
-    summaryParts.push("主Agent 已按治理规则筛出仅保留为 finding 的提示性问题");
+    summaryParts.push("审核调度已按治理规则筛出仅保留观察的提示性问题");
   } else if (eventType === "impact_analysis_started") {
     summaryParts.push("系统已启动关联影响分析");
   } else if (eventType === "impact_report_generated") {
@@ -1000,7 +1000,7 @@ const buildStructuredGroups = (
           title: "阶段耗时",
           sections: [
             {
-              label: "专家判定耗时",
+              label: "角色判定耗时",
               values:
                 typeof metadata.selection_elapsed_ms === "number"
                   ? [`${metadata.selection_elapsed_ms} ms`]
@@ -1009,13 +1009,13 @@ const buildStructuredGroups = (
           ].filter((section) => section.values.length > 0),
         },
         {
-          title: "参与审核的专家",
+          title: "参与审核的检查角色",
           sections: [
-            { label: "大模型选中", values: formatExpertRows(selectedExperts) },
+            { label: "系统选中", values: formatExpertRows(selectedExperts) },
           ].filter((section) => section.values.length > 0),
         },
         {
-          title: "未参与本轮的专家",
+          title: "未参与本轮的检查角色",
           sections: [
             { label: "跳过原因", values: formatExpertRows(skippedExperts) },
           ].filter((section) => section.values.length > 0),
@@ -1288,24 +1288,24 @@ const buildLiveWaitingRow = (
   review?: ReviewSummary | null,
   events?: ReviewEvent[],
 ): ReviewDialogueViewMessage | null => {
-  // 真实 LLM 首条消息出来前，先展示一个系统占位气泡，
+  // 真实模型首条消息出来前，先展示一个系统占位气泡，
   // 避免用户误以为审核过程页“卡住了”。
   if (!review || !["pending", "running"].includes(review.status)) return null;
   const latestEvent = events && events.length > 0 ? events[events.length - 1] : null;
   const phase = String(review.phase || latestEvent?.phase || "intake");
   const createdAt = latestEvent?.created_at || review.updated_at || review.created_at || new Date().toISOString();
-  let summary = "主Agent 正在读取本次变更并拆解专家任务";
+  let summary = "审核调度正在读取本次变更并拆解检查任务";
   let detail =
     "系统已启动实时审核，正在拉取 diff、识别关键文件，并为第一位专家生成带文件和行号的审查指令。";
   if (phase === "coordination") {
-    summary = "主Agent 正在整理首轮派工";
-    detail = "主Agent 正在根据改动文件、风险提示和专家职责生成首批派工消息，首条对话会在模型返回后立即显示。";
+    summary = "审核调度正在整理首轮派工";
+    detail = "审核调度正在根据改动文件、风险提示和角色职责生成首批派工消息，首条记录会在模型返回后立即显示。";
   } else if (phase === "expert_review") {
-    summary = "首位专家已进入审查，正在等待第一条分析回复";
-    detail = "系统已经完成派工并收到专家接单，当前正在等待首位专家返回结构化分析结果。";
+    summary = "首位检查角色已进入审查，正在等待第一条分析回复";
+    detail = "系统已经完成派工并收到角色接单，当前正在等待首位检查角色返回结构化分析结果。";
   } else if (phase === "queued") {
-    summary = "审核任务已进入执行队列，准备启动主Agent";
-    detail = "系统正在初始化实时审核上下文，马上会进入主Agent 拆解任务和派工阶段。";
+    summary = "审核任务已进入执行队列，准备启动审核调度";
+    detail = "系统正在初始化实时审核上下文，马上会进入任务拆解和派工阶段。";
   }
   return {
     id: "system-live-waiting",
@@ -1351,7 +1351,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
       if (!map.has(row.agentName)) {
         map.set(
           row.agentName,
-          row.agentName === "main_agent" ? "主Agent" : row.agentName === "judge" ? "Judge" : row.agentName,
+          row.agentName === "main_agent" ? "审核调度" : row.agentName === "judge" ? "结果复核" : row.agentName,
         );
       }
     });
@@ -1395,7 +1395,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
   }, [visibleRows.length]);
 
   if (displayRows.length === 0) {
-    return <Empty description="暂无专家对话流。" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+    return <Empty description="暂无过程记录。" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
 
   return (
@@ -1493,7 +1493,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
             <div className={`dialogue-message dialogue-status-${row.status}`}>
               <div className="dialogue-meta">
                 <Text className="dialogue-username">{row.agentName}</Text>
-                {row.isMainAgent ? <Tag className="dialogue-main-badge">主Agent</Tag> : null}
+                {row.isMainAgent ? <Tag className="dialogue-main-badge">审核调度</Tag> : null}
                 <Text className="dialogue-time">{row.timeText}</Text>
                 <Tag className={`dialogue-kind-tag dialogue-kind-tag-${row.messageKind}`}>
                   {row.messageKind === "command"

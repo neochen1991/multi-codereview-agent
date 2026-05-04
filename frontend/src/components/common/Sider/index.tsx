@@ -23,9 +23,9 @@ const AppSider: React.FC = () => {
     // 菜单项固定，只需要在首次渲染时构造一次。
     () => [
       { key: "/", icon: <HomeOutlined />, label: "首页" },
-      { key: "/review", icon: <CodeOutlined />, label: "审核工作台" },
+      { key: "/review", icon: <CodeOutlined />, label: "检视工作台" },
       { key: "/history", icon: <HistoryOutlined />, label: "历史记录" },
-      { key: "/experts", icon: <RobotOutlined />, label: "专家中心" },
+      { key: "/experts", icon: <RobotOutlined />, label: "检查角色" },
       { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },
       { key: "/governance", icon: <DashboardOutlined />, label: "治理中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },

@@ -108,23 +108,23 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   const isMrReview = form.subject_type === "mr";
 
   return (
-    <Card className="module-card" title={readonly ? "概览" : "概览与启动"}>
+    <Card className="module-card" title={readonly ? "检视概览" : "提交检视"}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         <Alert
           type="info"
           showIcon
           message={
             readonly
-              ? "当前是审核记录查看模式。这里展示当时提交的审核对象与候选专家，实际参与集合由大模型在启动后判定，过程细节请切到“审核过程”，最终结论请切到“结论与行动”。"
-              : "先输入 Codehub MR 链接，再选择候选专家（可选）并启动审核。关联性影响分析专家会默认参与每一次 MR 检视；如果你没有额外指定其他候选专家，启动后主 Agent 仍会让大模型判定本次参与审核的专家集合。"
+              ? "当前是审核记录查看模式。这里展示当时提交的审核对象与候选角色，实际参与集合由系统在启动后判定，过程细节请切到“检视过程”，最终结论请切到“检视结果”。"
+              : "先输入 Codehub MR 链接，再选择候选检查角色（可选）并启动审核。关联影响分析会默认参与每一次 MR 检视；如果你没有额外指定其他候选角色，启动后系统仍会判定本次参与审核的检查角色。"
           }
         />
         {!hasExperts ? (
           <Alert
             type="error"
             showIcon
-            message="当前没有可用的专家 agent"
-            description="请检查后端是否已加载预置专家，或先在专家中心创建/启用专家后再启动审核。"
+            message="当前没有可用的检查角色"
+            description="请检查后端是否已加载预置检查角色，或先在角色中心创建/启用检查角色后再启动审核。"
           />
         ) : null}
         <div className="incident-overview-status-strip">
@@ -217,7 +217,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           <div style={{ gridColumn: "1 / -1" }}>
             {!readonly ? (
               <div className="review-expert-quick-actions">
-                <Text strong>候选专家快捷选择</Text>
+                <Text strong>候选角色快捷选择</Text>
                 <Space wrap>
                   <Button
                     size="small"
@@ -263,7 +263,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
               allowClear={!readonly}
               disabled={readonly}
               style={{ width: "100%" }}
-              placeholder="选择候选专家（启动后由大模型最终判定本次参与集合）"
+              placeholder="选择候选检查角色（启动后由系统最终判定本次参与集合）"
               value={form.selected_experts}
               onChange={(value) =>
                 onChange({
@@ -288,17 +288,17 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                     <Alert
                       type="info"
                       showIcon
-                      message="关联性影响分析专家会默认参与每一次 MR 检视"
-                      description="系统会默认勾选该专家，用于生成影响范围、调用链和测试建议报告。你仍然可以继续补充其他候选专家。"
+                      message="关联影响分析会默认参与每一次 MR 检视"
+                      description="系统会默认勾选该角色，用于生成影响范围、调用链和测试建议报告。你仍然可以继续补充其他候选角色。"
                     />
                   ) : null}
                   <div className="review-design-docs-readonly review-expert-panel">
                     <div className="review-expert-panel-head">
                       <div>
-                        <Text strong>候选专家</Text>
+                        <Text strong>候选检查角色</Text>
                         <div className="review-expert-panel-subtitle">这里展示系统默认带入和你手动补充的候选集合。</div>
                       </div>
-                      {isMrReview ? <Tag color="gold">MR 默认带入关联影响分析专家</Tag> : null}
+                      {isMrReview ? <Tag color="gold">MR 默认带入关联影响分析</Tag> : null}
                     </div>
                     <Space wrap style={{ width: "100%", marginTop: 8 }}>
                       {requestedExpertIds.length > 0 ? (
@@ -309,13 +309,13 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                           </Tag>
                         ))
                       ) : (
-                        <Text type="secondary">当前还没有候选专家</Text>
+                        <Text type="secondary">当前还没有候选角色</Text>
                       )}
                     </Space>
                   </div>
                   {requestedExpertIds.length > 0 ? (
                     <div className="review-design-docs-readonly review-expert-panel">
-                      <Text strong>候选专家职责速览</Text>
+                      <Text strong>候选角色职责速览</Text>
                       <div className="review-expert-summary-grid">
                         {requestedExpertIds.map((expertId) => {
                           const expert = expertById.get(expertId);
@@ -352,8 +352,8 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                     <div className="review-design-docs-readonly review-expert-panel review-expert-panel-final">
                       <div className="review-expert-panel-head">
                         <div>
-                          <Text strong>大模型最终参与专家</Text>
-                          <div className="review-expert-panel-subtitle">主 Agent 会基于完整 diff、风险信号和专家画像，补齐真正需要参与本轮审核的专家。</div>
+                          <Text strong>最终参与角色</Text>
+                          <div className="review-expert-panel-subtitle">系统会基于完整 diff、风险信号和角色职责，补齐真正需要参与本轮审核的检查角色。</div>
                         </div>
                         {selectedExperts.length > 0 ? <Tag color="green">已判定 {selectedExperts.length} 位</Tag> : null}
                       </div>
@@ -365,7 +365,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                               <strong>{requestedExpertIds.length}</strong>
                             </div>
                             <div className="review-expert-result-metric">
-                              <Text type="secondary">大模型补充</Text>
+                              <Text type="secondary">系统补充</Text>
                               <strong>{addedByModel.length}</strong>
                             </div>
                             <div className="review-expert-result-metric">
@@ -390,7 +390,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                           </Space>
                         </>
                       ) : (
-                        <Text type="secondary">审核启动后，主 Agent 会先调用大模型判定本次真正参与审核的专家集合。</Text>
+                        <Text type="secondary">审核启动后，系统会先判定本次真正参与审核的检查角色。</Text>
                       )}
                     </div>
                   ) : null}
@@ -408,7 +408,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                                 </Tag>
                               ))
                             ) : (
-                              <Text type="secondary">当前还没有命中的候选专家</Text>
+                              <Text type="secondary">当前还没有命中的候选角色</Text>
                             )}
                           </Space>
                         </div>
@@ -422,13 +422,13 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                                 </Tag>
                               ))
                             ) : (
-                              <Text type="secondary">当前没有被剔除的候选专家</Text>
+                              <Text type="secondary">当前没有被剔除的候选角色</Text>
                             )}
                           </Space>
                         </div>
                         {addedByModel.length > 0 ? (
                           <div className="review-expert-diff-block review-expert-diff-block-accent">
-                            <Text strong>大模型补充纳入</Text>
+                            <Text strong>系统补充纳入</Text>
                             <Space wrap style={{ width: "100%", marginTop: 8 }}>
                               {addedByModel.map((item) => (
                                 <Tag key={`candidate-added-${item.expert_id}`} color="cyan">
@@ -448,7 +448,7 @@ const ReviewOverviewPanel: React.FC<Props> = ({
                         {skippedExperts.map((item) => (
                           <Text key={`skipped-${item.expert_id}`} type="secondary">
                             {(item.expert_name || expertNameById.get(item.expert_id) || item.expert_id) + "："}
-                            {item.reason || "大模型未将其纳入本次参与集合"}
+                            {item.reason || "系统未将其纳入本次参与集合"}
                           </Text>
                         ))}
                       </Space>
@@ -519,10 +519,10 @@ const ReviewOverviewPanel: React.FC<Props> = ({
 
         <Divider style={{ margin: 0 }} />
         <Text type="secondary">
-          主 Agent 会先根据 PR / MR / Commit 链接、改动文件和风险提示拆解任务，再向不同专家下发带文件/行号的审查指令。
+          系统会先根据 PR / MR / Commit 链接、改动文件和风险提示拆解任务，再向不同检查角色下发带文件/行号的审查指令。
           {form.analysis_mode === "light"
-            ? " 当前为轻量模式：会提高 LLM 超时、降低并发和辩论轮次，更适合内网或 Windows 高延迟环境。"
-            : " 当前为标准模式：保留更完整的专家协作和深度分析。"}
+            ? " 当前为轻量模式：会提高模型超时、降低并发和复核轮次，更适合内网或 Windows 高延迟环境。"
+            : " 当前为标准模式：保留更完整的角色协作和深度分析。"}
         </Text>
 
         {readonly ? (

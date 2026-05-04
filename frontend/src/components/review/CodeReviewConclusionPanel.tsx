@@ -30,7 +30,7 @@ const severityColor = (severity: string): string => {
 
 const getMergeImpact = (finding: ReviewFinding, issue: DebateIssue | null): string => {
   // 合并影响会结合 severity 和人工裁决需求共同判断。
-  if (!issue) return "仅作为 finding 保留";
+  if (!issue) return "仅作为检视发现保留";
   if (issue?.needs_human && issue.status !== "resolved") return "阻塞合并";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "建议修复后再合并";
   return "可跟随后续修复计划";
@@ -209,7 +209,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           },
           {
             key: "expert",
-            label: "提出专家",
+            label: "检查角色",
             children: <Tag color="geekblue">{finding.expert_id}</Tag>,
           },
           {
@@ -226,8 +226,8 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                   </>
                 ) : (
                   <>
-                    <Tag color="default">仅 finding</Tag>
-                    <Tag>未升级为 issue</Tag>
+                    <Tag color="default">仅保留发现</Tag>
+                    <Tag>未升级为正式问题</Tag>
                   </>
                 )}
               </>

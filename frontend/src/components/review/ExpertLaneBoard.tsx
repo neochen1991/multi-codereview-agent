@@ -52,7 +52,7 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
     command: `接收命令${targetExpertId ? ` · ${targetExpertId}` : ""}`,
     skill: `激活技能 ${toolName || "skill"}`,
     tool: `调用工具 ${toolName || "tool"}`,
-    chat: message.message_type === "expert_analysis" ? "输出分析结论" : "专家对话",
+    chat: message.message_type === "expert_analysis" ? "输出分析结论" : "过程记录",
     status: "收敛状态",
   };
   const summaryParts: string[] = [];
@@ -107,7 +107,7 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
   }, [categoryFilter, messages.length]);
 
   return (
-    <Card className="module-card expert-lane-card" title="专家泳道">
+    <Card className="module-card expert-lane-card" title="检查角色视图">
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Segmented
           value={categoryFilter}
@@ -122,7 +122,7 @@ const ExpertLaneBoard: React.FC<ExpertLaneBoardProps> = ({ review, messages }) =
           ]}
         />
         {expertIds.length === 0 ? (
-          <Empty description="当前还没有专家泳道数据。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="当前还没有检查角色记录。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <div className="expert-lane-grid">
             {expertIds.map((expertId) => {

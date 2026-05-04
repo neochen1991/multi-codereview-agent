@@ -16,13 +16,13 @@ const ConversationMessageList: React.FC<ConversationMessageListProps> = ({
   messages,
 }) => {
   return (
-    <Card className="module-card" title="议题对话">
+    <Card className="module-card" title="问题过程记录">
       {!issueId ? (
-        <Empty description="请先从左侧选择一个议题。" />
+        <Empty description="请先从左侧选择一个问题。" />
       ) : (
         <List
           dataSource={messages}
-          locale={{ emptyText: "当前议题还没有更多专家发言。" }}
+          locale={{ emptyText: "当前问题还没有更多过程记录。" }}
           renderItem={(item) => (
             <List.Item>
               <List.Item.Meta

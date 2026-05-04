@@ -56,7 +56,7 @@ const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="证据链与工具核验">
       <div className="process-card-scroll">
         {!issue ? (
-          <Empty description="选择一个议题后，这里会展示 verifier 和工具核验结果。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="选择一个问题后，这里会展示核验器和工具核验结果。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             <Descriptions column={1} size="small">
@@ -89,7 +89,7 @@ const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
                 )}
               />
             ) : (
-              <Empty description="当前议题尚未写入结构化证据链。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              <Empty description="当前问题尚未写入结构化证据链。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             )}
           </Space>
         )}

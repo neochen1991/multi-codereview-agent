@@ -270,6 +270,8 @@ class FeedbackLearnerService:
         unresolved_count = int(stats.get("unresolved_count", 0))
         false_positive_rate = round(false_positive_count / sample_count, 2) if sample_count else 0.0
         accept_rate = round(confirmed_count / sample_count, 2) if sample_count else 0.0
+        smoothed_false_positive_rate = self._bayesian_rate(false_positive_count, sample_count, prior_rate=0.2, prior_weight=2)
+        smoothed_accept_rate = self._bayesian_rate(confirmed_count, sample_count, prior_rate=0.35, prior_weight=2)
         confidence_penalty = 0.0
         confidence_bonus = 0.0
         needs_human_confidence = 0.8
@@ -286,6 +288,12 @@ class FeedbackLearnerService:
             confidence_bonus = 0.05
         elif sample_count >= 5 and accept_rate >= 0.65:
             confidence_bonus = 0.03
+        elif 1 <= sample_count < 3 and smoothed_false_positive_rate >= 0.45:
+            confidence_penalty = 0.03
+            needs_human_confidence = 0.84
+            prefer_needs_verification = True
+        elif 1 <= sample_count < 5 and smoothed_accept_rate >= 0.55:
+            confidence_bonus = 0.02
         return {
             "key": key,
             "sample_count": sample_count,
@@ -293,7 +301,9 @@ class FeedbackLearnerService:
             "confirmed_count": confirmed_count,
             "unresolved_count": unresolved_count,
             "false_positive_rate": false_positive_rate,
+            "smoothed_false_positive_rate": smoothed_false_positive_rate,
             "accept_rate": accept_rate,
+            "smoothed_accept_rate": smoothed_accept_rate,
             "confidence_penalty": confidence_penalty,
             "confidence_bonus": confidence_bonus,
             "needs_human_confidence": needs_human_confidence,
@@ -306,21 +316,36 @@ class FeedbackLearnerService:
         false_positive_count = int(stats.get("false_positive_count") or 0)
         false_positive_rate = self._rate(false_positive_count, sample_count)
         accept_rate = self._rate(confirmed_count, sample_count)
+        smoothed_false_positive_rate = self._bayesian_rate(false_positive_count, sample_count, prior_rate=0.2, prior_weight=2)
+        smoothed_accept_rate = self._bayesian_rate(confirmed_count, sample_count, prior_rate=0.35, prior_weight=2)
         if sample_count >= 3 and false_positive_rate >= 0.6:
             recommended_action = "require_manual_verification"
         elif sample_count >= 3 and accept_rate >= 0.8:
             recommended_action = "boost_confidence"
+        elif 1 <= sample_count < 3 and smoothed_false_positive_rate >= 0.45:
+            recommended_action = "watch_for_false_positive"
+        elif 1 <= sample_count < 3 and smoothed_accept_rate >= 0.55:
+            recommended_action = "soft_boost_confidence"
         else:
             recommended_action = "keep_observing"
         return {
             **stats,
             "false_positive_rate": false_positive_rate,
             "accept_rate": accept_rate,
+            "smoothed_false_positive_rate": smoothed_false_positive_rate,
+            "smoothed_accept_rate": smoothed_accept_rate,
             "recommended_action": recommended_action,
         }
 
     def _rate(self, numerator: int, denominator: int) -> float:
         return round(numerator / denominator, 2) if denominator else 0.0
+
+    def _bayesian_rate(self, numerator: int, denominator: int, *, prior_rate: float, prior_weight: int) -> float:
+        total = max(0, int(denominator or 0)) + max(0, int(prior_weight or 0))
+        if total <= 0:
+            return 0.0
+        value = (max(0, int(numerator or 0)) + float(prior_rate) * max(0, int(prior_weight or 0))) / total
+        return round(value, 2)
 
     def _coerce_threshold(self, value: object, default: float) -> float:
         try:

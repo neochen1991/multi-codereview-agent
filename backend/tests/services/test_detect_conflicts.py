@@ -93,6 +93,139 @@ def test_detect_conflicts_keeps_comment_contract_mismatch_even_if_text_contains_
     assert result["issue_filter_decisions"] == []
 
 
+def test_detect_conflicts_keeps_high_priority_issue_when_text_contains_hint_tokens():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.9,
+            "hint_issue_evidence_cap": 3,
+            "issue_confidence_threshold_p2": 0.8,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_auth_hint_overlap",
+                "expert_id": "security_compliance",
+                "title": "注释说明掩盖鉴权绕过风险",
+                "summary": "注释声称会校验资源归属，但当前代码删除了 ownerId 校验，存在越权访问路径。",
+                "finding_type": "direct_defect",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verification_needed": True,
+                "direct_evidence": True,
+                "file_path": "src/main/java/com/example/OrderController.java",
+                "line_start": 42,
+                "evidence": ["删除 ownerId 校验", "保留对外接口入口", "存在未授权访问路径"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["访问控制规则"],
+                "violated_guidelines": ["接口必须做资源级鉴权"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_auth_hint_overlap"
+    assert result["issue_filter_decisions"] == []
+
+
+def test_detect_conflicts_applies_feedback_profiles_before_issue_scoring():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "feedback_quality_profiles": {
+            "experts": {
+                "database_analysis": {
+                    "sample_count": 4,
+                    "confidence_penalty": 0.12,
+                }
+            },
+            "issue_types": {
+                "query_boundary_missing": {
+                    "sample_count": 4,
+                    "confidence_penalty": 0.07,
+                }
+            },
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_feedback_penalty",
+                "expert_id": "database_analysis",
+                "title": "查询边界缺失",
+                "summary": "删除分页可能导致无界查询。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "query_boundary_missing",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": True,
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "line_start": 42,
+                "evidence": ["删除 limit"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    breakdown = result["conflicts"][0]["confidence_breakdown"]
+    assert breakdown["base_weighted_confidence"] == 0.72
+    assert breakdown["feedback_adjustments"][0]["confidence_penalty"] == 0.18
+
+
+def test_detect_conflicts_does_not_cross_validate_unrelated_sast_match():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_null_pointer",
+                "expert_id": "correctness_business",
+                "title": "空指针风险",
+                "summary": "customer 可能为空。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "null_pointer",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": True,
+                "file_path": "src/main/java/com/example/OrderService.java",
+                "line_start": 42,
+                "evidence": ["customer.getId()"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+                "sast_prescan_matches": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "message": "SQL injection risk",
+                        "cwe": "CWE-89",
+                        "file_path": "src/main/java/com/example/OrderService.java",
+                        "line_start": 42,
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["sast_cross_validated"] is False
+    assert conflict["confidence_breakdown"]["verification_bonus"] == 0.0
+
+
 def test_detect_conflicts_respects_disabled_issue_filter():
     state = {
         "issue_filter_config": {

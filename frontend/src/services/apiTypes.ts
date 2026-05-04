@@ -408,6 +408,15 @@ export interface TestScopeRecommendation {
   priority: string;
 }
 
+export interface ImpactIssueLink {
+  issue_id: string;
+  issue_title: string;
+  issue_file_path: string;
+  impact_target: string;
+  relationship: string;
+  reason: string;
+}
+
 export interface ImpactReport {
   graph_status: string;
   graph_indexed_at?: string;
@@ -436,6 +445,8 @@ export interface ImpactReport {
   report_summary?: string;
   key_impact_points?: string[];
   test_focus?: string[];
+  related_issue_ids?: string[];
+  impact_issue_links?: ImpactIssueLink[];
   llm_markdown?: string;
   llm_generated?: boolean;
 }
@@ -602,6 +613,10 @@ export interface RuntimeSettings {
   enable_llm_targeted_debate: boolean;
   llm_targeted_debate_timeout_seconds: number;
   enable_sast_prescan: boolean;
+  gitnexus_max_targets: number;
+  gitnexus_max_context_queries: number;
+  gitnexus_max_impact_queries: number;
+  gitnexus_max_dynamic_targets: number;
   default_max_debate_rounds: number;
   standard_llm_timeout_seconds: number;
   standard_llm_retry_count: number;

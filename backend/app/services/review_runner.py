@@ -1253,6 +1253,33 @@ class ReviewRunner(
                 },
             )
         )
+        if not self._has_live_llm_call(review_id):
+            reason = "无法完成审核：本次检视任务未产生任何真实 LLM 调用，请先配置可用模型后重试。"
+            review.status = "failed"
+            review.phase = "failed"
+            review.failure_reason = reason
+            review.report_summary = reason
+            review.human_review_status = "not_required"
+            review.pending_human_issue_ids = []
+            review.completed_at = datetime.now(UTC)
+            review.duration_seconds = self._safe_duration_seconds(
+                review.started_at or review.created_at,
+                review.completed_at,
+            )
+            review.updated_at = datetime.now(UTC)
+            self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review_id,
+                    event_type="review_failed",
+                    phase="failed",
+                    message=reason,
+                    payload={"reason_code": "llm_live_call_required"},
+                )
+            )
+            self.artifact_service.publish(review, issues)
+            MemoryProbe.log("review_runner.finish", review_id=review.review_id, status=review.status)
+            return review
         self.event_repo.append(
             ReviewEvent(
                 review_id=review_id,
@@ -1999,30 +2026,14 @@ class ReviewRunner(
             forced_line_start = self._normalize_line_start(candidate.get("line_start"), line_start)
             evidence = [str(item).strip() for item in list(candidate.get("evidence") or []) if str(item).strip()]
             observation_ids = self._normalize_text_list(candidate.get("observation_ids"), [])
-            is_forced_ddd_factory_bypass = (
-                expert.expert_id == "ddd_architecture"
-                and "DDD-JDDD-001" in set(self._normalize_text_list(candidate.get("matched_rules"), matched_rules))
-                and any(
-                    token in "\n".join(evidence).lower()
-                    for token in ("course.create", "new course", "factory", "工厂")
-                )
-            )
             finding = ReviewFinding(
                 review_id=review.review_id,
                 expert_id=expert.expert_id,
                 title=str(candidate.get("title") or f"{expert.name_zh} 规则兜底发现"),
                 summary=str(candidate.get("claim") or candidate.get("summary") or ""),
-                finding_type=(
-                    "direct_defect"
-                    if is_forced_ddd_factory_bypass
-                    else str(candidate.get("finding_type") or "direct_defect")
-                ),
+                finding_type=str(candidate.get("finding_type") or "risk_hypothesis"),
                 severity=self._normalize_severity(candidate.get("severity"), "high"),
-                confidence=(
-                    max(self._normalize_confidence(candidate.get("confidence"), 0.86), 0.9)
-                    if is_forced_ddd_factory_bypass
-                    else self._normalize_confidence(candidate.get("confidence"), 0.86)
-                ),
+                confidence=self._normalize_confidence(candidate.get("confidence"), 0.74),
                 file_path=str(candidate.get("file_path") or file_path),
                 line_start=forced_line_start,
                 evidence=evidence,
@@ -2032,12 +2043,8 @@ class ReviewRunner(
                 matched_rules=self._normalize_text_list(candidate.get("matched_rules"), matched_rules),
                 violated_guidelines=self._normalize_text_list(candidate.get("violated_guidelines"), matched_rules),
                 rule_based_reasoning=str(candidate.get("rule_based_reasoning") or ""),
-                verification_needed=(
-                    False if is_forced_ddd_factory_bypass else bool(candidate.get("verification_needed", True))
-                ),
-                verification_plan=(
-                    "" if is_forced_ddd_factory_bypass else str(candidate.get("verification_plan") or "")
-                ),
+                verification_needed=bool(candidate.get("verification_needed", True)),
+                verification_plan=str(candidate.get("verification_plan") or ""),
                 remediation_strategy=str(candidate.get("fix_strategy") or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)),
                 remediation_suggestion=str(candidate.get("suggested_fix") or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)),
                 remediation_steps=self._normalize_text_list(
@@ -2065,7 +2072,7 @@ class ReviewRunner(
                 code_context["failure_reason"] = error_text
                 if candidate.get("evidence_source"):
                     code_context["evidence_source"] = str(candidate.get("evidence_source") or "")
-                code_context["direct_evidence"] = bool(candidate.get("direct_evidence", False)) or is_forced_ddd_factory_bypass
+                code_context["direct_evidence"] = bool(candidate.get("direct_evidence", False))
                 finding.code_context = code_context
             return finding
         must_review_count = int(rule_screening.get("must_review_count") or 0)
@@ -4365,6 +4372,16 @@ class ReviewRunner(
             "completion_tokens": llm_result.completion_tokens,
             "total_tokens": llm_result.total_tokens,
         }
+
+    def _has_live_llm_call(self, review_id: str) -> bool:
+        for message in self.message_repo.list(review_id):
+            metadata = dict(message.metadata or {})
+            if (
+                str(metadata.get("mode") or "").strip().lower() == "live"
+                and str(metadata.get("llm_call_id") or "").strip()
+            ):
+                return True
+        return False
 
     def _score_finding(self, subject: ReviewSubject, expert_id: str) -> tuple[str, float]:
         file_blob = " ".join(subject.changed_files).lower()

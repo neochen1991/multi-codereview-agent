@@ -81,6 +81,8 @@ def main() -> int:
     assert isinstance(review, dict)
     assert review.get("status") in {"completed", "waiting_human"}
     assert report.get("status") in {"completed", "waiting_human"}
+    llm_usage = report.get("llm_usage_summary") if isinstance(report.get("llm_usage_summary"), dict) else {}
+    assert int(llm_usage.get("total_calls") or 0) > 0, "smoke review must use at least one LLM call"
 
     messages = replay.get("messages", [])
     assert isinstance(messages, list)
@@ -90,6 +92,13 @@ def main() -> int:
         and item.get("message_type") == "main_agent_command"
         for item in messages
     )
+    assert any(
+        isinstance(item, dict)
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("mode") == "live"
+        and item["metadata"].get("llm_call_id")
+        for item in messages
+    ), "smoke review must contain a live LLM message"
     assert any(
         isinstance(item, dict)
         and item.get("expert_id") == "ddd_architecture"
@@ -122,6 +131,7 @@ def main() -> int:
         "status": review.get("status"),
         "issue_count": len(issues),
         "finding_count": len(findings),
+        "llm_total_calls": int(llm_usage.get("total_calls") or 0),
         "filtered_count": sum(
             len(item.get("finding_ids") or [])
             for item in filter_decisions

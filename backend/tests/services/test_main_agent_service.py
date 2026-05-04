@@ -370,6 +370,50 @@ def test_main_agent_final_summary_marks_partial_failures_as_inconclusive():
     assert "专家执行失败数: 1" in stub.user_prompt
 
 
+def test_main_agent_final_summary_falls_back_when_llm_call_fails():
+    class FailingLLM:
+        def resolve_main_agent(self, _runtime: RuntimeSettings):
+            class Resolution:
+                provider = "stub"
+                model = "stub-model"
+
+            return Resolution()
+
+        def complete_text(self, **_kwargs):
+            raise RuntimeError("http_status:429")
+
+    agent = MainAgentService()
+    agent._llm = FailingLLM()  # type: ignore[assignment]
+    review = ReviewTask(
+        review_id="rev_summary_fallback",
+        status="waiting_human",
+        phase="human_gate",
+        analysis_mode="light",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OwnerController.java"],
+        ),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    summary, metadata = agent.build_final_summary(
+        review,
+        [],
+        RuntimeSettings(allow_llm_fallback=False),
+        partial_failure_count=2,
+    )
+
+    assert "部分完成" in summary
+    assert "2 个专家任务执行失败" in summary
+    assert metadata["mode"] == "fallback"
+    assert metadata["error"] == "http_status:429"
+
+
 def test_main_agent_prefers_migration_hunk_for_database_expert():
     agent = MainAgentService()
     subject = ReviewSubject(
@@ -1782,7 +1826,7 @@ def test_main_agent_readds_security_expert_for_java_validation_signal():
     assert selected["security_compliance"]["source"] == "heuristic_selected"
 
 
-def test_main_agent_readds_ddd_architecture_and_security_for_java_quality_signals():
+def test_main_agent_readds_ddd_architecture_and_database_for_java_quality_signals():
     agent = MainAgentService()
     experts = [
         ExpertProfile(
@@ -1795,12 +1839,12 @@ def test_main_agent_readds_ddd_architecture_and_security_for_java_quality_signal
             system_prompt="prompt",
         ),
         ExpertProfile(
-            expert_id="security_compliance",
-            name="Security",
-            name_zh="安全与合规专家",
-            role="security",
+            expert_id="database_analysis",
+            name="Database",
+            name_zh="数据库专家",
+            role="database",
             enabled=True,
-            focus_areas=["安全边界"],
+            focus_areas=["查询语义"],
             system_prompt="prompt",
         ),
         ExpertProfile(
@@ -1845,24 +1889,24 @@ def test_main_agent_readds_ddd_architecture_and_security_for_java_quality_signal
     merged = agent._merge_expert_selection(
         subject=subject,
         experts=experts,
-        requested_expert_ids=["correctness_business", "ddd_architecture", "security_compliance"],
+        requested_expert_ids=["correctness_business", "ddd_architecture", "database_analysis"],
         llm_payload={
             "selected_experts": [
                 {"expert_id": "correctness_business", "reason": "业务正确性变化明显", "confidence": 0.9},
                 {"expert_id": "ddd_architecture", "reason": "涉及聚合创建与事件顺序", "confidence": 0.88},
             ],
             "skipped_experts": [
-                {"expert_id": "security_compliance", "reason": "LLM 认为未命中安全关键词"},
+                {"expert_id": "database_analysis", "reason": "LLM 未识别查询语义变化"},
             ],
         },
         fallback_ids=["correctness_business"],
     )
 
     assert "ddd_architecture" in merged["selected_expert_ids"]
-    assert "security_compliance" in merged["selected_expert_ids"]
+    assert "database_analysis" in merged["selected_expert_ids"]
     selected = {item["expert_id"]: item for item in merged["selected_experts"]}
     assert selected["ddd_architecture"]["source"] in {"llm_selected", "heuristic_selected"}
-    assert selected["security_compliance"]["source"] == "heuristic_selected"
+    assert selected["database_analysis"]["source"] == "heuristic_selected"
 
 
 def test_main_agent_readds_correctness_for_typescript_comment_contract_signal():

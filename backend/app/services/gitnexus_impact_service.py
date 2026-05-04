@@ -165,6 +165,11 @@ class GitNexusImpactClient(Protocol):
         subject: ReviewSubject,
         changed_symbols: list[ImpactSymbol],
         runtime_env: dict[str, str] | None = None,
+        max_targets: int = MAX_GITNEXUS_TARGETS,
+        max_context_queries: int = MAX_GITNEXUS_CONTEXT_QUERIES,
+        max_impact_queries: int = MAX_GITNEXUS_IMPACT_QUERIES,
+        max_dynamic_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
+        impact_feedback_profiles: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """基于已建好的 GitNexus 图谱分析本次 MR 影响。"""
 
@@ -190,32 +195,53 @@ class GitNexusMcpImpactClient:
         subject: ReviewSubject,
         changed_symbols: list[ImpactSymbol],
         runtime_env: dict[str, str] | None = None,
+        max_targets: int = MAX_GITNEXUS_TARGETS,
+        max_context_queries: int = MAX_GITNEXUS_CONTEXT_QUERIES,
+        max_impact_queries: int = MAX_GITNEXUS_IMPACT_QUERIES,
+        max_dynamic_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
+        impact_feedback_profiles: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         command = self._command()
+        max_targets = self._coerce_limit(max_targets, MAX_GITNEXUS_TARGETS)
+        max_context_queries = self._coerce_limit(max_context_queries, MAX_GITNEXUS_CONTEXT_QUERIES)
+        max_impact_queries = self._coerce_limit(max_impact_queries, MAX_GITNEXUS_IMPACT_QUERIES)
+        max_dynamic_targets = self._coerce_limit(max_dynamic_targets, MAX_GITNEXUS_DYNAMIC_TARGETS, allow_zero=True)
+        mcp_session = self._open_persistent_mcp_session(command, repo_path, runtime_env)
         logger.info(
-            "gitnexus impact start repo=%s repo_path=%s changed_file_count=%s changed_symbol_count=%s command=%s",
+            "gitnexus impact start repo=%s repo_path=%s changed_file_count=%s changed_symbol_count=%s command=%s max_targets=%s max_context=%s max_impact=%s max_dynamic=%s",
             repo_name,
             repo_path,
             len(list(subject.changed_files or [])),
             len(changed_symbols),
             " ".join(command),
+            max_targets,
+            max_context_queries,
+            max_impact_queries,
+            max_dynamic_targets,
         )
-        initial_payloads = self._call_tools_batch(
-            command,
-            repo_path,
-            [
-                ("list_repos", {}),
-                (
-                    "detect_changes",
-                    {
-                        "repo": repo_name,
-                        "scope": "all",
-                    },
-                ),
-            ],
-            runtime_env,
-            raise_on_error=False,
-        )
+        try:
+            initial_payloads = self._call_tools_batch(
+                command,
+                repo_path,
+                [
+                    ("list_repos", {}),
+                    (
+                        "detect_changes",
+                        {
+                            "repo": repo_name,
+                            "scope": "all",
+                        },
+                    ),
+                ],
+                runtime_env,
+                raise_on_error=False,
+                mcp_session=mcp_session,
+                include_initialize=True,
+            )
+        except Exception:
+            if mcp_session is not None:
+                mcp_session.close()
+            raise
         list_repos_payload = initial_payloads[0]
         if "__error" in list_repos_payload:
             raise RuntimeError(f"GitNexus list_repos 调用失败: {list_repos_payload.get('__error')}")
@@ -240,7 +266,12 @@ class GitNexusMcpImpactClient:
             )
         else:
             detect_changes_payload = detect_changes_result
-        targets, skipped_invalid_targets = self._build_targets(changed_symbols, detect_changes_payload)
+        targets, skipped_invalid_targets = self._build_targets(
+            changed_symbols,
+            detect_changes_payload,
+            max_targets=max_targets,
+            impact_feedback_profiles=impact_feedback_profiles or {},
+        )
         context_payloads: list[dict[str, Any]] = []
         impact_payloads: list[dict[str, Any]] = []
         if targets:
@@ -257,8 +288,15 @@ class GitNexusMcpImpactClient:
                 repo_path,
                 targets,
                 runtime_env,
+                max_context_queries=max_context_queries,
+                max_impact_queries=max_impact_queries,
+                mcp_session=mcp_session,
             )
-            dynamic_targets = self._dynamic_targets_from_contexts(context_payloads, existing_targets=targets)
+            dynamic_targets = self._dynamic_targets_from_contexts(
+                context_payloads,
+                existing_targets=targets,
+                max_targets=max_dynamic_targets,
+            )
             if dynamic_targets:
                 (
                     dynamic_context_payloads,
@@ -273,8 +311,9 @@ class GitNexusMcpImpactClient:
                     repo_path,
                     dynamic_targets,
                     runtime_env,
-                    max_context_queries=MAX_GITNEXUS_DYNAMIC_TARGETS,
-                    max_impact_queries=MAX_GITNEXUS_DYNAMIC_TARGETS,
+                    max_context_queries=max_dynamic_targets,
+                    max_impact_queries=max_dynamic_targets,
+                    mcp_session=mcp_session,
                 )
                 context_payloads.extend(dynamic_context_payloads)
                 impact_payloads.extend(dynamic_impact_payloads)
@@ -294,25 +333,31 @@ class GitNexusMcpImpactClient:
             ",".join(targets[:8]),
         )
         if available_repos and effective_repo_name not in available_repos:
+            if mcp_session is not None:
+                mcp_session.close()
             raise RuntimeError(
                 f"GitNexus MCP 未发现仓库 {effective_repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
             )
-        return {
-            "repo": effective_repo_name,
-            "available_repos": available_repos,
-            "detect_changes": detect_changes_payload,
-            "context_results": context_payloads,
-            "impact_results": impact_payloads,
-            "queried_targets": targets,
-            "raw_response_count": 2 + len(context_payloads) + len(impact_payloads),
-            "detect_changes_error": detect_changes_error,
-            "skipped_invalid_targets": skipped_invalid_targets,
-            "skipped_missing_context_targets": skipped_missing_context_targets,
-            "skipped_missing_impact_targets": skipped_missing_impact_targets,
-            "successful_context_targets": successful_context_targets,
-            "successful_impact_targets": successful_impact_targets,
-            "dynamic_targets": dynamic_targets,
-        }
+        try:
+            return {
+                "repo": effective_repo_name,
+                "available_repos": available_repos,
+                "detect_changes": detect_changes_payload,
+                "context_results": context_payloads,
+                "impact_results": impact_payloads,
+                "queried_targets": targets,
+                "raw_response_count": 2 + len(context_payloads) + len(impact_payloads),
+                "detect_changes_error": detect_changes_error,
+                "skipped_invalid_targets": skipped_invalid_targets,
+                "skipped_missing_context_targets": skipped_missing_context_targets,
+                "skipped_missing_impact_targets": skipped_missing_impact_targets,
+                "successful_context_targets": successful_context_targets,
+                "successful_impact_targets": successful_impact_targets,
+                "dynamic_targets": dynamic_targets,
+            }
+        finally:
+            if mcp_session is not None:
+                mcp_session.close()
 
     def _command(self) -> list[str]:
         raw = str(os.getenv("GITNEXUS_MCP_COMMAND") or "").strip()
@@ -324,6 +369,14 @@ class GitNexusMcpImpactClient:
         if binary:
             return [binary, "mcp"]
         return ["gitnexus", "mcp"]
+
+    def _coerce_limit(self, value: int, default: int, *, allow_zero: bool = False) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        lower_bound = 0 if allow_zero else 1
+        return max(lower_bound, min(50, parsed))
 
     def _parse_command(self, raw: str) -> list[str]:
         return _parse_command_text(raw)
@@ -340,6 +393,22 @@ class GitNexusMcpImpactClient:
             return client.call_many(requests)
         except RuntimeError as error:
             raise RuntimeError(f"GitNexus MCP 调用失败: {error}") from error
+
+    def _open_persistent_mcp_session(
+        self,
+        command: list[str],
+        repo_path: str,
+        runtime_env: dict[str, str] | None = None,
+    ):
+        if "_call_mcp" in self.__dict__:
+            return None
+        try:
+            session = McpStdioClient(command, cwd=repo_path, timeout_seconds=self.timeout_seconds, env=runtime_env).open_session()
+            session.start()
+            return session
+        except Exception as error:
+            logger.warning("gitnexus persistent mcp session unavailable; fallback to per-batch process error=%s", error)
+            return None
 
     def _call_tool(
         self,
@@ -410,9 +479,12 @@ class GitNexusMcpImpactClient:
         runtime_env: dict[str, str] | None = None,
         *,
         raise_on_error: bool,
+        mcp_session=None,
+        include_initialize: bool = True,
     ) -> list[dict[str, Any]]:
-        requests = [self._initialize_request(), self._initialized_notification()]
-        for offset, (tool_name, arguments) in enumerate(tool_calls, start=2):
+        requests = [self._initialize_request(), self._initialized_notification()] if include_initialize else []
+        start_offset = 2 if include_initialize else 1
+        for offset, (tool_name, arguments) in enumerate(tool_calls, start=start_offset):
             logger.info("gitnexus mcp tool call tool=%s arguments=%s", tool_name, json.dumps(arguments, ensure_ascii=False))
             requests.append(
                 {
@@ -425,7 +497,7 @@ class GitNexusMcpImpactClient:
                 }
             )
         try:
-            responses = self._call_mcp(command, repo_path, requests, runtime_env)
+            responses = mcp_session.call_many(requests) if mcp_session is not None else self._call_mcp(command, repo_path, requests, runtime_env)
         except RuntimeError as error:
             tool_names = ",".join(name for name, _ in tool_calls)
             logger.exception(
@@ -436,7 +508,7 @@ class GitNexusMcpImpactClient:
             )
             raise RuntimeError(f"GitNexus MCP 批量调用失败: {error}") from error
         payloads: list[dict[str, Any]] = []
-        for offset, (tool_name, arguments) in enumerate(tool_calls, start=2):
+        for offset, (tool_name, arguments) in enumerate(tool_calls, start=start_offset):
             payloads.append(
                 self._tool_response_payload(
                     command=command,
@@ -503,6 +575,7 @@ class GitNexusMcpImpactClient:
         *,
         max_context_queries: int = MAX_GITNEXUS_CONTEXT_QUERIES,
         max_impact_queries: int = MAX_GITNEXUS_IMPACT_QUERIES,
+        mcp_session=None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str], list[str], list[str]]:
         context_targets = targets[: max(0, int(max_context_queries or 0))]
         impact_targets = targets[: max(0, int(max_impact_queries or 0))]
@@ -535,7 +608,15 @@ class GitNexusMcpImpactClient:
         if not tool_calls:
             return [], [], [], [], [], []
 
-        payloads = self._call_tools_batch(command, repo_path, tool_calls, runtime_env, raise_on_error=False)
+        payloads = self._call_tools_batch(
+            command,
+            repo_path,
+            tool_calls,
+            runtime_env,
+            raise_on_error=False,
+            mcp_session=mcp_session,
+            include_initialize=mcp_session is None,
+        )
         context_results: list[dict[str, Any]] = []
         impact_results: list[dict[str, Any]] = []
         skipped_missing_context_targets: list[str] = []
@@ -653,6 +734,9 @@ class GitNexusMcpImpactClient:
         self,
         changed_symbols: list[ImpactSymbol],
         detect_changes_payload: dict[str, Any],
+        *,
+        max_targets: int = MAX_GITNEXUS_TARGETS,
+        impact_feedback_profiles: dict[str, Any] | None = None,
     ) -> tuple[list[str], list[str]]:
         candidates: list[dict[str, Any]] = []
         for item in changed_symbols:
@@ -681,18 +765,19 @@ class GitNexusMcpImpactClient:
             if not self._is_valid_symbol_target(target):
                 skipped_invalid.append(target)
                 continue
-            score = self._target_priority_score(target, item)
+            score = self._target_priority_score(target, item, impact_feedback_profiles or {})
             previous = ranked.get(target)
             if previous is None or score > float(previous.get("score") or 0.0):
                 ranked[target] = {**item, "target": target, "score": score}
         ordered = sorted(ranked.values(), key=lambda item: (-float(item.get("score") or 0.0), str(item.get("target") or "")))
-        return [str(item.get("target") or "") for item in ordered[:MAX_GITNEXUS_TARGETS]], self._dedupe_strings(skipped_invalid)
+        return [str(item.get("target") or "") for item in ordered[: self._coerce_limit(max_targets, MAX_GITNEXUS_TARGETS)]], self._dedupe_strings(skipped_invalid)
 
     def _dynamic_targets_from_contexts(
         self,
         context_payloads: list[dict[str, Any]],
         *,
         existing_targets: list[str],
+        max_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
     ) -> list[str]:
         existing = {str(item or "").strip() for item in existing_targets if str(item or "").strip()}
         candidates: dict[str, float] = {}
@@ -712,7 +797,7 @@ class GitNexusMcpImpactClient:
                     score = base_score + self._dynamic_target_priority_bonus(target)
                     candidates[target] = max(candidates.get(target, 0.0), score)
         ordered = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
-        return [target for target, _score in ordered[:MAX_GITNEXUS_DYNAMIC_TARGETS]]
+        return [target for target, _score in ordered[: self._coerce_limit(max_targets, MAX_GITNEXUS_DYNAMIC_TARGETS, allow_zero=True)]]
 
     def _extract_context_symbol_names(self, value: Any) -> list[str]:
         names: list[str] = []
@@ -748,7 +833,12 @@ class GitNexusMcpImpactClient:
             score -= 8
         return score
 
-    def _target_priority_score(self, target: str, candidate: dict[str, Any]) -> float:
+    def _target_priority_score(
+        self,
+        target: str,
+        candidate: dict[str, Any],
+        impact_feedback_profiles: dict[str, Any] | None = None,
+    ) -> float:
         score = 0.0
         source = str(candidate.get("source") or "")
         if source == "changed_container_symbol":
@@ -780,7 +870,40 @@ class GitNexusMcpImpactClient:
             score += 2
         if any(token in target_lower for token in ("test", "dto", "request", "response", "config", "constant")):
             score -= 8
+        score += self._target_feedback_score_adjustment(target, impact_feedback_profiles or {})
         return score
+
+    def _target_feedback_score_adjustment(self, target: str, impact_feedback_profiles: dict[str, Any]) -> float:
+        target_text = str(target or "").strip().lower()
+        if not target_text:
+            return 0.0
+        adjustment = 0.0
+        for profile in dict(impact_feedback_profiles.get("targets") or {}).values():
+            if not isinstance(profile, dict):
+                continue
+            target_type = str(profile.get("target_type") or "").strip()
+            if target_type and target_type not in {"impact_path", "impact_file", "test_scope"}:
+                continue
+            key_text = str(profile.get("target_key") or "").strip().lower()
+            if not key_text or target_text not in key_text:
+                continue
+            action = str(profile.get("recommended_action") or "").strip()
+            false_positive_rate = float(
+                profile.get("false_positive_rate")
+                or profile.get("smoothed_false_positive_rate")
+                or 0.0
+            )
+            accept_rate = float(profile.get("accept_rate") or profile.get("smoothed_accept_rate") or 0.0)
+            sample_count = int(profile.get("sample_count") or 0)
+            if action == "require_manual_verification" or false_positive_rate >= 0.6:
+                adjustment -= 18 + min(10, sample_count)
+            elif action == "watch_for_false_positive" or false_positive_rate >= 0.45:
+                adjustment -= 8
+            elif action == "boost_confidence" or accept_rate >= 0.8:
+                adjustment += 10 + min(6, sample_count)
+            elif action == "soft_boost_confidence" or accept_rate >= 0.55:
+                adjustment += 4
+        return adjustment
 
     def _is_missing_symbol_error(self, error: RuntimeError) -> bool:
         message = str(error or "").lower()
@@ -1224,6 +1347,11 @@ class GitNexusImpactService:
                 subject=subject,
                 changed_symbols=changed_symbols,
                 runtime_env=self._gitnexus_runtime_env(subject, runtime),
+                max_targets=runtime.gitnexus_max_targets,
+                max_context_queries=runtime.gitnexus_max_context_queries,
+                max_impact_queries=runtime.gitnexus_max_impact_queries,
+                max_dynamic_targets=runtime.gitnexus_max_dynamic_targets,
+                impact_feedback_profiles=self._impact_feedback_profiles(),
             )
         except Exception as error:
             logger.exception(

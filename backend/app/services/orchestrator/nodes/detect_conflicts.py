@@ -19,7 +19,6 @@ LOW_RISK_HINT_TOKENS = {
     "文档说明",
     "提示性",
     "提醒",
-    "代码健康",
 }
 
 HIGH_VALUE_CONTRACT_MISMATCH_TOKENS = {
@@ -41,6 +40,28 @@ HIGH_VALUE_DIRECT_DEFECT_TOKENS = {
     "domain event",
     "domainevent",
     "事件不再被记录",
+}
+
+HIGH_PRIORITY_OVERRIDE_TOKENS = {
+    "鉴权",
+    "越权",
+    "未授权",
+    "注入",
+    "泄露",
+    "并发",
+    "竞态",
+    "死锁",
+    "数据丢失",
+    "不可达",
+    "死代码",
+    "authorization",
+    "unauthorized",
+    "injection",
+    "leak",
+    "race",
+    "deadlock",
+    "data loss",
+    "unreachable",
 }
 
 NON_CODE_REVIEW_SCOPE_TOKENS = {
@@ -73,7 +94,7 @@ FINDING_TYPE_WEIGHTS = {
     "direct_defect": 1.0,
     "test_gap": 0.8,
     "risk_hypothesis": 0.65,
-    "design_concern": 0.55,
+    "design_concern": 0.65,
 }
 
 SEMANTIC_STOP_TOKENS = {
@@ -682,6 +703,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     next_state = dict(state)
     next_state["phase"] = "detect_conflicts"
     issue_filter_config = _resolve_issue_filter_config(next_state)
+    feedback_quality_profiles = dict(next_state.get("feedback_quality_profiles") or {})
     findings = list(next_state.get("findings", []))
     issue_filter_decisions: list[dict[str, object]] = []
     conflicts: list[dict[str, object]] = []
@@ -691,7 +713,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             file_path = str(finding.get("file_path", "")).strip() or "unknown"
             line_start = int(finding.get("line_start", 1) or 1)
             key = f"{file_path}::{line_start}::{str(finding.get('finding_id') or '').strip() or 'unknown'}"
-            skip_decision = _classify_issue_candidate([finding], issue_filter_config)
+            skip_decision = _classify_issue_candidate([finding], issue_filter_config, feedback_quality_profiles)
             if skip_decision is not None:
                 issue_filter_decisions.append(
                     {
@@ -723,7 +745,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             highest_severity = "high"
         if any(str(item.get("severity")) == "blocker" for item in eligible_items):
             highest_severity = "blocker"
-        confidence, confidence_breakdown = _score_issue_confidence(eligible_items)
+        confidence, confidence_breakdown = _score_issue_confidence(eligible_items, feedback_quality_profiles)
         aggregated_finding_types = _collect_unique_finding_types(eligible_items)
         aggregated_titles = _collect_unique_values(eligible_items, "title")
         aggregated_summaries = _collect_unique_values(eligible_items, "summary")
@@ -840,6 +862,7 @@ def _collect_unique_list_values(items: list[dict[str, object]], field: str) -> l
 def _classify_issue_candidate(
     items: list[dict[str, object]],
     config: dict[str, object],
+    feedback_quality_profiles: dict[str, object] | None = None,
 ) -> dict[str, str] | None:
     """判断当前 finding 组是否应仅保留为 finding，并返回治理原因。"""
 
@@ -881,7 +904,7 @@ def _classify_issue_candidate(
     )
     average_confidence = sum(float(item.get("confidence") or 0.0) for item in items) / max(len(items), 1)
     max_confidence = max(float(item.get("confidence") or 0.0) for item in items)
-    aggregate_confidence, _ = _score_issue_confidence(items)
+    aggregate_confidence, _ = _score_issue_confidence(items, feedback_quality_profiles)
     effective_confidence = max(average_confidence, max_confidence, aggregate_confidence)
     all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
     text_blob = "\n".join(
@@ -907,6 +930,7 @@ def _classify_issue_candidate(
     hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
     high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
     high_value_direct_defect = any(token in text_blob for token in HIGH_VALUE_DIRECT_DEFECT_TOKENS)
+    high_priority_override = any(token in text_blob for token in HIGH_PRIORITY_OVERRIDE_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
     observation_signal = _has_observation_signal(items)
     sast_cross_validated = bool(_collect_sast_prescan_matches(items))
@@ -939,7 +963,6 @@ def _classify_issue_candidate(
         bool(config.get("suppress_low_risk_hint_issues", True))
         and finding_types <= {"design_concern"}
         and highest_severity in {"low", "medium"}
-        and highest_severity not in {"high", "critical", "blocker"}
     ):
         return {
             "rule_code": "design_concern_only",
@@ -959,6 +982,7 @@ def _classify_issue_candidate(
         and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
         and hint_like
         and not high_value_contract_mismatch
+        and not high_priority_override
         and not observation_signal
         and not sast_cross_validated
     ):
@@ -1031,7 +1055,10 @@ def _priority_confidence_threshold(config: dict[str, object], priority_label: st
         return 0.8
 
 
-def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict[str, object]]:
+def _score_issue_confidence(
+    items: list[dict[str, object]],
+    feedback_quality_profiles: dict[str, object] | None = None,
+) -> tuple[float, dict[str, object]]:
     if not items:
         return 0.01, {
             "base_weighted_confidence": 0.01,
@@ -1046,10 +1073,19 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
 
     weighted_sum = 0.0
     total_weight = 0.0
+    feedback_adjustments: list[dict[str, object]] = []
     for item in items:
         finding_type = str(item.get("finding_type") or "risk_hypothesis").strip()
         weight = float(FINDING_TYPE_WEIGHTS.get(finding_type, 0.65))
         confidence = _coerce_confidence(item.get("confidence"))
+        adjusted_confidence, feedback_adjustment = _apply_feedback_confidence_profile(
+            item,
+            confidence,
+            feedback_quality_profiles or {},
+        )
+        if feedback_adjustment:
+            feedback_adjustments.append(feedback_adjustment)
+            confidence = adjusted_confidence
         weighted_sum += confidence * weight
         total_weight += weight
     base_weighted_confidence = round(weighted_sum / max(total_weight, 1e-6), 2)
@@ -1103,6 +1139,50 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
         "evidence_signal_count": evidence_signal_count,
         "direct_evidence": direct_evidence,
         "finding_count": len(items),
+        "feedback_adjustments": feedback_adjustments,
+    }
+
+
+def _apply_feedback_confidence_profile(
+    item: dict[str, object],
+    confidence: float,
+    quality_profiles: dict[str, object],
+) -> tuple[float, dict[str, object]]:
+    expert_profiles = dict(quality_profiles.get("experts") or {})
+    issue_type_profiles = dict(quality_profiles.get("issue_types") or {})
+    expert_id = str(item.get("expert_id") or "").strip()
+    issue_type = str(item.get("normalized_issue_type") or _build_single_problem_type(item) or "").strip().lower()
+    expert_profile = dict(expert_profiles.get(expert_id) or {})
+    issue_type_profile = dict(issue_type_profiles.get(issue_type) or {})
+    penalty = min(
+        0.18,
+        float(expert_profile.get("confidence_penalty") or 0.0)
+        + float(issue_type_profile.get("confidence_penalty") or 0.0),
+    )
+    bonus = 0.0
+    if penalty <= 0:
+        bonus = min(
+            0.05,
+            max(
+                float(expert_profile.get("confidence_bonus") or 0.0),
+                float(issue_type_profile.get("confidence_bonus") or 0.0),
+            ),
+        )
+    if penalty <= 0 and bonus <= 0:
+        return confidence, {}
+    adjusted = max(0.01, min(0.95, round(confidence - penalty + bonus, 2)))
+    return adjusted, {
+        "expert_id": expert_id,
+        "issue_type": issue_type,
+        "original_confidence": round(confidence, 2),
+        "adjusted_confidence": adjusted,
+        "confidence_penalty": penalty,
+        "confidence_bonus": bonus,
+        "expert_sample_count": int(expert_profile.get("sample_count") or 0),
+        "issue_type_sample_count": int(issue_type_profile.get("sample_count") or 0),
+        "prefer_needs_verification": bool(
+            expert_profile.get("prefer_needs_verification") or issue_type_profile.get("prefer_needs_verification")
+        ),
     }
 
 
@@ -1148,9 +1228,12 @@ def _collect_sast_prescan_matches(items: list[dict[str, object]]) -> list[dict[s
                 "rule_id": str(raw.get("rule_id") or "").strip(),
                 "message": str(raw.get("message") or "").strip(),
                 "severity": str(raw.get("severity") or "").strip(),
+                "cwe": str(raw.get("cwe") or "").strip(),
                 "file_path": str(raw.get("file_path") or item.get("file_path") or "").strip(),
                 "line_start": _safe_int(raw.get("line_start") or item.get("line_start"), 1),
             }
+            if not _is_semantically_related_sast_match(item, match):
+                continue
             key = (
                 str(match["tool"]).lower(),
                 str(match["rule_id"]).lower(),
@@ -1161,6 +1244,54 @@ def _collect_sast_prescan_matches(items: list[dict[str, object]]) -> list[dict[s
                 seen.add(key)
                 matches.append(match)
     return matches[:8]
+
+
+def _is_semantically_related_sast_match(item: dict[str, object], match: dict[str, object]) -> bool:
+    issue_text = "\n".join(
+        [
+            str(item.get("normalized_issue_type") or ""),
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            *[str(value) for value in list(item.get("evidence") or [])],
+            *[str(value) for value in list(item.get("matched_rules") or [])],
+        ]
+    ).lower()
+    sast_text = "\n".join(
+        [
+            str(match.get("rule_id") or ""),
+            str(match.get("message") or ""),
+            str(match.get("cwe") or ""),
+            str(match.get("tool") or ""),
+        ]
+    ).lower()
+    issue_categories = _semantic_sast_categories(issue_text)
+    sast_categories = _semantic_sast_categories(sast_text)
+    if issue_categories and sast_categories:
+        return bool(issue_categories & sast_categories)
+    if sast_categories and not issue_categories:
+        return any(token in issue_text for token in ("安全", "漏洞", "注入", "鉴权", "权限", "泄露", "校验", "输入"))
+    if issue_categories and not sast_categories:
+        return any(token in sast_text for token in issue_categories)
+    return True
+
+
+def _semantic_sast_categories(text: str) -> set[str]:
+    categories: set[str] = set()
+    lowered = str(text or "").lower()
+    category_tokens = {
+        "injection": ("injection", "eval", "sql", "xss", "command", "ldap", "注入", "cwe-79", "cwe-89", "cwe-78"),
+        "auth": ("auth", "authorization", "permission", "unauthorized", "越权", "鉴权", "权限", "cwe-862", "cwe-863"),
+        "secret": ("secret", "password", "token", "credential", "key leak", "泄露", "凭证", "cwe-798"),
+        "validation": ("validation", "sanitize", "校验", "输入", "cwe-20"),
+        "null": ("null", "空指针", "npe", "cwe-476"),
+        "query": ("query", "limit", "pagination", "分页", "无界查询", "全量查询"),
+        "concurrency": ("race", "deadlock", "lock", "并发", "竞态", "死锁", "cwe-362"),
+        "exception": ("exception", "catch", "吞异常", "printstacktrace"),
+    }
+    for category, tokens in category_tokens.items():
+        if any(token in lowered for token in tokens):
+            categories.add(category)
+    return categories
 
 
 def _has_observation_signal(items: list[dict[str, object]]) -> bool:

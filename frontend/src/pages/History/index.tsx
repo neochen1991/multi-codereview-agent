@@ -164,7 +164,7 @@ const HistoryPage: React.FC = () => {
             </div>
             <Space size={4} wrap>
               <Tag color={evidenceCoverage >= 80 ? "green" : issueCount > 0 ? "gold" : "default"}>{`证据链 ${evidenceCoverage}%`}</Tag>
-              {quality.qualityFilteredIssueCount ? <Tag color="blue">{`过滤 ${quality.qualityFilteredIssueCount}`}</Tag> : null}
+              {quality.qualityFilteredIssueCount ? <Tag color="blue">{`保留观察 ${quality.qualityFilteredIssueCount}`}</Tag> : null}
               {hasImpact ? (
                 <>
                   <Tag color={impactGraphColor(impact.graphStatus)}>{impact.graphStatus || "impact"}</Tag>
@@ -226,7 +226,7 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
-      title: "检视议题数",
+      title: "正式问题数",
       dataIndex: "issue_count",
       key: "issue_count",
       width: 120,
@@ -243,8 +243,8 @@ const HistoryPage: React.FC = () => {
         return (
           <Space size={4} wrap>
             <Tag color={coverage >= 80 ? "green" : issueCount > 0 ? "gold" : "default"}>{`证据链 ${coverage}%`}</Tag>
-            <Tag color={summary.qualityFilteredIssueCount ? "blue" : "default"}>{`过滤 ${summary.qualityFilteredIssueCount}`}</Tag>
-            <Tag color={summary.budgetFilteredIssueCount ? "gold" : "default"}>{`预算 ${summary.budgetFilteredIssueCount}`}</Tag>
+            <Tag color={summary.qualityFilteredIssueCount ? "blue" : "default"}>{`保留观察 ${summary.qualityFilteredIssueCount}`}</Tag>
+            <Tag color={summary.budgetFilteredIssueCount ? "gold" : "default"}>{`提交上限 ${summary.budgetFilteredIssueCount}`}</Tag>
           </Space>
         );
       },
@@ -276,13 +276,13 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
-      title: "人工裁决",
+      title: "人工确认",
       dataIndex: "human_review_status",
       key: "human_review_status",
       width: 140,
       render: (value?: string) => (
         <Tag color={value === "requested" ? "error" : value === "approved" ? "success" : "default"}>
-          {value === "requested" ? "待人工裁决" : value === "approved" ? "人工已批准" : value === "rejected" ? "人工已驳回" : "无需人工"}
+          {value === "requested" ? "待人工确认" : value === "approved" ? "人工已批准" : value === "rejected" ? "人工已驳回" : "无需人工"}
         </Tag>
       ),
     },
@@ -367,7 +367,7 @@ const HistoryPage: React.FC = () => {
           {["completed", "failed", "closed"].includes(record.status) ? (
             <Popconfirm
               title="确认删除这条历史审核记录吗？"
-              description="删除后会同时清理该审核的过程消息、发现、议题、产物和 SQLite 记录，操作不可恢复。"
+              description="删除后会同时清理该审核的过程消息、发现、正式问题、产物和 SQLite 记录，操作不可恢复。"
               okText="确认删除"
               cancelText="取消"
               onConfirm={async () => {
@@ -401,7 +401,7 @@ const HistoryPage: React.FC = () => {
         <Space>
           <Popconfirm
             title="确认批量删除选中的历史记录吗？"
-            description="只会删除已结束记录，并清理关联消息、发现、议题和产物。SQLite 压缩会在后台统一执行一次。"
+            description="只会删除已结束记录，并清理关联消息、发现、正式问题和产物。SQLite 压缩会在后台统一执行一次。"
             okText="确认删除"
             cancelText="取消"
             disabled={selectedDeletableIds.length === 0}

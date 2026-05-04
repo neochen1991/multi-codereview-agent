@@ -5,6 +5,19 @@ import json
 from app.domain.models.expert_profile import ExpertProfile
 
 
+SIGNAL_EXPERT_PRIMARY = {
+    "factory_bypass": "ddd_architecture",
+    "event_ordering_risk": "ddd_architecture",
+    "loop_call_amplification": "performance_reliability",
+    "unbounded_query_risk": "database_analysis",
+    "query_semantics_weakened": "database_analysis",
+    "comment_contract_unimplemented": "correctness_business",
+    "exception_swallowed": "maintainability_code_health",
+    "naming_convention_violation": "maintainability_code_health",
+    "magic_value_literal": "maintainability_code_health",
+}
+
+
 def parse_json_payload(text: str) -> dict[str, object]:
     content = str(text or "").strip()
     if "```json" in content:
@@ -110,15 +123,16 @@ def apply_java_signal_expert_retention(
             0.81,
         )
 
-    if {"loop_call_amplification", "unbounded_query_risk"} & signal_set:
+    if "loop_call_amplification" in signal_set:
         _add_if_requested(
             "performance_reliability",
-            "检测到循环内调用放大或批量边界缺失，系统补入性能与可靠性专家复核数据库往返、远程调用和超时风险。",
+            "检测到循环内调用放大，系统补入性能与可靠性专家复核数据库往返、远程调用和超时风险。",
             0.84,
         )
+    if "unbounded_query_risk" in signal_set:
         _add_if_requested(
             "database_analysis",
-            "检测到循环查库或分页边界缺失，系统补入数据库专家复核查询路径、索引命中和批量访问模式。",
+            "检测到查询边界缺失，系统补入数据库专家复核查询路径、索引命中和批量访问模式。",
             0.8,
         )
 
@@ -129,10 +143,10 @@ def apply_java_signal_expert_retention(
             0.79,
         )
 
-    if {"query_semantics_weakened", "exception_swallowed"} & signal_set:
+    if "query_semantics_weakened" in signal_set:
         _add_if_requested(
-            "security_compliance",
-            "检测到查询语义放宽或异常处理退化，系统补入安全与合规专家复核数据访问面与错误处理边界。",
+            "database_analysis",
+            "检测到查询语义放宽，系统补入数据库专家复核结果集扩大、索引命中和访问边界。",
             0.76,
         )
 

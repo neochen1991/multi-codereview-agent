@@ -52,8 +52,16 @@ class SastPreScanService:
         return scanners
 
     def _scan_semgrep(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        config = self._first_existing(
+            root,
+            [".semgrep.yml", ".semgrep.yaml", "semgrep.yml", "semgrep.yaml"],
+        )
+        command = ["semgrep", "--json", "--quiet"]
+        if config:
+            command.extend(["--config", str(config)])
+        command.append(file_path)
         completed = subprocess.run(
-            ["semgrep", "--json", "--quiet", file_path],
+            command,
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -86,8 +94,25 @@ class SastPreScanService:
         return findings
 
     def _scan_eslint(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        config = self._first_existing(
+            root,
+            [
+                "eslint.config.js",
+                "eslint.config.mjs",
+                "eslint.config.cjs",
+                ".eslintrc.js",
+                ".eslintrc.cjs",
+                ".eslintrc.json",
+                ".eslintrc.yml",
+                ".eslintrc.yaml",
+            ],
+        )
+        command = ["eslint", "--format", "json"]
+        if config:
+            command.extend(["--config", str(config)])
+        command.append(file_path)
         completed = subprocess.run(
-            ["eslint", "--format", "json", file_path],
+            command,
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -120,8 +145,13 @@ class SastPreScanService:
         return findings
 
     def _scan_bandit(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        config = self._first_existing(root, [".bandit", "bandit.yml", "bandit.yaml", "pyproject.toml"])
+        command = ["bandit", "-q", "-f", "json"]
+        if config:
+            command.extend(["-c", str(config)])
+        command.append(file_path)
         completed = subprocess.run(
-            ["bandit", "-q", "-f", "json", file_path],
+            command,
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -182,6 +212,13 @@ class SastPreScanService:
         if tool == "eslint":
             return "该命中来自项目 linter，通常表示代码约束、潜在缺陷或团队规范被破坏。"
         return "该命中来自静态扫描工具，应作为专家复核的候选证据，而不是直接结论。"
+
+    def _first_existing(self, root: Path, names: list[str]) -> Path | None:
+        for name in names:
+            candidate = root / name
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
 
     def _loads_json(self, value: str) -> Any:
         try:

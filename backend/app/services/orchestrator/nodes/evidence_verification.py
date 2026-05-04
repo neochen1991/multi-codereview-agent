@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.evidence_false_positive_filter_service import EvidenceFalsePositiveFilterService
 from app.services.evidence_verifier_service import EvidenceVerifierService
+from app.services.orchestrator.nodes.slice_change import STATIC_DIFF_RISK_TOKENS
 from app.services.orchestrator.state import ReviewState
 
 
@@ -211,42 +212,7 @@ def _should_use_static_diff(issue: dict[str, object], state: ReviewState) -> boo
             *[str(item) for item in list(issue.get("evidence") or [])],
         ]
     ).lower()
-    return any(
-        token in text
-        for token in [
-            "loop_call_amplification",
-            "n_plus_one",
-            "循环",
-            "逐条",
-            "query_bound_removed",
-            "query_boundary_missing",
-            "unbounded_query_risk",
-            "limit",
-            "分页",
-            "全量",
-            "security_guard_removed",
-            "input_validation_removed",
-            "missing_auth_check",
-            "@valid",
-            "权限",
-            "鉴权",
-            "校验",
-            "idempotency_guard_removed",
-            "duplicate_processing_risk",
-            "幂等",
-            "重复",
-            "lock_guard_removed",
-            "concurrency_guard_removed",
-            "锁",
-            "并发",
-            "comment_contract_unimplemented",
-            "注释",
-            "todo",
-            "未实现",
-            "exception_swallowed",
-            "吞异常",
-        ]
-    )
+    return any(token in text for token in STATIC_DIFF_RISK_TOKENS)
 
 
 def _assess_evidence_quality(

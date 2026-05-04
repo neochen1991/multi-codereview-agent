@@ -503,9 +503,9 @@ const SettingsPage: React.FC = () => {
               <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
             </div>
             <div className="settings-summary-card">
-              <span className="settings-summary-label">Issue 阈值</span>
+              <span className="settings-summary-label">正式问题阈值</span>
               <strong>{priorityThreshold}</strong>
-              <span className="settings-summary-meta">低于该级别只保留为 finding</span>
+              <span className="settings-summary-meta">低于该级别只保留为检视发现</span>
             </div>
           </div>
         );
@@ -561,7 +561,7 @@ const SettingsPage: React.FC = () => {
             系统设置
           </Title>
           <Paragraph style={{ marginBottom: 0 }}>
-            这里统一管理代码仓、模型、自动审核、Issue 治理和扩展能力。系统启动必需的配置会写入项目根目录
+            这里统一管理代码仓、模型、自动审核、问题治理和扩展能力。系统启动必需的配置会写入项目根目录
             {" "}
             <code>config.json</code>
             ，设置页治理项会持久化到当前存储后端，并在运行时与系统配置合并生效。
@@ -573,7 +573,7 @@ const SettingsPage: React.FC = () => {
                   type="info"
                   showIcon
                   message={`当前统一配置文件：${String(form.getFieldValue("config_path"))}`}
-                  description="默认 LLM、平台 Token、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准。"
+                  description="默认模型、平台凭据、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准。"
                 />
               ) : null
             }
@@ -585,10 +585,10 @@ const SettingsPage: React.FC = () => {
       <Card className="module-card" title="当前实现状态" style={{ marginTop: 16 }}>
         <Descriptions column={1}>
           <Descriptions.Item label="日志落盘">前后端日志统一输出到项目根目录 logs/</Descriptions.Item>
-          <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
-          <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
-          <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
-          <Descriptions.Item label="Issue 治理">低风险、提示性、常见建议类问题可只保留在 findings，不升级为 issue / debate</Descriptions.Item>
+          <Descriptions.Item label="知识检索">按检查角色绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
+          <Descriptions.Item label="运行时工具调用">每个检查角色按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
+          <Descriptions.Item label="代码仓上下文">所有检查角色可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
+          <Descriptions.Item label="问题治理">低风险、提示性、常见建议类问题可只保留为检视发现，不升级为正式问题</Descriptions.Item>
         </Descriptions>
       </Card>
 
@@ -762,7 +762,7 @@ const SettingsPage: React.FC = () => {
                     type="info"
                     showIcon
                     style={{ marginBottom: 12 }}
-                    message="LLM 会基于 GitNexus 返回的事实，按这里的 Markdown 模板生成最终关联影响分析报告。"
+                    message="模型会基于 GitNexus 返回的事实，按这里的 Markdown 模板生成最终关联影响分析报告。"
                     description="建议保留章节结构和占位语义，主要调整标题、表达风格和测试建议的展示方式。保存后会更新当前生效模板；如果改坏了，可以随时恢复到系统默认模板。"
                   />
                   <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
@@ -929,6 +929,10 @@ const SettingsPage: React.FC = () => {
                 enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
                 llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
                 enable_sast_prescan: Boolean(values.enable_sast_prescan),
+                gitnexus_max_targets: Number(values.gitnexus_max_targets || 12),
+                gitnexus_max_context_queries: Number(values.gitnexus_max_context_queries || 8),
+                gitnexus_max_impact_queries: Number(values.gitnexus_max_impact_queries || 8),
+                gitnexus_max_dynamic_targets: Number(values.gitnexus_max_dynamic_targets ?? 6),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
                 standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
                 standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
@@ -1063,7 +1067,7 @@ const SettingsPage: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="allow_human_gate" label="允许人工 Gate" valuePropName="checked">
+                        <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>
@@ -1231,42 +1235,42 @@ const SettingsPage: React.FC = () => {
                   <div className="settings-collapse-content">
                     <Row gutter={[16, 0]}>
                       <Col xs={24}>
-                        <Form.Item name="code_repo_access_token" label="代码仓 Access Token">
+                        <Form.Item name="code_repo_access_token" label="代码仓访问凭据">
                           <Input.Password placeholder="留空则保持当前已配置的代码仓 token" />
                         </Form.Item>
                         {renderConfiguredNotice(
                           "code_repo_access_token_configured",
-                          "当前已在配置文件中保存代码仓 Access Token",
+                          "当前已在配置文件中保存代码仓访问凭据",
                           "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
-                        <Form.Item name="github_access_token" label="GitHub Token">
+                        <Form.Item name="github_access_token" label="GitHub 访问凭据">
                           <Input.Password placeholder="优先用于 github.com 链接" />
                         </Form.Item>
                         {renderConfiguredNotice(
                           "github_access_token_configured",
-                          "当前已在配置文件中保存 GitHub Token",
+                          "当前已在配置文件中保存 GitHub 访问凭据",
                           "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
-                        <Form.Item name="gitlab_access_token" label="GitLab Token">
+                        <Form.Item name="gitlab_access_token" label="GitLab 访问凭据">
                           <Input.Password placeholder="优先用于 gitlab 链接" />
                         </Form.Item>
                         {renderConfiguredNotice(
                           "gitlab_access_token_configured",
-                          "当前已在配置文件中保存 GitLab Token",
+                          "当前已在配置文件中保存 GitLab 访问凭据",
                           "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
                       <Col xs={24} xl={12}>
-                        <Form.Item name="codehub_access_token" label="CodeHub Token">
+                        <Form.Item name="codehub_access_token" label="CodeHub 访问凭据">
                           <Input.Password placeholder="优先用于 codehub 链接" />
                         </Form.Item>
                         {renderConfiguredNotice(
                           "codehub_access_token_configured",
-                          "当前已在配置文件中保存 CodeHub Token",
+                          "当前已在配置文件中保存 CodeHub 访问凭据",
                           "已保存的 token 不会在页面回显；留空保存会保留现有配置。",
                         )}
                       </Col>
@@ -1294,20 +1298,20 @@ const SettingsPage: React.FC = () => {
                       type="info"
                       showIcon
                       style={{ marginBottom: 16 }}
-                      message="Issue 过滤治理说明"
-                      description="这组开关只影响问题是否升级为有效问题，不会丢掉原始 findings。当前系统会把结果分成三层：审核发现、有效问题、被过滤问题。被过滤的常见原因包括 P 级阈值不足、结论仍带条件前提，以及问题只命中了待删除代码。规则筛选也支持切换为 LLM 语义筛选。"
+                      message="问题升级治理说明"
+                      description="这组开关只影响检视发现是否升级为正式问题，不会丢掉原始发现。当前系统会把结果分成三层：审核发现、正式问题、保留观察。保留观察的常见原因包括 P 级不足、结论仍带条件前提，以及问题只命中了待删除代码。规则筛选也支持切换为模型语义筛选。"
                     />
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="issue_filter_enabled" label="启用 Issue 过滤治理" valuePropName="checked">
+                        <Form.Item name="issue_filter_enabled" label="启用问题升级治理" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="issue_min_priority_level"
-                          label="Issue 升级最低 P 级阈值"
-                          extra="只有达到该优先级及以上的问题才进入 issue / debate。"
+                          label="正式问题最低 P 级"
+                          extra="只有达到该优先级及以上的问题才进入正式问题流程。"
                         >
                           <Select
                             options={[
@@ -1320,15 +1324,15 @@ const SettingsPage: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="default_max_debate_rounds" label="默认辩论轮次">
+                        <Form.Item name="default_max_debate_rounds" label="默认复核轮次">
                           <InputNumber min={1} max={6} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={6}>
                         <Form.Item
                           name="issue_confidence_threshold_p0"
-                          label="P0 Issue 置信度阈值"
-                          extra="blocker 级问题至少达到该置信度才升级为 issue。"
+                          label="P0 正式问题置信度"
+                          extra="blocker 级问题至少达到该置信度才升级为正式问题。"
                         >
                           <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1336,8 +1340,8 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={6}>
                         <Form.Item
                           name="issue_confidence_threshold_p1"
-                          label="P1 Issue 置信度阈值"
-                          extra="high / critical 级问题至少达到该置信度才升级为 issue。"
+                          label="P1 正式问题置信度"
+                          extra="high / critical 级问题至少达到该置信度才升级为正式问题。"
                         >
                           <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1345,8 +1349,8 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={6}>
                         <Form.Item
                           name="issue_confidence_threshold_p2"
-                          label="P2 Issue 置信度阈值"
-                          extra="medium 级问题至少达到该置信度才升级为 issue。"
+                          label="P2 正式问题置信度"
+                          extra="medium 级问题至少达到该置信度才升级为正式问题。"
                         >
                           <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1354,8 +1358,8 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={6}>
                         <Form.Item
                           name="issue_confidence_threshold_p3"
-                          label="P3 Issue 置信度阈值"
-                          extra="low 级问题至少达到该置信度才升级为 issue。"
+                          label="P3 正式问题置信度"
+                          extra="low 级问题至少达到该置信度才升级为正式问题。"
                         >
                           <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1363,59 +1367,59 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="suppress_low_risk_hint_issues"
-                          label="压制低风险提示类 Issue"
+                          label="低风险提示暂不提交"
                           valuePropName="checked"
                         >
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="hint_issue_confidence_threshold" label="提示类 Issue 置信度阈值">
+                        <Form.Item name="hint_issue_confidence_threshold" label="提示类问题置信度">
                           <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="hint_issue_evidence_cap" label="提示类 Issue 最大证据条数">
+                        <Form.Item name="hint_issue_evidence_cap" label="提示类问题最大证据条数">
                           <InputNumber min={0} max={10} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="enable_llm_evidence_filter"
-                          label="启用证据误报过滤"
+                          label="启用证据质量复核"
                           valuePropName="checked"
-                          extra="开启后，弱证据问题会在进入最终裁决前先做一次 LLM 误报过滤；失败自动回退本地规则。"
+                          extra="开启后，弱证据问题会在进入最终确认前先做一次模型复核；失败自动回退本地规则。"
                         >
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_evidence_filter_confidence_threshold" label="证据过滤触发阈值">
+                        <Form.Item name="llm_evidence_filter_confidence_threshold" label="证据复核触发阈值">
                           <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_evidence_filter_timeout_seconds" label="证据过滤 LLM 超时（秒）">
+                        <Form.Item name="llm_evidence_filter_timeout_seconds" label="证据复核模型超时（秒）">
                           <InputNumber min={10} max={180} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="enable_llm_issue_judge"
-                          label="启用 LLM Issue 裁判"
+                          label="启用模型问题复核"
                           valuePropName="checked"
-                          extra="开启后，低置信或薄证据 issue 会在收敛阶段再次判定；失败自动回退本地规则。"
+                          extra="开启后，低置信或薄证据问题会在收敛阶段再次判定；失败自动回退本地规则。"
                         >
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_issue_judge_confidence_threshold" label="Issue 裁判触发阈值">
+                        <Form.Item name="llm_issue_judge_confidence_threshold" label="问题复核触发阈值">
                           <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_issue_judge_timeout_seconds" label="Issue 裁判 LLM 超时（秒）">
+                        <Form.Item name="llm_issue_judge_timeout_seconds" label="问题复核模型超时（秒）">
                           <InputNumber min={10} max={180} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
@@ -1423,11 +1427,11 @@ const SettingsPage: React.FC = () => {
                         <Form.Item
                           name="rule_screening_mode"
                           label="规则筛选模式"
-                          extra="LLM 模式会先做语义筛选，失败时自动回退到启发式。"
+                          extra="模型模式会先做语义筛选，失败时自动回退到启发式。"
                         >
                           <Select
                             options={[
-                              { label: "LLM 语义筛选", value: "llm" },
+                              { label: "模型语义筛选", value: "llm" },
                               { label: "启发式筛选", value: "heuristic" },
                             ]}
                           />
@@ -1439,22 +1443,22 @@ const SettingsPage: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="rule_screening_llm_timeout_seconds" label="规则筛选 LLM 超时（秒）">
+                        <Form.Item name="rule_screening_llm_timeout_seconds" label="规则筛选模型超时（秒）">
                           <InputNumber min={15} max={300} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="enable_llm_targeted_debate"
-                          label="启用 LLM 定向辩论裁判"
+                          label="启用模型定向复核"
                           valuePropName="checked"
-                          extra="开启后，多专家存在分歧或低置信时，会先让模型裁判观点再进入收敛；失败会自动回退本地规则。"
+                          extra="开启后，多个检查角色存在分歧或低置信时，会先让模型复核观点再进入收敛；失败会自动回退本地规则。"
                         >
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_targeted_debate_timeout_seconds" label="LLM 辩论裁判超时（秒）">
+                        <Form.Item name="llm_targeted_debate_timeout_seconds" label="模型定向复核超时（秒）">
                           <InputNumber min={15} max={300} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
@@ -1463,9 +1467,33 @@ const SettingsPage: React.FC = () => {
                           name="enable_sast_prescan"
                           label="启用 SAST/linter 预扫描"
                           valuePropName="checked"
-                          extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为专家提示补充工具候选信号。"
+                          extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为检查角色补充工具候选信号。"
                         >
                           <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="gitnexus_max_targets" label="GitNexus 目标上限">
+                          <InputNumber min={1} max={50} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="gitnexus_max_context_queries" label="GitNexus context 查询上限">
+                          <InputNumber min={1} max={50} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="gitnexus_max_impact_queries" label="GitNexus impact 查询上限">
+                          <InputNumber min={1} max={50} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="gitnexus_max_dynamic_targets"
+                          label="GitNexus 动态目标上限"
+                          extra="Windows 或低配环境可设为 0，减少二次扩展查询。"
+                        >
+                          <InputNumber min={0} max={50} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -1479,45 +1507,45 @@ const SettingsPage: React.FC = () => {
                   <div className="settings-collapse-content">
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="standard_llm_timeout_seconds" label="标准模式 LLM 超时（秒）">
+                        <Form.Item name="standard_llm_timeout_seconds" label="标准模式模型超时（秒）">
                           <InputNumber min={10} max={300} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="standard_llm_retry_count" label="标准模式 LLM 重试次数">
+                        <Form.Item name="standard_llm_retry_count" label="标准模式模型重试次数">
                           <InputNumber min={1} max={5} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="standard_max_parallel_experts" label="标准模式最大并发专家数">
+                        <Form.Item name="standard_max_parallel_experts" label="标准模式最大并发角色数">
                           <InputNumber min={1} max={8} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="light_llm_timeout_seconds" label="轻量模式 LLM 超时（秒）">
+                        <Form.Item name="light_llm_timeout_seconds" label="轻量模式模型超时（秒）">
                           <InputNumber min={10} max={600} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="light_llm_retry_count" label="轻量模式 LLM 重试次数">
+                        <Form.Item name="light_llm_retry_count" label="轻量模式模型重试次数">
                           <InputNumber min={1} max={5} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="light_max_parallel_experts" label="轻量模式最大并发专家数">
+                        <Form.Item name="light_max_parallel_experts" label="轻量模式最大并发角色数">
                           <InputNumber min={1} max={4} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="light_max_debate_rounds" label="轻量模式最大辩论轮次">
+                        <Form.Item name="light_max_debate_rounds" label="轻量模式最大复核轮次">
                           <InputNumber min={1} max={3} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="light_llm_max_input_tokens"
-                          label="轻量模式上下文 token 上限"
-                          extra="智能压缩会以这个预算为准，超过时优先保留规则、变更代码和关键上下文。"
+                          label="轻量模式上下文用量上限"
+                          extra="智能压缩会以这个上限为准，超过时优先保留规则、变更代码和关键上下文。"
                         >
                           <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1526,27 +1554,27 @@ const SettingsPage: React.FC = () => {
                         <Form.Item
                           name="light_llm_max_prompt_chars"
                           label="轻量模式提示字符上限"
-                          extra="作为字符级兜底预算，防止混合中英文场景下提示过长。"
+                          extra="作为字符级兜底上限，防止混合中英文场景下提示过长。"
                         >
                           <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="llm_log_truncate_enabled" label="截断 LLM 日志预览" valuePropName="checked">
+                        <Form.Item name="llm_log_truncate_enabled" label="截断模型日志预览" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="llm_log_preview_limit"
-                          label="LLM 日志预览长度"
+                          label="模型日志预览长度"
                           extra="仅影响日志预览，不影响实际发送给模型的内容。"
                         >
                           <InputNumber min={200} max={20000} step={200} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="default_llm_provider" label="默认 LLM Provider">
+                        <Form.Item name="default_llm_provider" label="默认模型服务">
                           <Input placeholder="dashscope-openai-compatible" />
                         </Form.Item>
                       </Col>
@@ -1556,12 +1584,12 @@ const SettingsPage: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col xs={24}>
-                        <Form.Item name="default_llm_base_url" label="默认 LLM Base URL">
+                        <Form.Item name="default_llm_base_url" label="默认模型服务地址">
                           <Input placeholder="https://coding.dashscope.aliyuncs.com/v1" />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
-                        <Form.Item name="allow_llm_fallback" label="允许 LLM Fallback" valuePropName="checked">
+                        <Form.Item name="allow_llm_fallback" label="允许模型自动降级" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>
@@ -1605,7 +1633,7 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={12}>
                         <Form.Item
                           name="agent_allowlist"
-                          label="Agent 白名单"
+                          label="检查角色白名单"
                           getValueProps={(value) => ({ value: stringifyList(value as string[]) })}
                         >
                           <Input placeholder="judge, main_agent" />

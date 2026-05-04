@@ -44,12 +44,12 @@ export const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null
   const bannerTone = summary.system_added_experts.length > 0 ? "warning" : hasAdjustments ? "info" : "default";
   const heading =
     summary.system_added_experts.length > 0
-      ? "专家与代码不完全匹配，系统已自动补入兜底专家继续审查"
+      ? "检查角色与代码不完全匹配，系统已自动补入兜底角色继续检视"
       : hasAdjustments
-        ? "部分已选择专家与当前变更相关性较低，系统已自动跳过"
-        : "本轮专家路由已完成";
+        ? "部分已选择角色与当前变更相关性较低，系统已自动跳过"
+        : "本轮检查角色匹配已完成";
   return (
-    <Card className={`module-card expert-routing-card expert-routing-card-${bannerTone}`} title="专家路由提示">
+    <Card className={`module-card expert-routing-card expert-routing-card-${bannerTone}`} title="检查角色匹配">
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Paragraph className="expert-routing-summary">{heading}</Paragraph>
         <RoutingExpertTags title="用户选择" items={summary.user_selected_experts} color="blue" />
@@ -63,7 +63,7 @@ export const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null
                 <div key={`skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
                   <Text strong>{item.expert_name || item.expert_id}</Text>
                   <Text type="secondary">
-                    {item.reason || "当前变更未命中该专家的有效审查线索"}
+                    {item.reason || "当前变更未命中该角色的有效审查线索"}
                     {item.file_path ? ` · ${item.file_path}${item.line_start ? `:${item.line_start}` : ""}` : ""}
                   </Text>
                 </div>
@@ -79,7 +79,7 @@ export const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null
 export const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> = ({ items }) => {
   if (items.length === 0) return null;
   return (
-    <Card className="module-card" title="专家规则命中统计">
+    <Card className="module-card" title="检查规则命中统计">
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         {items.map((item) => (
           <Card key={item.expert_id} size="small">
@@ -116,14 +116,14 @@ export const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummar
 
 export const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | null }> = ({ summary }) => {
   return (
-    <Card className="module-card expert-routing-card expert-routing-card-info" title="专家参与判定">
+    <Card className="module-card expert-routing-card expert-routing-card-info" title="参与角色判定">
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Paragraph className="expert-routing-summary">
           {summary
-            ? "主Agent 已基于当前 MR 信息、完整 diff 和专家画像，先由大模型判定本次真正需要参与审核的专家集合。"
-            : "主Agent 正在结合当前 MR、完整 diff 和专家画像判定本轮需要参与审核的专家，请稍候。"}
+            ? "审核调度已基于当前 MR 信息、完整 diff 和角色职责，判定本次真正需要参与审核的检查角色。"
+            : "审核调度正在结合当前 MR、完整 diff 和角色职责判定本轮需要参与审核的检查角色，请稍候。"}
         </Paragraph>
-        {summary ? <RoutingExpertTags title="大模型选中" items={summary.selected_experts} color="green" /> : null}
+        {summary ? <RoutingExpertTags title="系统选中" items={summary.selected_experts} color="green" /> : null}
         {summary?.requested_expert_ids.length ? (
           <div className="routing-group">
             <Text className="routing-group-title">原始候选</Text>
@@ -143,13 +143,13 @@ export const ExpertSelectionPanel: React.FC<{ summary: ExpertSelectionSummary | 
               {summary.skipped_experts.map((item) => (
                 <div key={`selection-skipped-${item.expert_id}-${item.file_path || "none"}`} className="routing-skip-item">
                   <Text strong>{item.expert_name || item.expert_id}</Text>
-                  <Text type="secondary">{item.reason || "大模型未将其纳入本次 MR 的审核集合"}</Text>
+                  <Text type="secondary">{item.reason || "系统未将其纳入本次 MR 的审核集合"}</Text>
                 </div>
               ))}
             </Space>
           </div>
         ) : !summary ? (
-          <Tag color="processing">正在判定参与专家</Tag>
+          <Tag color="processing">正在判定参与角色</Tag>
         ) : null}
       </Space>
     </Card>

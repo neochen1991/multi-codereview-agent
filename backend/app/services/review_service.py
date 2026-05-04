@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_MR_EXPERTS = ("change_impact_analysis",)
 
 
+def _is_formal_issue(issue: DebateIssue) -> bool:
+    """人工驳回代表误报闭环，保留原始记录但不再进入正式议题口径。"""
+
+    return str(issue.human_decision or "").strip().lower() != "rejected" and str(issue.resolution or "").strip().lower() != "human_rejected"
+
+
 def parse_json_object(value: str) -> dict[str, object]:
     text = str(value or "").strip()
     if not text:
@@ -1006,8 +1012,13 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         findings = self.finding_repo.list(review_id)
         finding_by_id = {item.finding_id: item for item in findings}
         if self._issues_require_finding_rehydration(issues, findings):
-            return self._rehydrate_issues_from_findings(review_id, issues, findings)
-        return [self._realign_issue_location(issue, finding_by_id) for issue in issues]
+            issues = self._rehydrate_issues_from_findings(review_id, issues, findings)
+            return [issue for issue in issues if _is_formal_issue(issue)]
+        return [
+            self._realign_issue_location(issue, finding_by_id)
+            for issue in issues
+            if _is_formal_issue(issue)
+        ]
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return self.message_repo.list_by_issue(review_id, issue_id)
@@ -1301,15 +1312,16 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if not pending_ids:
             review.completed_at = datetime.now(UTC)
             review.duration_seconds = self._duration_seconds(review.started_at or review.created_at, review.completed_at)
+        formal_issues = [issue for issue in updated_issues if _is_formal_issue(issue)]
         review.report_summary = build_report_summary(
             review=review,
             finding_count=len(self.list_findings(review_id)),
-            issue_count=len(updated_issues),
+            issue_count=len(formal_issues),
             pending_human_count=len(pending_ids),
         )
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
-        self.artifact_service.publish(review, updated_issues)
+        self.artifact_service.publish(review, formal_issues)
         if not pending_ids:
             self.event_repo.append(
                 ReviewEvent(

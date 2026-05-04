@@ -66,3 +66,22 @@ def test_sast_prescan_parses_semgrep_json(tmp_path: Path):
     assert payload["findings"][0]["cwe"] == "CWE-95"
     assert "CWE-95" in payload["findings"][0]["why_it_matters"]
     assert "Use of eval" in payload["summary"] or payload["findings"][0]["message"] == "Use of eval"
+
+
+def test_sast_prescan_uses_project_semgrep_config(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("eval(user_input)\n", encoding="utf-8")
+    (repo / ".semgrep.yml").write_text("rules: []\n", encoding="utf-8")
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        assert "--config" in command
+        assert str(repo / ".semgrep.yml") in command
+        return type("Completed", (), {"stdout": '{"results":[]}', "stderr": "", "returncode": 0})()
+
+    with patch("app.services.sast_prescan_service.shutil.which", side_effect=lambda name: "/usr/bin/semgrep" if name == "semgrep" else None):
+        with patch("app.services.sast_prescan_service.subprocess.run", side_effect=fake_run):
+            payload = SastPreScanService().scan_file(repo, "src/app.py", enabled=True)
+
+    assert payload["enabled"] is True

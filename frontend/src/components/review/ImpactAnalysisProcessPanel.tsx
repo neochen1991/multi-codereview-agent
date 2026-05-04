@@ -90,7 +90,7 @@ const ImpactAnalysisProcessPanel: React.FC<Props> = ({ review, messages }) => {
     <Card className="module-card" title="关联影响分析">
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
         <Paragraph style={{ marginBottom: 0 }}>
-          这一步不是代码检视，也不会进入 issue 收敛。系统会单独调用 GitNexus，分析本次改动的影响范围和建议测试范围。
+          这一步不是代码检视，也不会进入正式问题收敛。系统会单独调用 GitNexus，分析本次改动的影响范围和建议测试范围。
         </Paragraph>
         <Steps
           size="small"

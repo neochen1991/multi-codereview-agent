@@ -89,15 +89,15 @@ const HomePage: React.FC = () => {
       {
         key: "review",
         title: "开始一次新审核",
-        description: "进入审核工作台，粘贴 Git 平台链接、选择专家并启动分析。",
+        description: "进入检视工作台，粘贴 Git 平台链接、选择检查范围并启动分析。",
         icon: <CodeOutlined />,
         path: "/review",
         accentClass: "home-entry-review",
       },
       {
         key: "experts",
-        title: "管理专家与规范",
-        description: "查看专家边界、核心规范文档和运行时工具绑定。",
+        title: "管理检查角色与规范",
+        description: "查看检查职责、核心规范文档和运行时工具绑定。",
         icon: <RobotOutlined />,
         path: "/experts",
         accentClass: "home-entry-experts",
@@ -105,7 +105,7 @@ const HomePage: React.FC = () => {
       {
         key: "knowledge",
         title: "维护知识库",
-        description: "上传并绑定 Markdown 文档，让专家审查时引用团队知识和规则。",
+        description: "上传并绑定 Markdown 文档，让代码检视时引用团队知识和规则。",
         icon: <BookOutlined />,
         path: "/knowledge",
         accentClass: "home-entry-knowledge",
@@ -113,7 +113,7 @@ const HomePage: React.FC = () => {
       {
         key: "settings",
         title: "调整系统设置",
-        description: "维护代码仓、平台 Token、模型参数和标准/轻量运行模式。",
+        description: "维护代码仓、平台凭据、模型参数和标准/轻量运行模式。",
         icon: <SettingOutlined />,
         path: "/settings",
         accentClass: "home-entry-settings",
@@ -126,13 +126,13 @@ const HomePage: React.FC = () => {
     const hints: Array<{ title: string; tone: "warning" | "info" | "success" }> = [];
     if (stats.pendingHuman > 0) {
       hints.push({
-        title: `当前有 ${stats.pendingHuman} 条审核待人工裁决，建议优先从历史记录或审核工作台进入处理。`,
+        title: `当前有 ${stats.pendingHuman} 条审核待人工确认，建议优先从历史记录或检视工作台进入处理。`,
         tone: "warning",
       });
     }
     if (stats.running > 0) {
       hints.push({
-        title: `当前有 ${stats.running} 条审核仍在运行中，首页适合看全局状态，详细过程请进入审核工作台。`,
+        title: `当前有 ${stats.running} 条审核仍在运行中，首页适合看全局状态，详细过程请进入检视工作台。`,
         tone: "info",
       });
     }
@@ -205,16 +205,16 @@ const HomePage: React.FC = () => {
           <Col xs={24} xl={15}>
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>
               <Tag color="processing" style={{ width: "fit-content" }}>
-                Expert Debate Code Review
+                代码检视工作台
               </Tag>
-              <h2 className="home-title">多专家协同代码审核控制台</h2>
+              <h2 className="home-title">代码检视协同平台</h2>
               <p className="home-subtitle">
-                首页只负责展示平台状态、最近审核和关键入口。真正的新建与启动审核统一放在“审核工作台”中完成，
+                首页展示平台状态、最近审核和关键入口。新建与启动审核统一放在“检视工作台”中完成，
                 让首页更像系统总入口，而不是表单页面。
               </p>
               <Space wrap size="middle">
                 <Button type="primary" size="large" icon={<CodeOutlined />} onClick={() => navigate("/review")}>
-                  进入审核工作台
+                  进入检视工作台
                 </Button>
                 <Button size="large" icon={<HistoryOutlined />} onClick={() => navigate("/history")}>
                   查看历史记录
@@ -260,7 +260,7 @@ const HomePage: React.FC = () => {
                 <strong>{stats.queued}</strong>
               </div>
               <div className="home-hero-status-card">
-                <span className="home-hero-status-label">待人工裁决</span>
+                <span className="home-hero-status-label">待人工确认</span>
                 <strong>{stats.pendingHuman}</strong>
               </div>
               <div className="home-hero-status-card">
@@ -449,7 +449,7 @@ const HomePage: React.FC = () => {
               ) : (
                 <div className="home-hint-card home-hint-success">
                   <span className="home-hint-dot" />
-                  <span>当前系统运行平稳，可以直接进入审核工作台发起新的代码审查。</span>
+                  <span>当前系统运行平稳，可以直接进入检视工作台发起新的代码审查。</span>
                 </div>
               )}
             </div>

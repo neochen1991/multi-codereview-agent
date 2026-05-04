@@ -22,12 +22,12 @@ export const getReviewPhaseLabel = (value?: string): string => {
   if (value === "not_started") return "尚未启动";
   if (value === "queued") return "排队等待";
   if (value === "intake") return "输入整理";
-  if (value === "coordination") return "主Agent 编排";
+  if (value === "coordination") return "审核调度";
   if (value === "impact_analysis") return "关联影响分析";
-  if (value === "expert_review") return "专家审查";
-  if (value === "debate") return "议题收敛";
-  if (value === "judge") return "Judge 校验";
-  if (value === "human_gate") return "人工裁决";
+  if (value === "expert_review") return "专项检视";
+  if (value === "debate") return "问题收敛";
+  if (value === "judge") return "结果复核";
+  if (value === "human_gate") return "人工确认";
   if (value === "completed") return "审核完成";
   if (value === "failed") return "执行失败";
   return value || "-";

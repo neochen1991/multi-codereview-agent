@@ -6,6 +6,41 @@ from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.orchestrator.state import ReviewState
 
 
+STATIC_DIFF_RISK_TOKENS = (
+    "loop_call_amplification",
+    "n_plus_one",
+    "循环",
+    "逐条",
+    "query_bound_removed",
+    "query_boundary_missing",
+    "unbounded_query_risk",
+    "limit",
+    "分页",
+    "全量",
+    "security_guard_removed",
+    "input_validation_removed",
+    "missing_auth_check",
+    "@valid",
+    "权限",
+    "鉴权",
+    "校验",
+    "idempotency_guard_removed",
+    "duplicate_processing_risk",
+    "幂等",
+    "重复",
+    "lock_guard_removed",
+    "concurrency_guard_removed",
+    "锁",
+    "并发",
+    "comment_contract_unimplemented",
+    "注释",
+    "todo",
+    "未实现",
+    "exception_swallowed",
+    "吞异常",
+)
+
+
 def slice_change(state: ReviewState) -> ReviewState:
     """把 changed_files 切成后续可路由的 hunk 级 change slice。"""
 

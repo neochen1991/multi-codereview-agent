@@ -122,6 +122,17 @@ class TestScopeRecommendation(BaseModel):
     priority: str = "medium"
 
 
+class ImpactIssueLink(BaseModel):
+    """关联影响分析结果与代码检视 issue 的交叉引用。"""
+
+    issue_id: str = ""
+    issue_title: str = ""
+    issue_file_path: str = ""
+    impact_target: str = ""
+    relationship: str = ""
+    reason: str = ""
+
+
 class ImpactReport(BaseModel):
     """面向每个 MR 输出的关联影响报告。
 
@@ -156,6 +167,8 @@ class ImpactReport(BaseModel):
     report_summary: str = ""
     key_impact_points: list[str] = Field(default_factory=list)
     test_focus: list[str] = Field(default_factory=list)
+    related_issue_ids: list[str] = Field(default_factory=list)
+    impact_issue_links: list[ImpactIssueLink] = Field(default_factory=list)
     llm_markdown: str = ""
     llm_generated: bool = False
 

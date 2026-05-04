@@ -34,8 +34,8 @@ const buildRecommendedAction = (issue: DebateIssue | undefined, finding: ReviewF
   }
   if (issue.needs_human && issue.status !== "resolved") return "提交人工复核";
   if (issue.resolution === "human_approved" || issue.resolution === "judge_accepted") return "进入修复清单";
-  if (issue.resolution === "human_rejected") return "关闭议题并补证据";
-  if (issue.needs_debate && issue.status !== "resolved") return "继续专家辩论";
+  if (issue.resolution === "human_rejected") return "关闭问题并补证据";
+  if (issue.needs_debate && issue.status !== "resolved") return "继续复核";
   if (issue.verified) return "按核验证据整改";
   return "补充证据后再裁决";
 };
@@ -133,7 +133,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     <ReviewResultListTable
       cardClassName="review-findings-card"
       title="审核发现清单"
-      extra={<Tag color="default">这里展示本次审核产出的全部 findings，包含已升级为正式议题和保留为 finding 的证据项</Tag>}
+      extra={<Tag color="default">这里展示本次审核产出的全部检视发现，包含已升级为正式问题和保留观察的证据项</Tag>}
       rows={rows}
       selectedRowId={selectedFindingId}
       onSelectRow={onSelectFinding}

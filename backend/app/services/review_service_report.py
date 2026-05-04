@@ -6,7 +6,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.report import ImpactReport, ReviewReport
 from app.domain.models.review import ReviewTask
-from app.services.review_report_builder import build_confidence_summary
+from app.services.review_report_builder import _attach_issue_impact_links, build_confidence_summary
 
 
 class ReviewServiceReportMixin:
@@ -33,7 +33,7 @@ class ReviewServiceReportMixin:
         paged_issues = self._slice_items(issues, offset=issues_offset, limit=issues_limit)
         light_issues = [self._build_light_report_issue(item) for item in paged_issues]
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
-        impact_report = self._build_impact_report_for_review(review)
+        impact_report = _attach_issue_impact_links(self._build_impact_report_for_review(review), issues)
         issue_count = issues_total_count
         summary = (
             f"本次代码审核共收敛 {findings_total_count} 条发现，"

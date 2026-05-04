@@ -66,7 +66,7 @@ const AppShell: React.FC = () => {
             </div>
           </Content>
           <Footer className="app-footer">
-            Multi Code Review Agent ©{new Date().getFullYear()} · 多专家协同代码审核工作台
+            代码检视协同平台 ©{new Date().getFullYear()}
           </Footer>
         </Layout>
       </Layout>

@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Card, Col, Empty, List, Row, Space, Statistic, Tag, Typography } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewReport, ReviewSummary } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -66,13 +67,13 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
               <Statistic title="证据链覆盖" value={evidenceCoverage} suffix="%" />
             </Col>
             <Col xs={12} xl={6}>
-              <Statistic title="质量过滤" value={qualityFilteredCount} />
+              <Statistic title="保留观察" value={qualityFilteredCount} />
             </Col>
             <Col xs={12} xl={6}>
-              <Statistic title="评论预算降级" value={budgetFilteredCount} />
+              <Statistic title="提交上限保留" value={budgetFilteredCount} />
             </Col>
             <Col xs={12} xl={6}>
-              <Statistic title="评论预算" value={maxComments || "-"} />
+              <Statistic title="问题提交上限" value={maxComments || "-"} />
             </Col>
           </Row>
           <Space wrap>
@@ -94,23 +95,23 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
           {visibleDecisions.length ? (
             <List
               size="small"
-              header={<Text strong>过滤与降噪决策</Text>}
+              header={<Text strong>保留观察记录</Text>}
               dataSource={visibleDecisions}
               renderItem={(item) => (
                 <List.Item>
                   <Space direction="vertical" size={4} style={{ width: "100%" }}>
                     <Space wrap>
-                      <Text strong>{item.topic || item.rule_label || item.rule_code || "未命名决策"}</Text>
+                      <Text strong>{humanizeReviewText(item.topic || item.rule_label || item.rule_code || "未命名记录")}</Text>
                       {item.rule_label || item.rule_code ? (
                         <Tag color={item.rule_code === "repo_policy_comment_budget" ? "gold" : "blue"}>
-                          {item.rule_label || item.rule_code}
+                          {humanizeReviewText(item.rule_label || item.rule_code)}
                         </Tag>
                       ) : null}
                       {item.severity ? <Tag>{item.severity}</Tag> : null}
                     </Space>
-                    {item.reason ? <Text type="secondary">{item.reason}</Text> : null}
+                    {item.reason ? <Text type="secondary">{humanizeReviewText(item.reason)}</Text> : null}
                     {item.finding_titles?.length ? (
-                      <Text type="secondary">关联发现：{item.finding_titles.slice(0, 3).join("、")}</Text>
+                      <Text type="secondary">关联发现：{item.finding_titles.slice(0, 3).map(humanizeReviewText).join("、")}</Text>
                     ) : null}
                   </Space>
                 </List.Item>

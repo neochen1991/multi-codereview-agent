@@ -17,7 +17,7 @@ type HumanGatePanelProps = {
   className?: string;
 };
 
-// 人工裁决卡负责处理待人工 issue 的批准/驳回动作。
+// 人工确认卡负责处理待确认问题的批准/驳回动作。
 const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   review,
   selectedIssue,
@@ -33,23 +33,23 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   const canSubmitDecision = Boolean(selectedIssue?.needs_human && selectedIssue?.status !== "resolved");
 
   return (
-    <Card className={`module-card ${className || ""}`.trim()} title="人工裁决">
+    <Card className={`module-card ${className || ""}`.trim()} title="人工确认">
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         <div className="human-gate-status-row">
           <Tag color={humanStatus === "requested" ? "error" : humanStatus === "approved" ? "success" : "default"}>
             {humanStatus}
           </Tag>
           <Text type="secondary">
-            待人工议题 {review?.pending_human_issue_ids?.length || 0} 个
+            待人工确认 {review?.pending_human_issue_ids?.length || 0} 个
           </Text>
         </div>
         {!selectedIssue ? (
-          <Empty description="先从问题清单中选择一条需要人工确认的议题。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description="先从问题清单中选择一条需要人工确认的问题。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
             {isFallbackIssue ? (
               <Text type="secondary">
-                当前选中的问题无需人工裁决，已自动切换到一条待人工确认的议题。
+                当前选中的问题无需人工确认，已自动切换到一条待人工确认的问题。
               </Text>
             ) : null}
             <div className="human-gate-issue-box">
@@ -59,14 +59,14 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
               </div>
               <Paragraph style={{ marginBottom: 8 }}>{selectedIssue.summary}</Paragraph>
               <Text type="secondary">
-                当前状态 {selectedIssue.status} · 主责专家 {selectedIssue.primary_expert_id || selectedIssue.participant_expert_ids[0] || "-"} · 参与专家 {selectedIssue.participant_expert_ids.join("、") || "-"}
+                当前状态 {selectedIssue.status} · 主责角色 {selectedIssue.primary_expert_id || selectedIssue.participant_expert_ids[0] || "-"} · 参与角色 {selectedIssue.participant_expert_ids.join("、") || "-"}
               </Text>
             </div>
             <Input.TextArea
               rows={4}
               value={decisionComment}
               onChange={(event) => onDecisionCommentChange(event.target.value)}
-              placeholder="填写人工裁决意见，记录为什么接受或驳回该议题。"
+              placeholder="填写人工确认意见，记录为什么接受或驳回该问题。"
             />
             <Space>
               <Button
@@ -76,7 +76,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
                 loading={submitting}
                 onClick={onReject}
               >
-                驳回议题
+                驳回问题
               </Button>
               <Button
                 type="primary"

@@ -552,7 +552,7 @@ class ReviewRunnerExpertOutputMixin:
                         "line_start": line_start,
                         "line_end": line_start,
                         "title": "查询边界缺失",
-                        "finding_type": "direct_defect",
+                        "finding_type": "risk_hypothesis",
                         "normalized_issue_type": "query_bound_removed",
                         "claim": f"当前查询路径缺少分页、LIMIT 或批量边界保护（{symbol_display}），数据量放大后可能触发全表扫描或大结果集返回。",
                         "severity": "high",
@@ -568,10 +568,11 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "为该查询补回分页/limit 约束，并确认索引能覆盖过滤和排序字段。",
                         "change_steps": ["恢复查询边界", "补充或确认索引", "增加大数据量场景测试"],
                         "suggested_code": "// TODO: 恢复分页/LIMIT 或批量边界，避免无界查询",
-                        "confidence": max(float(item.get("confidence") or 0.0), 0.86),
-                        "verification_needed": False,
-                        "verification_plan": "",
-                        "direct_evidence": True,
+                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "verification_needed": True,
+                        "verification_plan": "该问题来自结构化观察信号，需要确认查询入口是否确实可能返回无界结果集或触发不可接受的查询计划。",
+                        "direct_evidence": False,
+                        "evidence_source": "observation_signal",
                     }
                 )
             elif expert.expert_id == "performance_reliability" and kind in {"bulk_processing_boundary_missing", "transactional_side_effect"}:
@@ -581,7 +582,7 @@ class ReviewRunnerExpertOutputMixin:
                         "line_start": line_start,
                         "line_end": line_start,
                         "title": "批量路径可靠性风险",
-                        "finding_type": "direct_defect",
+                        "finding_type": "risk_hypothesis",
                         "normalized_issue_type": kind,
                         "claim": f"当前批量或事务路径存在会随数据量放大的副作用（{symbol_display}），容易造成吞吐退化、超时或回滚语义不一致。",
                         "severity": "high",
@@ -597,10 +598,11 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "为批处理增加分片、限流、超时和失败补偿；事务内不要直接做远程调用或消息发送。",
                         "change_steps": ["识别批量输入规模", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
                         "suggested_code": "// TODO: 为批量/事务副作用路径补充边界、超时和幂等保护",
-                        "confidence": max(float(item.get("confidence") or 0.0), 0.84),
-                        "verification_needed": False,
-                        "verification_plan": "",
-                        "direct_evidence": True,
+                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "verification_needed": True,
+                        "verification_plan": "该问题来自结构化观察信号，需要确认批量规模、事务边界和外部副作用是否会在生产数据量下放大。",
+                        "direct_evidence": False,
+                        "evidence_source": "observation_signal",
                     }
                 )
             elif expert.expert_id == "security_compliance" and kind in {"input_validation_removed", "security_guard_removed"}:
@@ -627,9 +629,10 @@ class ReviewRunnerExpertOutputMixin:
                         "change_steps": ["恢复被删除的校验", "确认错误响应语义", "补充越权或非法输入测试"],
                         "suggested_code": "// TODO: 恢复入口校验/权限保护，避免非法输入绕过",
                         "confidence": max(float(item.get("confidence") or 0.0), 0.86),
-                        "verification_needed": False,
-                        "verification_plan": "",
+                        "verification_needed": True,
+                        "verification_plan": "该问题来自结构化观察信号，需要确认被删除的校验是否属于当前接口的有效安全边界。",
                         "direct_evidence": True,
+                        "evidence_source": "observation_signal",
                     }
                 )
 

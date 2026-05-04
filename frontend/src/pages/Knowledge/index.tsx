@@ -106,7 +106,7 @@ const KnowledgePage: React.FC = () => {
       <Card className="module-card">
         <Title level={3}>知识库管理</Title>
         <Paragraph>
-          这里按专家维护知识文档。每份知识都以 Markdown 文档上传，并在审核时按专家绑定关系和检索命中结果注入对应 agent。
+          这里按检查角色维护知识文档。每份知识都以 Markdown 文档上传，并在审核时按角色绑定关系和检索命中结果注入对应流程。
         </Paragraph>
       </Card>
 
@@ -150,9 +150,9 @@ const KnowledgePage: React.FC = () => {
                     }
                   }}
                 >
-                  <Form.Item name="expert_id" label="绑定专家" rules={[{ required: true, message: "请选择专家" }]}>
+                  <Form.Item name="expert_id" label="绑定检查角色" rules={[{ required: true, message: "请选择检查角色" }]}>
                     <Select
-                      placeholder="选择需要绑定知识的专家"
+                      placeholder="选择需要绑定知识的检查角色"
                       options={experts.map((item) => ({
                         value: item.expert_id,
                         label: `${item.name_zh} (${item.expert_id})`,
@@ -186,7 +186,7 @@ const KnowledgePage: React.FC = () => {
                     </Upload>
                   </Form.Item>
                   <Button type="primary" htmlType="submit" loading={uploading}>
-                    上传并绑定专家
+                    上传并绑定角色
                   </Button>
                 </Form>
               </Card>
@@ -194,9 +194,9 @@ const KnowledgePage: React.FC = () => {
           },
           {
             key: "browse",
-            label: "已有专家与文档",
+            label: "已有角色与文档",
             children: (
-              <Card className="module-card" title="按专家分组的知识文档">
+              <Card className="module-card" title="按检查角色分组的知识文档">
                 {groupedItems.length ? (
                   <Collapse items={groupedItems} />
                 ) : (

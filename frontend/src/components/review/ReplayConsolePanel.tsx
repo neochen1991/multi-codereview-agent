@@ -79,8 +79,8 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
             />
           </div>
           <Paragraph className="replay-note">
-            回放面板按事件时间顺序重放审查轨迹，便于查看从 finding、debate、tool verification 到
-            human gate 的收敛过程。
+            回放面板按事件时间顺序重放审查轨迹，便于查看从检视发现、复核、工具核验到
+            人工确认的收敛过程。
           </Paragraph>
         </Space>
       )}

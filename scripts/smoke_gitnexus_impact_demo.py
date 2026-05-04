@@ -11,7 +11,7 @@ from app.services.review_service import ReviewService
 
 
 class FakeGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         return {
             "detect_changes": {
                 "affected_files": [
@@ -54,7 +54,7 @@ class FakeGitNexusImpactClient:
 
 
 class FailingGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         raise RuntimeError("simulated mcp failure")
 
 
@@ -176,7 +176,7 @@ def _run_case(name: str, client) -> dict[str, object]:
         service.runtime_settings_service.update(
             {
                 "code_repo_local_path": str(repo_path),
-                "allow_llm_fallback": True,
+                "allow_llm_fallback": False,
             }
         )
         import os
@@ -188,10 +188,18 @@ def _run_case(name: str, client) -> dict[str, object]:
             review = service.start_review(review.review_id)
             report = service.build_report(review.review_id)
             impact = report.impact_report
+            live_llm_calls = sum(
+                1
+                for message in service.message_repo.list(review.review_id)
+                if str((message.metadata or {}).get("mode") or "").strip().lower() == "live"
+                and str((message.metadata or {}).get("llm_call_id") or "").strip()
+            )
             return {
                 "case": name,
                 "review_status": review.status,
                 "review_phase": review.phase,
+                "llm_total_calls": report.llm_usage_summary.total_calls,
+                "live_llm_calls": live_llm_calls,
                 "impact_progress": dict(review.subject.metadata.get("impact_analysis_progress") or {}),
                 "registry_path": str(registry_path),
                 "graph_status": impact.graph_status if impact else None,
@@ -217,6 +225,8 @@ def _assert_smoke_results(results: list[dict[str, object]]) -> None:
     errors: list[str] = []
     if success.get("review_status") != "completed":
         errors.append(f"success case review_status expected completed, got {success.get('review_status')}")
+    if int(success.get("llm_total_calls") or 0) <= 0 or int(success.get("live_llm_calls") or 0) <= 0:
+        errors.append("success case expected at least one live LLM call")
     if success.get("graph_status") != "ready":
         errors.append(f"success case graph_status expected ready, got {success.get('graph_status')}")
     if not success.get("impact_paths"):
@@ -228,12 +238,14 @@ def _assert_smoke_results(results: list[dict[str, object]]) -> None:
 
     if failure.get("review_status") != "completed":
         errors.append(f"failure case review_status expected completed, got {failure.get('review_status')}")
-    if dict(failure.get("impact_progress") or {}).get("state") != "failed":
-        errors.append(f"failure case impact progress expected failed, got {failure.get('impact_progress')}")
-    if failure.get("graph_status") is not None:
-        errors.append(f"failure case should not expose fallback impact report, got graph_status={failure.get('graph_status')}")
-    if failure.get("impact_paths"):
-        errors.append("failure case should not expose fallback impact paths")
+    if int(failure.get("llm_total_calls") or 0) <= 0 or int(failure.get("live_llm_calls") or 0) <= 0:
+        errors.append("failure case expected at least one live LLM call")
+    if dict(failure.get("impact_progress") or {}).get("state") != "completed":
+        errors.append(f"failure case impact progress expected completed degraded fallback, got {failure.get('impact_progress')}")
+    if failure.get("graph_status") != "degraded":
+        errors.append(f"failure case should expose degraded fallback report, got graph_status={failure.get('graph_status')}")
+    if not failure.get("limitations"):
+        errors.append("failure case should explain GitNexus degradation limitations")
 
     if errors:
         raise AssertionError("\n".join(errors))

@@ -448,7 +448,7 @@ class ReviewRunnerCommonMixin:
         return normalized[:96].rstrip("，,。.;；:：") + "。"
 
     def _allow_llm_fallback(self, runtime_settings) -> bool:
-        return bool(getattr(runtime_settings, "allow_llm_fallback", False) or os.getenv("PYTEST_CURRENT_TEST"))
+        return bool(getattr(runtime_settings, "allow_llm_fallback", False))
 
     def _resolve_analysis_mode(self, review: ReviewTask, runtime_settings) -> Literal["standard", "light"]:
         mode = str(

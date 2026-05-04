@@ -13,7 +13,7 @@ from app.services.tool_gateway import ReviewToolGateway
 
 
 class FakeGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         return {
             "detect_changes": {
                 "changed_symbols": ["StockRepository.findByStatus", "StockService.reserve"],
@@ -55,7 +55,7 @@ class CaptureGitNexusImpactClient:
     def __init__(self) -> None:
         self.changed_symbols = []
 
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         self.changed_symbols = list(changed_symbols)
         return {
             "detect_changes": {
@@ -68,7 +68,7 @@ class CaptureGitNexusImpactClient:
 
 
 class FailingGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         raise RuntimeError("mcp unavailable")
 
 
@@ -181,6 +181,62 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls():
     assert tool_names.count("impact") == 6
     assert len(payload["context_results"]) == 6
     assert len(payload["impact_results"]) == 6
+
+
+def test_gitnexus_mcp_impact_client_respects_runtime_query_limits():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+    call_batches: list[list[dict[str, object]]] = []
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        call_batches.append(requests)
+        responses = {}
+        for request in requests:
+            params = request.get("params") or {}
+            tool = params.get("name")
+            args = params.get("arguments") or {}
+            request_id = request.get("id")
+            if tool == "list_repos":
+                responses[request_id] = {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}
+            elif tool == "detect_changes":
+                responses[request_id] = {"result": {"content": [{"text": '{"changed_symbols":["OrderController.create","OrderService.create","OrderRepository.save"]}'}]}}
+            elif tool == "context":
+                responses[request_id] = {"result": {"content": [{"text": '{"symbol":{"name":"%s"}}' % args.get("name")}]}}
+            elif tool == "impact":
+                responses[request_id] = {"result": {"content": [{"text": '{"paths":[["Entry","%s"]]}' % args.get("target")}]}}
+        return responses
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        payload = client.analyze_mr(
+            repo_name="repo",
+            repo_path="/tmp/repo",
+            subject=subject,
+            changed_symbols=[],
+            runtime_env=None,
+            max_targets=2,
+            max_context_queries=1,
+            max_impact_queries=2,
+            max_dynamic_targets=0,
+        )
+
+    tool_names = [
+        (request.get("params") or {}).get("name")
+        for batch in call_batches
+        for request in batch
+        if request.get("method") == "tools/call"
+    ]
+    assert tool_names.count("context") == 1
+    assert tool_names.count("impact") == 2
+    assert len(payload["queried_targets"]) == 2
+    assert payload["dynamic_targets"] == []
 
 
 def test_gitnexus_mcp_impact_client_discovers_dynamic_targets_from_context():
@@ -311,6 +367,31 @@ def test_gitnexus_mcp_impact_client_prioritizes_high_value_targets():
     assert targets[0] == "OrderController.createOrder"
     assert "OrderRepository.save" in targets[:3]
     assert "OrderDto" in targets
+
+
+def test_gitnexus_mcp_impact_client_uses_feedback_profiles_in_target_priority():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    targets, skipped_invalid = client._build_targets(
+        [
+            type("ChangedSymbol", (), {"symbol": "create", "container": "OrderController", "file_path": "OrderController.java", "kind": "function", "line_start": 12})(),
+            type("ChangedSymbol", (), {"symbol": "save", "container": "OrderRepository", "file_path": "OrderRepository.java", "kind": "function", "line_start": 20})(),
+        ],
+        {},
+        impact_feedback_profiles={
+            "targets": {
+                "impact_path:OrderController.create -> OrderRepository.save": {
+                    "target_type": "impact_path",
+                    "target_key": "OrderController.create -> OrderRepository.save",
+                    "sample_count": 4,
+                    "false_positive_rate": 0.75,
+                    "recommended_action": "require_manual_verification",
+                }
+            }
+        },
+    )
+
+    assert skipped_invalid == []
+    assert targets.index("OrderRepository.save") > targets.index("OrderController.create")
 
 
 def test_gitnexus_mcp_impact_client_skips_missing_symbol_context_and_impact():

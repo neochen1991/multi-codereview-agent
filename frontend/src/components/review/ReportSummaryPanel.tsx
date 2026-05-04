@@ -2,6 +2,7 @@ import React from "react";
 import { Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph } = Typography;
 
@@ -48,12 +49,12 @@ const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]
 
 const getVerdict = (report: ReviewReport | null, findings: ReviewFinding[], review?: ReviewSummary | null): { label: string; color: string } => {
   if (isReviewStillRunning(review) || ["pending", "queued", "running"].includes(String(report?.status || "").toLowerCase())) {
-    return { label: "In progress", color: "processing" };
+    return { label: "检视中", color: "processing" };
   }
   const decision = getMergeDecision(report, findings, review);
-  if (decision.includes("阻塞")) return { label: "Request changes", color: "error" };
-  if (findings.length > 0 || decision.includes("修复")) return { label: "Comment", color: "warning" };
-  return { label: "Approve", color: "success" };
+  if (decision.includes("阻塞")) return { label: "需要修改", color: "error" };
+  if (findings.length > 0 || decision.includes("修复")) return { label: "建议处理", color: "warning" };
+  return { label: "可合并", color: "success" };
 };
 
 const getOverallPriority = (findings: ReviewFinding[]): string => {
@@ -65,10 +66,10 @@ const getOverallPriority = (findings: ReviewFinding[]): string => {
 };
 
 const getHumanReviewTone = (status: string): { color: string; label: string } => {
-  if (status === "requested") return { color: "error", label: "人工裁决中" };
+  if (status === "requested") return { color: "error", label: "等待人工确认" };
   if (status === "approved") return { color: "success", label: "人工已批准" };
   if (status === "rejected") return { color: "warning", label: "人工已驳回" };
-  return { color: "default", label: "无需人工裁决" };
+  return { color: "default", label: "无需人工确认" };
 };
 
 const findingTypeLabel = (value: string): string => {
@@ -113,7 +114,7 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
     `- 级别: ${finding.severity}`,
     `- 优先级: ${getPriority(finding)}`,
     `- 合并影响: ${getFindingMergeImpact(finding, report.confidence_summary.needs_human_count)}`,
-    `- 提出专家: ${finding.expert_id}`,
+    `- 检查角色: ${finding.expert_id}`,
     `- 问题分类: ${finding.category_label || finding.normalized_issue_type || finding.finding_type || "未分类"}`,
     `- 置信度: ${(finding.confidence * 100).toFixed(0)}%`,
     `- 置信度理由: ${finding.confidence_rationale || "未提供"}`,
@@ -126,13 +127,13 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
     "",
   ];
   const lines = [
-    `# Code Review 报告 - ${report.review_id}`,
+    `# 代码检视报告 - ${report.review_id}`,
     "",
     `- 状态: ${report.status}`,
     `- 阶段: ${report.phase}`,
     `- 合并建议: ${mergeDecision}`,
     `- 建议优先级: ${priority}`,
-    `- 人工裁决状态: ${report.human_review_status}`,
+    `- 人工确认状态: ${report.human_review_status}`,
     "",
     "## 摘要",
     report.summary,
@@ -234,7 +235,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
   }, {});
 
   return (
-    <Card className={`module-card ${className || ""}`.trim()} title="Code Review 报告摘要">
+    <Card className={`module-card ${className || ""}`.trim()} title="代码检视摘要">
       <Space style={{ marginBottom: 16 }} wrap>
         <Tag color={verdict.color} style={{ fontSize: 13, paddingInline: 10, borderRadius: 999 }}>
           {verdict.label}
@@ -244,29 +245,29 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
         </Tag>
         <Tag color="purple">{`建议优先级 ${overallPriority}`}</Tag>
         <Tag color={humanReview.color}>{humanReview.label}</Tag>
-        <Tag color={pendingHumanCount > 0 ? "error" : "default"}>{`待人工 ${pendingHumanCount}`}</Tag>
+        <Tag color={pendingHumanCount > 0 ? "error" : "default"}>{`待确认 ${pendingHumanCount}`}</Tag>
         <Button size="small" onClick={() => report && downloadMarkdownReport(report, findings)} disabled={!report}>
-          导出 Markdown 报告
+          导出检视报告
         </Button>
       </Space>
       <Paragraph style={{ marginBottom: 16 }}>
         {isReviewStillRunning(review)
           ? "当前审核仍在运行中，以下统计与建议仅代表阶段性结果，最终结论以任务完成后的收敛结果为准。"
-          : report?.summary || "运行审核后，这里会显示最终的 Code Review 报告摘要、风险统计和裁决状态。"}
+          : humanizeReviewText(report?.summary) || "运行审核后，这里会显示最终的检视摘要、风险统计和确认状态。"}
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          {clickableStatistic("待处理发现", pendingFindingCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
+          {clickableStatistic("检视发现", pendingFindingCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
-          {clickableStatistic("正式议题", formalIssueCount)}
+          {clickableStatistic("正式问题", formalIssueCount)}
         </Col>
         <Col xs={12} xl={6}>
-          {clickableStatistic("高风险发现", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}
+          {clickableStatistic("高风险问题", criticalCount, onNavigateToGroup ? () => onNavigateToGroup("should_fix") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
           {clickableStatistic(
-            "待人工裁决",
+            "待人工确认",
             report?.confidence_summary.needs_human_count || 0,
             onNavigateToGroup ? () => onNavigateToGroup("blocking") : undefined,
           )}
@@ -277,8 +278,8 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       </Row>
       <Space wrap style={{ marginTop: 16 }}>
         <Tag color="default">{`发现总数 ${totalCount}`}</Tag>
-        <Tag color={promotedFindingCount > 0 ? "processing" : "default"}>{`已升级为正式议题 ${promotedFindingCount}`}</Tag>
-        <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`阈值过滤 ${thresholdFilteredCount}`}</Tag>
+        <Tag color={promotedFindingCount > 0 ? "processing" : "default"}>{`进入正式问题 ${promotedFindingCount}`}</Tag>
+        <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`保留观察 ${thresholdFilteredCount}`}</Tag>
         <Tag color={blockingCount > 0 ? "error" : "default"}>{`阻塞合并 ${blockingCount}`}</Tag>
         <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`建议先修 ${shouldFixCount}`}</Tag>
         <Tag color="success">{`非阻塞 ${Math.max(totalCount - blockingCount - shouldFixCount, 0)}`}</Tag>
@@ -289,15 +290,15 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       <Card
         size="small"
         className="module-card"
-        title="Judge 质量收敛"
+        title="结果复核"
         style={{ marginTop: 16 }}
       >
         <Row gutter={[12, 12]}>
           <Col xs={12} xl={4}>
-            <Statistic title="Judge 处理" value={report?.confidence_summary.llm_judged_issue_count || 0} />
+            <Statistic title="复核处理" value={report?.confidence_summary.llm_judged_issue_count || 0} />
           </Col>
           <Col xs={12} xl={4}>
-            <Statistic title="Judge 保留" value={report?.confidence_summary.llm_judge_accepted_count || 0} />
+            <Statistic title="复核保留" value={report?.confidence_summary.llm_judge_accepted_count || 0} />
           </Col>
           <Col xs={12} xl={4}>
             <Statistic title="转待验证" value={report?.confidence_summary.llm_judge_needs_verification_count || 0} />
@@ -306,7 +307,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
             <Statistic title="转人工" value={report?.confidence_summary.llm_judge_needs_human_count || 0} />
           </Col>
           <Col xs={12} xl={4}>
-            <Statistic title="Judge 拒绝" value={report?.confidence_summary.llm_judge_rejected_count || 0} />
+            <Statistic title="复核驳回" value={report?.confidence_summary.llm_judge_rejected_count || 0} />
           </Col>
           <Col xs={12} xl={4}>
             <Statistic title="质量过滤" value={report?.confidence_summary.quality_filtered_issue_count || 0} />
@@ -335,12 +336,12 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
           },
           {
             key: "llm_calls",
-            label: "LLM 调用次数",
+            label: "模型调用次数",
             children: llmUsage.total_calls,
           },
           {
             key: "llm_tokens",
-            label: "LLM 总 Token",
+            label: "模型总用量",
             children: llmUsage.total_tokens,
           },
           {
@@ -352,12 +353,12 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
           },
           {
             key: "llm_prompt_tokens",
-            label: "Prompt Tokens",
+            label: "输入用量",
             children: llmUsage.prompt_tokens,
           },
           {
             key: "llm_completion_tokens",
-            label: "Completion Tokens",
+            label: "输出用量",
             children: llmUsage.completion_tokens,
           },
           {

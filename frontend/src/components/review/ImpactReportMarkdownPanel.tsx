@@ -123,6 +123,9 @@ const buildRelationshipInsights = (impactReport: ImpactReport): string[] => {
       insights.push(`影响链路：${chain}`);
     }
   }
+  for (const link of impactReport.impact_issue_links || []) {
+    insights.push(`检视问题 ${link.issue_id} 与影响目标 ${link.impact_target} 相关：${link.reason || link.issue_title}`);
+  }
   if (!insights.length && impactReport.impacted_modules.length) {
     insights.push(`当前至少识别到模块级波及：${impactReport.impacted_modules.join("、")}`);
   }
@@ -1085,7 +1088,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     return impactReport.llm_markdown.trim();
   }
   const sections: string[] = [
-    `# 关联影响报告 - ${review.review_id}`,
+    `# 影响范围报告 - ${review.review_id}`,
     "",
     `- 风险等级: ${impactReport.risk_level || "unknown"}`,
     `- 图谱状态: ${graphStatusLabel(impactReport.graph_status)}`,
@@ -1799,10 +1802,10 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
   return (
     <Card
       className={`module-card ${className || ""}`.trim()}
-      title="关联影响报告"
+      title="影响范围报告"
       extra={
         <Button size="small" onClick={() => downloadImpactReportMarkdown(effectiveReport)} disabled={!markdown}>
-          导出 MD
+          导出报告
         </Button>
       }
     >
@@ -1878,18 +1881,18 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
           <Alert
             type="error"
             showIcon
-            message="关联影响报告生成失败"
+            message="影响范围报告生成失败"
             description={impactFailure.error_message || "GitNexus 调用失败，本次没有生成可导出的影响报告。"}
           />
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="本次任务没有可用的关联影响报告。请先修复 GitNexus 环境或图谱状态后重试。"
+            description="本次任务没有可用的影响范围报告。请先修复 GitNexus 环境或图谱状态后重试。"
           />
         </Space>
       ) : (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="暂无关联影响报告。任务完成后，这里会生成本次改动的影响范围与测试建议。"
+          description="暂无影响范围报告。任务完成后，这里会生成本次改动的影响范围与测试建议。"
         />
       )}
     </Card>

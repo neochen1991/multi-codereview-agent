@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -393,26 +392,34 @@ class MainAgentService(MainAgentPromptingMixin):
             f"专家执行失败数: {partial_failure_count}\n"
             f"请输出一段中文总结，风格像主Agent对控制台的收敛播报。"
         )
-        result = self._llm.complete_text(
-            system_prompt="你是主代码审查协调Agent，负责在多专家完成分析后输出最终的收敛播报。",
-            user_prompt=user_prompt,
-            resolution=resolution,
-            runtime_settings=runtime_settings,
-            fallback_text=fallback_text,
-            allow_fallback=self._allow_fallback(runtime_settings),
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            log_context={
-                "review_id": review.review_id,
-                "agent_id": self.agent_id,
-                "phase": "final_summary",
-                "analysis_mode": review.analysis_mode,
-            },
-        )
+        try:
+            result = self._llm.complete_text(
+                system_prompt="你是主代码审查协调Agent，负责在多专家完成分析后输出最终的收敛播报。",
+                user_prompt=user_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=fallback_text,
+                allow_fallback=self._allow_fallback(runtime_settings),
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
+                log_context={
+                    "review_id": review.review_id,
+                    "agent_id": self.agent_id,
+                    "phase": "final_summary",
+                    "analysis_mode": review.analysis_mode,
+                },
+            )
+        except RuntimeError as error:
+            return fallback_text, {
+                "mode": "fallback",
+                "provider": getattr(resolution, "provider", ""),
+                "model": getattr(resolution, "model", ""),
+                "error": str(error),
+            }
         return result.text.strip(), self._llm_metadata(result)
 
     def _allow_fallback(self, runtime_settings: RuntimeSettings) -> bool:
-        return bool(runtime_settings.allow_llm_fallback or os.getenv("PYTEST_CURRENT_TEST"))
+        return bool(runtime_settings.allow_llm_fallback)
 
     def _main_agent_timeout_seconds(self, runtime_settings: RuntimeSettings) -> float:
         """主 Agent 的专家选择/派工 prompt 更长，优先采用运行时中的较大超时。"""
@@ -1195,9 +1202,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
-
-
 
 
 

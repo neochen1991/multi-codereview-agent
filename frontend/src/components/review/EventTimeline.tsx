@@ -24,7 +24,7 @@ const EventTimeline: React.FC<EventTimelineProps> = ({ events }) => {
   }, [events.length]);
 
   return (
-    <Card className="module-card process-sidebar-card process-sidebar-card-lg" title="专家实时对话流">
+    <Card className="module-card process-sidebar-card process-sidebar-card-lg" title="实时过程记录">
       {hiddenCount > 0 ? (
         <Space style={{ padding: "0 16px 12px" }}>
           <Button type="link" size="small" onClick={() => setVisibleCount((current) => current + VISIBLE_EVENTS_STEP)}>

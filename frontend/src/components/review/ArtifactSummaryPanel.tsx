@@ -22,12 +22,12 @@ const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }
         <Empty description="当前审核还没有产物快照。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
       ) : (
         <Descriptions column={1} size="small">
-          <Descriptions.Item label="Summary Comment">
+          <Descriptions.Item label="摘要评论">
             <Paragraph style={{ marginBottom: 0 }}>
               {summaryComment?.summary || "-"}
             </Paragraph>
           </Descriptions.Item>
-          <Descriptions.Item label="Check Run">
+          <Descriptions.Item label="检查状态">
             {checkRun ? (
               <>
                 <Tag color={checkRun.status === "completed" ? "success" : "processing"}>
@@ -42,7 +42,7 @@ const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }
           <Descriptions.Item label="产物状态">
             {reportSnapshot ? `${getReviewPhaseLabel(reportSnapshot.phase)} · ${getReviewStatusLabel(reportSnapshot.status)}` : "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="待人工议题">
+          <Descriptions.Item label="待人工确认">
             {reportSnapshot?.pending_human_issue_ids?.length || 0}
           </Descriptions.Item>
         </Descriptions>

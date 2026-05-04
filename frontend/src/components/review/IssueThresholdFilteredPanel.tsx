@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Card, Empty, Table, Tag, Typography } from "antd";
 
 import type { IssueFilterDecision, ReviewFinding } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -76,8 +77,8 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
   return (
     <Card
       className="module-card review-threshold-filter-card"
-      title={`被降级的问题清单 (${rows.length})`}
-      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为有效问题，常见原因包括阈值不足、条件化结论、仅命中删除代码或超出仓库评论预算。</Text>}
+      title={`保留观察清单 (${rows.length})`}
+      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为正式问题，常见原因包括级别不足、结论仍需验证、仅命中删除代码或超出本次问题提交上限。</Text>}
     >
       <Table<ThresholdFilteredRow>
         rowKey="finding_id"
@@ -88,7 +89,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
           onClick: () => onSelectFinding?.(record.finding_id),
           style: { cursor: onSelectFinding ? "pointer" : "default" },
         })}
-        locale={{ emptyText: <Empty description="当前没有被阈值过滤的问题。" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+        locale={{ emptyText: <Empty description="当前没有保留观察的问题。" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
         columns={[
           {
             title: "代码文件",
@@ -105,7 +106,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             render: (value: number) => (value ? `L${value}` : "-"),
           },
           {
-            title: "提出专家",
+            title: "检查角色",
             dataIndex: "expert_id",
             key: "expert_id",
             width: 210,
@@ -126,13 +127,13 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             render: (value: number) => `${(value * 100).toFixed(0)}%`,
           },
           {
-            title: "过滤规则",
+            title: "处理规则",
             dataIndex: "threshold_label",
             key: "threshold_label",
             width: 220,
             render: (value: string, row: ThresholdFilteredRow) => (
               <Tag color={row.rule_code === "removed_line_only" ? "red" : row.rule_code === "conditional_conclusion" ? "gold" : row.rule_code === "repo_policy_comment_budget" ? "purple" : "default"}>
-                {value}
+                {humanizeReviewText(value)}
               </Tag>
             ),
           },
@@ -152,14 +153,14 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             ),
           },
           {
-            title: "过滤原因",
+            title: "处理说明",
             dataIndex: "threshold_reason",
             key: "threshold_reason",
             width: 420,
             render: (value: string) => (
               <div className="review-summary-cell">
                 <div className="review-summary-text" title={value}>
-                  {value}
+                  {humanizeReviewText(value)}
                 </div>
               </div>
             ),

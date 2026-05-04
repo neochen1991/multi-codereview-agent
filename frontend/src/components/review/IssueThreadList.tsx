@@ -20,11 +20,11 @@ const IssueThreadList: React.FC<IssueThreadListProps> = ({
   onSelect,
 }) => {
   return (
-    <Card className="module-card process-sidebar-card process-sidebar-card-lg" title="议题线程">
+    <Card className="module-card process-sidebar-card process-sidebar-card-lg" title="问题列表">
       <div className="process-card-scroll">
         <List
           dataSource={issues}
-          locale={{ emptyText: "暂无可进入讨论的议题。" }}
+          locale={{ emptyText: "暂无可进入复核的问题。" }}
           renderItem={(item) => {
             const finding = issueFindingMap?.[item.issue_id] || null;
             const routingReason = finding?.code_context?.routing_reason || "";

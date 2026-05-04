@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
-from app.domain.models.report import ImpactReport, ReviewReport
+from app.domain.models.report import ImpactIssueLink, ImpactReport, ReviewReport
 from app.domain.models.review import ReviewTask
 
 QUALITY_FILTER_RULE_CODES = {
@@ -35,6 +35,10 @@ def build_report(
         f"覆盖 {selected_expert_count} 个专家视角，"
         f"当前状态为 {review.status}。"
     )
+    normalized_impact_report = _attach_issue_impact_links(
+        ImpactReport.model_validate(impact_report) if impact_report else None,
+        issues,
+    )
     return ReviewReport(
         review_id=review_id,
         status=review.status,
@@ -47,7 +51,7 @@ def build_report(
         human_review_status=review.human_review_status,
         llm_usage_summary=llm_usage_summary,
         issue_filter_decisions=issue_filter_decisions,
-        impact_report=ImpactReport.model_validate(impact_report) if impact_report else None,
+        impact_report=normalized_impact_report,
         confidence_summary=build_confidence_summary(
             review=review,
             findings=findings,
@@ -55,6 +59,93 @@ def build_report(
             issue_filter_decisions=issue_filter_decisions,
         ),
     )
+
+
+def _attach_issue_impact_links(impact_report: ImpactReport | None, issues: list[DebateIssue]) -> ImpactReport | None:
+    if impact_report is None or not issues:
+        return impact_report
+    links: list[ImpactIssueLink] = []
+    for issue in issues:
+        issue_file = str(issue.file_path or "").strip()
+        issue_tokens = _issue_link_tokens(issue)
+        for impacted in impact_report.impacted_files:
+            impacted_file = str(impacted.file_path or "").strip()
+            if issue_file and impacted_file and _same_path(issue_file, impacted_file):
+                links.append(
+                    ImpactIssueLink(
+                        issue_id=issue.issue_id,
+                        issue_title=issue.title,
+                        issue_file_path=issue_file,
+                        impact_target=impacted_file,
+                        relationship=str(impacted.relationship or "impacted_file"),
+                        reason="issue 所在文件与关联影响文件一致。",
+                    )
+                )
+        for path in impact_report.impact_paths:
+            path_text = " ".join([path.source, path.target, *list(path.path or [])])
+            if issue_tokens and any(token.lower() in path_text.lower() for token in issue_tokens):
+                links.append(
+                    ImpactIssueLink(
+                        issue_id=issue.issue_id,
+                        issue_title=issue.title,
+                        issue_file_path=issue_file,
+                        impact_target=str(path.target or path.source or ""),
+                        relationship="impact_path",
+                        reason="issue 关键词命中了 GitNexus 影响路径。",
+                    )
+                )
+    deduped_links: list[ImpactIssueLink] = []
+    seen: set[tuple[str, str, str]] = set()
+    for link in links:
+        key = (link.issue_id, link.impact_target, link.relationship)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_links.append(link)
+    if not deduped_links:
+        return impact_report
+    related_issue_ids = list(dict.fromkeys([*impact_report.related_issue_ids, *[link.issue_id for link in deduped_links]]))
+    manual_verification = list(impact_report.manual_verification)
+    for link in deduped_links[:5]:
+        item = f"关联影响需结合检视 issue {link.issue_id} 复核：{link.issue_title}"
+        if item not in manual_verification:
+            manual_verification.append(item)
+    return impact_report.model_copy(
+        update={
+            "related_issue_ids": related_issue_ids[:20],
+            "impact_issue_links": deduped_links[:30],
+            "manual_verification": manual_verification,
+        }
+    )
+
+
+def _same_path(left: str, right: str) -> bool:
+    normalized_left = str(left or "").replace("\\", "/").strip().lower()
+    normalized_right = str(right or "").replace("\\", "/").strip().lower()
+    return bool(
+        normalized_left
+        and normalized_right
+        and (normalized_left == normalized_right or normalized_left.endswith(f"/{normalized_right}") or normalized_right.endswith(f"/{normalized_left}"))
+    )
+
+
+def _issue_link_tokens(issue: DebateIssue) -> list[str]:
+    raw_values = [
+        str(issue.normalized_issue_type or ""),
+        str(issue.title or ""),
+        str(issue.summary or ""),
+        *list(issue.context_files or []),
+        *list(issue.cross_file_evidence or []),
+    ]
+    tokens: list[str] = []
+    for value in raw_values:
+        for token in str(value or "").replace("->", " ").replace("::", " ").split():
+            cleaned = token.strip(" ,;:()[]{}'\"`")
+            if len(cleaned) >= 4 and any(char.isupper() for char in cleaned):
+                tokens.append(cleaned)
+            elif "." in cleaned and len(cleaned) >= 6:
+                tokens.append(cleaned)
+    return list(dict.fromkeys(tokens))[:20]
 
 
 def build_confidence_summary(

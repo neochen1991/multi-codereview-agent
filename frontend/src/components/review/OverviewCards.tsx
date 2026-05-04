@@ -55,28 +55,28 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onExpertClick ? "overview-stat-button-clickable" : ""}`} onClick={onExpertClick}>
           <Card className="module-card">
-            <Statistic title="本次参与专家" value={expertCount} />
+            <Statistic title="本次参与角色" value={expertCount} />
           </Card>
         </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onFindingClick ? "overview-stat-button-clickable" : ""}`} onClick={onFindingClick}>
           <Card className="module-card">
-            <Statistic title="待处理发现" value={findingCount} suffix={<Tag color="processing">evidence-first</Tag>} />
+            <Statistic title="检视发现" value={findingCount} suffix={<Tag color="processing">证据优先</Tag>} />
           </Card>
         </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onIssueClick ? "overview-stat-button-clickable" : ""}`} onClick={onIssueClick}>
           <Card className="module-card">
-            <Statistic title="有效问题" value={issueCount} />
+            <Statistic title="正式问题" value={issueCount} />
           </Card>
         </button>
       </Col>
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onHumanGateClick ? "overview-stat-button-clickable" : ""}`} onClick={onHumanGateClick}>
           <Card className="module-card">
-            <Statistic title="待人工确认" value={humanGateCount} suffix={<Tag color={humanGateCount > 0 ? "error" : "success"}>{humanGateCount > 0 ? "gate" : "clear"}</Tag>} />
+            <Statistic title="待人工确认" value={humanGateCount} suffix={<Tag color={humanGateCount > 0 ? "error" : "success"}>{humanGateCount > 0 ? "待确认" : "已清理"}</Tag>} />
           </Card>
         </button>
       </Col>

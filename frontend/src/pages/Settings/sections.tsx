@@ -348,7 +348,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="suppress_low_risk_hint_issues" label="压制低风险提示类 Issue" valuePropName="checked">
+            <Form.Item name="suppress_low_risk_hint_issues" label="低风险提示暂不提交" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
@@ -385,7 +385,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           <Col xs={24} xl={8}>
             <Form.Item
               name="enable_llm_issue_judge"
-              label="启用 LLM Issue 裁判"
+              label="启用模型问题复核"
               valuePropName="checked"
               extra="开启后，低置信或薄证据 issue 会在收敛阶段再次判定；失败自动回退本地规则。"
             >
@@ -393,12 +393,12 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="llm_issue_judge_confidence_threshold" label="Issue 裁判触发阈值">
+            <Form.Item name="llm_issue_judge_confidence_threshold" label="问题复核触发阈值">
               <InputNumber min={0} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="llm_issue_judge_timeout_seconds" label="Issue 裁判 LLM 超时（秒）">
+            <Form.Item name="llm_issue_judge_timeout_seconds" label="问题复核模型超时（秒）">
               <InputNumber min={10} max={180} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -420,15 +420,15 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           <Col xs={24} xl={8}>
             <Form.Item
               name="enable_llm_targeted_debate"
-              label="启用 LLM 定向辩论裁判"
+              label="启用模型定向复核"
               valuePropName="checked"
-              extra="开启后，多专家存在分歧或低置信时，会先让模型裁判观点再进入收敛；失败会自动回退本地规则。"
+              extra="开启后，多个检查角色存在分歧或低置信时，会先让模型复核观点再进入收敛；失败会自动回退本地规则。"
             >
               <Switch />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="llm_targeted_debate_timeout_seconds" label="LLM 辩论裁判超时（秒）">
+            <Form.Item name="llm_targeted_debate_timeout_seconds" label="模型定向复核超时（秒）">
               <InputNumber min={15} max={300} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -440,6 +440,30 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为专家提示补充工具候选信号。"
             >
               <Switch />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="gitnexus_max_targets" label="GitNexus 目标上限">
+              <InputNumber min={1} max={50} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="gitnexus_max_context_queries" label="GitNexus context 查询上限">
+              <InputNumber min={1} max={50} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item name="gitnexus_max_impact_queries" label="GitNexus impact 查询上限">
+              <InputNumber min={1} max={50} style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item
+              name="gitnexus_max_dynamic_targets"
+              label="GitNexus 动态目标上限"
+              extra="Windows 或低配环境可设为 0，减少二次扩展查询。"
+            >
+              <InputNumber min={0} max={50} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
         </Row>
@@ -488,12 +512,12 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="light_llm_max_input_tokens" label="轻量模式上下文 token 上限" extra="智能压缩会以这个预算为准，超过时优先保留规则、变更代码和关键上下文。">
+            <Form.Item name="light_llm_max_input_tokens" label="轻量模式上下文用量上限" extra="智能压缩会以这个上限为准，超过时优先保留规则、变更代码和关键上下文。">
               <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="light_llm_max_prompt_chars" label="轻量模式提示字符上限" extra="作为字符级兜底预算，防止混合中英文场景下提示过长。">
+            <Form.Item name="light_llm_max_prompt_chars" label="轻量模式提示字符上限" extra="作为字符级兜底上限，防止混合中英文场景下提示过长。">
               <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -945,6 +969,10 @@ export const sanitizeRuntimeSettingsPayload = (values: RuntimeSettings): Partial
   enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
   llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
   enable_sast_prescan: Boolean(values.enable_sast_prescan),
+  gitnexus_max_targets: Number(values.gitnexus_max_targets || 12),
+  gitnexus_max_context_queries: Number(values.gitnexus_max_context_queries || 8),
+  gitnexus_max_impact_queries: Number(values.gitnexus_max_impact_queries || 8),
+  gitnexus_max_dynamic_targets: Number(values.gitnexus_max_dynamic_targets ?? 6),
   default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
   standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
   standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),

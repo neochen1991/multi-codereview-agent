@@ -64,7 +64,7 @@ class ChangeImpactReportService:
             resolution=resolution,
             runtime_settings=runtime_settings,
             fallback_text=json.dumps(fallback, ensure_ascii=False),
-            allow_fallback=True,
+            allow_fallback=bool(runtime_settings.allow_llm_fallback),
             timeout_seconds=45.0,
             max_attempts=2,
             log_context={

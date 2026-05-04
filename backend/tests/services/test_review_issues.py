@@ -110,6 +110,50 @@ def test_build_report_exposes_impact_report_for_each_review(storage_root: Path):
     assert any("接口" in item.scope for item in report.impact_report.recommended_test_scope)
 
 
+def test_build_report_cross_links_impact_report_to_review_issues(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_impact",
+            "project_id": "proj_impact",
+            "source_ref": "feature/order-impact",
+            "target_ref": "main",
+            "title": "order impact",
+            "changed_files": ["order-service/src/main/java/com/example/OrderController.java"],
+            "unified_diff": (
+                "diff --git a/order-service/src/main/java/com/example/OrderController.java "
+                "b/order-service/src/main/java/com/example/OrderController.java\n"
+                "@@ -10,2 +10,5 @@\n"
+                "+public OrderDTO createOrder(CreateOrderRequest request) {\n"
+                "+    return orderService.create(request);\n"
+                "+}\n"
+            ),
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_order_controller",
+                title="订单创建入口缺少鉴权",
+                summary="OrderController.createOrder 缺少资源级鉴权。",
+                file_path="order-service/src/main/java/com/example/OrderController.java",
+                line_start=10,
+                normalized_issue_type="auth_bypass",
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.impact_report is not None
+    assert "iss_order_controller" in report.impact_report.related_issue_ids
+    assert any(link.issue_id == "iss_order_controller" for link in report.impact_report.impact_issue_links)
+    assert any("iss_order_controller" in item for item in report.impact_report.manual_verification)
+
+
 def test_build_report_does_not_emit_fallback_after_gitnexus_failure(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

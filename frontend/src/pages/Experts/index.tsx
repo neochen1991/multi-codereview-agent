@@ -128,10 +128,10 @@ const ExpertsPage: React.FC = () => {
   return (
     <div>
       <Card className="module-card">
-        <Title level={3}>专家配置中心</Title>
+        <Title level={3}>检查角色配置中心</Title>
         <Paragraph>
-          专家中心现在同时承担三件事：维护专家职责与提示词、绑定专家的核心审视规范、上传并绑定多篇 Markdown
-          参考文档。审核执行时，每个专家都会完整加载核心规范文档，并结合 MR 片段、源码仓上下文和已绑定文档进行代码审视。
+          这里统一维护检查角色职责与提示词、绑定核心审视规范、上传并绑定多篇 Markdown
+          参考文档。审核执行时，每个检查角色都会完整加载核心规范文档，并结合 MR 片段、源码仓上下文和已绑定文档进行代码审视。
         </Paragraph>
       </Card>
 
@@ -140,9 +140,9 @@ const ExpertsPage: React.FC = () => {
         items={[
           {
             key: "existing",
-            label: `已有专家 (${allExperts.length})`,
+            label: `已有检查角色 (${allExperts.length})`,
             children: (
-              <Card className="module-card" title="已创建专家与绑定文档">
+              <Card className="module-card" title="已创建检查角色与绑定文档">
                 <List
                   dataSource={allExperts}
                   renderItem={(item) => {
@@ -182,7 +182,7 @@ const ExpertsPage: React.FC = () => {
                                 Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
                               </div>
                               <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                专家源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                                角色源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
                               </div>
                               <div style={{ marginTop: 8, color: "var(--text-primary)" }}>
                                 必查项：{item.required_checks.length ? item.required_checks.join(" / ") : "未配置"}
@@ -253,11 +253,11 @@ const ExpertsPage: React.FC = () => {
           },
           {
             key: "create",
-            label: "新建专家",
+            label: "新建检查角色",
             children: (
               <Row gutter={[16, 16]}>
                 <Col xs={24} xl={10}>
-                  <Card className="module-card" title="新建自定义专家">
+                  <Card className="module-card" title="新建自定义检查角色">
                     <Form
                       form={form}
                       layout="vertical"
@@ -303,11 +303,11 @@ const ExpertsPage: React.FC = () => {
                             system_prompt: values.system_prompt || "",
                             review_spec: values.review_spec || "",
                           });
-                          message.success("自定义专家已创建");
+                          message.success("自定义检查角色已创建");
                           form.resetFields();
                           await loadPage();
                         } catch (error: any) {
-                          message.error(error?.message || "创建专家失败");
+                          message.error(error?.message || "创建检查角色失败");
                         } finally {
                           setCreating(false);
                         }
@@ -340,7 +340,7 @@ const ExpertsPage: React.FC = () => {
                       <Form.Item name="runtime_tool_bindings" label="运行时工具白名单">
                         <Input placeholder="knowledge_search, repo_context_search" />
                       </Form.Item>
-                      <Form.Item name="agent_bindings" label="Agent 白名单">
+                      <Form.Item name="agent_bindings" label="检查角色白名单">
                         <Input placeholder="judge" />
                       </Form.Item>
                       <Space size={12} style={{ display: "flex" }}>
@@ -351,10 +351,10 @@ const ExpertsPage: React.FC = () => {
                           <InputNumber min={1} max={6} style={{ width: "100%" }} />
                         </Form.Item>
                       </Space>
-                      <Form.Item name="provider" label="LLM Provider">
+                      <Form.Item name="provider" label="模型服务">
                         <Input placeholder="留空则继承系统配置" />
                       </Form.Item>
-                      <Form.Item name="api_base_url" label="LLM Base URL">
+                      <Form.Item name="api_base_url" label="模型服务地址">
                         <Input placeholder="留空则继承系统配置" />
                       </Form.Item>
                       <Space size={12} style={{ display: "flex" }}>
@@ -369,16 +369,16 @@ const ExpertsPage: React.FC = () => {
                         <Input.TextArea rows={4} placeholder="Focus on accessibility regressions first." />
                       </Form.Item>
                       <Form.Item name="review_spec" label="核心审视规范">
-                        <Input.TextArea rows={10} placeholder="为这个自定义专家写一份完整的 Markdown 审视规范。" />
+                        <Input.TextArea rows={10} placeholder="为这个自定义检查角色写一份完整的 Markdown 审视规范。" />
                       </Form.Item>
                       <Button type="primary" htmlType="submit" loading={creating}>
-                        创建专家
+                        创建检查角色
                       </Button>
                     </Form>
                   </Card>
                 </Col>
                 <Col xs={24} xl={14}>
-                  <Card className="module-card" title="已有自定义专家">
+                  <Card className="module-card" title="已有自定义检查角色">
                     {customExperts.length ? (
                       <List
                         dataSource={customExperts}
@@ -405,7 +405,7 @@ const ExpertsPage: React.FC = () => {
                                       Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
                                     </div>
                                     <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                      专家源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                                      角色源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
                                     </div>
                                     <div style={{ marginTop: 6 }}>
                                       {item.tool_bindings.map((tool) => (
@@ -451,7 +451,7 @@ const ExpertsPage: React.FC = () => {
                         }}
                       />
                     ) : (
-                      <Empty description="当前还没有自定义专家。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                      <Empty description="当前还没有自定义检查角色。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                     )}
                   </Card>
                 </Col>
@@ -500,7 +500,7 @@ const ExpertsPage: React.FC = () => {
             }
           }}
         >
-          <Form.Item name="expert_id" label="绑定专家" rules={[{ required: true }]}>
+          <Form.Item name="expert_id" label="绑定检查角色" rules={[{ required: true }]}>
             <Select
               options={experts.map((item) => ({
                 value: item.expert_id,
@@ -551,7 +551,7 @@ const ExpertsPage: React.FC = () => {
       </Modal>
 
       <Modal
-        title={detailTarget ? `${detailTarget.name_zh} 的规范与绑定文档` : "专家文档详情"}
+        title={detailTarget ? `${detailTarget.name_zh} 的规范与绑定文档` : "角色文档详情"}
         open={Boolean(detailTarget)}
         onCancel={closeDetailModal}
         footer={null}

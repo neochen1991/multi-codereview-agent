@@ -416,7 +416,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         render: (value: string) => <Tag color={getSeverityColor(value)}>{value}</Tag>,
       },
       {
-        title: "提出专家",
+        title: "检查角色",
         dataIndex: "expert_labels",
         key: "expert_labels",
         width: columnWidths.expert_labels,
