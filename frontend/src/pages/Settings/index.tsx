@@ -528,12 +528,25 @@ const SettingsPage: React.FC = () => {
     return "default";
   };
 
-  const gitnexusInstallDisplay = (status?: GitNexusIndexStatus | null) => {
+  const gitnexusCommandCheck = (diagnostic?: GitNexusPreflightStatus | null) =>
+    (diagnostic?.checks || []).find((check) => check.name === "gitnexus_command") || null;
+
+  const gitnexusInstallDisplay = (
+    status?: GitNexusIndexStatus | null,
+    diagnostic?: GitNexusPreflightStatus | null,
+  ) => {
+    const commandCheck = gitnexusCommandCheck(diagnostic);
     if (status?.gitnexus_installed === true) {
       return { color: "success", label: "已预装", path: status.gitnexus_path || "已检测到 gitnexus 命令" };
     }
+    if (commandCheck?.status === "passed") {
+      return { color: "success", label: "已预装", path: commandCheck.message || "GitNexus 命令可用" };
+    }
     if (status?.gitnexus_installed === false) {
       return { color: "error", label: "未安装", path: status.gitnexus_path || "当前机器未发现 gitnexus 可执行命令" };
+    }
+    if (commandCheck?.status === "failed") {
+      return { color: "error", label: "未安装", path: commandCheck.message || "当前机器未发现 gitnexus 可执行命令" };
     }
     return { color: "default", label: "未确认", path: status?.gitnexus_path || "刷新后显示 gitnexus 命令路径" };
   };
@@ -622,11 +635,24 @@ const SettingsPage: React.FC = () => {
           message="GitNexus 图谱用于每个 MR 的关联影响分析"
           description="部署机器需要预先安装 GitNexus。后台定时任务和手工入口只负责调用已安装的 gitnexus analyze 建图；建图完成后，结果页“关联影响报告”会直接展示 GitNexus 的影响分析结果。如果建图或调用失败，页面会明确提示失败原因，不再自动降级。"
         />
+        {(() => {
+          const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
+          return (
+            <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="本机 GitNexus">
+                <Space wrap>
+                  <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
+                  <span>{installDisplay.path}</span>
+                </Space>
+              </Descriptions.Item>
+            </Descriptions>
+          );
+        })()}
         <Form.Item noStyle shouldUpdate>
           {() => {
             const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
             if (!repositories.length) {
-              const installDisplay = gitnexusInstallDisplay(gitnexusStatus);
+              const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
               return (
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="状态">
@@ -667,7 +693,7 @@ const SettingsPage: React.FC = () => {
                   const repositoryId = String(repo.repository_id || "").trim();
                   const status = repositoryId ? repositoryGitnexusStatuses[repositoryId] : undefined;
                   const diagnostic = repositoryId ? repositoryGitnexusPreflights[repositoryId] : undefined;
-                  const installDisplay = gitnexusInstallDisplay(status);
+                  const installDisplay = gitnexusInstallDisplay(status, diagnostic);
                   return (
                     <Card
                       key={repositoryId || `repo-${index}`}
