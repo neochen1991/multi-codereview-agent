@@ -150,6 +150,9 @@ def route_experts(state: ReviewState) -> ReviewState:
     next_state = dict(state)
     next_state["phase"] = "route_experts"
     selected = list(next_state.get("selected_experts", []))
+    review_policy = dict(next_state.get("review_policy") or {})
+    for expert_id in list(review_policy.get("required_experts") or []):
+        _append_once(selected, str(expert_id))
     risk_hints = {str(item) for item in next_state.get("risk_hints", [])}
     for hint, expert_ids in RISK_HINT_EXPERTS.items():
         if hint not in risk_hints:
@@ -194,8 +197,9 @@ def _match_experts_by_risk_signals(state: ReviewState) -> list[str]:
 
 def _build_signal_text(state: ReviewState) -> str:
     parts: list[str] = []
-    parts.extend(str(item) for item in state.get("changed_files", []) if str(item).strip())
-    unified_diff = str(state.get("unified_diff") or "")
+    reviewable_files = _reviewable_changed_files(state)
+    parts.extend(reviewable_files)
+    unified_diff = _filter_unified_diff_by_reviewable_files(str(state.get("unified_diff") or ""), reviewable_files)
     if unified_diff:
         parts.append(unified_diff)
     for change_slice in list(state.get("change_slices") or []):
@@ -209,3 +213,46 @@ def _build_signal_text(state: ReviewState) -> str:
             if value:
                 parts.append(str(value))
     return "\n".join(parts).lower()
+
+
+def _reviewable_changed_files(state: ReviewState) -> list[str]:
+    policy = dict(state.get("review_policy") or {})
+    if "reviewable_changed_files" in policy:
+        return [str(item).strip() for item in list(policy.get("reviewable_changed_files") or []) if str(item).strip()]
+    excluded = {str(item).strip() for item in list(policy.get("excluded_changed_files") or []) if str(item).strip()}
+    return [
+        str(item).strip()
+        for item in state.get("changed_files", [])
+        if str(item).strip() and str(item).strip() not in excluded
+    ]
+
+
+def _filter_unified_diff_by_reviewable_files(unified_diff: str, reviewable_files: list[str]) -> str:
+    if not str(unified_diff or "").strip() or not reviewable_files:
+        return "" if not reviewable_files else str(unified_diff or "")
+    reviewable = set(reviewable_files)
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    current_file = ""
+    for line in str(unified_diff or "").splitlines():
+        if line.startswith("diff --git "):
+            if current and current_file in reviewable:
+                blocks.append(current)
+            current = [line]
+            current_file = _extract_diff_file_path(line)
+            continue
+        if current:
+            current.append(line)
+        elif any(file_path in line for file_path in reviewable):
+            current = [line]
+    if current and current_file in reviewable:
+        blocks.append(current)
+    return "\n".join("\n".join(block) for block in blocks)
+
+
+def _extract_diff_file_path(line: str) -> str:
+    parts = str(line or "").split()
+    if len(parts) >= 4:
+        value = parts[3]
+        return value[2:] if value.startswith("b/") else value
+    return ""

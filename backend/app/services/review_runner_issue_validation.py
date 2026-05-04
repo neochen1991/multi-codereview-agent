@@ -46,9 +46,12 @@ class ReviewRunnerIssueValidationMixin:
         for item in grouped:
             if item.file_path != candidate.file_path:
                 continue
-            if abs(int(item.line_start or 1) - int(candidate.line_start or 1)) > 2:
+            item_family = self._issue_root_family(item)
+            if item_family != candidate_family:
                 continue
-            if self._issue_root_family(item) == candidate_family:
+            if candidate_family in {"event_consumer_batch_boundary"}:
+                return True
+            if abs(int(item.line_start or 1) - int(candidate.line_start or 1)) <= 2:
                 return True
         return False
 
@@ -120,6 +123,21 @@ class ReviewRunnerIssueValidationMixin:
             )
         ):
             return "event_consumer_batch_boundary"
+        if "mysqldomaineventsconsumer" in path and any(
+            token in compact
+            for token in (
+                "catch",
+                "空catch",
+                "静默吞",
+                "吞掉异常",
+                "异常被完全吞掉",
+                "printstacktrace",
+                "error_handling_weakened",
+                "exception_swallowed",
+                "exception_semantics_weakened",
+            )
+        ):
+            return "event_consumer_exception_swallowed"
         return ""
 
     def _merge_issue_group(self, group: list[DebateIssue]) -> DebateIssue:
@@ -243,6 +261,8 @@ class ReviewRunnerIssueValidationMixin:
             return "course_creation_semantics"
         if family == "event_consumer_batch_boundary":
             return "event_consumer_batch_boundary"
+        if family == "event_consumer_exception_swallowed":
+            return "event_consumer_exception_swallowed"
         return ",".join(types[:3])
 
     @staticmethod

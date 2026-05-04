@@ -286,6 +286,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+.review-table-title-stack {
+  max-width: 100%;
+}
+
+.review-history-load-alert {
+  margin-bottom: 16px;
+}
+
 .review-table-link-cell {
   display: inline-block;
   max-width: 100%;
@@ -1263,6 +1271,66 @@ body {
   color: #0f172a;
 }
 
+.impact-report-quality-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.8fr);
+  gap: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid #d8e3f2;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.impact-report-quality-strip-success {
+  border-color: #b7ebc6;
+  background: linear-gradient(180deg, #f6ffed 0%, #ffffff 100%);
+}
+
+.impact-report-quality-strip-warning {
+  border-color: #ffe1a8;
+  background: linear-gradient(180deg, #fffaf0 0%, #ffffff 100%);
+}
+
+.impact-report-quality-strip-error {
+  border-color: #ffccc7;
+  background: linear-gradient(180deg, #fff2f0 0%, #ffffff 100%);
+}
+
+.impact-report-quality-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.impact-report-quality-verdict {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.55;
+}
+
+.impact-report-quality-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.impact-report-quality-metrics > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.impact-report-quality-metrics strong {
+  color: #0f172a;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
 .impact-report-section {
   display: grid;
   gap: 10px;
@@ -1270,6 +1338,13 @@ body {
 
 .impact-report-section .ant-typography {
   margin-bottom: 0;
+}
+
+.impact-report-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .impact-report-mini-stats {
@@ -1307,6 +1382,40 @@ body {
   font-weight: 700;
   line-height: 1.2;
   color: #0f172a;
+}
+
+.impact-report-symbol-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.impact-report-symbol-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #cfe0ff;
+  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+  min-width: 0;
+}
+
+.impact-report-symbol-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.impact-report-symbol-main > .ant-typography {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.impact-report-symbol-path.ant-typography {
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .impact-report-meta-grid {
@@ -1451,6 +1560,15 @@ body {
   font-weight: 600;
 }
 
+.impact-report-feedback-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .impact-report-inline-meta {
   display: grid;
   gap: 4px;
@@ -1566,6 +1684,8 @@ body {
 .impact-report-checklist {
   display: grid;
   gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .impact-report-checklist-item {
@@ -1576,6 +1696,7 @@ body {
   border-radius: 14px;
   border: 1px solid var(--border-soft);
   background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  min-width: min(360px, 100%);
 }
 
 .impact-report-checklist-index {
@@ -1605,9 +1726,43 @@ body {
   gap: 12px;
 }
 
+.impact-report-checklist-head .ant-typography {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.impact-report-checklist-head .ant-tag {
+  flex: 0 0 auto;
+}
+
 @media (max-width: 980px) {
   .impact-report-hero {
     grid-template-columns: 1fr;
+  }
+
+  .impact-report-quality-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .impact-report-quality-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .impact-report-section,
+  .template-preview-rendered {
+    overflow-x: auto;
+  }
+
+  .impact-report-quality-strip,
+  .impact-report-hero {
+    padding: 14px;
+  }
+
+  .impact-report-checklist-item {
+    min-width: 300px;
   }
 }
 
@@ -2403,6 +2558,12 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.settings-gitnexus-actions {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .settings-actions {

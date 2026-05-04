@@ -101,6 +101,140 @@ def test_judge_accepts_verified_hypothesis_with_richer_evidence():
 
     assert result["issues"][0]["status"] == "resolved"
     assert result["issues"][0]["resolution"] == "accepted_with_verification"
+    assert result["issues"][0]["category_label"] == "risk_hypothesis"
+    assert "工具/证据核验已通过" in result["issues"][0]["confidence_rationale"]
+
+
+def test_judge_adds_confidence_rationale_for_observation_signal():
+    state = {
+        "issues": [
+            {
+                "issue_id": "iss_observation_signal",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.78,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["循环体内存在外部调用"],
+                "context_files": ["OrderBatchService.java"],
+                "confidence_breakdown": {
+                    "participant_count": 1,
+                    "consensus_bonus": 0.0,
+                    "evidence_bonus": 0.02,
+                    "hypothesis_penalty": 0.05,
+                    "evidence_source": "observation_signal",
+                },
+            }
+        ]
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "needs_verification"
+    assert issue["category_label"] == "risk_hypothesis"
+    assert "观察信号" in issue["confidence_rationale"]
+    assert "需要复核" in issue["confidence_rationale"]
+
+
+def test_judge_lightweight_verification_marks_gray_zone_as_needs_context():
+    state = {
+        "issues": [
+            {
+                "issue_id": "iss_gray_zone",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.76,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["调用方可能没有同步修改"],
+                "participant_expert_ids": ["correctness_business"],
+            }
+        ]
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "needs_verification"
+    assert issue["confidence_breakdown"]["lightweight_verification"]["verdict"] == "needs_context"
+    assert issue["confidence_breakdown"]["lightweight_verification"]["confidence_adjustment"] < 0
+
+
+def test_judge_lightweight_verification_confirms_direct_rich_evidence():
+    state = {
+        "issues": [
+            {
+                "issue_id": "iss_direct_rich",
+                "finding_type": "direct_defect",
+                "severity": "medium",
+                "confidence": 0.79,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "evidence": ["空值分支被删除", "调用方传入 nullable request"],
+                "cross_file_evidence": ["Controller -> Service"],
+                "context_files": ["OrderController.java"],
+            }
+        ]
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "resolved"
+    assert issue["confidence"] == 0.82
+    assert issue["confidence_breakdown"]["lightweight_verification"]["verdict"] == "confirmed"
+
+
+def test_judge_rationale_mentions_sast_cross_validation():
+    state = {
+        "issues": [
+            {
+                "issue_id": "iss_sast",
+                "title": "eval 调用存在注入风险",
+                "summary": "新增代码直接 eval 用户输入。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.84,
+                "direct_evidence": False,
+                "tool_verified": True,
+                "sast_cross_validated": True,
+                "verified": False,
+                "needs_human": False,
+                "participant_expert_ids": ["security_compliance"],
+                "evidence": [
+                    "eval(user_input)",
+                    "SAST/linter 佐证: semgrep:python.lang.security.audit.eval L12 Use of eval",
+                    "安全专家确认 eval 直接消费用户输入",
+                    "代码片段位于新增逻辑",
+                ],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "assumptions": [],
+                "confidence_breakdown": {"sast_cross_validated": True, "verification_bonus": 0.04},
+            }
+        ],
+        "feedback_quality_profiles": {},
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "resolved"
+    assert issue["resolution"] == "accepted_with_verification"
+    assert "SAST/linter" in issue["confidence_rationale"]
 
 
 def test_judge_keeps_speculative_low_confidence_hypothesis_in_needs_verification():
@@ -187,6 +321,58 @@ def test_judge_drops_non_issue_formatting_entries():
     assert result["issue_filter_decisions"][0]["rule_label"] == "非问题类条目过滤"
 
 
+def test_judge_applies_repo_policy_comment_budget():
+    state = {
+        "review_policy": {"max_comments_per_review": 2},
+        "issues": [
+            {
+                "issue_id": "iss_low",
+                "title": "低风险建议",
+                "finding_type": "design_concern",
+                "severity": "low",
+                "confidence": 0.95,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "evidence": ["命名建议"],
+            },
+            {
+                "issue_id": "iss_high",
+                "title": "高风险鉴权问题",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.82,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "evidence": ["权限分支被删除"],
+            },
+            {
+                "issue_id": "iss_medium",
+                "title": "中风险事务问题",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.9,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "evidence": ["schema_diff 命中", "调用路径存在影响"],
+                "cross_file_evidence": ["service -> repository"],
+                "context_files": ["service.py"],
+            },
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    assert [item["issue_id"] for item in result["issues"]] == ["iss_high", "iss_medium"]
+    assert result["issue_filter_decisions"][-1]["rule_code"] == "repo_policy_comment_budget"
+    assert result["issue_filter_decisions"][-1]["finding_titles"] == ["低风险建议"]
+
+
 def test_judge_uses_feedback_profile_to_tighten_risk_hypothesis():
     state = {
         "feedback_quality_profiles": {
@@ -235,10 +421,55 @@ def test_judge_uses_feedback_profile_to_tighten_risk_hypothesis():
     result = judge_and_merge(state)
 
     issue = result["issues"][0]
-    assert issue["confidence"] == 0.7
+    assert issue["confidence"] == 0.67
     assert issue["status"] == "needs_verification"
     assert issue["resolution"] == "feedback_profile_requires_more_evidence"
     assert issue["confidence_breakdown"]["feedback_profile"]["applied"] is True
+    assert issue["confidence_breakdown"]["lightweight_verification"]["verdict"] == "needs_context"
+
+
+def test_judge_uses_feedback_accept_rate_to_lift_confidence():
+    state = {
+        "feedback_quality_profiles": {
+            "experts": {
+                "database_analysis": {
+                    "sample_count": 8,
+                    "false_positive_rate": 0.12,
+                    "accept_rate": 0.88,
+                    "confidence_bonus": 0.05,
+                }
+            },
+            "issue_types": {},
+        },
+        "issues": [
+            {
+                "issue_id": "iss_accept_profile",
+                "primary_expert_id": "database_analysis",
+                "normalized_issue_type": "query_boundary_missing",
+                "finding_type": "direct_defect",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "evidence": ["limit 被删除", "查询入口仍可传入大范围条件"],
+                "cross_file_evidence": [],
+                "context_files": ["OrderRepository.java"],
+                "assumptions": [],
+                "participant_expert_ids": ["database_analysis"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["confidence"] == 0.91
+    assert issue["confidence_breakdown"]["feedback_profile"]["confidence_bonus"] == 0.05
+    assert "高接受率" in issue["confidence_rationale"]
 
 
 def test_judge_uses_llm_judge_to_reject_low_confidence_issue(monkeypatch):

@@ -6,6 +6,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.report import ImpactReport, ReviewReport
 from app.domain.models.review import ReviewTask
+from app.services.review_report_builder import build_confidence_summary
 
 
 class ReviewServiceReportMixin:
@@ -33,23 +34,6 @@ class ReviewServiceReportMixin:
         light_issues = [self._build_light_report_issue(item) for item in paged_issues]
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         impact_report = self._build_impact_report_for_review(review)
-        llm_judge_rejected_count = len(
-            [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "llm_judge_rejected"]
-        )
-        quality_filtered_issue_count = len(
-            [
-                item
-                for item in issue_filter_decisions
-                if str(item.get("rule_code") or "")
-                in {
-                    "llm_judge_rejected",
-                    "conditional_conclusion",
-                    "removed_line_only",
-                    "below_priority_confidence_threshold",
-                    "below_issue_priority_threshold",
-                }
-            ]
-        )
         issue_count = issues_total_count
         summary = (
             f"本次代码审核共收敛 {findings_total_count} 条发现，"
@@ -57,7 +41,6 @@ class ReviewServiceReportMixin:
             f"覆盖 {len(review.selected_experts)} 个专家视角，"
             f"当前状态为 {review.status}。"
         )
-        llm_judged_issues = [item for item in issues if item.llm_judge_result]
         return ReviewReport(
             review_id=review_id,
             status=review.status,
@@ -71,36 +54,12 @@ class ReviewServiceReportMixin:
             llm_usage_summary=self.message_repo.summarize_llm_usage(review_id),
             issue_filter_decisions=issue_filter_decisions,
             impact_report=impact_report,
-            confidence_summary={
-                "high_confidence_count": len(
-                    [item for item in findings if item.confidence >= 0.85]
-                ),
-                "debated_issue_count": len(
-                    [item for item in issues if item.status in {"debating", "needs_human", "resolved"}]
-                ),
-                "needs_human_count": len([item for item in issues if item.needs_human]),
-                "verified_issue_count": len([item for item in issues if item.verified]),
-                "direct_defect_count": len([item for item in findings if item.finding_type == "direct_defect"]),
-                "risk_hypothesis_count": len([item for item in findings if item.finding_type == "risk_hypothesis"]),
-                "test_gap_count": len([item for item in findings if item.finding_type == "test_gap"]),
-                "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
-                "llm_judged_issue_count": len(llm_judged_issues),
-                "llm_judge_accepted_count": len(
-                    [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "accept"]
-                ),
-                "llm_judge_needs_verification_count": len(
-                    [
-                        item
-                        for item in llm_judged_issues
-                        if str(item.llm_judge_result.get("final_verdict") or "") == "needs_verification"
-                    ]
-                ),
-                "llm_judge_needs_human_count": len(
-                    [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
-                ),
-                "llm_judge_rejected_count": llm_judge_rejected_count,
-                "quality_filtered_issue_count": quality_filtered_issue_count,
-            },
+            confidence_summary=build_confidence_summary(
+                review=review,
+                findings=findings,
+                issues=issues,
+                issue_filter_decisions=issue_filter_decisions,
+            ),
         )
 
     def _build_impact_report_for_review(self, review: ReviewTask) -> ImpactReport | None:
@@ -108,6 +67,14 @@ class ReviewServiceReportMixin:
         cached = metadata.get("impact_report") or metadata.get("gitnexus_impact_report")
         if isinstance(cached, dict):
             return ImpactReport.model_validate(cached)
+        progress = dict(metadata.get("impact_analysis_progress") or {})
+        if str(progress.get("state") or "").strip().lower() == "failed":
+            return None
+        if list(review.subject.changed_files or []) or str(review.subject.unified_diff or "").strip():
+            return self.gitnexus_impact_service.build_fallback_report(
+                review.subject,
+                self.get_runtime_settings(),
+            )
         return None
 
     def _realign_issue_location(
@@ -179,6 +146,13 @@ class ReviewServiceReportMixin:
                 continue
             linked_findings = [finding_by_id[finding_id] for finding_id in finding_ids if finding_id in finding_by_id]
             if len(linked_findings) <= 1:
+                continue
+            # 新版 judge/debate 输出的聚合 issue 是正式收敛结果，应作为 canonical issue 展示。
+            # 只有旧版“同一代码行”合并记录与真实 finding 位置明显矛盾时，才按 finding 兼容拆分。
+            title = str(issue.title or "").strip()
+            summary = str(issue.summary or "").strip()
+            legacy_same_line_merge = "同一代码行" in title or "旧版合并" in summary
+            if not legacy_same_line_merge:
                 continue
             linked_paths = {str(item.file_path or "").strip() for item in linked_findings}
             linked_lines = [int(item.line_start or 1) for item in linked_findings]
@@ -252,6 +226,11 @@ class ReviewServiceReportMixin:
         issue_confidence_breakdown = (
             dict(persisted_issue.confidence_breakdown or {}) if persisted_issue else {}
         )
+        issue_evidence_chain = (
+            [dict(item) for item in list(persisted_issue.evidence_chain or []) if isinstance(item, dict)]
+            if persisted_issue
+            else []
+        )
         issue_created_at = persisted_issue.created_at if persisted_issue else finding.created_at
         issue_updated_at = persisted_issue.updated_at if persisted_issue else finding.created_at
         return DebateIssue(
@@ -296,6 +275,7 @@ class ReviewServiceReportMixin:
             aggregated_remediation_steps=list(finding.remediation_steps or []),
             evidence=list(finding.evidence or []),
             cross_file_evidence=list(finding.cross_file_evidence or []),
+            evidence_chain=issue_evidence_chain,
             assumptions=list(finding.assumptions or []),
             context_files=list(finding.context_files or []),
             direct_evidence=str(finding.finding_type or "") == "direct_defect",

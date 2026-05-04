@@ -312,6 +312,35 @@ def test_score_summary_includes_failure_reasons() -> None:
     assert "missing_inputs=关联源码上下文" in summary
 
 
+def test_score_summary_labels_incomplete_reviews_without_fail_verdict() -> None:
+    module = _load_benchmark_module()
+    score = module.BenchmarkScore(
+        passed=False,
+        score=1.0,
+        required_expert_coverage=1.0,
+        required_rule_hit=True,
+        finding_keyword_coverage=1.0,
+        input_quality_coverage=1.0,
+        problem_marker_coverage=1.0,
+        invalid_finding_rate=0.0,
+        missing_experts=(),
+        matched_rule_ids=("ARCH-JDDD-002",),
+        missing_keywords=(),
+        missing_problem_markers=(),
+        missing_input_sections=(),
+        incomplete=True,
+        review_status="running",
+        review_phase="expert_review",
+    )
+
+    summary = module._build_score_summary(score)
+
+    assert summary.startswith("INCOMPLETE (1.000)")
+    assert "FAIL" not in summary
+    assert "status=running" in summary
+    assert "phase=expert_review" in summary
+
+
 def test_evaluate_case_result_ignores_stale_missing_sections_when_checks_pass() -> None:
     module = _load_benchmark_module()
     case = module.JavaReviewCase(

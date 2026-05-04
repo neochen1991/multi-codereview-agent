@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from app.domain.models.finding import ReviewFinding
@@ -59,6 +60,78 @@ def test_human_decision_persists_feedback_label(storage_root: Path):
     assert labels[0].label == "false_positive"
 
 
+def test_record_impact_feedback_persists_normalized_label_and_metadata(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/impact-feedback",
+            "target_ref": "main",
+            "title": "impact feedback review",
+            "changed_files": ["backend/app/orders/service.py"],
+        }
+    )
+
+    label = service.record_impact_feedback(
+        review.review_id,
+        target_type="impact_path",
+        target_key="OrderController -> OrderService -> PaymentClient",
+        label="false_positive",
+        comment="实际没有走这个调用路径",
+    )
+    labels = service.list_feedback_labels(review.review_id)
+
+    assert label.label == "impact_false_positive"
+    assert label.source == "impact_feedback"
+    assert label.issue_id.startswith("impact:impact_path:")
+    assert labels == [label]
+    payload = json.loads(label.comment)
+    assert payload["target_key"] == "OrderController -> OrderService -> PaymentClient"
+    assert payload["comment"] == "实际没有走这个调用路径"
+
+
+def test_feedback_learner_builds_impact_feedback_profiles(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    learner = FeedbackLearnerService(storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/impact-profile",
+            "target_ref": "main",
+            "title": "impact feedback profile review",
+            "changed_files": ["backend/app/orders/service.py"],
+        }
+    )
+
+    service.record_impact_feedback(
+        review.review_id,
+        target_type="impact_path",
+        target_key="OrderController -> OrderService -> PaymentClient",
+        label="confirmed",
+        comment="真实命中",
+    )
+    service.record_impact_feedback(
+        review.review_id,
+        target_type="impact_path",
+        target_key="OrderController -> OrderService -> PaymentClient",
+        label="false_positive",
+        comment="另一次验证发现不命中",
+    )
+
+    profiles = learner.build_impact_feedback_profiles()
+    target_profile = profiles["targets"]["impact_path:OrderController -> OrderService -> PaymentClient"]
+
+    assert profiles["summary"]["sample_count"] == 2
+    assert target_profile["confirmed_count"] == 1
+    assert target_profile["false_positive_count"] == 1
+    assert target_profile["false_positive_rate"] == 0.5
+    assert target_profile["recommended_action"] == "keep_observing"
+
+
 def test_feedback_learner_builds_quality_profiles(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     learner = FeedbackLearnerService(storage_root)
@@ -104,7 +177,9 @@ def test_feedback_learner_builds_quality_profiles(storage_root: Path):
     issue_type_profile = profiles["issue_types"]["missing_auth_check"]
     assert expert_profile["sample_count"] == 3
     assert expert_profile["false_positive_rate"] == 1.0
+    assert expert_profile["accept_rate"] == 0.0
     assert expert_profile["confidence_penalty"] > 0
+    assert expert_profile["confidence_bonus"] == 0.0
     assert expert_profile["prefer_needs_verification"] is True
     assert issue_type_profile["sample_count"] == 3
     assert issue_type_profile["false_positive_rate"] == 1.0

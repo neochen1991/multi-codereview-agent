@@ -135,6 +135,14 @@ def test_evidence_verification_keeps_direct_anchored_issue_verified():
     assert issue["confidence"] == 0.9
     assert issue["evidence_quality"]["false_positive_risk"] == "low"
     assert issue["needs_human"] is True
+    assert issue["evidence_chain"][0]["step"] == "claim"
+    assert issue["evidence_chain"][0]["status"] == "present"
+    assert issue["evidence_chain"][1]["step"] == "anchor"
+    assert issue["evidence_chain"][1]["status"] == "anchored"
+    assert issue["evidence_chain"][2]["step"] == "verifier"
+    assert issue["evidence_chain"][2]["tool_name"] == "local_diff"
+    assert issue["evidence_chain"][-1]["step"] == "confidence"
+    assert issue["evidence_chain"][-1]["confidence_delta"] == 0.0
 
 
 def test_evidence_verification_uses_static_signal_to_anchor_loop_amplification():
@@ -172,6 +180,9 @@ diff --git a/src/main/java/app/OrderBatchService.java b/src/main/java/app/OrderB
     assert issue["tool_name"] == "static_diff"
     assert "loop_call_amplification" in issue["evidence_quality"]["static_analysis_signals"]
     assert issue["evidence_quality"]["false_positive_risk"] == "low"
+    static_steps = [item for item in issue["evidence_chain"] if item["step"] == "static_analysis"]
+    assert static_steps
+    assert "loop_call_amplification" in static_steps[0]["signals"]
 
 
 def test_evidence_verification_uses_static_signal_to_anchor_removed_validation_guard():
@@ -209,3 +220,44 @@ diff --git a/src/main/java/app/OwnerController.java b/src/main/java/app/OwnerCon
     assert issue["tool_name"] == "static_diff"
     assert "security_guard_removed" in issue["evidence_quality"]["static_analysis_signals"]
     assert issue["direct_evidence"] is True
+
+
+def test_evidence_verification_records_false_positive_filter_in_evidence_chain(monkeypatch):
+    class FakeFalsePositiveFilter:
+        def should_filter(self, issue, runtime_settings, evidence_quality):
+            return True
+
+        def filter_issue(self, issue, runtime_settings, evidence_quality, unified_diff):
+            return {
+                "verdict": "needs_verification",
+                "confidence_adjustment": -0.12,
+                "reason": "证据链缺少代码锚点",
+            }
+
+    monkeypatch.setattr(evidence_module, "EvidenceFalsePositiveFilterService", lambda: FakeFalsePositiveFilter())
+    state = {
+        "changed_files": ["src/main/java/app/OrderService.java"],
+        "runtime_settings": RuntimeSettings(enable_llm_evidence_filter=True),
+        "risk_hints": [],
+        "issues": [
+            {
+                "issue_id": "issue-needs-verification",
+                "finding_type": "risk_hypothesis",
+                "title": "可能存在并发问题",
+                "summary": "如果调用方并发提交，可能出现问题",
+                "confidence": 0.71,
+                "severity": "medium",
+                "direct_evidence": False,
+                "evidence": ["需要确认调用方是否并发"],
+            }
+        ],
+    }
+
+    result = evidence_verification(state)
+
+    chain = result["issues"][0]["evidence_chain"]
+    filter_steps = [item for item in chain if item["step"] == "false_positive_filter"]
+    assert filter_steps
+    assert filter_steps[0]["verdict"] == "needs_verification"
+    assert filter_steps[0]["confidence_adjustment"] == -0.12
+    assert chain[-1]["status"] == "needs_verification"

@@ -60,6 +60,7 @@ def evidence_verification(state: ReviewState) -> ReviewState:
     verified_issues: list[dict[str, object]] = []
     risk_hints = set(next_state.get("risk_hints", []))
     for issue in next_state.get("issues", []):
+        original_confidence = float(issue.get("confidence", 0.0))
         strategy = _pick_verification_strategy(issue)
         if _should_use_static_diff(issue, next_state):
             strategy = "static_diff"
@@ -145,6 +146,15 @@ def evidence_verification(state: ReviewState) -> ReviewState:
                 if marker not in evidence_items:
                     evidence_items.append(marker)
             next_issue["evidence"] = evidence_items
+        next_issue["evidence_chain"] = _build_evidence_chain(
+            issue=next_issue,
+            verification_result=verification_result,
+            evidence_quality=evidence_quality,
+            original_confidence=original_confidence,
+            final_confidence=confidence,
+            verified=verified,
+            filter_result=filter_result,
+        )
         verified_issues.append(next_issue)
     next_state["issues"] = verified_issues
     return next_state
@@ -319,3 +329,98 @@ def _assess_evidence_quality(
         "static_analysis_signals": static_signals,
         "reasons": reasons,
     }
+
+
+def _build_evidence_chain(
+    *,
+    issue: dict[str, object],
+    verification_result: dict[str, object],
+    evidence_quality: dict[str, object],
+    original_confidence: float,
+    final_confidence: float,
+    verified: bool,
+    filter_result: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    """Build a structured proof trail for downstream judging, reports, and eval."""
+
+    claim = str(issue.get("claim") or issue.get("title") or issue.get("summary") or "").strip()
+    evidence_items = [str(item).strip() for item in list(issue.get("evidence") or []) if str(item).strip()]
+    cross_file_evidence = [
+        str(item).strip() for item in list(issue.get("cross_file_evidence") or []) if str(item).strip()
+    ]
+    line_start = issue.get("line_start") or issue.get("line") or issue.get("line_number") or issue.get("start_line")
+    static_signals = [
+        str(item).strip()
+        for item in list(evidence_quality.get("static_analysis_signals") or [])
+        if str(item).strip()
+    ]
+    chain: list[dict[str, object]] = [
+        {
+            "step": "claim",
+            "status": "present" if claim else "missing",
+            "claim": claim,
+            "issue_id": str(issue.get("issue_id") or ""),
+        },
+        {
+            "step": "anchor",
+            "status": "anchored" if bool(evidence_quality.get("anchored")) else "weak",
+            "file_path": str(issue.get("file_path") or ""),
+            "line_start": int(line_start or 0),
+            "evidence": evidence_items[:4],
+            "cross_file_evidence": cross_file_evidence[:4],
+            "reasons": [str(item) for item in list(evidence_quality.get("reasons") or [])],
+        },
+        {
+            "step": "verifier",
+            "status": "verified" if bool(verification_result.get("tool_verified")) else "not_verified",
+            "tool_name": str(verification_result.get("tool_name") or ""),
+            "tool_verified": bool(verification_result.get("tool_verified")),
+            "score": round(float(verification_result.get("score") or 0.0), 3),
+            "summary": str(verification_result.get("summary") or ""),
+        },
+    ]
+    if static_signals:
+        chain.append(
+            {
+                "step": "static_analysis",
+                "status": "signal_matched",
+                "signals": static_signals,
+            }
+        )
+    if filter_result is not None:
+        chain.append(
+            {
+                "step": "false_positive_filter",
+                "status": str(filter_result.get("verdict") or "abstain"),
+                "verdict": str(filter_result.get("verdict") or "abstain"),
+                "confidence_adjustment": round(float(filter_result.get("confidence_adjustment") or 0.0), 3),
+                "reason": str(filter_result.get("reason") or ""),
+            }
+        )
+    chain.append(
+        {
+            "step": "confidence",
+            "status": _evidence_chain_final_status(verified, evidence_quality, filter_result),
+            "original_confidence": round(original_confidence, 3),
+            "final_confidence": round(float(final_confidence), 3),
+            "confidence_delta": round(float(final_confidence) - float(original_confidence), 3),
+            "false_positive_risk": str(evidence_quality.get("false_positive_risk") or "unknown"),
+        }
+    )
+    return chain
+
+
+def _evidence_chain_final_status(
+    verified: bool,
+    evidence_quality: dict[str, object],
+    filter_result: dict[str, object] | None,
+) -> str:
+    if filter_result is not None:
+        verdict = str(filter_result.get("verdict") or "").strip()
+        if verdict in {"false_positive", "needs_verification", "true_positive"}:
+            return verdict
+    if verified:
+        return "verified"
+    if str(evidence_quality.get("false_positive_risk") or "") == "high":
+        return "high_false_positive_risk"
+    return "needs_verification"

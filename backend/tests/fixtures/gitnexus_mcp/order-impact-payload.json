@@ -1,0 +1,115 @@
+{
+  "repo": "order-service",
+  "available_repos": ["order-service"],
+  "detect_changes": {
+    "changedSymbols": [
+      {"name": "OrderController.createOrder", "file": "src/main/java/com/example/order/OrderController.java"},
+      "synchronized"
+    ],
+    "affectedFiles": [
+      {
+        "path": "src/main/java/com/example/order/OrderApplicationService.java",
+        "relationship": "caller",
+        "reason": "OrderController.createOrder dispatches into OrderApplicationService.placeOrder.",
+        "riskLevel": "high"
+      },
+      {
+        "path": "src/test/java/com/example/order/OrderControllerTest.java",
+        "relationship": "test_candidate",
+        "reason": "Controller entrypoint behavior should be covered by API regression.",
+        "riskLevel": "medium"
+      }
+    ],
+    "affectedProcesses": ["order-service"],
+    "testRecommendations": [
+      {
+        "scope": "Order create API regression",
+        "reason": "Controller -> ApplicationService -> Repository path is affected.",
+        "paths": [
+          "src/test/java/com/example/order/OrderControllerTest.java",
+          "src/test/java/com/example/order/OrderApplicationServiceTest.java"
+        ],
+        "priority": "high"
+      }
+    ],
+    "riskLevel": "high"
+  },
+  "context_results": [
+    {
+      "symbol": {
+        "name": "OrderController.createOrder",
+        "file": "src/main/java/com/example/order/OrderController.java"
+      },
+      "outgoing": {
+        "calls": [
+          {
+            "name": "OrderApplicationService.placeOrder",
+            "file": "src/main/java/com/example/order/OrderApplicationService.java"
+          }
+        ]
+      }
+    },
+    {
+      "symbol": {
+        "name": "MissingAuditClient.notify",
+        "file": "src/main/java/com/example/order/AuditClient.java"
+      }
+    }
+  ],
+  "impact_results": [
+    {
+      "target": {
+        "name": "OrderController.createOrder",
+        "file": "src/main/java/com/example/order/OrderController.java"
+      },
+      "paths": [
+        {
+          "source": "OrderController.createOrder",
+          "target": "OrderRepository.save",
+          "nodes": [
+            "OrderController.createOrder",
+            "OrderApplicationService.placeOrder",
+            "OrderRepository.save"
+          ],
+          "depth": 2,
+          "risk": "high",
+          "files": [
+            "src/main/java/com/example/order/OrderRepository.java"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "scope": "Repository persistence regression",
+          "reason": "OrderRepository.save remains in the impacted path.",
+          "files": ["src/test/java/com/example/order/OrderRepositoryTest.java"],
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "target": "OrderApplicationService.placeOrder",
+      "byDepth": {
+        "1": [
+          {"name": "OrderController.createOrder"},
+          {"module": "order-api"}
+        ]
+      },
+      "affected_modules": ["order-domain"],
+      "risk": "medium"
+    }
+  ],
+  "queried_targets": [
+    "OrderController.createOrder",
+    "OrderApplicationService.placeOrder",
+    "MissingAuditClient.notify"
+  ],
+  "successful_context_targets": ["OrderController.createOrder"],
+  "successful_impact_targets": [
+    "OrderController.createOrder",
+    "OrderApplicationService.placeOrder"
+  ],
+  "skipped_invalid_targets": ["synchronized"],
+  "skipped_missing_context_targets": ["MissingAuditClient.notify"],
+  "skipped_missing_impact_targets": []
+}

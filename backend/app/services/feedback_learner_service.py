@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.domain.models.feedback import FeedbackLabel
@@ -97,6 +98,56 @@ class FeedbackLearnerService:
             },
         }
 
+    def build_impact_feedback_profiles(self) -> dict[str, object]:
+        """聚合关联影响分析反馈，供后续路径排序和风险校准使用。"""
+
+        target_stats: dict[str, dict[str, object]] = {}
+        summary = {"sample_count": 0, "confirmed_count": 0, "false_positive_count": 0}
+        for review in self.review_repo.list():
+            for label in self.feedback_repo.list(review.review_id):
+                if label.source != "impact_feedback":
+                    continue
+                metadata = self._parse_feedback_metadata(label.comment)
+                target_type = str(metadata.get("target_type") or "").strip()
+                target_key = str(metadata.get("target_key") or "").strip()
+                if not target_type or not target_key:
+                    continue
+                target_id = f"{target_type}:{target_key}"
+                row = target_stats.setdefault(
+                    target_id,
+                    {
+                        "target_id": target_id,
+                        "target_type": target_type,
+                        "target_key": target_key,
+                        "sample_count": 0,
+                        "confirmed_count": 0,
+                        "false_positive_count": 0,
+                    },
+                )
+                row["sample_count"] = int(row["sample_count"]) + 1
+                summary["sample_count"] += 1
+                if label.label == "impact_confirmed":
+                    row["confirmed_count"] = int(row["confirmed_count"]) + 1
+                    summary["confirmed_count"] += 1
+                elif label.label == "impact_false_positive":
+                    row["false_positive_count"] = int(row["false_positive_count"]) + 1
+                    summary["false_positive_count"] += 1
+
+        return {
+            "summary": {
+                **summary,
+                "false_positive_rate": self._rate(
+                    summary["false_positive_count"],
+                    summary["sample_count"],
+                ),
+                "accept_rate": self._rate(summary["confirmed_count"], summary["sample_count"]),
+            },
+            "targets": {
+                key: self._build_impact_target_profile(value)
+                for key, value in sorted(target_stats.items())
+            },
+        }
+
     def build_runtime_threshold_recommendations(
         self,
         current_thresholds: dict[str, object],
@@ -183,6 +234,13 @@ class FeedbackLearnerService:
             return "confirmed"
         return "unresolved"
 
+    def _parse_feedback_metadata(self, value: str) -> dict[str, object]:
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
     def _accumulate_quality_stats(
         self,
         container: dict[str, dict[str, int]],
@@ -211,7 +269,9 @@ class FeedbackLearnerService:
         confirmed_count = int(stats.get("confirmed_count", 0))
         unresolved_count = int(stats.get("unresolved_count", 0))
         false_positive_rate = round(false_positive_count / sample_count, 2) if sample_count else 0.0
+        accept_rate = round(confirmed_count / sample_count, 2) if sample_count else 0.0
         confidence_penalty = 0.0
+        confidence_bonus = 0.0
         needs_human_confidence = 0.8
         prefer_needs_verification = False
         if sample_count >= 3 and false_positive_rate >= 0.6:
@@ -222,6 +282,10 @@ class FeedbackLearnerService:
             confidence_penalty = 0.07
             needs_human_confidence = 0.85
             prefer_needs_verification = True
+        elif sample_count >= 5 and accept_rate >= 0.8:
+            confidence_bonus = 0.05
+        elif sample_count >= 5 and accept_rate >= 0.65:
+            confidence_bonus = 0.03
         return {
             "key": key,
             "sample_count": sample_count,
@@ -229,10 +293,34 @@ class FeedbackLearnerService:
             "confirmed_count": confirmed_count,
             "unresolved_count": unresolved_count,
             "false_positive_rate": false_positive_rate,
+            "accept_rate": accept_rate,
             "confidence_penalty": confidence_penalty,
+            "confidence_bonus": confidence_bonus,
             "needs_human_confidence": needs_human_confidence,
             "prefer_needs_verification": prefer_needs_verification,
         }
+
+    def _build_impact_target_profile(self, stats: dict[str, object]) -> dict[str, object]:
+        sample_count = int(stats.get("sample_count") or 0)
+        confirmed_count = int(stats.get("confirmed_count") or 0)
+        false_positive_count = int(stats.get("false_positive_count") or 0)
+        false_positive_rate = self._rate(false_positive_count, sample_count)
+        accept_rate = self._rate(confirmed_count, sample_count)
+        if sample_count >= 3 and false_positive_rate >= 0.6:
+            recommended_action = "require_manual_verification"
+        elif sample_count >= 3 and accept_rate >= 0.8:
+            recommended_action = "boost_confidence"
+        else:
+            recommended_action = "keep_observing"
+        return {
+            **stats,
+            "false_positive_rate": false_positive_rate,
+            "accept_rate": accept_rate,
+            "recommended_action": recommended_action,
+        }
+
+    def _rate(self, numerator: int, denominator: int) -> float:
+        return round(numerator / denominator, 2) if denominator else 0.0
 
     def _coerce_threshold(self, value: object, default: float) -> float:
         try:

@@ -90,6 +90,73 @@ def test_code_observation_extractor_detects_python_swallowed_exception() -> None
     assert any(item["kind"] == "error_handling_weakened" for item in payload["observations"])
 
 
+def test_code_observation_extractor_detects_java_empty_catch_after_removed_handling() -> None:
+    extractor = CodeObservationExtractor()
+
+    payload = extractor.extract(
+        file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        target_hunk={
+            "start_line": 54,
+            "changed_lines": [54, 55, 56],
+            "excerpt": "\n".join(
+                [
+                    "@@ -56,7 +54,6 @@ public class MySqlDomainEventsConsumer {",
+                    "+            } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |",
+                    "+                     InstantiationException e) {",
+                    "-                e.printStackTrace();",
+                    "+            }",
+                ]
+            ),
+        },
+    )
+
+    assert payload["language"] == "java"
+    assert "exception_swallowed" in payload["signals"]
+    observation = next(item for item in payload["observations"] if item["signal"] == "exception_swallowed")
+    assert observation["kind"] == "error_handling_weakened"
+    assert observation["line_start"] == 54
+    assert any("printStackTrace" in item or "catch" in item for item in observation["evidence"])
+
+
+def test_code_observation_extractor_locates_java_swallowed_exception_in_later_hunk() -> None:
+    extractor = CodeObservationExtractor()
+    full_diff = "\n".join(
+        [
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "@@ -20,7 +20,7 @@ public class MySqlDomainEventsConsumer {",
+            " \tprivate final EventBus bus;",
+            "-\tprivate final Integer CHUNKS = 200;",
+            "+\tprivate final Integer chunksTmp = 200;",
+            "@@ -56,7 +54,6 @@ public class MySqlDomainEventsConsumer {",
+            " \t\t\t\t}",
+            " \t\t\t} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |",
+            " \t\t\t\t\t InstantiationException e) {",
+            "-\t\t\t\te.printStackTrace();",
+            " \t\t\t}",
+        ]
+    )
+
+    payload = extractor.extract(
+        file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        target_hunk={
+            "start_line": 20,
+            "changed_lines": [23],
+            "excerpt": "\n".join(
+                [
+                    "@@ -20,7 +20,7 @@ public class MySqlDomainEventsConsumer {",
+                    " \tprivate final EventBus bus;",
+                    "-\tprivate final Integer CHUNKS = 200;",
+                    "+\tprivate final Integer chunksTmp = 200;",
+                ]
+            ),
+        },
+        full_diff=full_diff,
+    )
+
+    observation = next(item for item in payload["observations"] if item["signal"] == "exception_swallowed")
+    assert observation["line_start"] == 55
+
+
 def test_code_observation_extractor_detects_go_loop_call_amplification() -> None:
     extractor = CodeObservationExtractor()
 

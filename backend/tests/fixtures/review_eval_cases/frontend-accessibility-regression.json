@@ -1,0 +1,19 @@
+{
+  "case_id": "frontend-accessibility-regression",
+  "expected_findings": [
+    {
+      "id": "icon-button-name-missing",
+      "severity": "P2",
+      "file_path": "frontend/src/components/review/Toolbar.tsx",
+      "keywords": ["icon button", "accessible name"],
+      "required": true
+    },
+    {
+      "id": "keyboard-state-not-exposed",
+      "severity": "P2",
+      "file_path": "frontend/src/components/review/Toolbar.tsx",
+      "keywords": ["keyboard", "aria-pressed"],
+      "required": true
+    }
+  ]
+}

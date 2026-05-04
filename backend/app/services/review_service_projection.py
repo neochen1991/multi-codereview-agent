@@ -48,6 +48,9 @@ class ReviewServiceProjectionMixin:
     def build_expert_metrics(self) -> list[dict[str, object]]:
         return self.feedback_learner_service.build_expert_metrics()
 
+    def build_impact_feedback_profiles(self) -> dict[str, object]:
+        return self.feedback_learner_service.build_impact_feedback_profiles()
+
     def build_runtime_threshold_recommendations(self) -> dict[str, object]:
         runtime = self.get_runtime_settings()
         return self.feedback_learner_service.build_runtime_threshold_recommendations(
@@ -349,4 +352,3 @@ class ReviewServiceProjectionMixin:
             except ValueError:
                 return 20_000
         return 20_000
-

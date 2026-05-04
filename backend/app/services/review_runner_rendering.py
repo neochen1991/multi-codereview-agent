@@ -118,6 +118,24 @@ class ReviewRunnerRenderingMixin:
             summary = str(repository_context.get("summary") or "").strip()
             if summary:
                 lines.append(f"- 主Agent上下文: {summary}")
+            sast_prescan = repository_context.get("sast_prescan")
+            if isinstance(sast_prescan, dict):
+                sast_summary = str(sast_prescan.get("summary") or "").strip()
+                if sast_summary:
+                    lines.append(f"- SAST/linter 预扫描: {sast_summary}")
+                for item in list(sast_prescan.get("findings") or [])[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    tool = str(item.get("tool") or "").strip()
+                    rule_id = str(item.get("rule_id") or "").strip()
+                    message = str(item.get("message") or "").strip()
+                    cwe = str(item.get("cwe") or "").strip()
+                    why = str(item.get("why_it_matters") or "").strip()
+                    line_start = int(item.get("line_start") or 1)
+                    if message:
+                        cwe_text = f" ({cwe})" if cwe else ""
+                        why_text = f"；{why}" if why else ""
+                        lines.append(f"  * {tool or 'sast'}:{rule_id or 'rule'} L{line_start}{cwe_text} {message}{why_text}")
             primary_context = repository_context.get("primary_context")
             if isinstance(primary_context, dict) and primary_context.get("snippet"):
                 lines.append(f"- 目标文件: {primary_context.get('path')}")
@@ -783,4 +801,3 @@ class ReviewRunnerRenderingMixin:
                     sections.append(false_positive_code[:800])
         sections.append("《规则遍历结果》结束")
         return "\n".join(sections)
-

@@ -28,6 +28,7 @@ class DebateIssue(BaseModel):
     summary: str
     finding_type: str = "risk_hypothesis"
     normalized_issue_type: str = ""
+    category_label: str = ""
     primary_expert_id: str = ""
     aggregated_finding_types: list[str] = Field(default_factory=list)
     file_path: str = ""
@@ -35,10 +36,12 @@ class DebateIssue(BaseModel):
     status: str = "open"
     severity: str = "medium"
     confidence: float = 0.72
+    confidence_rationale: str = ""
     confidence_breakdown: dict[str, object] = Field(default_factory=dict)
     llm_judge_result: dict[str, object] = Field(default_factory=dict)
     finding_ids: list[str] = Field(default_factory=list)
     participant_expert_ids: list[str] = Field(default_factory=list)
+    supporting_expert_ids: list[str] = Field(default_factory=list)
     expert_views: list[dict[str, object]] = Field(default_factory=list)
     aggregated_titles: list[str] = Field(default_factory=list)
     aggregated_summaries: list[str] = Field(default_factory=list)
@@ -52,6 +55,7 @@ class DebateIssue(BaseModel):
     suggested_code: str = ""
     evidence: list[str] = Field(default_factory=list)
     cross_file_evidence: list[str] = Field(default_factory=list)
+    evidence_chain: list[dict[str, object]] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     context_files: list[str] = Field(default_factory=list)
     direct_evidence: bool = False
@@ -61,6 +65,8 @@ class DebateIssue(BaseModel):
     verifier_name: str = ""
     tool_name: str = ""
     tool_verified: bool = False
+    sast_cross_validated: bool = False
+    sast_prescan_matches: list[dict[str, object]] = Field(default_factory=list)
     human_decision: str = "pending"
     resolution: str = ""
     consistency_check_status: str = "unchecked"

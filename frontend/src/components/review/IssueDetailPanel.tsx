@@ -119,6 +119,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="置信度">
                 {`${(issue.confidence * 100).toFixed(0)}%`}
               </Descriptions.Item>
+              <Descriptions.Item label="问题分类">
+                {issue.category_label || issue.normalized_issue_type || issue.finding_type || "-"}
+              </Descriptions.Item>
+              {issue.confidence_rationale ? (
+                <Descriptions.Item label="置信度理由">
+                  <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                    {issue.confidence_rationale}
+                  </Paragraph>
+                </Descriptions.Item>
+              ) : null}
             </Descriptions>
 
             {Object.keys(confidenceBreakdown).length ? (

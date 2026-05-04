@@ -1,0 +1,19 @@
+{
+  "case_id": "db-query-bound-regression",
+  "expected_findings": [
+    {
+      "id": "query-bound-removed",
+      "severity": "P1",
+      "file_path": "src/main/java/com/example/order/OrderRepository.java",
+      "keywords": ["limit", "pagination", "large result set"],
+      "required": true
+    },
+    {
+      "id": "missing-large-data-test",
+      "severity": "P2",
+      "file_path": "src/test/java/com/example/order/OrderRepositoryTest.java",
+      "keywords": ["large data", "regression test"],
+      "required": true
+    }
+  ]
+}

@@ -97,3 +97,46 @@ def test_route_experts_adds_specialists_from_hunk_risk_signals():
     assert "correctness_business" in selected
     assert "database_analysis" in selected
     assert "performance_reliability" in selected
+
+
+def test_route_experts_adds_required_experts_from_repo_policy():
+    state = {
+        "selected_experts": ["correctness_business"],
+        "risk_hints": [],
+        "changed_files": ["backend/app/payments/service.py"],
+        "unified_diff": "",
+        "review_policy": {
+            "required_experts": ["security_compliance", "database_analysis"],
+            "excluded_changed_files": [],
+        },
+    }
+
+    routed = route_experts(state)
+
+    assert routed["selected_experts"][:3] == [
+        "correctness_business",
+        "security_compliance",
+        "database_analysis",
+    ]
+
+
+def test_route_experts_ignores_excluded_policy_paths_for_signal_matching():
+    state = {
+        "selected_experts": [],
+        "risk_hints": [],
+        "changed_files": ["package-lock.json"],
+        "unified_diff": """
+diff --git a/package-lock.json b/package-lock.json
+@@ -1,2 +1,4 @@
++ "kafka": "1.0.0",
++ "redis": "1.0.0",
+""",
+        "review_policy": {
+            "excluded_changed_files": ["package-lock.json"],
+            "reviewable_changed_files": [],
+        },
+    }
+
+    routed = route_experts(state)
+
+    assert routed["selected_experts"] == []

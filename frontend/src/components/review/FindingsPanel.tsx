@@ -57,6 +57,14 @@ const buildFindingTypeLabels = (finding: ReviewFinding): string[] => {
   return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
 };
 
+const buildConfidenceMetaSummary = (finding: ReviewFinding): string | undefined => {
+  const parts = [
+    finding.category_label ? `分类：${finding.category_label}` : "",
+    finding.confidence_rationale ? `置信度理由：${finding.confidence_rationale}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("；") : undefined;
+};
+
 const FindingsPanel: React.FC<FindingsPanelProps> = ({
   findings,
   issues,
@@ -99,7 +107,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           line_start: finding.line_start,
           title: finding.title,
           summary: finding.summary,
-          metaSummary: undefined,
+          metaSummary: buildConfidenceMetaSummary(finding),
           finding_type: finding.finding_type,
           finding_type_labels: buildFindingTypeLabels(finding),
           severity: finding.severity,

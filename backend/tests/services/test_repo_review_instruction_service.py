@@ -44,3 +44,47 @@ def test_repo_review_instruction_service_matches_codereview_yaml_paths(tmp_path:
     assert len(payload["instructions"]) == 1
     assert payload["instructions"][0]["title"] == "Controller 安全入口"
     assert "ownerId 一致性校验" in payload["summary"]
+
+
+def test_repo_review_instruction_service_includes_ai_review_path_rules(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "backend" / "app" / "payments" / "service.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def charge(): pass", encoding="utf-8")
+    (repo / ".ai-review.yml").write_text(
+        "\n".join(
+            [
+                "path_rules:",
+                "  backend/app/payments/**:",
+                "    required_experts: [security_compliance, database_analysis]",
+                "    comment_level: strict",
+                "    instructions: Payment code must prove authorization, idempotency, and transaction safety.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload = RepoReviewInstructionService().load_for_file(repo, "backend/app/payments/service.py")
+
+    assert len(payload["instructions"]) == 1
+    assert payload["instructions"][0]["source"] == ".ai-review.yml"
+    assert payload["instructions"][0]["expert_ids"] == ["security_compliance", "database_analysis"]
+    assert "transaction safety" in payload["summary"]
+
+
+def test_repo_review_instruction_service_loads_agent_standard_files(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("Agent 规则：代码检视必须确认幂等性。", encoding="utf-8")
+    (repo / ".github").mkdir()
+    (repo / ".github/copilot-instructions.md").write_text("Copilot 规则：高风险接口必须说明测试。", encoding="utf-8")
+
+    payload = RepoReviewInstructionService().load_for_file(repo, "src/main/java/app/OrderService.java")
+
+    sources = [str(item["source"]) for item in payload["instructions"]]
+    assert "AGENTS.md" in sources
+    assert ".github/copilot-instructions.md" in sources
+    assert "确认幂等性" in payload["summary"]
+    assert "高风险接口必须说明测试" in payload["summary"]

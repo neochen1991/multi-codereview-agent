@@ -172,6 +172,24 @@ PROBLEM_FAMILY_TOKENS = {
     },
 }
 
+ISSUE_JURISDICTION = {
+    "exception_swallowed": "maintainability_code_health",
+    "null_pointer": "correctness_business",
+    "code_injection_risk": "security_compliance",
+    "injection_risk": "security_compliance",
+    "auth_bypass": "security_compliance",
+    "sensitive_data_exposure": "security_compliance",
+    "loop_call_amplification": "performance_reliability",
+    "n_plus_one": "performance_reliability",
+    "query_boundary_missing": "database_analysis",
+    "query_semantics_weakened": "database_analysis",
+    "unbounded_query_risk": "database_analysis",
+    "comment_contract_unimplemented": "correctness_business",
+    "domain_aggregate_creation": "ddd_architecture",
+    "aggregate_factory": "ddd_architecture",
+    "domain_event": "ddd_architecture",
+}
+
 RESPONSIBILITY_TOKEN_HINTS = {
     "architecture_design": {
         "命名",
@@ -597,6 +615,9 @@ def _select_responsible_expert_id(items: list[dict[str, object]]) -> str:
     }
     if len(participant_ids) <= 1:
         return next(iter(participant_ids), "")
+    jurisdiction_expert_id = _select_jurisdiction_expert_id(items, participant_ids)
+    if jurisdiction_expert_id:
+        return jurisdiction_expert_id
     tokens: set[str] = set()
     for item in items:
         tokens.update(_build_problem_token_set(item))
@@ -610,6 +631,25 @@ def _select_responsible_expert_id(items: list[dict[str, object]]) -> str:
     if best_expert_id:
         return best_expert_id
     return _select_primary_item(items).get("expert_id", "")
+
+
+def _select_jurisdiction_expert_id(items: list[dict[str, object]], participant_ids: set[str]) -> str:
+    for item in items:
+        for key in _jurisdiction_keys_for_item(item):
+            expert_id = ISSUE_JURISDICTION.get(key)
+            if expert_id in participant_ids:
+                return expert_id
+    return ""
+
+
+def _jurisdiction_keys_for_item(item: dict[str, object]) -> list[str]:
+    keys: list[str] = []
+    normalized = str(item.get("normalized_issue_type") or "").strip().lower()
+    if normalized:
+        keys.append(normalized)
+    keys.extend(sorted(_build_problem_family_set(item)))
+    keys.extend(sorted(_build_problem_token_set(item)))
+    return list(dict.fromkeys(key for key in keys if key))
 
 
 def _build_expert_views(items: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -699,6 +739,10 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
             eligible_items,
             "remediation_steps",
         )
+        sast_prescan_matches = _collect_sast_prescan_matches(eligible_items)
+        evidence = [e for item in eligible_items for e in item.get("evidence", [])]
+        if sast_prescan_matches:
+            evidence.extend(_format_sast_evidence(item) for item in sast_prescan_matches)
         conflicts.append(
             {
                 "issue_id": first.get("finding_id"),
@@ -720,16 +764,31 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 ),
                 "expert_views": _build_expert_views(eligible_items),
                 "primary_expert_id": responsible_expert_id,
+                "supporting_expert_ids": [
+                    expert_id
+                    for expert_id in list(
+                        dict.fromkeys(
+                            str(item.get("expert_id") or "").strip()
+                            for item in eligible_items
+                            if str(item.get("expert_id") or "").strip()
+                        )
+                    )
+                    if expert_id != responsible_expert_id
+                ],
                 "aggregated_titles": aggregated_titles,
                 "aggregated_summaries": aggregated_summaries,
                 "aggregated_remediation_strategies": aggregated_remediation_strategies,
                 "aggregated_remediation_suggestions": aggregated_remediation_suggestions,
                 "aggregated_remediation_steps": aggregated_remediation_steps,
-                "evidence": [e for item in eligible_items for e in item.get("evidence", [])],
+                "evidence": list(dict.fromkeys(str(item).strip() for item in evidence if str(item).strip())),
                 "cross_file_evidence": [e for item in eligible_items for e in item.get("cross_file_evidence", [])],
                 "assumptions": [e for item in eligible_items for e in item.get("assumptions", [])],
                 "context_files": [e for item in eligible_items for e in item.get("context_files", [])],
                 "direct_evidence": any(str(item.get("finding_type")) == "direct_defect" for item in eligible_items),
+                "sast_cross_validated": bool(sast_prescan_matches),
+                "sast_prescan_matches": sast_prescan_matches,
+                "tool_name": "sast_prescan" if sast_prescan_matches else "",
+                "tool_verified": bool(sast_prescan_matches),
                 "severity": highest_severity,
                 "confidence": confidence,
                 "confidence_breakdown": confidence_breakdown,
@@ -849,6 +908,8 @@ def _classify_issue_candidate(
     high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
     high_value_direct_defect = any(token in text_blob for token in HIGH_VALUE_DIRECT_DEFECT_TOKENS)
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
+    observation_signal = _has_observation_signal(items)
+    sast_cross_validated = bool(_collect_sast_prescan_matches(items))
 
     if non_code_review_scope and not direct_evidence:
         return {
@@ -878,6 +939,7 @@ def _classify_issue_candidate(
         bool(config.get("suppress_low_risk_hint_issues", True))
         and finding_types <= {"design_concern"}
         and highest_severity in {"low", "medium"}
+        and highest_severity not in {"high", "critical", "blocker"}
     ):
         return {
             "rule_code": "design_concern_only",
@@ -897,6 +959,8 @@ def _classify_issue_candidate(
         and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
         and hint_like
         and not high_value_contract_mismatch
+        and not observation_signal
+        and not sast_cross_validated
     ):
         return {
             "rule_code": "hint_like_medium",
@@ -914,11 +978,16 @@ def _classify_issue_candidate(
         direct_evidence
         and highest_severity in {"blocker", "critical", "high"}
         and effective_confidence >= priority_confidence_threshold
-        and evidence_strength >= 4
+        and evidence_strength >= 3
         and (high_value_contract_mismatch or high_value_direct_defect)
     )
+    verification_supported_issue = (
+        (direct_evidence and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
+        or (sast_cross_validated and evidence_strength >= 1 and effective_confidence >= priority_confidence_threshold)
+        or (observation_signal and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
+    )
 
-    if all_need_verification and not strong_direct_code_issue:
+    if all_need_verification and not (strong_direct_code_issue or verification_supported_issue):
         return {
             "rule_code": "conditional_conclusion",
             "rule_label": "待验证结论保留为 finding",
@@ -992,7 +1061,7 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
     }
     participant_count = len(participant_ids)
     consensus_bonus = 0.0
-    if participant_count > 1:
+    if participant_count > 1 and _has_same_issue_type_consensus(items):
         consensus_bonus = min(0.08, round(0.03 + 0.02 * (participant_count - 2), 2))
 
     evidence_signal_count = len(_collect_issue_evidence_signals(items))
@@ -1010,7 +1079,10 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
             hypothesis_penalty += 0.02
         hypothesis_penalty = min(0.12, round(hypothesis_penalty, 2))
 
+    sast_prescan_matches = _collect_sast_prescan_matches(items)
     verification_bonus = 0.0
+    if sast_prescan_matches:
+        verification_bonus = min(0.08, round(0.04 + 0.01 * (len(sast_prescan_matches) - 1), 2))
     final_confidence = round(
         min(
             0.99,
@@ -1023,6 +1095,8 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
         "consensus_bonus": consensus_bonus,
         "evidence_bonus": evidence_bonus,
         "verification_bonus": verification_bonus,
+        "sast_cross_validated": bool(sast_prescan_matches),
+        "sast_match_count": len(sast_prescan_matches),
         "hypothesis_penalty": hypothesis_penalty,
         "final_confidence": final_confidence,
         "participant_count": participant_count,
@@ -1030,6 +1104,20 @@ def _score_issue_confidence(items: list[dict[str, object]]) -> tuple[float, dict
         "direct_evidence": direct_evidence,
         "finding_count": len(items),
     }
+
+
+def _has_same_issue_type_consensus(items: list[dict[str, object]]) -> bool:
+    if len(items) <= 1:
+        return False
+    explicit_types = [
+        str(item.get("normalized_issue_type") or "").strip()
+        for item in items
+        if str(item.get("normalized_issue_type") or "").strip()
+    ]
+    if explicit_types:
+        return len(set(explicit_types)) == 1 and len(explicit_types) == len(items)
+    inferred_types = {_build_single_problem_type(item) for item in items}
+    return len(inferred_types) == 1
 
 
 def _collect_issue_evidence_signals(items: list[dict[str, object]]) -> set[str]:
@@ -1041,6 +1129,64 @@ def _collect_issue_evidence_signals(items: list[dict[str, object]]) -> set[str]:
                 if value:
                     signals.add(value)
     return signals
+
+
+def _collect_sast_prescan_matches(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    matches: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+    for item in items:
+        raw_matches = item.get("sast_prescan_matches")
+        if not raw_matches:
+            code_context = item.get("code_context")
+            if isinstance(code_context, dict):
+                raw_matches = code_context.get("sast_prescan_matches")
+        for raw in list(raw_matches or []):
+            if not isinstance(raw, dict):
+                continue
+            match = {
+                "tool": str(raw.get("tool") or "sast").strip(),
+                "rule_id": str(raw.get("rule_id") or "").strip(),
+                "message": str(raw.get("message") or "").strip(),
+                "severity": str(raw.get("severity") or "").strip(),
+                "file_path": str(raw.get("file_path") or item.get("file_path") or "").strip(),
+                "line_start": _safe_int(raw.get("line_start") or item.get("line_start"), 1),
+            }
+            key = (
+                str(match["tool"]).lower(),
+                str(match["rule_id"]).lower(),
+                str(match["file_path"]).lower(),
+                int(match["line_start"]),
+            )
+            if key not in seen:
+                seen.add(key)
+                matches.append(match)
+    return matches[:8]
+
+
+def _has_observation_signal(items: list[dict[str, object]]) -> bool:
+    for item in items:
+        breakdown = item.get("confidence_breakdown")
+        if isinstance(breakdown, dict) and str(breakdown.get("evidence_source") or "").strip() == "observation_signal":
+            return True
+        code_context = item.get("code_context")
+        if isinstance(code_context, dict) and str(code_context.get("evidence_source") or "").strip() == "observation_signal":
+            return True
+    return False
+
+
+def _format_sast_evidence(match: dict[str, object]) -> str:
+    tool = str(match.get("tool") or "sast").strip()
+    rule_id = str(match.get("rule_id") or "rule").strip()
+    line_start = _safe_int(match.get("line_start"), 1)
+    message = str(match.get("message") or "").strip()
+    return f"SAST/linter 佐证: {tool}:{rule_id} L{line_start} {message}".strip()
+
+
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _coerce_confidence(value: object) -> float:

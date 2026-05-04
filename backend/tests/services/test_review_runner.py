@@ -3853,10 +3853,12 @@ def test_review_runner_builds_forced_loop_observation_candidate(storage_root: Pa
 
     assert len(forced) == 1
     assert forced[0]["title"] == "循环调用放大"
-    assert forced[0]["finding_type"] == "direct_defect"
-    assert forced[0]["verification_needed"] is False
+    assert forced[0]["finding_type"] == "risk_hypothesis"
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["direct_evidence"] is False
+    assert forced[0]["evidence_source"] == "observation_signal"
     assert forced[0]["severity"] == "high"
-    assert float(forced[0]["confidence"]) >= 0.86
+    assert float(forced[0]["confidence"]) <= 0.78
 
 
 def test_review_runner_builds_forced_comment_contract_candidate(storage_root: Path):
@@ -3889,10 +3891,12 @@ def test_review_runner_builds_forced_comment_contract_candidate(storage_root: Pa
 
     assert len(forced) == 1
     assert forced[0]["title"] == "承诺未落地"
-    assert forced[0]["finding_type"] == "direct_defect"
-    assert forced[0]["verification_needed"] is False
+    assert forced[0]["finding_type"] == "risk_hypothesis"
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["direct_evidence"] is False
+    assert forced[0]["evidence_source"] == "observation_signal"
     assert forced[0]["severity"] == "high"
-    assert float(forced[0]["confidence"]) >= 0.88
+    assert float(forced[0]["confidence"]) <= 0.78
 
 
 def test_review_runner_builds_forced_ddd_factory_bypass_candidate(storage_root: Path):
@@ -3929,10 +3933,12 @@ def test_review_runner_builds_forced_ddd_factory_bypass_candidate(storage_root: 
 
     assert len(forced) == 1
     assert forced[0]["title"] == "聚合工厂绕过"
-    assert forced[0]["finding_type"] == "direct_defect"
-    assert forced[0]["verification_needed"] is False
+    assert forced[0]["finding_type"] == "risk_hypothesis"
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["direct_evidence"] is False
+    assert forced[0]["evidence_source"] == "observation_signal"
     assert forced[0]["severity"] == "blocker"
-    assert float(forced[0]["confidence"]) >= 0.9
+    assert float(forced[0]["confidence"]) <= 0.78
     assert "DDD-JDDD-001" in forced[0]["matched_rules"]
     assert forced[0]["observation_ids"] == ["obs_factory_001"]
 
@@ -6271,6 +6277,96 @@ def test_review_runner_coalesces_same_root_cause_issues_before_final_judge(stora
     assert merged.severity == "blocker"
 
 
+def test_review_runner_coalesces_duplicate_event_consumer_exception_issues(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    file_path = "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+    empty_catch = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_empty_catch",
+        title="空catch块吞掉事件处理异常，存在排障与补偿缺口（静默吞掉异常）",
+        summary="catch 块删除 printStackTrace 后变为空 catch，异常被静默吞掉。",
+        finding_type="direct_defect",
+        normalized_issue_type="exception_swallowed",
+        file_path=file_path,
+        line_start=54,
+        status="needs_human",
+        severity="high",
+        confidence=0.95,
+        finding_ids=["fdg_empty_catch"],
+        participant_expert_ids=["correctness_business"],
+        primary_expert_id="correctness_business",
+    )
+    reflection_exception = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_reflection_exception",
+        title="反射异常被完全吞掉，排障信息丢失（静默吞掉异常）",
+        summary="NoSuchMethodException 等反射异常捕获后没有任何处理。",
+        finding_type="direct_defect",
+        normalized_issue_type="exception_semantics_weakened",
+        file_path=file_path,
+        line_start=54,
+        status="needs_human",
+        severity="high",
+        confidence=0.9,
+        finding_ids=["fdg_reflection_exception"],
+        participant_expert_ids=["performance_reliability"],
+        primary_expert_id="performance_reliability",
+    )
+
+    issues = runner._coalesce_duplicate_issues([empty_catch, reflection_exception])
+
+    assert len(issues) == 1
+    assert issues[0].normalized_issue_type == "event_consumer_exception_swallowed"
+    assert set(issues[0].finding_ids) == {"fdg_empty_catch", "fdg_reflection_exception"}
+    assert set(issues[0].participant_expert_ids) == {"correctness_business", "performance_reliability"}
+
+
+def test_review_runner_coalesces_event_consumer_batch_boundary_across_lines(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    file_path = "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+    naming_issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_chunks_tmp",
+        title="常量命名退化为 chunksTmp",
+        summary="CHUNKS 被改成 chunksTmp，批量大小语义被弱化。",
+        finding_type="direct_defect",
+        normalized_issue_type="naming_misleading",
+        file_path=file_path,
+        line_start=23,
+        status="open",
+        severity="medium",
+        confidence=0.91,
+        finding_ids=["fdg_chunks_tmp"],
+        participant_expert_ids=["architecture_design"],
+        primary_expert_id="architecture_design",
+    )
+    query_bound_issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_query_bound_removed",
+        title="事件消费查询删除 LIMIT :chunk 后失去批量边界",
+        summary="SELECT 查询移除了 LIMIT :chunk，消费循环可能一次性拉取全部事件。",
+        finding_type="direct_defect",
+        normalized_issue_type="query_bound_removed",
+        file_path=file_path,
+        line_start=37,
+        status="needs_human",
+        severity="high",
+        confidence=0.97,
+        finding_ids=["fdg_query_bound"],
+        participant_expert_ids=["database_analysis"],
+        primary_expert_id="database_analysis",
+    )
+
+    issues = runner._coalesce_duplicate_issues([naming_issue, query_bound_issue])
+
+    assert len(issues) == 1
+    assert issues[0].normalized_issue_type == "event_consumer_batch_boundary"
+    assert issues[0].severity == "high"
+    assert set(issues[0].finding_ids) == {"fdg_chunks_tmp", "fdg_query_bound"}
+    assert set(issues[0].participant_expert_ids) == {"architecture_design", "database_analysis"}
+    assert "LIMIT :chunk" in issues[0].summary
+
+
 def test_review_runner_appends_deterministic_query_bound_finding(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
@@ -6311,9 +6407,35 @@ def test_review_runner_appends_deterministic_query_bound_finding(storage_root: P
     assert len(findings) == 1
     assert findings[0].expert_id == "database_analysis"
     assert findings[0].normalized_issue_type == "query_bound_removed"
+    assert findings[0].category_label == "data_access"
+    assert "确定性规则信号" in findings[0].confidence_rationale
     assert findings[0].line_start == 37
     assert "LIMIT" in " ".join(findings[0].evidence)
     assert len(finding_payloads) == 1
+
+
+def test_review_runner_builds_default_finding_category_and_confidence_rationale(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    category = runner._category_label_for_finding(
+        finding_type="direct_defect",
+        issue_type="exception_swallowed",
+        expert_id="maintainability_code_health",
+    )
+    rationale = runner._confidence_rationale_for_finding(
+        confidence=0.81,
+        finding_type="direct_defect",
+        evidence=["catch 块为空"],
+        matched_rules=["JAVA-ERR-001"],
+        verification_needed=True,
+        code_context={"sast_cross_validated": True},
+    )
+
+    assert category == "exception_handling"
+    assert "直接代码证据" in rationale
+    assert "命中 1 条规则" in rationale
+    assert "SAST/linter 交叉验证" in rationale
+    assert "仍需复核" in rationale
 
 
 def test_review_runner_augments_repository_context_with_java_observations(storage_root: Path):

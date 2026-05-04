@@ -1,0 +1,34 @@
+{
+  "findings": [
+    {
+      "id": "finding-1",
+      "severity": "P1",
+      "file_path": "backend/app/payments/service.py",
+      "title": "Missing owner_id authorization check",
+      "summary": "The update path no longer verifies owner_id before charging.",
+      "expert_id": "security_compliance",
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    },
+    {
+      "id": "finding-2",
+      "severity": "P2",
+      "file_path": "backend/app/payments/service.py",
+      "title": "Transaction rollback is skipped",
+      "summary": "The transaction can commit after a downstream failure without rollback.",
+      "expert_id": "database_analysis",
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    }
+  ],
+  "metadata": {
+    "token_cost_usd": 0.42,
+    "runtime_seconds": 24.0
+  }
+}

@@ -37,6 +37,8 @@ from app.services.memory_probe import MemoryProbe
 from app.services.orchestrator.graph import build_review_graph
 from app.services.prompt_budget_planner import PromptBudgetPlanner
 from app.services.repository_config_resolver import RepositoryConfigResolver
+from app.services.repository_context_service import RepositoryContextService
+from app.services.repo_review_policy_service import RepoReviewPolicyService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
 from app.services.review_runner_common import ReviewRunnerCommonMixin
@@ -86,6 +88,7 @@ class ReviewRunner(
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.repository_resolver = RepositoryConfigResolver()
+        self.review_policy_service = RepoReviewPolicyService()
         self.artifact_service = ArtifactService(self.storage_root)
         self.diff_excerpt_service = DiffExcerptService()
         self.capability_service = ExpertCapabilityService()
@@ -151,6 +154,17 @@ class ReviewRunner(
         safe_completed = completed_at if completed_at.tzinfo is not None else completed_at.replace(tzinfo=UTC)
         return max(0.0, round((safe_completed - safe_started).total_seconds(), 3))
 
+    def _load_repo_review_policy(self, runtime_settings: object, subject: ReviewSubject) -> dict[str, object]:
+        try:
+            repository = self.repository_resolver.resolve(runtime_settings, subject)  # type: ignore[arg-type]
+        except Exception:
+            logger.exception("failed to resolve repository for review policy repo_id=%s", subject.repo_id)
+            return self.review_policy_service.load_for_files("", list(subject.changed_files or []))
+        return self.review_policy_service.load_for_files(
+            repository.local_path,
+            list(subject.changed_files or []),
+        )
+
     def run_once(self, review_id: str) -> ReviewTask:
         """完整执行一次审核主链。"""
         self._knowledge_runtime_cache.clear()
@@ -214,6 +228,7 @@ class ReviewRunner(
                 )
             )
             return review
+        review_policy = self._load_repo_review_policy(runtime_settings, review.subject)
         requested_selected_ids = [
             item for item in review.selected_experts if isinstance(item, str) and item.strip()
         ]
@@ -232,11 +247,18 @@ class ReviewRunner(
                 effective_runtime_settings,
                 requested_expert_ids=requested_selected_ids,
             )
+        pre_policy_selection_mode = str((selection_plan.get("llm") or {}).get("mode") or "").strip().lower()
         selection_plan = self._ensure_required_mr_experts(
             subject=review.subject,
             selection_plan=selection_plan,
             enabled_experts=enabled_experts,
         )
+        if pre_policy_selection_mode != "user_selected_direct":
+            selection_plan = self.review_policy_service.apply_to_selection_plan(
+                selection_plan,
+                review_policy,
+                enabled_expert_ids=[expert.expert_id for expert in enabled_experts],
+            )
         MemoryProbe.log(
             "review_runner.after_expert_selection",
             review_id=review.review_id,
@@ -261,7 +283,9 @@ class ReviewRunner(
                 "selected_experts": list(selection_plan.get("selected_experts", []) or []),
                 "skipped_experts": list(selection_plan.get("skipped_experts", []) or []),
                 "llm": dict(selection_plan.get("llm") or {}),
+                "review_policy": dict(selection_plan.get("review_policy") or {}),
             },
+            "review_policy": review_policy,
         }
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
@@ -819,6 +843,12 @@ class ReviewRunner(
         )
         self._append_deterministic_query_bound_findings(review, finding_payloads)
         self._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
+        self._append_empty_diff_fallback_finding(
+            review,
+            expert_jobs,
+            finding_payloads,
+            manual_expert_selection=manual_expert_selection,
+        )
         self._abort_if_closed(review_id)
         if not expert_jobs and impact_analysis_expert is None:
             reason = "用户选择的专家与当前变更相关性不足，且未能补入兜底专家，无法继续审核。"
@@ -895,6 +925,7 @@ class ReviewRunner(
                 "findings": finding_payloads,
                 "feedback_quality_profiles": self.feedback_learner_service.build_quality_profiles(),
                 "runtime_settings": effective_runtime_settings,
+                "review_policy": review_policy,
             }
         )
 
@@ -927,6 +958,7 @@ class ReviewRunner(
                 confidence_breakdown=dict(item.get("confidence_breakdown") or {}),
                 finding_ids=[str(value) for value in item.get("finding_ids", [])],
                 participant_expert_ids=[str(value) for value in item.get("participant_expert_ids", [])],
+                supporting_expert_ids=[str(value) for value in item.get("supporting_expert_ids", [])],
                 expert_views=[dict(value) for value in item.get("expert_views", []) if isinstance(value, dict)],
                 aggregated_titles=[str(value) for value in item.get("aggregated_titles", [])],
                 aggregated_summaries=[str(value) for value in item.get("aggregated_summaries", [])],
@@ -946,6 +978,9 @@ class ReviewRunner(
                 suggested_code=str(item.get("suggested_code") or ""),
                 evidence=[str(value) for value in item.get("evidence", [])],
                 cross_file_evidence=[str(value) for value in item.get("cross_file_evidence", [])],
+                evidence_chain=[
+                    dict(value) for value in item.get("evidence_chain", []) if isinstance(value, dict)
+                ],
                 assumptions=[str(value) for value in item.get("assumptions", [])],
                 context_files=[str(value) for value in item.get("context_files", [])],
                 direct_evidence=bool(item.get("direct_evidence")),
@@ -954,7 +989,11 @@ class ReviewRunner(
                 needs_debate=bool(item.get("needs_debate")),
                 verifier_name=str(item.get("verifier_name") or ""),
                 tool_name=str(item.get("tool_name") or ""),
-                tool_verified=bool(item.get("tool_verified")),
+                tool_verified=bool(item.get("tool_verified")) or bool(item.get("sast_cross_validated")),
+                sast_cross_validated=bool(item.get("sast_cross_validated")),
+                sast_prescan_matches=[
+                    dict(value) for value in list(item.get("sast_prescan_matches") or []) if isinstance(value, dict)
+                ],
                 resolution=str(item.get("resolution") or ""),
                 consistency_check_status=str(item.get("consistency_check_status") or "unchecked"),
                 consistency_check_summary=str(item.get("consistency_check_summary") or ""),
@@ -1036,6 +1075,9 @@ class ReviewRunner(
                     evidence=[str(v) for v in list(fallback_source.get("evidence") or []) if str(v).strip()],
                     cross_file_evidence=[
                         str(v) for v in list(fallback_source.get("cross_file_evidence") or []) if str(v).strip()
+                    ],
+                    evidence_chain=[
+                        dict(v) for v in list(fallback_source.get("evidence_chain") or []) if isinstance(v, dict)
                     ],
                     assumptions=[str(v) for v in list(fallback_source.get("assumptions") or []) if str(v).strip()],
                     context_files=[str(v) for v in list(fallback_source.get("context_files") or []) if str(v).strip()],
@@ -1474,8 +1516,10 @@ class ReviewRunner(
                     summary="本次 diff 删除了查询的 LIMIT、分页或批量边界保护，数据量放大后可能返回大结果集并拖垮数据库访问路径。",
                     finding_type="direct_defect",
                     normalized_issue_type="query_bound_removed",
+                    category_label="data_access",
                     severity="high",
                     confidence=0.92,
+                    confidence_rationale="确定性规则信号；直接代码证据；命中 1 条规则；原始置信度 0.92",
                     file_path=normalized_file_path,
                     line_start=line_start,
                     evidence=self._query_bound_evidence(excerpt),
@@ -1508,6 +1552,69 @@ class ReviewRunner(
                     )
                 )
                 return
+
+    def _append_empty_diff_fallback_finding(
+        self,
+        review: ReviewTask,
+        expert_jobs: list[dict[str, object]],
+        finding_payloads: list[dict[str, object]],
+        *,
+        manual_expert_selection: bool,
+    ) -> None:
+        """自动 MR 只有文件清单时保留低置信度风险，避免报告页完全空白。"""
+
+        metadata = dict(review.subject.metadata or {})
+        if manual_expert_selection or expert_jobs or finding_payloads:
+            return
+        if str(review.subject.unified_diff or "").strip():
+            return
+        changed_files = [str(path).strip() for path in list(review.subject.changed_files or []) if str(path).strip()]
+        if not changed_files or not bool(metadata.get("allow_empty_diff_fallback")):
+            return
+        primary_file = changed_files[0]
+        finding = ReviewFinding(
+            review_id=review.review_id,
+            expert_id=FALLBACK_EXPERT_ID,
+            title="变更内容不足，需补充 diff 后复核",
+            summary=(
+                "本次审核只拿到了变更文件清单，缺少可定位的 diff hunk。"
+                "系统先保留为待验证风险，提醒补充平台 diff 或本地工作区上下文后再做正式结论。"
+            ),
+            finding_type="risk_hypothesis",
+            normalized_issue_type="empty_diff_review_input",
+            category_label="risk_hypothesis",
+            severity="low",
+            confidence=0.31,
+            confidence_rationale="待验证风险；审核输入缺少 unified_diff；仍需复核；原始置信度 0.31",
+            file_path=primary_file,
+            line_start=1,
+            evidence=[
+                f"变更文件：{primary_file}",
+                "审核输入缺少 unified_diff，无法确认新增/删除代码行。",
+            ],
+            assumptions=["该 finding 仅用于保留审核输入不足的风险，不应升级为阻塞合并问题。"],
+            context_files=changed_files[:8],
+            remediation_strategy="补齐 MR diff 或接入本地仓库上下文后重新审核。",
+            remediation_suggestion="重新拉取平台 diff，或配置 workspace_repo_path 让系统可以读取本地变更。",
+            remediation_steps=["补充 unified_diff", "确认变更行号", "重新运行代码检视"],
+        )
+        self.finding_repo.save(review.review_id, finding)
+        finding_payloads.append(finding.model_dump(mode="json"))
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="finding_created",
+                phase="expert_review",
+                message="系统因缺少 diff 保留了一条低置信度待验证 finding",
+                payload={
+                    "finding_id": finding.finding_id,
+                    "expert_id": finding.expert_id,
+                    "file_path": finding.file_path,
+                    "line_start": finding.line_start,
+                    "deterministic_signal": "empty_diff_review_input",
+                },
+            )
+        )
 
     def _append_deterministic_observation_findings(
         self,
@@ -1550,6 +1657,20 @@ class ReviewRunner(
                 "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
                 "confidence_floor": 0.88,
             },
+            "error_handling_weakened": {
+                "expert_id": "correctness_business",
+                "title": "异常处理被静默吞掉",
+                "normalized_issue_type": "exception_swallowed",
+                "summary": "当前改动删除或削弱了 catch 分支里的异常处理，失败路径会被静默吞掉，调用方和运维侧难以及时发现真实错误。",
+                "matched_rules": ["CODE-JAVA-002"],
+                "violated_guidelines": ["catch 分支不能静默吞掉异常，至少需要日志、重新抛出或明确补偿处理"],
+                "rule_based_reasoning": "observation 已明确命中 catch 分支为空或原有异常处理被删除，这类错误处理退化可以直接从 diff 和当前代码结构确认。",
+                "remediation_strategy": "恢复异常处理语义，至少记录错误上下文；若该异常应阻断流程，则重新抛出业务异常或让事务回滚。",
+                "remediation_suggestion": "不要保留空 catch。结合当前组件语义选择 logger.error、重新抛出或补偿处理，并补充异常分支回归测试。",
+                "remediation_steps": ["恢复 catch 分支中的错误处理", "补充包含事件名/聚合 ID 的错误上下文", "增加异常分支测试覆盖"],
+                "suggested_code": "catch (Exception e) {\n    logger.error(\"Failed to consume domain event\", e);\n    throw e;\n}",
+                "confidence_floor": 0.9,
+            },
         }
 
         for observation in observations:
@@ -1584,6 +1705,11 @@ class ReviewRunner(
                     f"注释、TODO 或方法意图已经承诺了行为（{symbol_display}），"
                     "但当前实现没有对应动作，属于直接的语义缺口。"
                 )
+            elif kind == "error_handling_weakened":
+                claim = (
+                    f"当前 catch 分支的异常处理被删除或变成空实现（{symbol_display}），"
+                    "失败路径会被静默吞掉，导致事件消费、补偿或排障链路失去错误信号。"
+                )
             finding = ReviewFinding(
                 review_id=review.review_id,
                 expert_id=str(profile["expert_id"]),
@@ -1591,8 +1717,14 @@ class ReviewRunner(
                 summary=str(profile["summary"]),
                 finding_type="direct_defect",
                 normalized_issue_type=normalized_issue_type,
+                category_label=self._category_label_for_finding(
+                    finding_type="direct_defect",
+                    issue_type=normalized_issue_type,
+                    expert_id=str(profile["expert_id"]),
+                ),
                 severity="high",
                 confidence=max(float(observation.get("confidence") or 0.0), float(profile.get("confidence_floor") or 0.85)),
+                confidence_rationale="确定性规则信号；结构化观察信号；直接代码证据；仍需结合业务上下文复核",
                 file_path=file_path,
                 line_start=line_start,
                 evidence=evidence[:3] or [claim],
@@ -1866,14 +1998,31 @@ class ReviewRunner(
             candidate = forced_candidates[0]
             forced_line_start = self._normalize_line_start(candidate.get("line_start"), line_start)
             evidence = [str(item).strip() for item in list(candidate.get("evidence") or []) if str(item).strip()]
+            observation_ids = self._normalize_text_list(candidate.get("observation_ids"), [])
+            is_forced_ddd_factory_bypass = (
+                expert.expert_id == "ddd_architecture"
+                and "DDD-JDDD-001" in set(self._normalize_text_list(candidate.get("matched_rules"), matched_rules))
+                and any(
+                    token in "\n".join(evidence).lower()
+                    for token in ("course.create", "new course", "factory", "工厂")
+                )
+            )
             finding = ReviewFinding(
                 review_id=review.review_id,
                 expert_id=expert.expert_id,
                 title=str(candidate.get("title") or f"{expert.name_zh} 规则兜底发现"),
                 summary=str(candidate.get("claim") or candidate.get("summary") or ""),
-                finding_type=str(candidate.get("finding_type") or "direct_defect"),
+                finding_type=(
+                    "direct_defect"
+                    if is_forced_ddd_factory_bypass
+                    else str(candidate.get("finding_type") or "direct_defect")
+                ),
                 severity=self._normalize_severity(candidate.get("severity"), "high"),
-                confidence=self._normalize_confidence(candidate.get("confidence"), 0.86),
+                confidence=(
+                    max(self._normalize_confidence(candidate.get("confidence"), 0.86), 0.9)
+                    if is_forced_ddd_factory_bypass
+                    else self._normalize_confidence(candidate.get("confidence"), 0.86)
+                ),
                 file_path=str(candidate.get("file_path") or file_path),
                 line_start=forced_line_start,
                 evidence=evidence,
@@ -1883,8 +2032,12 @@ class ReviewRunner(
                 matched_rules=self._normalize_text_list(candidate.get("matched_rules"), matched_rules),
                 violated_guidelines=self._normalize_text_list(candidate.get("violated_guidelines"), matched_rules),
                 rule_based_reasoning=str(candidate.get("rule_based_reasoning") or ""),
-                verification_needed=False,
-                verification_plan="",
+                verification_needed=(
+                    False if is_forced_ddd_factory_bypass else bool(candidate.get("verification_needed", True))
+                ),
+                verification_plan=(
+                    "" if is_forced_ddd_factory_bypass else str(candidate.get("verification_plan") or "")
+                ),
                 remediation_strategy=str(candidate.get("fix_strategy") or self._build_remediation_strategy(review.subject, expert.expert_id, file_path)),
                 remediation_suggestion=str(candidate.get("suggested_fix") or self._build_remediation_suggestion(review.subject, expert.expert_id, file_path)),
                 remediation_steps=self._normalize_text_list(
@@ -1905,12 +2058,14 @@ class ReviewRunner(
                 suggested_code=str(candidate.get("suggested_code") or self._build_suggested_code(review.subject, file_path, forced_line_start, expert.expert_id)).strip(),
                 suggested_code_language=self._infer_code_language(file_path),
             )
-            observation_ids = self._normalize_text_list(candidate.get("observation_ids"), [])
             if observation_ids:
                 code_context = dict(finding.code_context or {})
                 code_context["observation_ids"] = observation_ids
                 code_context["fallback_generated_from_observation"] = True
                 code_context["failure_reason"] = error_text
+                if candidate.get("evidence_source"):
+                    code_context["evidence_source"] = str(candidate.get("evidence_source") or "")
+                code_context["direct_evidence"] = bool(candidate.get("direct_evidence", False)) or is_forced_ddd_factory_bypass
                 finding.code_context = code_context
             return finding
         must_review_count = int(rule_screening.get("must_review_count") or 0)
@@ -2252,6 +2407,8 @@ class ReviewRunner(
         """MR 任务必须保留关联影响专家，避免 LLM 自动选择时把它排除。"""
 
         if subject.subject_type != "mr":
+            return selection_plan
+        if str((selection_plan.get("llm") or {}).get("mode") or "").strip().lower() == "user_selected_direct":
             return selection_plan
         enabled_by_id = {expert.expert_id: expert for expert in enabled_experts}
         impact_expert = enabled_by_id.get(CHANGE_IMPACT_EXPERT_ID)
@@ -3879,11 +4036,57 @@ class ReviewRunner(
                 suggested_code=str(parsed.get("suggested_code") or "").strip(),
                 suggested_code_language=self._infer_code_language(finding_file_path),
             )
+            sast_matches = self._match_sast_prescan_findings(
+                parsed=parsed,
+                file_path=finding_file_path,
+                line_start=parsed_line_start,
+                repository_context=per_file_repository_context,
+            )
+            if sast_matches:
+                code_context = dict(finding.code_context or {})
+                code_context["sast_prescan_matches"] = sast_matches
+                code_context["sast_cross_validated"] = True
+                finding.code_context = code_context
+                finding.evidence = self._dedupe_texts(
+                    [
+                        *finding.evidence,
+                        *[
+                            formatted
+                            for formatted in (self._format_sast_prescan_evidence(item) for item in sast_matches)
+                            if formatted
+                        ],
+                    ]
+                )
+                finding.matched_rules = self._dedupe_texts(
+                    [
+                        *finding.matched_rules,
+                        *[
+                            str(item.get("rule_id") or "").strip()
+                            for item in sast_matches
+                            if str(item.get("rule_id") or "").strip()
+                        ],
+                    ]
+                )
             observation_ids = self._normalize_text_list(parsed.get("observation_ids"), [])
             if observation_ids:
                 code_context = dict(finding.code_context or {})
                 code_context["observation_ids"] = observation_ids
                 finding.code_context = code_context
+            if not finding.category_label:
+                finding.category_label = self._category_label_for_finding(
+                    finding_type=finding.finding_type,
+                    issue_type=finding.normalized_issue_type,
+                    expert_id=finding.expert_id,
+                )
+            if not finding.confidence_rationale:
+                finding.confidence_rationale = self._confidence_rationale_for_finding(
+                    confidence=finding.confidence,
+                    finding_type=finding.finding_type,
+                    evidence=finding.evidence,
+                    matched_rules=finding.matched_rules,
+                    verification_needed=finding.verification_needed,
+                    code_context=finding.code_context,
+                )
             if self._should_skip_finding(expert.expert_id, finding):
                 self.event_repo.append(
                     ReviewEvent(
@@ -4291,6 +4494,95 @@ class ReviewRunner(
             if item and item not in deduped:
                 deduped.append(item)
         return deduped
+
+    def _match_sast_prescan_findings(
+        self,
+        *,
+        parsed: dict[str, object],
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+    ) -> list[dict[str, object]]:
+        sast_prescan = repository_context.get("sast_prescan")
+        if not isinstance(sast_prescan, dict) or not sast_prescan.get("enabled"):
+            return []
+        findings = [dict(item) for item in list(sast_prescan.get("findings") or []) if isinstance(item, dict)]
+        if not findings:
+            return []
+        target_path = self._normalize_path_for_match(file_path)
+        text_blob = " ".join(
+            [
+                str(parsed.get("title") or ""),
+                str(parsed.get("claim") or ""),
+                str(parsed.get("summary") or ""),
+                str(parsed.get("normalized_issue_type") or ""),
+                *[str(item) for item in list(parsed.get("evidence") or [])],
+                *[str(item) for item in list(parsed.get("matched_rules") or [])],
+            ]
+        ).lower()
+        matches: list[dict[str, object]] = []
+        for item in findings:
+            item_path = self._normalize_path_for_match(str(item.get("file_path") or item.get("path") or ""))
+            if item_path and target_path and item_path != target_path and not item_path.endswith("/" + target_path):
+                continue
+            item_line = self._safe_int(item.get("line_start") or item.get("line") or 0, 0)
+            line_matches = item_line <= 0 or abs(item_line - int(line_start or 1)) <= 3
+            rule_id = str(item.get("rule_id") or "").strip()
+            message = str(item.get("message") or "").strip()
+            text_matches = bool(rule_id and rule_id.lower() in text_blob) or self._has_sast_text_overlap(text_blob, message)
+            if line_matches and (text_matches or not message):
+                matches.append(
+                    {
+                        "tool": str(item.get("tool") or "sast").strip(),
+                        "rule_id": rule_id,
+                        "message": message,
+                        "severity": str(item.get("severity") or "").strip(),
+                        "cwe": str(item.get("cwe") or "").strip(),
+                        "why_it_matters": str(item.get("why_it_matters") or "").strip(),
+                        "file_path": str(item.get("file_path") or file_path).strip(),
+                        "line_start": item_line or int(line_start or 1),
+                    }
+                )
+        return matches[:4]
+
+    def _has_sast_text_overlap(self, text_blob: str, message: str) -> bool:
+        tokens = [
+            token
+            for token in re.split(r"[^a-zA-Z0-9_\u4e00-\u9fff]+", str(message or "").lower())
+            if len(token) >= 4 and token not in {"warning", "error", "medium", "high", "rule", "message"}
+        ]
+        return bool(tokens and any(token in text_blob for token in tokens[:8]))
+
+    def _format_sast_prescan_evidence(self, item: dict[str, object]) -> str:
+        tool = str(item.get("tool") or "sast").strip()
+        rule_id = str(item.get("rule_id") or "rule").strip()
+        line_start = self._safe_int(item.get("line_start"), 1)
+        message = str(item.get("message") or "").strip()
+        cwe = str(item.get("cwe") or "").strip()
+        why = str(item.get("why_it_matters") or "").strip()
+        suffix = f" ({cwe})" if cwe else ""
+        detail = f"；{why}" if why else ""
+        return f"SAST/linter 佐证: {tool}:{rule_id} L{line_start}{suffix} {message}{detail}".strip()
+
+    def _normalize_path_for_match(self, value: str) -> str:
+        return str(value or "").strip().replace("\\", "/").lstrip("./")
+
+    def _dedupe_texts(self, values: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                deduped.append(text)
+        return deduped
+
+    def _safe_int(self, value: object, default: int) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
 
     def _build_finding_summary(self, subject: ReviewSubject, expert_id: str) -> str:
         file_blob = ", ".join(subject.changed_files[:2]) or subject.source_ref

@@ -55,7 +55,8 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
             continue
         finding_type = str(issue.get("finding_type") or "risk_hypothesis")
         direct_evidence = bool(issue.get("direct_evidence"))
-        tool_verified = bool(issue.get("tool_verified"))
+        sast_cross_validated = bool(issue.get("sast_cross_validated"))
+        tool_verified = bool(issue.get("tool_verified")) or sast_cross_validated
         verified = bool(issue.get("verified"))
         severity = str(issue.get("severity") or "")
         confidence = float(issue.get("confidence") or 0.0)
@@ -82,6 +83,19 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         ]
         evidence_strength = len(cross_file_evidence) + len(context_files) + len(evidence)
         speculative_issue = bool(assumptions) and not direct_evidence
+        verification_result = _lightweight_verify_issue(
+            next_issue,
+            evidence_strength=evidence_strength,
+            confidence=confidence,
+            direct_evidence=direct_evidence,
+            tool_verified=tool_verified,
+            verified=verified,
+        )
+        if verification_result:
+            confidence = _apply_llm_judge_adjustment(confidence, float(verification_result.get("confidence_adjustment") or 0.0))
+            next_issue["confidence"] = confidence
+            next_issue.setdefault("confidence_breakdown", {})
+            next_issue["confidence_breakdown"]["lightweight_verification"] = verification_result
         llm_judge_result = None
         if issue_judge.should_judge(next_issue, runtime_settings, quality_profiles):
             llm_judge_result = issue_judge.judge_issue(next_issue, runtime_settings, quality_profiles)
@@ -162,9 +176,21 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         else:
             next_issue["status"] = "resolved"
             next_issue["resolution"] = next_issue.get("resolution") or "accepted"
+        next_issue["category_label"] = _build_category_label(next_issue)
+        next_issue["confidence_rationale"] = _build_confidence_rationale(next_issue)
         merged_issues.append(next_issue)
-    next_state["issues"] = merged_issues
+    merged_issues, budget_filter_decisions = _apply_repo_policy_comment_budget(
+        merged_issues,
+        dict(next_state.get("review_policy") or {}),
+    )
+    issue_filter_decisions.extend(budget_filter_decisions)
     next_state["pending_human_issue_ids"] = pending_human_issue_ids
+    next_state["pending_human_issue_ids"] = [
+        issue_id
+        for issue_id in pending_human_issue_ids
+        if any(str(issue.get("issue_id") or "") == issue_id for issue in merged_issues)
+    ]
+    next_state["issues"] = merged_issues
     next_state["issue_filter_decisions"] = issue_filter_decisions
     return next_state
 
@@ -179,6 +205,98 @@ def _coerce_runtime_settings(raw_runtime_settings: object) -> RuntimeSettings:
 
 def _apply_llm_judge_adjustment(confidence: float, adjustment: float) -> float:
     return round(min(0.99, max(0.01, confidence + adjustment)), 2)
+
+
+def _build_category_label(issue: dict[str, object]) -> str:
+    normalized = str(issue.get("normalized_issue_type") or "").strip()
+    if normalized:
+        return normalized
+    finding_type = str(issue.get("finding_type") or "risk_hypothesis").strip()
+    return finding_type or "risk_hypothesis"
+
+
+def _lightweight_verify_issue(
+    issue: dict[str, object],
+    *,
+    evidence_strength: int,
+    confidence: float,
+    direct_evidence: bool,
+    tool_verified: bool,
+    verified: bool,
+) -> dict[str, object]:
+    finding_type = str(issue.get("finding_type") or "risk_hypothesis").strip()
+    severity = str(issue.get("severity") or "").strip()
+    participant_count = len([item for item in list(issue.get("participant_expert_ids") or []) if str(item).strip()])
+    needs_gray_zone_check = 0.65 <= confidence <= 0.8
+    needs_single_indirect_check = participant_count <= 1 and not direct_evidence
+    needs_high_without_tool_check = severity in {"blocker", "critical", "high"} and not tool_verified
+    if not (needs_gray_zone_check or needs_single_indirect_check or needs_high_without_tool_check):
+        return {}
+    if finding_type == "risk_hypothesis" and not direct_evidence:
+        return {
+            "verdict": "needs_context",
+            "reason": "当前仍是间接风险假设，缺少直接代码证据或工具核验。",
+            "confidence_adjustment": -0.03,
+        }
+    if (tool_verified or verified) and (direct_evidence or evidence_strength >= 4):
+        return {
+            "verdict": "confirmed",
+            "reason": "证据链较完整，且已有工具或确定性核验支撑。",
+            "confidence_adjustment": 0.03,
+        }
+    return {
+        "verdict": "needs_context",
+        "reason": "当前处于灰区置信度或高风险未工具核验状态，需要补充上下文。",
+        "confidence_adjustment": -0.02,
+    }
+
+
+def _build_confidence_rationale(issue: dict[str, object]) -> str:
+    breakdown = dict(issue.get("confidence_breakdown") or {})
+    reasons: list[str] = []
+    if bool(issue.get("direct_evidence")):
+        reasons.append("包含直接代码证据")
+    if bool(issue.get("tool_verified")) or bool(issue.get("verified")):
+        reasons.append("工具/证据核验已通过")
+    if bool(issue.get("sast_cross_validated")) or bool(breakdown.get("sast_cross_validated")):
+        reasons.append("SAST/linter 与专家发现交叉佐证")
+    participant_count = int(breakdown.get("participant_count") or len(list(issue.get("participant_expert_ids") or [])) or 0)
+    consensus_bonus = float(breakdown.get("consensus_bonus") or 0.0)
+    if participant_count > 1 and consensus_bonus > 0:
+        reasons.append(f"{participant_count} 个专家指向同一问题类型")
+    elif participant_count <= 1:
+        reasons.append("单专家发现，未获得跨专家共识")
+    evidence_bonus = float(breakdown.get("evidence_bonus") or 0.0)
+    if evidence_bonus > 0:
+        reasons.append("证据链有加分")
+    if float(breakdown.get("hypothesis_penalty") or 0.0) > 0:
+        reasons.append("仍带推测成分")
+    if str(breakdown.get("evidence_source") or "").strip() == "observation_signal":
+        reasons.append("来源为观察信号，需要复核后再作为确定缺陷")
+    feedback_profile = breakdown.get("feedback_profile")
+    if isinstance(feedback_profile, dict) and feedback_profile.get("applied"):
+        if float(feedback_profile.get("confidence_bonus") or 0.0) > 0:
+            reasons.append("已按历史高接受率质量画像上调")
+        elif float(feedback_profile.get("confidence_penalty") or 0.0) > 0:
+            reasons.append("已按历史误报质量画像下调")
+        else:
+            reasons.append("已按历史反馈质量画像校准")
+    llm_judge = breakdown.get("llm_judge")
+    if isinstance(llm_judge, dict) and llm_judge.get("applied"):
+        verdict = str(llm_judge.get("final_verdict") or "").strip()
+        if verdict:
+            reasons.append(f"LLM Judge 复核结论为 {verdict}")
+    status = str(issue.get("status") or "").strip()
+    if status == "needs_verification":
+        reasons.append("当前状态需要复核")
+    elif status == "needs_human":
+        reasons.append("当前状态需要人工裁决")
+    elif status == "resolved":
+        reasons.append("当前已通过裁决")
+    if not reasons:
+        reasons.append("基于置信度、证据数量和风险等级综合判断")
+    confidence = float(issue.get("confidence") or 0.0)
+    return f"{confidence:.2f}: " + "；".join(reasons)
 
 
 def _build_llm_reject_filter_decision(
@@ -224,6 +342,43 @@ def _build_rule_filter_decision(
     }
 
 
+def _apply_repo_policy_comment_budget(
+    issues: list[dict[str, object]],
+    review_policy: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    budget = int(review_policy.get("max_comments_per_review") or 0)
+    if budget <= 0 or len(issues) <= budget:
+        return issues, []
+    ranked = sorted(enumerate(issues), key=lambda item: _issue_budget_rank(item[1]))
+    kept_indexes = {index for index, _issue in ranked[:budget]}
+    kept = [issue for index, issue in enumerate(issues) if index in kept_indexes]
+    dropped = [issue for index, issue in enumerate(issues) if index not in kept_indexes]
+    decisions = [
+        _build_rule_filter_decision(
+            issue,
+            rule_code="repo_policy_comment_budget",
+            rule_label="仓库评论预算",
+            reason=f"仓库策略 max_comments_per_review={budget}，该条低于本轮前 {budget} 个优先级，降级为 finding/summary。",
+        )
+        for issue in dropped
+    ]
+    kept.sort(key=_issue_budget_rank)
+    return kept, decisions
+
+
+def _issue_budget_rank(issue: dict[str, object]) -> tuple[int, int, int, float]:
+    severity_rank = {
+        "blocker": 0,
+        "critical": 0,
+        "high": 1,
+        "medium": 2,
+        "low": 3,
+    }.get(str(issue.get("severity") or "").strip().lower(), 2)
+    status_rank = 0 if bool(issue.get("needs_human")) or str(issue.get("status") or "") == "needs_human" else 1
+    evidence_rank = 0 if bool(issue.get("direct_evidence")) or bool(issue.get("tool_verified")) or bool(issue.get("verified")) else 1
+    return (severity_rank, status_rank, evidence_rank, -float(issue.get("confidence") or 0.0))
+
+
 def _apply_feedback_quality_profile(
     issue: dict[str, object],
     confidence: float,
@@ -242,17 +397,25 @@ def _apply_feedback_quality_profile(
         float(expert_profile.get("confidence_penalty") or 0.0)
         + float(issue_type_profile.get("confidence_penalty") or 0.0),
     )
+    bonus = 0.0
     if penalty <= 0:
+        expert_bonus = _profile_confidence_bonus(expert_profile)
+        issue_type_bonus = _profile_confidence_bonus(issue_type_profile)
+        bonus = min(0.05, max(expert_bonus, issue_type_bonus))
+    if penalty <= 0 and bonus <= 0:
         return confidence, {}
-    adjusted = max(0.01, round(confidence - penalty, 2))
+    adjusted = max(0.01, min(0.95, round(confidence - penalty + bonus, 2)))
     return adjusted, {
         "applied": True,
         "confidence_penalty": penalty,
+        "confidence_bonus": bonus,
         "expert_id": primary_expert_id,
         "expert_false_positive_rate": float(expert_profile.get("false_positive_rate") or 0.0),
+        "expert_accept_rate": float(expert_profile.get("accept_rate") or 0.0),
         "expert_sample_count": int(expert_profile.get("sample_count") or 0),
         "issue_type": issue_type,
         "issue_type_false_positive_rate": float(issue_type_profile.get("false_positive_rate") or 0.0),
+        "issue_type_accept_rate": float(issue_type_profile.get("accept_rate") or 0.0),
         "issue_type_sample_count": int(issue_type_profile.get("sample_count") or 0),
         "needs_human_confidence": max(
             float(expert_profile.get("needs_human_confidence") or 0.8),
@@ -262,3 +425,21 @@ def _apply_feedback_quality_profile(
             expert_profile.get("prefer_needs_verification") or issue_type_profile.get("prefer_needs_verification")
         ),
     }
+
+
+def _profile_confidence_bonus(profile: dict[str, object]) -> float:
+    sample_count = int(profile.get("sample_count") or 0)
+    if sample_count < 5:
+        return 0.0
+    explicit_bonus = float(profile.get("confidence_bonus") or 0.0)
+    if explicit_bonus > 0:
+        return min(0.05, explicit_bonus)
+    accept_rate = float(profile.get("accept_rate") or 0.0)
+    false_positive_rate = float(profile.get("false_positive_rate") or 0.0)
+    if false_positive_rate >= 0.25:
+        return 0.0
+    if accept_rate >= 0.8:
+        return 0.05
+    if accept_rate >= 0.65:
+        return 0.03
+    return 0.0

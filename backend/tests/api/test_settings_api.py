@@ -136,3 +136,14 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["ca_bundle_path"] == "C:/certs/corp-ca.pem"
     assert payload["config_path"].endswith("config.json")
     assert "default_llm_api_key" not in payload
+
+
+def test_gitnexus_preflight_endpoint_returns_diagnostics(client):
+    response = client.get("/api/settings/gitnexus/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] in {"ready", "warning", "failed"}
+    assert isinstance(payload["checks"], list)
+    assert isinstance(payload["recommended_actions"], list)
+    assert {item["name"] for item in payload["checks"]} >= {"git_binary", "gitnexus_command", "repo_path"}

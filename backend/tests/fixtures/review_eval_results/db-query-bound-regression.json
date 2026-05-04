@@ -1,0 +1,40 @@
+{
+  "review_id": "eval_db_query_bound",
+  "status": "completed",
+  "phase": "completed",
+  "findings": [
+    {
+      "finding_id": "fdg_query_bound_1",
+      "severity": "high",
+      "file_path": "src/main/java/com/example/order/OrderRepository.java",
+      "title": "Query limit and pagination boundary removed",
+      "summary": "The repository query no longer applies a limit or pagination guard, so batch jobs can read a large result set and overload the database path.",
+      "expert_id": "database_analysis",
+      "matched_rules": ["PERF-SQL-001"],
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "static_analysis", "status": "matched"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    },
+    {
+      "finding_id": "fdg_query_bound_2",
+      "severity": "medium",
+      "file_path": "src/test/java/com/example/order/OrderRepositoryTest.java",
+      "title": "Missing large data regression test",
+      "summary": "There is no large data regression test covering the repository path after the query boundary change.",
+      "expert_id": "performance_reliability",
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    }
+  ],
+  "issues": [],
+  "metadata": {
+    "token_cost_usd": 0.51,
+    "runtime_seconds": 31.2
+  }
+}

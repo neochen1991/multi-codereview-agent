@@ -5,6 +5,7 @@ import os
 import multiprocessing as mp
 import logging
 import json
+import hashlib
 import shutil
 import time
 from datetime import UTC, datetime
@@ -155,21 +156,24 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        incoming_metadata = dict(subject.metadata or {})
+        incoming_workspace_repo_path = str(incoming_metadata.get("workspace_repo_path") or "").strip()
         resolved_repository = self.repository_resolver.resolve(runtime_settings, subject)
         if subject.subject_type == "mr":
             for expert_id in DEFAULT_MR_EXPERTS:
                 if expert_id not in selected_experts:
                     selected_experts.append(expert_id)
         subject.metadata = {
-            **dict(subject.metadata or {}),
+            **incoming_metadata,
             "repository_id": resolved_repository.repository_id,
             "repository_name": resolved_repository.name,
             "repository_provider": resolved_repository.provider,
-            "workspace_repo_path": resolved_repository.local_path,
+            "workspace_repo_path": incoming_workspace_repo_path or resolved_repository.local_path,
+            "configured_workspace_repo_path": resolved_repository.local_path,
             "repository_clone_url": resolved_repository.clone_url,
             "manual_expert_selection": manual_expert_selection,
             # API 直接创建且缺少 diff/changed_files 时，允许走兜底派工，避免回放/报告页完全无数据。
-            "allow_empty_diff_fallback": bool(dict(subject.metadata or {}).get("allow_empty_diff_fallback", True)),
+            "allow_empty_diff_fallback": bool(incoming_metadata.get("allow_empty_diff_fallback", True)),
         }
         subject.repo_id = subject.repo_id or resolved_repository.repository_id
         subject.repo_url = subject.repo_url or resolved_repository.clone_url
@@ -1316,6 +1320,64 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 )
             )
         return review
+
+    def record_impact_feedback(
+        self,
+        review_id: str,
+        target_type: str,
+        target_key: str,
+        label: str,
+        comment: str = "",
+    ) -> FeedbackLabel:
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        normalized_type = str(target_type or "").strip().lower().replace(" ", "_")
+        normalized_key = str(target_key or "").strip()
+        normalized_label = str(label or "").strip().lower()
+        if not normalized_type or not normalized_key:
+            raise ValueError("target_type and target_key are required")
+        label_mapping = {
+            "confirmed": "impact_confirmed",
+            "true_positive": "impact_confirmed",
+            "impact_confirmed": "impact_confirmed",
+            "false_positive": "impact_false_positive",
+            "rejected": "impact_false_positive",
+            "impact_false_positive": "impact_false_positive",
+        }
+        feedback_label = label_mapping.get(normalized_label)
+        if feedback_label is None:
+            raise ValueError("unsupported impact feedback label")
+
+        digest = hashlib.sha1(f"{normalized_type}:{normalized_key}".encode("utf-8")).hexdigest()[:12]
+        metadata = {
+            "target_type": normalized_type,
+            "target_key": normalized_key,
+            "comment": comment,
+        }
+        saved = self.feedback_repo.save(
+            FeedbackLabel(
+                review_id=review_id,
+                issue_id=f"impact:{normalized_type}:{digest}",
+                label=feedback_label,
+                source="impact_feedback",
+                comment=json.dumps(metadata, ensure_ascii=False),
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review_id,
+                event_type="impact_feedback_recorded",
+                phase=review.phase,
+                message="关联影响反馈已记录",
+                payload={
+                    "target_type": normalized_type,
+                    "target_key": normalized_key,
+                    "label": feedback_label,
+                },
+            )
+        )
+        return saved
 
 
 review_service = ReviewService()

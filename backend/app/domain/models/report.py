@@ -24,6 +24,13 @@ class ConfidenceSummary(BaseModel):
     llm_judge_needs_human_count: int = 0
     llm_judge_rejected_count: int = 0
     quality_filtered_issue_count: int = 0
+    evidence_chain_issue_count: int = 0
+    evidence_chain_coverage: float = 0.0
+    policy_comment_budget_filtered_count: int = 0
+    review_policy_excluded_file_count: int = 0
+    review_policy_reviewable_file_count: int = 0
+    review_policy_path_rule_count: int = 0
+    review_policy_required_expert_count: int = 0
 
 
 class LlmUsageSummary(BaseModel):
@@ -75,6 +82,8 @@ class ImpactPath(BaseModel):
     path: list[str] = Field(default_factory=list)
     depth: int = 0
     risk: str = ""
+    confidence_label: str = "candidate"
+    confirmation_reason: str = ""
 
 
 class ImpactGraphNode(BaseModel):
@@ -138,6 +147,7 @@ class ImpactReport(BaseModel):
     queried_targets: list[str] = Field(default_factory=list)
     successful_context_targets: list[str] = Field(default_factory=list)
     successful_impact_targets: list[str] = Field(default_factory=list)
+    dynamic_targets: list[str] = Field(default_factory=list)
     skipped_invalid_targets: list[str] = Field(default_factory=list)
     skipped_missing_context_targets: list[str] = Field(default_factory=list)
     skipped_missing_impact_targets: list[str] = Field(default_factory=list)

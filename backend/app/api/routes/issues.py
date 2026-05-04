@@ -16,6 +16,15 @@ class HumanDecisionRequest(BaseModel):
     comment: str
 
 
+class ImpactFeedbackRequest(BaseModel):
+    """定义关联影响分析反馈提交时的请求体。"""
+
+    target_type: str
+    target_key: str
+    label: str
+    comment: str = ""
+
+
 class ExportIssuesToCodehubRequest(BaseModel):
     """定义 issue 导出到 CodeHub 的 mock 请求体。"""
 
@@ -60,6 +69,25 @@ def record_human_decision(review_id: str, payload: HumanDecisionRequest) -> dict
         "phase": updated.phase,
         "human_review_status": updated.human_review_status,
     }
+
+
+@router.post("/reviews/{review_id}/impact-feedback", status_code=status.HTTP_202_ACCEPTED)
+def record_impact_feedback(review_id: str, payload: ImpactFeedbackRequest) -> dict[str, object]:
+    """记录关联影响路径、文件或测试建议的确认/误报反馈。"""
+
+    try:
+        label = review_service_module.review_service.record_impact_feedback(
+            review_id,
+            target_type=payload.target_type,
+            target_key=payload.target_key,
+            label=payload.label,
+            comment=payload.comment,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return label.model_dump(mode="json")
 
 
 @router.post("/reviews/{review_id}/issues/export/codehub")

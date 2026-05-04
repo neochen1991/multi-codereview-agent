@@ -110,6 +110,40 @@ def test_build_report_exposes_impact_report_for_each_review(storage_root: Path):
     assert any("接口" in item.scope for item in report.impact_report.recommended_test_scope)
 
 
+def test_build_report_does_not_emit_fallback_after_gitnexus_failure(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_impact",
+            "project_id": "proj_impact",
+            "source_ref": "feature/order-impact",
+            "target_ref": "main",
+            "title": "order impact",
+            "changed_files": ["order-service/src/main/java/com/example/OrderController.java"],
+            "unified_diff": (
+                "diff --git a/order-service/src/main/java/com/example/OrderController.java "
+                "b/order-service/src/main/java/com/example/OrderController.java\n"
+                "@@ -10,2 +10,5 @@\n"
+                "+public OrderDTO createOrder(CreateOrderRequest request) {\n"
+                "+    return orderService.create(request);\n"
+                "+}\n"
+            ),
+        }
+    )
+    metadata = dict(review.subject.metadata or {})
+    metadata["impact_analysis_progress"] = {
+        "state": "failed",
+        "graph_status": "failed",
+        "error_message": "GitNexus MCP unavailable",
+    }
+    service.review_repo.save(review.model_copy(update={"subject": review.subject.model_copy(update={"metadata": metadata})}))
+
+    report = service.build_report(review.review_id)
+
+    assert report.impact_report is None
+
+
 def test_list_issues_rehydrates_legacy_merged_issue_into_individual_findings(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -418,3 +452,95 @@ def test_build_report_exposes_llm_judge_rejected_filter_stats(storage_root: Path
 
     assert report.confidence_summary.llm_judge_rejected_count == 1
     assert report.confidence_summary.quality_filtered_issue_count == 1
+
+
+def test_build_report_exposes_quality_governance_stats(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_quality",
+            "project_id": "proj_quality",
+            "source_ref": "feature/quality-summary",
+            "target_ref": "main",
+            "title": "quality summary",
+            "metadata": {
+                "review_policy": {
+                    "excluded_changed_files": ["dist/app.js"],
+                    "reviewable_changed_files": ["backend/app/payment.py", "backend/app/auth.py"],
+                    "required_experts": ["security_compliance", "database_analysis"],
+                    "path_rules": [
+                        {
+                            "pattern": "backend/app/payments/**",
+                            "required_experts": ["security_compliance"],
+                        }
+                    ],
+                }
+            },
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_with_chain",
+                title="授权校验缺失",
+                summary="支付接口新增路径未校验操作者身份。",
+                file_path="backend/app/payment.py",
+                line_start=42,
+                evidence_chain=[
+                    {"step": "claim", "status": "present"},
+                    {"step": "anchor", "status": "present"},
+                ],
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_without_chain",
+                title="缺少测试",
+                summary="新增边界条件未覆盖。",
+                file_path="backend/app/auth.py",
+                line_start=18,
+            ),
+        ],
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="judge",
+            message_type="issue_filter_applied",
+            content="Quality governance filters applied",
+            metadata={
+                "phase": "coordination",
+                "issue_filter_decisions": [
+                    {
+                        "topic": "低置信度建议",
+                        "rule_code": "below_issue_priority_threshold",
+                        "rule_label": "低优先级过滤",
+                    },
+                    {
+                        "topic": "样式噪声",
+                        "rule_code": "low_confidence_noise",
+                        "rule_label": "低置信噪声过滤",
+                    },
+                    {
+                        "topic": "超出评论预算",
+                        "rule_code": "repo_policy_comment_budget",
+                        "rule_label": "仓库评论预算",
+                    },
+                ],
+            },
+        )
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.confidence_summary.evidence_chain_issue_count == 1
+    assert report.confidence_summary.evidence_chain_coverage == 0.5
+    assert report.confidence_summary.quality_filtered_issue_count == 2
+    assert report.confidence_summary.policy_comment_budget_filtered_count == 1
+    assert report.confidence_summary.review_policy_excluded_file_count == 1
+    assert report.confidence_summary.review_policy_reviewable_file_count == 2
+    assert report.confidence_summary.review_policy_path_rule_count == 1
+    assert report.confidence_summary.review_policy_required_expert_count == 2

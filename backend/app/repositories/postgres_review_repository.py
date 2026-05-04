@@ -108,6 +108,51 @@ class PostgresReviewRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
+                    WITH issue_counts AS (
+                        SELECT
+                            review_id,
+                            COUNT(1) AS issue_count,
+                            SUM(
+                                CASE
+                                    WHEN jsonb_array_length(COALESCE(payload_json::jsonb -> 'evidence_chain', '[]'::jsonb)) > 0
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS evidence_chain_issue_count
+                        FROM "{self._db.schema}".issues
+                        GROUP BY review_id
+                    ),
+                    issue_filter_counts AS (
+                        SELECT
+                            m.review_id,
+                            SUM(
+                                CASE
+                                    WHEN decision ->> 'rule_code' IN (
+                                        'llm_judge_rejected',
+                                        'conditional_conclusion',
+                                        'removed_line_only',
+                                        'below_priority_confidence_threshold',
+                                        'below_issue_priority_threshold',
+                                        'low_confidence_noise'
+                                    )
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS quality_filtered_issue_count,
+                            SUM(
+                                CASE
+                                    WHEN decision ->> 'rule_code' = 'repo_policy_comment_budget'
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS policy_comment_budget_filtered_count
+                        FROM "{self._db.schema}".messages m
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            COALESCE(m.metadata_json::jsonb -> 'issue_filter_decisions', '[]'::jsonb)
+                        ) decision
+                        WHERE m.message_type = 'issue_filter_applied'
+                        GROUP BY m.review_id
+                    )
                     SELECT
                         review_id,
                         status,
@@ -132,13 +177,28 @@ class PostgresReviewRepository:
                         subject_json::jsonb ->> 'mr_url' AS mr_url,
                         (subject_json::jsonb -> 'changed_files')::text AS changed_files_json,
                         subject_json::jsonb -> 'metadata' ->> 'trigger_source' AS trigger_source,
-                        (
-                            SELECT COUNT(1)
-                            FROM "{self._db.schema}".issues i
-                            WHERE i.review_id = r.review_id
-                        ) AS issue_count
+                        subject_json::jsonb -> 'metadata' -> 'impact_report' ->> 'graph_status' AS impact_graph_status,
+                        subject_json::jsonb -> 'metadata' -> 'impact_report' ->> 'risk_level' AS impact_risk_level,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'impacted_files', '[]'::jsonb)
+                        ) AS impacted_file_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'recommended_test_scope', '[]'::jsonb)
+                        ) AS recommended_test_scope_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'successful_context_targets', '[]'::jsonb)
+                        ) AS successful_context_target_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'successful_impact_targets', '[]'::jsonb)
+                        ) AS successful_impact_target_count,
+                        COALESCE(issue_counts.evidence_chain_issue_count, 0) AS evidence_chain_issue_count,
+                        COALESCE(issue_filter_counts.quality_filtered_issue_count, 0) AS quality_filtered_issue_count,
+                        COALESCE(issue_filter_counts.policy_comment_budget_filtered_count, 0) AS policy_comment_budget_filtered_count,
+                        COALESCE(issue_counts.issue_count, 0) AS issue_count
                     FROM {self._table} r
-                    ORDER BY updated_at DESC
+                    LEFT JOIN issue_counts ON issue_counts.review_id = r.review_id
+                    LEFT JOIN issue_filter_counts ON issue_filter_counts.review_id = r.review_id
+                    ORDER BY r.updated_at DESC
                     """
                 )
                 rows = cursor.fetchall()
@@ -176,6 +236,21 @@ class PostgresReviewRepository:
     def _deserialize_light_row(self, row: dict[str, object]) -> dict[str, object]:
         trigger_source = row["trigger_source"]
         metadata = {"trigger_source": trigger_source} if trigger_source else {}
+        quality_summary = {
+            "evidence_chain_issue_count": int(row.get("evidence_chain_issue_count") or 0),
+            "quality_filtered_issue_count": int(row.get("quality_filtered_issue_count") or 0),
+            "policy_comment_budget_filtered_count": int(row.get("policy_comment_budget_filtered_count") or 0),
+        }
+        impact_summary = {
+            "graph_status": row.get("impact_graph_status") or "",
+            "risk_level": row.get("impact_risk_level") or "",
+            "impacted_file_count": int(row.get("impacted_file_count") or 0),
+            "recommended_test_scope_count": int(row.get("recommended_test_scope_count") or 0),
+            "successful_context_target_count": int(row.get("successful_context_target_count") or 0),
+            "successful_impact_target_count": int(row.get("successful_impact_target_count") or 0),
+        }
+        metadata["quality_summary"] = quality_summary
+        metadata["impact_summary"] = impact_summary
         changed_files = self._loads_list(row["changed_files_json"])
         return {
             "review_id": row["review_id"],
@@ -193,6 +268,8 @@ class PostgresReviewRepository:
             "duration_seconds": row["duration_seconds"],
             "updated_at": row["updated_at"],
             "issue_count": int(row.get("issue_count") or 0),
+            "quality_summary": quality_summary,
+            "impact_summary": impact_summary,
             "subject": {
                 "subject_type": row.get("subject_type") or "",
                 "repo_id": row.get("repo_id") or "",

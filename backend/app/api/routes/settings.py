@@ -5,7 +5,9 @@ from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
 
 from app.config import settings
+from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings
+from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 import app.services.review_service as review_service_module
 
@@ -17,6 +19,26 @@ def _gitnexus_scheduler(request: Request) -> GitNexusIndexScheduler:
     if isinstance(scheduler, GitNexusIndexScheduler):
         return scheduler
     return GitNexusIndexScheduler(review_service_module.review_service)
+
+
+def _gitnexus_preflight(repository_id: str = "") -> dict[str, object]:
+    runtime = review_service_module.review_service.get_runtime_settings()
+    normalized_repository_id = str(repository_id or "").strip()
+    repository = runtime.resolve_repository(repository_id=normalized_repository_id)
+    repo_path = str((repository.local_path if repository is not None else "") or runtime.code_repo_local_path or "").strip()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id=normalized_repository_id or str(runtime.default_repository_id or ""),
+        project_id="settings",
+        source_ref="",
+        target_ref=str((repository.default_branch if repository is not None else "") or runtime.code_repo_default_branch or ""),
+        changed_files=[],
+        unified_diff="",
+        metadata={"workspace_repo_path": repo_path} if repo_path else {},
+    )
+    payload = GitNexusImpactService(review_service_module.review_service.storage_root).preflight(subject, runtime)
+    payload["repository_id"] = normalized_repository_id or str(runtime.default_repository_id or "")
+    return payload
 
 
 class RuntimeSettingsRequest(BaseModel):
@@ -203,6 +225,20 @@ def get_repository_gitnexus_index_status(repository_id: str, request: Request) -
     """返回指定代码仓最近一次 GitNexus 建图状态。"""
 
     return _gitnexus_scheduler(request).status(repository_id)
+
+
+@router.get("/settings/gitnexus/preflight")
+def get_gitnexus_preflight() -> dict[str, object]:
+    """返回 GitNexus 影响分析本机诊断结果。"""
+
+    return _gitnexus_preflight()
+
+
+@router.get("/settings/repositories/{repository_id}/gitnexus/preflight")
+def get_repository_gitnexus_preflight(repository_id: str) -> dict[str, object]:
+    """返回指定仓库的 GitNexus 影响分析本机诊断结果。"""
+
+    return _gitnexus_preflight(repository_id)
 
 
 @router.post("/settings/gitnexus/index/run", status_code=status.HTTP_202_ACCEPTED)

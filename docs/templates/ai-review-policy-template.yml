@@ -1,0 +1,41 @@
+# Repository-owned AI review policy.
+# Copy this file to the repository root as `.ai-review.yml`.
+
+max_comments_per_review: 8
+
+excluded_paths:
+  - dist/**
+  - build/**
+  - coverage/**
+  - package-lock.json
+  - pnpm-lock.yaml
+  - yarn.lock
+
+path_rules:
+  backend/app/payments/**:
+    required_experts:
+      - security_compliance
+      - database_analysis
+    comment_level: strict
+    max_comments: 5
+    instructions: >
+      Payment changes must prove authorization, idempotency, transaction safety,
+      and rollback behavior. Weak style-only comments should stay out of inline review.
+
+  backend/app/auth/**:
+    required_experts:
+      - security_compliance
+      - correctness_business
+    comment_level: strict
+    instructions: >
+      Authentication and authorization changes must include concrete evidence for
+      permission boundaries, token handling, and tenant or owner isolation.
+
+  frontend/**:
+    required_experts:
+      - frontend_accessibility
+    comment_level: normal
+    max_comments: 3
+    instructions: >
+      Prioritize user-visible regressions, accessibility, state handling, and
+      form validation. Avoid low-value formatting comments.

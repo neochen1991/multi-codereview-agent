@@ -17,6 +17,7 @@ class ReviewState(TypedDict, total=False):
     issue_filter_decisions: list[dict[str, Any]]
     feedback_quality_profiles: dict[str, Any]
     runtime_settings: Any
+    review_policy: dict[str, Any]
     findings: list[dict[str, Any]]
     conflicts: list[dict[str, Any]]
     issues: list[dict[str, Any]]

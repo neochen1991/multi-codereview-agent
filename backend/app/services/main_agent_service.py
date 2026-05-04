@@ -19,6 +19,7 @@ from app.services.main_agent_prompting import MainAgentPromptingMixin
 from app.services.repo_review_instruction_service import RepoReviewInstructionService
 from app.services.repository_context_service import RepositoryContextService
 from app.services.repository_config_resolver import RepositoryConfigResolver
+from app.services.sast_prescan_service import SastPreScanService
 
 
 class MainAgentService(MainAgentPromptingMixin):
@@ -39,6 +40,7 @@ class MainAgentService(MainAgentPromptingMixin):
         self._capability_service = ExpertCapabilityService()
         self._java_quality_signal_extractor = CodeObservationExtractor()
         self._repo_review_instruction_service = RepoReviewInstructionService()
+        self._sast_prescan_service = SastPreScanService()
         self._repository_resolver = RepositoryConfigResolver()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
@@ -83,6 +85,7 @@ class MainAgentService(MainAgentPromptingMixin):
         disallowed_inference = self._build_disallowed_inference(expert)
         repo_context = self._build_repository_context(
             repository_service,
+            runtime_settings,
             file_path,
             line_start,
             related_files,
@@ -923,6 +926,7 @@ class MainAgentService(MainAgentPromptingMixin):
     def _build_repository_context(
         self,
         service: RepositoryContextService,
+        runtime_settings: RuntimeSettings,
         file_path: str,
         line_start: int,
         related_files: list[str],
@@ -988,6 +992,11 @@ class MainAgentService(MainAgentPromptingMixin):
             "repo_review_instructions": self._repo_review_instruction_service.load_for_file(
                 service.local_path,
                 file_path,
+            ),
+            "sast_prescan": self._sast_prescan_service.scan_file(
+                service.local_path,
+                file_path,
+                enabled=runtime_settings.enable_sast_prescan,
             ),
             "cross_file_impact_hints": build_cross_file_impact_hints(
                 file_path=file_path,
@@ -1186,8 +1195,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
-
 
 
 

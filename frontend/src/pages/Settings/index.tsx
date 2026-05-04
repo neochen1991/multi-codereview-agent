@@ -10,6 +10,7 @@ import {
   type ExtensionSkill,
   type ExtensionTool,
   type GitNexusIndexStatus,
+  type GitNexusPreflightStatus,
   type ImpactReportTemplateAnalysis,
   type ImpactReportTemplate,
   type ImpactReportTemplatePreview,
@@ -176,8 +177,10 @@ const SettingsPage: React.FC = () => {
   const [savingSkill, setSavingSkill] = React.useState(false);
   const [savingTool, setSavingTool] = React.useState(false);
   const [gitnexusStatus, setGitnexusStatus] = React.useState<GitNexusIndexStatus | null>(null);
+  const [gitnexusPreflight, setGitnexusPreflight] = React.useState<GitNexusPreflightStatus | null>(null);
   const [gitnexusRunning, setGitnexusRunning] = React.useState(false);
   const [repositoryGitnexusStatuses, setRepositoryGitnexusStatuses] = React.useState<Record<string, GitNexusIndexStatus>>({});
+  const [repositoryGitnexusPreflights, setRepositoryGitnexusPreflights] = React.useState<Record<string, GitNexusPreflightStatus>>({});
   const [repositoryGitnexusRunning, setRepositoryGitnexusRunning] = React.useState<Record<string, boolean>>({});
   const [impactTemplate, setImpactTemplate] = React.useState<ImpactReportTemplate | null>(null);
   const [impactTemplateContent, setImpactTemplateContent] = React.useState("");
@@ -194,39 +197,63 @@ const SettingsPage: React.FC = () => {
     );
     if (!repoList.length) {
       setRepositoryGitnexusStatuses({});
+      setRepositoryGitnexusPreflights({});
       return;
     }
-    const results = await Promise.all(
-      repoList.map(async (repo) => {
-        const repositoryId = String(repo.repository_id || "").trim();
-        try {
-          const status = await settingsApi.getRepositoryGitNexusIndexStatus(repositoryId);
-          return [repositoryId, status] as const;
-        } catch (error: any) {
-          return [
-            repositoryId,
-            {
-              repository_id: repositoryId,
-              state: "failed",
-              message: error?.message || "读取 GitNexus 图谱状态失败",
-            } satisfies GitNexusIndexStatus,
-          ] as const;
-        }
-      }),
-    );
-    setRepositoryGitnexusStatuses(Object.fromEntries(results));
+    const [statusResults, preflightResults] = await Promise.all([
+      Promise.all(
+        repoList.map(async (repo) => {
+          const repositoryId = String(repo.repository_id || "").trim();
+          try {
+            const status = await settingsApi.getRepositoryGitNexusIndexStatus(repositoryId);
+            return [repositoryId, status] as const;
+          } catch (error: any) {
+            return [
+              repositoryId,
+              {
+                repository_id: repositoryId,
+                state: "failed",
+                message: error?.message || "读取 GitNexus 图谱状态失败",
+              } satisfies GitNexusIndexStatus,
+            ] as const;
+          }
+        }),
+      ),
+      Promise.all(
+        repoList.map(async (repo) => {
+          const repositoryId = String(repo.repository_id || "").trim();
+          try {
+            const preflight = await settingsApi.getRepositoryGitNexusPreflight(repositoryId);
+            return [repositoryId, preflight] as const;
+          } catch (error: any) {
+            return [
+              repositoryId,
+              {
+                repository_id: repositoryId,
+                status: "failed",
+                checks: [],
+                recommended_actions: [error?.message || "读取 GitNexus 诊断结果失败"],
+              } satisfies GitNexusPreflightStatus,
+            ] as const;
+          }
+        }),
+      ),
+    ]);
+    setRepositoryGitnexusStatuses(Object.fromEntries(statusResults));
+    setRepositoryGitnexusPreflights(Object.fromEntries(preflightResults));
   }, [form]);
 
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools, gitnexus, impactTemplatePayload] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, impactTemplatePayload] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
         settingsApi.getGitNexusIndexStatus(),
+        settingsApi.getGitNexusPreflight().catch(() => null),
         settingsApi.getImpactReportTemplate(),
       ]);
       form.setFieldsValue(runtime);
@@ -235,6 +262,7 @@ const SettingsPage: React.FC = () => {
       setExtensionSkills(skills);
       setExtensionTools(tools);
       setGitnexusStatus(gitnexus);
+      setGitnexusPreflight(gitnexusDiagnostic);
       setImpactTemplate(impactTemplatePayload);
       setImpactTemplateContent(impactTemplatePayload.content || "");
       setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
@@ -279,8 +307,12 @@ const SettingsPage: React.FC = () => {
   }, [loadPage]);
 
   const refreshGitNexusStatus = React.useCallback(async () => {
-    const status = await settingsApi.getGitNexusIndexStatus();
+    const [status, diagnostic] = await Promise.all([
+      settingsApi.getGitNexusIndexStatus(),
+      settingsApi.getGitNexusPreflight().catch(() => null),
+    ]);
     setGitnexusStatus(status);
+    setGitnexusPreflight(diagnostic);
     await refreshRepositoryGitNexusStatuses();
   }, [refreshRepositoryGitNexusStatuses]);
 
@@ -303,8 +335,14 @@ const SettingsPage: React.FC = () => {
   const handleRefreshRepositoryGitNexusStatus = React.useCallback(async (repositoryId: string) => {
     const id = String(repositoryId || "").trim();
     if (!id) return;
-    const status = await settingsApi.getRepositoryGitNexusIndexStatus(id);
+    const [status, diagnostic] = await Promise.all([
+      settingsApi.getRepositoryGitNexusIndexStatus(id),
+      settingsApi.getRepositoryGitNexusPreflight(id).catch(() => null),
+    ]);
     setRepositoryGitnexusStatuses((prev) => ({ ...prev, [id]: status }));
+    if (diagnostic) {
+      setRepositoryGitnexusPreflights((prev) => ({ ...prev, [id]: diagnostic }));
+    }
   }, []);
 
   const handleRunRepositoryGitNexusIndex = React.useCallback(async (repositoryId: string) => {
@@ -483,6 +521,38 @@ const SettingsPage: React.FC = () => {
     return "default";
   };
 
+  const gitnexusDiagnosticColor = (state?: string) => {
+    if (state === "ready" || state === "passed") return "success";
+    if (state === "warning") return "warning";
+    if (state === "failed") return "error";
+    return "default";
+  };
+
+  const renderGitNexusPreflight = (diagnostic?: GitNexusPreflightStatus | null) => {
+    if (!diagnostic) {
+      return <span>暂无诊断结果，点击刷新后查看。</span>;
+    }
+    return (
+      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+        <Space wrap>
+          <Tag color={gitnexusDiagnosticColor(diagnostic.status)}>{diagnostic.status}</Tag>
+          {(diagnostic.checks || []).map((check) => (
+            <Tag key={check.name} color={gitnexusDiagnosticColor(check.status)}>
+              {check.name}: {check.status}
+            </Tag>
+          ))}
+        </Space>
+        {diagnostic.recommended_actions?.length ? (
+          <div className="settings-gitnexus-actions">
+            {diagnostic.recommended_actions.slice(0, 3).map((action) => (
+              <div key={action}>{action}</div>
+            ))}
+          </div>
+        ) : null}
+      </Space>
+    );
+  };
+
   return (
     <div className="settings-page">
       <Card className="module-card settings-hero-card">
@@ -563,6 +633,7 @@ const SettingsPage: React.FC = () => {
                     </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="执行命令">{gitnexusStatus?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
+                  <Descriptions.Item label="环境诊断">{renderGitNexusPreflight(gitnexusPreflight)}</Descriptions.Item>
                   <Descriptions.Item label="代码仓路径">
                     {gitnexusStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
                   </Descriptions.Item>
@@ -586,6 +657,7 @@ const SettingsPage: React.FC = () => {
                 {repositories.map((repo, index) => {
                   const repositoryId = String(repo.repository_id || "").trim();
                   const status = repositoryId ? repositoryGitnexusStatuses[repositoryId] : undefined;
+                  const diagnostic = repositoryId ? repositoryGitnexusPreflights[repositoryId] : undefined;
                   return (
                     <Card
                       key={repositoryId || `repo-${index}`}
@@ -633,6 +705,7 @@ const SettingsPage: React.FC = () => {
                           </Space>
                         </Descriptions.Item>
                         <Descriptions.Item label="执行命令">{status?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
+                        <Descriptions.Item label="环境诊断">{renderGitNexusPreflight(diagnostic)}</Descriptions.Item>
                         <Descriptions.Item label="图谱目录">
                           {status?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
                           {typeof status?.graph_dir_exists === "boolean" ? (
@@ -855,6 +928,7 @@ const SettingsPage: React.FC = () => {
                 rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
                 enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
                 llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
+                enable_sast_prescan: Boolean(values.enable_sast_prescan),
                 default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
                 standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
                 standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),
@@ -1382,6 +1456,16 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="llm_targeted_debate_timeout_seconds" label="LLM 辩论裁判超时（秒）">
                           <InputNumber min={15} max={300} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_sast_prescan"
+                          label="启用 SAST/linter 预扫描"
+                          valuePropName="checked"
+                          extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为专家提示补充工具候选信号。"
+                        >
+                          <Switch />
                         </Form.Item>
                       </Col>
                     </Row>

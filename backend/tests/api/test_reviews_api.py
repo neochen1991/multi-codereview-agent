@@ -1,6 +1,9 @@
 import sqlite3
 from pathlib import Path
 
+from app.domain.models.issue import DebateIssue
+from app.domain.models.message import ConversationMessage
+
 
 def test_create_review_returns_review_id(client):
     response = client.post(
@@ -64,6 +67,71 @@ def test_list_reviews_includes_started_time_and_duration(client):
     row = next(item for item in payload if item["review_id"] == created["review_id"])
     assert row["started_at"] is not None
     assert "duration_seconds" in row
+
+
+def test_list_reviews_includes_quality_and_impact_summaries(client):
+    import app.services.review_service as review_service_module
+
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/demo",
+            "target_ref": "main",
+            "title": "summary review",
+            "metadata": {
+                "impact_report": {
+                    "graph_status": "ready",
+                    "risk_level": "high",
+                    "impacted_files": [{"file_path": "src/payment.py"}],
+                    "recommended_test_scope": [{"scope": "payment regression"}],
+                    "successful_context_targets": ["PaymentService.reserve"],
+                    "successful_impact_targets": ["PaymentService.reserve"],
+                }
+            },
+        },
+    ).json()
+    service = review_service_module.review_service
+    service.issue_repo.save_all(
+        created["review_id"],
+        [
+            DebateIssue(
+                review_id=created["review_id"],
+                issue_id="iss_quality_summary",
+                title="payment rollback",
+                summary="rollback path needs coverage",
+                evidence_chain=[{"step": "diff", "status": "present"}],
+            )
+        ],
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=created["review_id"],
+            issue_id="review_orchestration",
+            expert_id="judge",
+            message_type="issue_filter_applied",
+            content="quality filters applied",
+            metadata={
+                "issue_filter_decisions": [
+                    {"rule_code": "low_confidence_noise", "topic": "noise"},
+                    {"rule_code": "repo_policy_comment_budget", "topic": "budget"},
+                ]
+            },
+        )
+    )
+
+    reviews = client.get("/api/reviews")
+    assert reviews.status_code == 200
+    row = next(item for item in reviews.json() if item["review_id"] == created["review_id"])
+    assert row["quality_summary"]["evidence_chain_issue_count"] == 1
+    assert row["quality_summary"]["quality_filtered_issue_count"] == 1
+    assert row["quality_summary"]["policy_comment_budget_filtered_count"] == 1
+    assert row["impact_summary"]["graph_status"] == "ready"
+    assert row["impact_summary"]["risk_level"] == "high"
+    assert row["impact_summary"]["impacted_file_count"] == 1
+    assert row["impact_summary"]["recommended_test_scope_count"] == 1
 
 
 def test_create_review_persists_design_docs_into_review_metadata(client):

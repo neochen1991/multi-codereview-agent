@@ -99,6 +99,7 @@ class RuntimeConfig(BaseModel):
     llm_issue_judge_timeout_seconds: int = 45
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
+    enable_sast_prescan: bool = False
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 60
     standard_llm_retry_count: int = 3
@@ -218,6 +219,7 @@ class AppConfig(BaseModel):
                 llm_issue_judge_timeout_seconds=runtime.llm_issue_judge_timeout_seconds,
                 enable_llm_targeted_debate=runtime.enable_llm_targeted_debate,
                 llm_targeted_debate_timeout_seconds=runtime.llm_targeted_debate_timeout_seconds,
+                enable_sast_prescan=runtime.enable_sast_prescan,
                 default_max_debate_rounds=runtime.default_max_debate_rounds,
                 standard_llm_timeout_seconds=runtime.standard_llm_timeout_seconds,
                 standard_llm_retry_count=runtime.standard_llm_retry_count,
@@ -293,6 +295,7 @@ class AppConfig(BaseModel):
             llm_issue_judge_timeout_seconds=self.runtime.llm_issue_judge_timeout_seconds,
             enable_llm_targeted_debate=self.runtime.enable_llm_targeted_debate,
             llm_targeted_debate_timeout_seconds=self.runtime.llm_targeted_debate_timeout_seconds,
+            enable_sast_prescan=self.runtime.enable_sast_prescan,
             default_max_debate_rounds=self.runtime.default_max_debate_rounds,
             standard_llm_timeout_seconds=self.runtime.standard_llm_timeout_seconds,
             standard_llm_retry_count=self.runtime.standard_llm_retry_count,

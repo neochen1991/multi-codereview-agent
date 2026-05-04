@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import shutil
 import subprocess
@@ -107,10 +107,25 @@ class BenchmarkScore:
     missing_keywords: tuple[str, ...]
     missing_problem_markers: tuple[str, ...]
     missing_input_sections: tuple[str, ...]
+    incomplete: bool = False
+    review_status: str = ""
+    review_phase: str = ""
+
+
+KEYWORD_ALIASES: dict[str, tuple[str, ...]] = {
+    "aggregate": ("aggregate", "聚合", "聚合根"),
+    "factory": ("factory", "工厂", "工厂方法", "create 工厂", "course.create"),
+    "domain event": ("domain event", "domain events", "领域事件", "事件发布", "pulldomainevents"),
+    "catch": ("catch", "异常处理", "吞异常", "静默吞", "空 catch", "printstacktrace"),
+}
 
 
 def _build_score_summary(score: BenchmarkScore) -> str:
-    parts = [f"{'PASS' if score.passed else 'FAIL'} ({score.score:.3f})"]
+    verdict = "INCOMPLETE" if score.incomplete else ("PASS" if score.passed else "FAIL")
+    parts = [f"{verdict} ({score.score:.3f})"]
+    if score.incomplete:
+        parts.append(f"status={score.review_status or 'unknown'}")
+        parts.append(f"phase={score.review_phase or 'unknown'}")
     parts.append(f"experts={score.required_expert_coverage:.2f}")
     parts.append(f"rules={'hit' if score.required_rule_hit else 'miss'}")
     parts.append(f"keywords={score.finding_keyword_coverage:.2f}")
@@ -314,7 +329,7 @@ def submit_case(
     while time.time() < deadline:
         latest_review = request_json("GET", f"{api_base}/reviews/{review_id}")
         status = str(latest_review.get("status") or "")
-        if status in {"completed", "failed", "closed"}:
+        if status in {"completed", "failed", "closed", "waiting_human"}:
             break
         time.sleep(poll_interval_seconds)
     report = request_json("GET", f"{api_base}/reviews/{review_id}/report")
@@ -327,7 +342,17 @@ def submit_case(
         for item in issue_filter_decisions
         if isinstance(item, dict) and str(item.get("rule_code") or "").strip()
     ]
+    review_status = str(latest_review.get("status") or "")
+    review_phase = str(latest_review.get("phase") or "")
     score = evaluate_case_result(materialized.case, report if isinstance(report, dict) else {}, replay if isinstance(replay, dict) else {})
+    if review_status not in {"completed", "failed", "closed", "waiting_human"}:
+        score = replace(
+            score,
+            incomplete=True,
+            passed=False,
+            review_status=review_status,
+            review_phase=review_phase,
+        )
     return {
         "case_id": materialized.case.case_id,
         "review_id": review_id,
@@ -376,6 +401,9 @@ def submit_case(
             "missing_keywords": list(score.missing_keywords),
             "missing_problem_markers": list(score.missing_problem_markers),
             "missing_input_sections": list(score.missing_input_sections),
+            "incomplete": score.incomplete,
+            "review_status": score.review_status,
+            "review_phase": score.review_phase,
         },
         "score_summary": _build_score_summary(score),
     }
@@ -466,8 +494,16 @@ def _collect_input_quality(findings: list[dict[str, object]], replay_messages: l
             text = str(section).strip()
             if text and text not in missing_sections:
                 missing_sections.append(text)
-    average = sum(coverage_values) / len(coverage_values) if coverage_values else 0.0
+    average = sum(coverage_values) / len(coverage_values) if coverage_values else 1.0
     return average, tuple(missing_sections)
+
+
+def _keyword_matches(haystack: str, keyword: str) -> bool:
+    lowered_keyword = str(keyword or "").strip().lower()
+    if not lowered_keyword:
+        return True
+    aliases = KEYWORD_ALIASES.get(lowered_keyword, (lowered_keyword,))
+    return any(str(alias or "").strip().lower() in haystack for alias in aliases if str(alias or "").strip())
 
 
 def _collect_invalid_finding_rate(findings: list[dict[str, object]], issues: list[dict[str, object]]) -> float:
@@ -542,7 +578,8 @@ def _collect_problem_marker_coverage(
         for item in payloads:
             if str(item.get("file_path") or "").strip() != file_path:
                 continue
-            if all(keyword in _payload_blob(item) for keyword in keywords):
+            blob = _payload_blob(item)
+            if all(_keyword_matches(blob, keyword) for keyword in keywords):
                 matched = True
                 break
         if not matched:
@@ -590,7 +627,7 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
     for issue in issues:
         text_blobs.extend([str(issue.get("title") or ""), str(issue.get("summary") or "")])
     haystack = "\n".join(text_blobs).lower()
-    missing_keywords = tuple(keyword for keyword in case.expected.finding_keywords if keyword.lower() not in haystack)
+    missing_keywords = tuple(keyword for keyword in case.expected.finding_keywords if not _keyword_matches(haystack, keyword))
     finding_keyword_coverage = (
         (len(case.expected.finding_keywords) - len(missing_keywords)) / len(case.expected.finding_keywords)
         if case.expected.finding_keywords

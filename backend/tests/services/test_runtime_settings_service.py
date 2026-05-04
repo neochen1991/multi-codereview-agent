@@ -229,3 +229,19 @@ def test_runtime_settings_service_persists_rule_screening_fields_in_sqlite(stora
     assert sqlite_payload["rule_screening_mode"] == "llm"
     assert sqlite_payload["rule_screening_batch_size"] == 10
     assert sqlite_payload["rule_screening_llm_timeout_seconds"] == 150
+
+
+def test_runtime_settings_service_keeps_sast_prescan_disabled_by_default(storage_root: Path) -> None:
+    runtime = RuntimeSettingsService(storage_root).get()
+
+    assert runtime.enable_sast_prescan is False
+
+
+def test_runtime_settings_service_persists_sast_prescan_toggle_in_sqlite(storage_root: Path) -> None:
+    service = RuntimeSettingsService(storage_root)
+
+    runtime = service.update({"enable_sast_prescan": True})
+
+    assert runtime.enable_sast_prescan is True
+    sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
+    assert sqlite_payload["enable_sast_prescan"] is True

@@ -432,6 +432,16 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               <InputNumber min={15} max={300} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item
+              name="enable_sast_prescan"
+              label="启用 SAST/linter 预扫描"
+              valuePropName="checked"
+              extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为专家提示补充工具候选信号。"
+            >
+              <Switch />
+            </Form.Item>
+          </Col>
         </Row>
       </div>
     ),
@@ -934,6 +944,7 @@ export const sanitizeRuntimeSettingsPayload = (values: RuntimeSettings): Partial
   rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
   enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
   llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
+  enable_sast_prescan: Boolean(values.enable_sast_prescan),
   default_max_debate_rounds: Number(values.default_max_debate_rounds || 2),
   standard_llm_timeout_seconds: Number(values.standard_llm_timeout_seconds || 60),
   standard_llm_retry_count: Number(values.standard_llm_retry_count || 3),

@@ -1,0 +1,19 @@
+{
+  "case_id": "java-loop-call-amplification",
+  "expected_findings": [
+    {
+      "id": "loop-external-call",
+      "severity": "P1",
+      "file_path": "src/main/java/com/example/course/CourseCreator.java",
+      "keywords": ["loop", "external call", "amplification"],
+      "required": true
+    },
+    {
+      "id": "batch-remediation",
+      "severity": "P2",
+      "file_path": "src/main/java/com/example/course/CourseCreator.java",
+      "keywords": ["batch", "outside the loop"],
+      "required": true
+    }
+  ]
+}

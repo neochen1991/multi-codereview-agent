@@ -28,8 +28,10 @@ class ReviewFinding(BaseModel):
     summary: str
     finding_type: str = "risk_hypothesis"
     normalized_issue_type: str = ""
+    category_label: str = ""
     severity: str = "medium"
     confidence: float = 0.72
+    confidence_rationale: str = ""
     file_path: str = "src/example.ts"
     line_start: int = 1
     evidence: list[str] = Field(default_factory=list)
@@ -65,8 +67,10 @@ class ExpertFindingPayload(BaseModel):
     summary: str = ""
     finding_type: str
     normalized_issue_type: str = ""
+    category_label: str = ""
     severity: str
     confidence: float = 0.0
+    confidence_rationale: str = ""
     file_path: str = ""
     line_start: int = 1
     line_end: int | None = None

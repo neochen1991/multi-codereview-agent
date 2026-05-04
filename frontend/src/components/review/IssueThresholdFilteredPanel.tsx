@@ -30,6 +30,7 @@ const FILTER_RULE_CODES = new Set([
   "below_priority_confidence_threshold",
   "conditional_conclusion",
   "removed_line_only",
+  "repo_policy_comment_budget",
 ]);
 
 const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = ({
@@ -75,8 +76,8 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
   return (
     <Card
       className="module-card review-threshold-filter-card"
-      title={`被过滤的问题清单 (${rows.length})`}
-      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为有效问题，常见原因包括阈值不足、条件化结论或仅命中删除代码。</Text>}
+      title={`被降级的问题清单 (${rows.length})`}
+      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为有效问题，常见原因包括阈值不足、条件化结论、仅命中删除代码或超出仓库评论预算。</Text>}
     >
       <Table<ThresholdFilteredRow>
         rowKey="finding_id"
@@ -129,7 +130,11 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             dataIndex: "threshold_label",
             key: "threshold_label",
             width: 220,
-            render: (value: string, row: ThresholdFilteredRow) => <Tag color={row.rule_code === "removed_line_only" ? "red" : row.rule_code === "conditional_conclusion" ? "gold" : "default"}>{value}</Tag>,
+            render: (value: string, row: ThresholdFilteredRow) => (
+              <Tag color={row.rule_code === "removed_line_only" ? "red" : row.rule_code === "conditional_conclusion" ? "gold" : row.rule_code === "repo_policy_comment_budget" ? "purple" : "default"}>
+                {value}
+              </Tag>
+            ),
           },
           {
             title: "问题摘要",

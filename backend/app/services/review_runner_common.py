@@ -366,6 +366,64 @@ class ReviewRunnerCommonMixin:
         }
         return expert_defaults.get(expert_id, "general_code_review_risk")
 
+    def _category_label_for_finding(self, *, finding_type: str, issue_type: str, expert_id: str) -> str:
+        normalized_type = str(issue_type or "").strip().lower()
+        normalized_finding_type = str(finding_type or "").strip().lower()
+        if "exception" in normalized_type or "catch" in normalized_type:
+            return "exception_handling"
+        if "auth" in normalized_type or "permission" in normalized_type or "security" in normalized_type:
+            return "security"
+        if "query" in normalized_type or "database" in normalized_type or "sql" in normalized_type:
+            return "data_access"
+        if "loop" in normalized_type or "performance" in normalized_type:
+            return "performance"
+        if "test" in normalized_type or normalized_finding_type == "test_gap":
+            return "test_coverage"
+        if "design" in normalized_type or normalized_finding_type == "design_concern":
+            return "architecture"
+        if "naming" in normalized_type or "maintainability" in normalized_type:
+            return "maintainability"
+        if expert_id == "change_impact_analysis":
+            return "change_impact"
+        if normalized_finding_type == "risk_hypothesis":
+            return "risk_hypothesis"
+        return "code_quality"
+
+    def _confidence_rationale_for_finding(
+        self,
+        *,
+        confidence: float,
+        finding_type: str,
+        evidence: list[str],
+        matched_rules: list[str],
+        verification_needed: bool,
+        code_context: dict[str, object] | None = None,
+    ) -> str:
+        reasons: list[str] = []
+        if finding_type == "direct_defect":
+            reasons.append("直接代码证据")
+        elif finding_type == "risk_hypothesis":
+            reasons.append("待验证风险")
+        elif finding_type == "test_gap":
+            reasons.append("测试覆盖缺口")
+        elif finding_type == "design_concern":
+            reasons.append("设计一致性关注")
+        if matched_rules:
+            reasons.append(f"命中 {len(matched_rules)} 条规则")
+        if evidence:
+            reasons.append(f"包含 {len(evidence)} 条证据")
+        context = dict(code_context or {})
+        if context.get("sast_cross_validated"):
+            reasons.append("SAST/linter 交叉验证")
+        if context.get("deterministic_signal"):
+            reasons.append("确定性规则信号")
+        if context.get("observation_ids"):
+            reasons.append("结构化观察信号")
+        if verification_needed:
+            reasons.append("仍需复核")
+        reasons.append(f"原始置信度 {float(confidence or 0.0):.2f}")
+        return "；".join(reasons)
+
     def _normalize_text_list(self, value: object, fallback: list[str]) -> list[str]:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]

@@ -1,17 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Empty, Space, Tag, Typography } from "antd";
-import mermaid from "mermaid";
+import { Alert, Button, Card, Empty, Space, Tag, Typography, message } from "antd";
 
-import type {
-  ImpactFile,
-  ImpactGraph,
-  ImpactGraphEdge,
-  ImpactGraphNode,
-  ImpactPath,
-  ImpactReport,
-  ReviewReport,
-  ReviewSummary,
-  TestScopeRecommendation,
+import {
+  reviewApi,
+  type ImpactFile,
+  type ImpactGraph,
+  type ImpactGraphEdge,
+  type ImpactGraphNode,
+  type ImpactPath,
+  type ImpactReport,
+  type ImpactSymbol,
+  type ReviewReport,
+  type ReviewSummary,
+  type TestScopeRecommendation,
 } from "@/services/api";
 
 const { Paragraph, Text, Title } = Typography;
@@ -30,9 +31,26 @@ const priorityColor = (value?: string): string => {
   return "default";
 };
 
+const confidenceLabelText = (value?: string): string => {
+  if (value === "confirmed") return "图谱确认";
+  if (value === "historically_confirmed") return "历史确认";
+  if (value === "needs_verification") return "需复核";
+  if (value === "inferred") return "推断";
+  if (value === "candidate") return "候选";
+  return value || "候选";
+};
+
+const confidenceLabelColor = (value?: string): string => {
+  if (value === "confirmed" || value === "historically_confirmed") return "success";
+  if (value === "needs_verification") return "warning";
+  if (value === "candidate" || value === "inferred") return "processing";
+  return "default";
+};
+
 const graphStatusLabel = (value?: string): string => {
   if (value === "ready") return "GitNexus 图谱已命中";
   if (value === "running") return "GitNexus 建图中";
+  if (value === "degraded") return "GitNexus 降级候选";
   if (value === "missing") return "GitNexus 图谱未命中";
   if (value === "failed") return "GitNexus 图谱不可用";
   return value || "状态未知";
@@ -156,6 +174,167 @@ const buildRiskDistribution = (items: ImpactFile[]): Array<{ label: string; coun
     { label: "低风险", count: low, tone: "success" },
   ];
 };
+
+type ImpactQualitySummary = {
+  verdict: string;
+  graphTone: string;
+  hitRate: number;
+  hitLabel: string;
+  skippedCount: number;
+  highRiskCount: number;
+  executableTestCount: number;
+  blindSpotCount: number;
+  nextActions: string[];
+};
+
+type ImpactChecklistItem = {
+  title: string;
+  detail: string;
+  kind: string;
+};
+
+type ImpactFeedbackLabel = "confirmed" | "false_positive";
+
+type ImpactFeedbackState = {
+  submittingKey: string;
+  submittedByTarget: Record<string, ImpactFeedbackLabel>;
+  disabled: boolean;
+};
+
+type ImpactFeedbackTargetType = "impact_path" | "impact_file" | "test_scope";
+
+type ImpactFeedbackHandler = (targetType: ImpactFeedbackTargetType, targetKey: string, label: ImpactFeedbackLabel) => void;
+
+const buildImpactFeedbackTargetId = (targetType: string, targetKey: string): string => `${targetType}:${targetKey}`;
+
+const buildImpactFeedbackActionId = (targetType: string, targetKey: string, label: string): string =>
+  `${targetType}:${targetKey}:${label}`;
+
+const buildImpactPathTargetKey = (item: ImpactPath, index: number): string => {
+  const nodes = item.path?.length ? item.path : [item.source, item.target].filter(Boolean);
+  const chain = nodes.map((node) => String(node || "").trim()).filter(Boolean).join(" -> ");
+  return chain || `impact_path_${index + 1}`;
+};
+
+const buildImpactFileTargetKey = (item: ImpactFile, index: number): string =>
+  [item.file_path, item.relationship, item.reason].map((value) => String(value || "").trim()).filter(Boolean).join(" | ") ||
+  `impact_file_${index + 1}`;
+
+const buildTestScopeTargetKey = (item: TestScopeRecommendation, index: number): string =>
+  [item.scope, item.priority, item.paths?.join(","), item.reason].map((value) => String(value || "").trim()).filter(Boolean).join(" | ") ||
+  `test_scope_${index + 1}`;
+
+const renderImpactFeedbackActions = (
+  targetType: ImpactFeedbackTargetType,
+  targetKey: string,
+  label: string,
+  onFeedback?: ImpactFeedbackHandler,
+  feedbackState?: ImpactFeedbackState,
+) => {
+  if (!onFeedback) return null;
+  const targetId = buildImpactFeedbackTargetId(targetType, targetKey);
+  const confirmedActionId = buildImpactFeedbackActionId(targetType, targetKey, "confirmed");
+  const falsePositiveActionId = buildImpactFeedbackActionId(targetType, targetKey, "false_positive");
+  const submittedLabel = feedbackState?.submittedByTarget[targetId];
+  return (
+    <div className="impact-report-feedback-actions">
+      <Text type="secondary">{label}</Text>
+      <Space size={8} wrap>
+        {submittedLabel ? (
+          <Tag color={submittedLabel === "confirmed" ? "success" : "warning"}>
+            {submittedLabel === "confirmed" ? "已确认" : "已标记误报"}
+          </Tag>
+        ) : null}
+        <Button
+          size="small"
+          type={submittedLabel === "confirmed" ? "primary" : "default"}
+          loading={feedbackState?.submittingKey === confirmedActionId}
+          disabled={feedbackState?.disabled || Boolean(feedbackState?.submittingKey)}
+          onClick={() => onFeedback(targetType, targetKey, "confirmed")}
+        >
+          确认
+        </Button>
+        <Button
+          size="small"
+          danger={submittedLabel === "false_positive"}
+          loading={feedbackState?.submittingKey === falsePositiveActionId}
+          disabled={feedbackState?.disabled || Boolean(feedbackState?.submittingKey)}
+          onClick={() => onFeedback(targetType, targetKey, "false_positive")}
+        >
+          误报
+        </Button>
+      </Space>
+    </div>
+  );
+};
+
+const buildImpactQualitySummary = (impactReport: ImpactReport): ImpactQualitySummary => {
+  const requestedCount = impactReport.queried_targets?.length || 0;
+  const contextHitCount = impactReport.successful_context_targets?.length || 0;
+  const impactHitCount = impactReport.successful_impact_targets?.length || 0;
+  const skippedCount =
+    (impactReport.skipped_invalid_targets?.length || 0) +
+    (impactReport.skipped_missing_context_targets?.length || 0) +
+    (impactReport.skipped_missing_impact_targets?.length || 0);
+  const hitBase = requestedCount || contextHitCount + impactHitCount + skippedCount;
+  const hitRate = hitBase > 0 ? Math.round(((contextHitCount + impactHitCount) / (hitBase * 2)) * 100) : 0;
+  const highRiskCount = impactReport.impacted_files.filter((item) => priorityRank(item.risk_level) >= 3).length;
+  const executableTestCount =
+    impactReport.recommended_test_scope.filter((item) => item.paths.length || item.reason).length + impactReport.must_run_tests.length;
+  const blindSpotCount = skippedCount + impactReport.limitations.length + (impactReport.graph_status === "ready" ? 0 : 1);
+  const graphTone = impactReport.graph_status === "ready" && hitRate > 0 ? "success" : impactReport.graph_status === "failed" ? "error" : "warning";
+  const nextActions = dedupeStrings([
+    highRiskCount > 0 ? `先验证 ${highRiskCount} 个高风险影响文件` : "",
+    executableTestCount > 0 ? `按优先级执行 ${executableTestCount} 条测试动作` : "",
+    blindSpotCount > 0 ? `补齐 ${blindSpotCount} 个图谱/上下文盲区` : "",
+    impactReport.manual_verification.length > 0 ? `人工确认 ${impactReport.manual_verification.length} 项边界条件` : "",
+  ]).slice(0, 3);
+  const verdict =
+    impactReport.graph_status !== "ready" || hitRate === 0
+      ? "图谱未完全可用，影响结论需要人工兜底确认。"
+      : highRiskCount > 0
+        ? "已命中高风险影响面，合并前应优先跑完核心回归。"
+        : executableTestCount > 0
+          ? "影响范围可执行，建议按测试动作完成验证后再合并。"
+          : "当前影响面较轻，但仍需确认报告边界。";
+  return {
+    verdict,
+    graphTone,
+    hitRate,
+  hitLabel: hitBase > 0 ? `${hitRate}%` : impactReport.changed_symbols.length ? `符号 ${impactReport.changed_symbols.length}` : "暂无",
+    skippedCount,
+    highRiskCount,
+    executableTestCount,
+    blindSpotCount,
+    nextActions,
+  };
+};
+
+const buildExecutionChecklistItems = (
+  items: TestScopeRecommendation[],
+  commands: string[],
+  manualVerification: string[],
+): ImpactChecklistItem[] =>
+  [
+    ...items
+      .slice()
+      .sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority))
+      .map((item) => ({
+        title: item.scope,
+        detail: item.reason || "补充相关测试验证。",
+        kind: priorityLabel(item.priority),
+      })),
+    ...commands.slice(0, 4).map((item) => ({
+      title: item,
+      detail: "建议纳入本次回归执行集。",
+      kind: "执行命令",
+    })),
+    ...manualVerification.slice(0, 3).map((item) => ({
+      title: item,
+      detail: "这部分需要研发或测试人工补判断。",
+      kind: "人工确认",
+    })),
+  ].slice(0, 8);
 
 type GraphLayoutNode = ImpactGraphNode & {
   x: number;
@@ -396,7 +575,10 @@ const renderInlineTemplateText = (text: string): React.ReactNode[] => {
   return tokens.length ? tokens : [source];
 };
 
+type MermaidApi = typeof import("mermaid").default;
+
 let mermaidConfigured = false;
+let mermaidPromise: Promise<MermaidApi> | null = null;
 
 const normalizeMermaidNodeLabel = (value: string): string => String(value || "").replace(/\s+/g, " ").trim();
 
@@ -498,8 +680,12 @@ const findLinkedMermaidBlock = (scope: ParentNode | null, currentBlock: Element 
   );
 };
 
-const ensureMermaid = () => {
-  if (mermaidConfigured) return;
+const ensureMermaid = async (): Promise<MermaidApi> => {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then((module) => module.default);
+  }
+  const mermaid = await mermaidPromise;
+  if (mermaidConfigured) return mermaid;
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "loose",
@@ -507,6 +693,7 @@ const ensureMermaid = () => {
     flowchart: { useMaxWidth: true, htmlLabels: false, curve: "basis" },
   });
   mermaidConfigured = true;
+  return mermaid;
 };
 
 const MermaidBlock = ({ chart }: { chart: string }) => {
@@ -524,9 +711,9 @@ const MermaidBlock = ({ chart }: { chart: string }) => {
     const render = async () => {
       if (!containerRef.current) return;
       setError("");
-      ensureMermaid();
       const id = `impact-mermaid-${Math.random().toString(36).slice(2, 10)}`;
       try {
+        const mermaid = await ensureMermaid();
         const result = await mermaid.render(id, chart);
         if (disposed || !containerRef.current) return;
         containerRef.current.innerHTML = result.svg;
@@ -935,7 +1122,9 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     ...((impactReport.impact_paths || []).length
       ? (impactReport.impact_paths || []).map((item) => {
           const pathText = item.path?.length ? item.path.join(" -> ") : `${item.source} -> ${item.target}`;
-          return `- ${pathText} | 深度 ${item.depth || 0} | 风险 ${item.risk || "unknown"}`;
+          const confidence = item.confidence_label ? ` | 可信度 ${item.confidence_label}` : "";
+          const reason = item.confirmation_reason ? ` | ${item.confirmation_reason}` : "";
+          return `- ${pathText} | 深度 ${item.depth || 0} | 风险 ${item.risk || "unknown"}${confidence}${reason}`;
         })
       : ["- 暂无"]),
     "",
@@ -959,6 +1148,37 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     ...buildAnalysisBasis(impactReport).map((item) => `- ${item}`),
   ];
   return sections.join("\n");
+};
+
+const buildExecutionChecklistMarkdown = (
+  reviewId: string,
+  impactReport: ImpactReport,
+  checklist: ImpactChecklistItem[],
+): string => {
+  const lines = [
+    `## GitNexus 影响分析执行清单`,
+    "",
+    `- Review ID: ${reviewId}`,
+    `- 风险等级: ${impactReport.risk_level || "unknown"}`,
+    `- 图谱状态: ${graphStatusLabel(impactReport.graph_status)}`,
+    `- 影响文件: ${impactReport.impacted_files.length}`,
+    `- 测试建议: ${impactReport.recommended_test_scope.length}`,
+    "",
+    "### 建议执行顺序",
+    ...(
+      checklist.length
+        ? checklist.map((item, index) => `${index + 1}. [ ] ${item.title}（${item.kind}）\n   - ${item.detail}`)
+        : ["- 暂无明确执行项"]
+    ),
+    "",
+    "### 人工确认项",
+    ...(
+      impactReport.manual_verification.length
+        ? impactReport.manual_verification.map((item) => `- [ ] ${item}`)
+        : ["- 暂无额外人工确认项"]
+    ),
+  ];
+  return lines.join("\n");
 };
 
 const downloadImpactReportMarkdown = (review: ReviewReport | null) => {
@@ -1001,6 +1221,78 @@ const renderMiniStats = (title: string, items: Array<{ label: string; count: num
           <div className="impact-report-mini-stat-value">{item.count}</div>
         </div>
       ))}
+    </div>
+  </section>
+);
+
+const formatImpactSymbol = (item: ImpactSymbol): string => {
+  const symbol = [item.container, item.symbol].filter(Boolean).join(".");
+  return symbol || item.file_path || "unknown";
+};
+
+const renderChangedSymbols = (items: ImpactSymbol[]) => (
+  <section className="impact-report-section">
+    <div className="impact-report-section-head">
+      <Title level={5}>变更符号</Title>
+      <Tag color={items.length ? "processing" : "default"}>{items.length}</Tag>
+    </div>
+    {items.length ? (
+      <div className="impact-report-symbol-grid">
+        {items.slice(0, 12).map((item) => (
+          <div key={`${item.file_path}-${item.container}-${item.symbol}-${item.line_start}`} className="impact-report-symbol-card">
+            <div className="impact-report-symbol-main">
+              <Text strong>{formatImpactSymbol(item)}</Text>
+              <Space size={6} wrap>
+                <Tag>{item.kind || "symbol"}</Tag>
+                {item.line_start ? <Tag color="default">L{item.line_start}</Tag> : null}
+              </Space>
+            </div>
+            <Text type="secondary" className="impact-report-symbol-path">
+              {item.file_path}
+            </Text>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <Text type="secondary">当前没有从 diff 或图谱中提取到变更符号。</Text>
+    )}
+  </section>
+);
+
+const renderImpactQualitySummary = (summary: ImpactQualitySummary) => (
+  <section className={`impact-report-quality-strip impact-report-quality-strip-${summary.graphTone}`}>
+    <div className="impact-report-quality-main">
+      <Text type="secondary">影响分析质量判读</Text>
+      <div className="impact-report-quality-verdict">{summary.verdict}</div>
+      <Space size={6} wrap>
+        {summary.nextActions.length ? (
+          summary.nextActions.map((item) => (
+            <Tag key={item} color="processing">
+              {item}
+            </Tag>
+          ))
+        ) : (
+          <Tag>暂无额外动作</Tag>
+        )}
+      </Space>
+    </div>
+    <div className="impact-report-quality-metrics">
+      <div>
+        <Text type="secondary">目标命中</Text>
+        <strong>{summary.hitLabel}</strong>
+      </div>
+      <div>
+        <Text type="secondary">高风险</Text>
+        <strong>{summary.highRiskCount}</strong>
+      </div>
+      <div>
+        <Text type="secondary">测试动作</Text>
+        <strong>{summary.executableTestCount}</strong>
+      </div>
+      <div>
+        <Text type="secondary">盲区</Text>
+        <strong>{summary.blindSpotCount}</strong>
+      </div>
     </div>
   </section>
 );
@@ -1089,7 +1381,11 @@ const renderCollapsibleTargetDiagnostics = (impactReport: ImpactReport) => {
   );
 };
 
-const renderImpactedFiles = (items: ImpactFile[]) => (
+const renderImpactedFiles = (
+  items: ImpactFile[],
+  onFeedback?: ImpactFeedbackHandler,
+  feedbackState?: ImpactFeedbackState,
+) => (
   <section className="impact-report-section">
     <Title level={5}>影响文件</Title>
     {items.length ? (
@@ -1111,20 +1407,24 @@ const renderImpactedFiles = (items: ImpactFile[]) => (
                 <Tag>{group.items.length}</Tag>
               </div>
               <div className="impact-report-file-list">
-                {group.items.map((item) => (
-                  <div key={`${item.file_path}-${item.relationship}-${item.reason}`} className="impact-report-file-card">
-                    <div className="impact-report-file-head">
-                      <Text strong>{item.file_path}</Text>
-                      <Space size={8} wrap>
-                        <Tag>{item.relationship || "关联"}</Tag>
-                        <Tag color={riskColor(item.risk_level)}>{`风险 ${item.risk_level || "unknown"}`}</Tag>
-                      </Space>
+                {group.items.map((item, index) => {
+                  const targetKey = buildImpactFileTargetKey(item, index);
+                  return (
+                    <div key={`${item.file_path}-${item.relationship}-${item.reason}`} className="impact-report-file-card">
+                      <div className="impact-report-file-head">
+                        <Text strong>{item.file_path}</Text>
+                        <Space size={8} wrap>
+                          <Tag>{item.relationship || "关联"}</Tag>
+                          <Tag color={riskColor(item.risk_level)}>{`风险 ${item.risk_level || "unknown"}`}</Tag>
+                        </Space>
+                      </div>
+                      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                        {item.reason || "暂无影响说明"}
+                      </Paragraph>
+                      {renderImpactFeedbackActions("impact_file", targetKey, "反馈这个影响文件", onFeedback, feedbackState)}
                     </div>
-                    <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                      {item.reason || "暂无影响说明"}
-                    </Paragraph>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -1135,13 +1435,20 @@ const renderImpactedFiles = (items: ImpactFile[]) => (
   </section>
 );
 
-const renderImpactPaths = (items: ImpactPath[]) => (
+const renderImpactPaths = (
+  items: ImpactPath[],
+  onFeedback?: ImpactFeedbackHandler,
+  feedbackState?: ImpactFeedbackState,
+) => (
   <section className="impact-report-section">
     <Title level={5}>关键影响路径</Title>
     {items.length ? (
       <div className="impact-report-path-list">
         {items.map((item, index) => {
           const pathText = item.path?.length ? item.path : [item.source, item.target].filter(Boolean);
+          const targetKey = buildImpactPathTargetKey(item, index);
+          const targetId = buildImpactFeedbackTargetId("impact_path", targetKey);
+          const submittedLabel = feedbackState?.submittedByTarget[targetId];
           return (
             <div key={`${item.source}-${item.target}-${index}`} className="impact-report-path-card">
               <div className="impact-report-path-head">
@@ -1149,6 +1456,14 @@ const renderImpactPaths = (items: ImpactPath[]) => (
                 <Space size={8} wrap>
                   <Tag>{`深度 ${item.depth || 0}`}</Tag>
                   <Tag color={riskColor(item.risk)}>{`风险 ${item.risk || "unknown"}`}</Tag>
+                  <Tag color={confidenceLabelColor(item.confidence_label)}>
+                    {confidenceLabelText(item.confidence_label)}
+                  </Tag>
+                  {submittedLabel ? (
+                    <Tag color={submittedLabel === "confirmed" ? "success" : "warning"}>
+                      {submittedLabel === "confirmed" ? "已确认" : "已标记误报"}
+                    </Tag>
+                  ) : null}
                 </Space>
               </div>
               <div className="impact-report-path-chain">
@@ -1171,6 +1486,12 @@ const renderImpactPaths = (items: ImpactPath[]) => (
                   </div>
                 ))}
               </div>
+              {item.confirmation_reason ? (
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  {item.confirmation_reason}
+                </Paragraph>
+              ) : null}
+              {renderImpactFeedbackActions("impact_path", targetKey, "反馈这条影响路径", onFeedback, feedbackState)}
             </div>
           );
         })}
@@ -1236,7 +1557,11 @@ const renderImpactGraph = (impactReport: ImpactReport) => {
   );
 };
 
-const renderTestScope = (items: TestScopeRecommendation[]) => (
+const renderTestScope = (
+  items: TestScopeRecommendation[],
+  onFeedback?: ImpactFeedbackHandler,
+  feedbackState?: ImpactFeedbackState,
+) => (
   <section className="impact-report-section">
     <Title level={5}>建议测试范围</Title>
     {items.length ? (
@@ -1262,21 +1587,25 @@ const renderTestScope = (items: TestScopeRecommendation[]) => (
                 <Tag>{group.items.length}</Tag>
               </div>
               <div className="impact-report-test-list">
-                {group.items.map((item) => (
-                  <div key={`${item.scope}-${item.priority}`} className="impact-report-test-card">
-                    <div className="impact-report-test-head">
-                      <Text strong>{item.scope}</Text>
-                      <Tag color={priorityColor(item.priority)}>{priorityLabel(item.priority)}</Tag>
-                    </div>
-                    <Paragraph style={{ marginBottom: 8 }}>{item.reason || "暂无原因说明"}</Paragraph>
-                    {item.paths.length ? (
-                      <div className="impact-report-inline-meta">
-                        <Text type="secondary">关联路径</Text>
-                        <Text>{item.paths.join("、")}</Text>
+                {group.items.map((item, index) => {
+                  const targetKey = buildTestScopeTargetKey(item, index);
+                  return (
+                    <div key={`${item.scope}-${item.priority}`} className="impact-report-test-card">
+                      <div className="impact-report-test-head">
+                        <Text strong>{item.scope}</Text>
+                        <Tag color={priorityColor(item.priority)}>{priorityLabel(item.priority)}</Tag>
                       </div>
-                    ) : null}
-                  </div>
-                ))}
+                      <Paragraph style={{ marginBottom: 8 }}>{item.reason || "暂无原因说明"}</Paragraph>
+                      {item.paths.length ? (
+                        <div className="impact-report-inline-meta">
+                          <Text type="secondary">关联路径</Text>
+                          <Text>{item.paths.join("、")}</Text>
+                        </div>
+                      ) : null}
+                      {renderImpactFeedbackActions("test_scope", targetKey, "反馈这个测试建议", onFeedback, feedbackState)}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -1287,31 +1616,17 @@ const renderTestScope = (items: TestScopeRecommendation[]) => (
   </section>
 );
 
-const renderExecutionChecklist = (items: TestScopeRecommendation[], commands: string[], manualVerification: string[]) => {
-  const checklist = [
-    ...items
-      .slice()
-      .sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority))
-      .map((item) => ({
-        title: item.scope,
-        detail: item.reason || "补充相关测试验证。",
-        kind: priorityLabel(item.priority),
-      })),
-    ...commands.slice(0, 4).map((item) => ({
-      title: item,
-      detail: "建议纳入本次回归执行集。",
-      kind: "执行命令",
-    })),
-    ...manualVerification.slice(0, 3).map((item) => ({
-      title: item,
-      detail: "这部分需要研发或测试人工补判断。",
-      kind: "人工确认",
-    })),
-  ].slice(0, 8);
-
+const renderExecutionChecklist = (checklist: ImpactChecklistItem[], onCopy?: () => void) => {
   return (
     <section className="impact-report-section">
-      <Title level={5}>建议执行顺序</Title>
+      <div className="impact-report-section-head">
+        <Title level={5}>建议执行顺序</Title>
+        {checklist.length && onCopy ? (
+          <Button size="small" onClick={onCopy}>
+            复制清单
+          </Button>
+        ) : null}
+      </div>
       {checklist.length ? (
         <div className="impact-report-checklist">
           {checklist.map((item, index) => (
@@ -1371,12 +1686,19 @@ type ImpactReportMarkdownPanelProps = {
 
 const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ report, review, className }) => {
   const impactReport = report?.impact_report || readImpactReportFromReview(review);
+  const [impactFeedbackSubmittingKey, setImpactFeedbackSubmittingKey] = useState("");
+  const [impactFeedbackSubmittedByTarget, setImpactFeedbackSubmittedByTarget] = useState<Record<string, ImpactFeedbackLabel>>({});
   const effectiveReport = useMemo(
     () => report || (impactReport ? ({ review_id: review?.review_id || "impact-report", impact_report: impactReport } as ReviewReport) : null),
     [impactReport, report, review?.review_id],
   );
   const markdown = useMemo(() => buildImpactReportMarkdown(effectiveReport), [effectiveReport]);
   const impactFailure = useMemo(() => readImpactFailure(review || null), [review]);
+  const hasConfirmedGraphFacts = Boolean(
+    impactReport &&
+      impactReport.graph_status === "ready" &&
+      ((impactReport.successful_context_targets?.length || 0) > 0 || (impactReport.successful_impact_targets?.length || 0) > 0),
+  );
 
   const summaryCards = useMemo(() => {
     if (!impactReport) return [];
@@ -1397,6 +1719,21 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
   const reportKeyPoints = useMemo(() => dedupeStrings(impactReport?.key_impact_points || []), [impactReport]);
   const reportTestFocus = useMemo(() => dedupeStrings(impactReport?.test_focus || []), [impactReport]);
   const riskDistribution = useMemo(() => (impactReport ? buildRiskDistribution(impactReport.impacted_files) : []), [impactReport]);
+  const impactQualitySummary = useMemo(
+    () => (impactReport ? buildImpactQualitySummary(impactReport) : null),
+    [impactReport],
+  );
+  const executionChecklist = useMemo(
+    () =>
+      impactReport
+        ? buildExecutionChecklistItems(
+            impactReport.recommended_test_scope,
+            impactReport.must_run_tests,
+            impactReport.manual_verification,
+          )
+        : [],
+    [impactReport],
+  );
   const topAttentionItems = useMemo(() => {
     if (!impactReport) return [];
     const impactTargets = impactReport.impacted_files
@@ -1413,6 +1750,51 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       .map((item) => `${item.scope}：${item.reason}`);
     return dedupeStrings([...impactTargets, ...testTargets]).slice(0, 5);
   }, [impactReport]);
+  const reviewId = effectiveReport?.review_id || review?.review_id || "";
+  const canSubmitImpactFeedback = Boolean(reviewId && reviewId !== "impact-report");
+  const impactFeedbackState = useMemo<ImpactFeedbackState>(
+    () => ({
+      submittingKey: impactFeedbackSubmittingKey,
+      submittedByTarget: impactFeedbackSubmittedByTarget,
+      disabled: !canSubmitImpactFeedback,
+    }),
+    [canSubmitImpactFeedback, impactFeedbackSubmittedByTarget, impactFeedbackSubmittingKey],
+  );
+
+  const submitImpactFeedback: ImpactFeedbackHandler = async (targetType, targetKey, label) => {
+    if (!canSubmitImpactFeedback) {
+      message.warning("当前报告缺少 review_id，无法记录影响反馈");
+      return;
+    }
+    const actionId = buildImpactFeedbackActionId(targetType, targetKey, label);
+    const targetId = buildImpactFeedbackTargetId(targetType, targetKey);
+    setImpactFeedbackSubmittingKey(actionId);
+    try {
+      await reviewApi.submitImpactFeedback(reviewId, {
+        target_type: targetType,
+        target_key: targetKey,
+        label,
+        comment: label === "confirmed" ? "前端确认影响分析结果" : "前端标记影响分析疑似误报",
+      });
+      setImpactFeedbackSubmittedByTarget((current) => ({ ...current, [targetId]: label }));
+      message.success(label === "confirmed" ? "已记录影响确认" : "已记录误报反馈");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "记录影响反馈失败");
+    } finally {
+      setImpactFeedbackSubmittingKey("");
+    }
+  };
+
+  const copyExecutionChecklist = async () => {
+    if (!impactReport) return;
+    const text = buildExecutionChecklistMarkdown(reviewId || "impact-report", impactReport, executionChecklist);
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success("已复制影响分析执行清单");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "复制执行清单失败");
+    }
+  };
 
   return (
     <Card
@@ -1425,14 +1807,20 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
       }
     >
       {impactReport ? (
-        impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown) ? (
+        hasConfirmedGraphFacts && impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown) ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {impactQualitySummary ? renderImpactQualitySummary(impactQualitySummary) : null}
+            {renderExecutionChecklist(executionChecklist, copyExecutionChecklist)}
             <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
             {renderCollapsibleTargetDiagnostics(impactReport)}
+            {renderImpactPaths(impactReport.impact_paths.slice(0, 5), submitImpactFeedback, impactFeedbackState)}
+            {renderImpactedFiles(impactReport.impacted_files.slice(0, 6), submitImpactFeedback, impactFeedbackState)}
+            {renderTestScope(impactReport.recommended_test_scope.slice(0, 6), submitImpactFeedback, impactFeedbackState)}
           </Space>
         ) : (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {renderReportHeadline(impactReport)}
+            {impactQualitySummary ? renderImpactQualitySummary(impactQualitySummary) : null}
 
             {renderListSection("报告重点", reportKeyPoints, "当前没有额外的重点结论。")}
             {renderListSection("优先测试建议", reportTestFocus, "当前没有额外的测试结论。")}
@@ -1448,6 +1836,7 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
 
             {renderListSection("本次最值得优先关注", topAttentionItems, "当前没有额外的重点关注项。")}
             {renderListSection("关联影响解读", relationshipInsights, "当前没有识别出更细的传播关系。")}
+            {renderChangedSymbols(impactReport.changed_symbols)}
             {renderTargetDiagnostics(impactReport)}
             {renderImpactGraph(impactReport)}
 
@@ -1475,14 +1864,10 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
 
             {renderListSection("本次变更文件", impactReport.changed_files, "当前没有记录到变更文件。")}
             {renderMiniStats("影响风险分布", riskDistribution)}
-            {renderImpactedFiles(impactReport.impacted_files)}
-            {renderImpactPaths(impactReport.impact_paths)}
-            {renderTestScope(impactReport.recommended_test_scope)}
-            {renderExecutionChecklist(
-              impactReport.recommended_test_scope,
-              impactReport.must_run_tests,
-              impactReport.manual_verification,
-            )}
+            {renderImpactedFiles(impactReport.impacted_files, submitImpactFeedback, impactFeedbackState)}
+            {renderImpactPaths(impactReport.impact_paths, submitImpactFeedback, impactFeedbackState)}
+            {renderTestScope(impactReport.recommended_test_scope, submitImpactFeedback, impactFeedbackState)}
+            {renderExecutionChecklist(executionChecklist, copyExecutionChecklist)}
             {renderListSection("建议执行项", impactReport.must_run_tests, "当前没有额外的必跑项。")}
             {renderListSection("人工确认项", impactReport.manual_verification, "当前没有额外的人工确认项。")}
             {renderListSection("分析依据与边界", analysisBasis, "当前没有额外的分析说明。")}

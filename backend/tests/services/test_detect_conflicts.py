@@ -1,4 +1,4 @@
-from app.services.orchestrator.nodes.detect_conflicts import detect_conflicts
+from app.services.orchestrator.nodes.detect_conflicts import _score_issue_confidence, detect_conflicts
 
 
 def test_detect_conflicts_skips_low_risk_hint_like_findings():
@@ -439,6 +439,7 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
                 "title": "鉴权绕过风险",
                 "summary": "存在可直接利用的未授权访问路径。",
                 "finding_type": "direct_defect",
+                "normalized_issue_type": "auth_bypass",
                 "severity": "high",
                 "confidence": 0.92,
                 "verification_needed": False,
@@ -456,6 +457,7 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
                 "title": "鉴权绕过风险",
                 "summary": "鉴权职责被下沉后没有在入口层补齐。",
                 "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "auth_bypass",
                 "severity": "high",
                 "confidence": 0.78,
                 "verification_needed": True,
@@ -481,6 +483,34 @@ def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_b
     assert conflict["confidence_breakdown"]["participant_count"] == 2
     assert conflict["confidence_breakdown"]["consensus_bonus"] == 0.03
     assert conflict["confidence_breakdown"]["hypothesis_penalty"] == 0.0
+
+
+def test_detect_conflicts_does_not_apply_consensus_bonus_for_different_issue_types():
+    _confidence, breakdown = _score_issue_confidence(
+        [
+            {
+                "expert_id": "security_compliance",
+                "title": "鉴权绕过风险",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "auth_bypass",
+                "confidence": 0.92,
+                "verification_needed": False,
+                "evidence": ["资源级鉴权缺失"],
+            },
+            {
+                "expert_id": "maintainability_code_health",
+                "title": "鉴权绕过风险",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "audit_logging_gap",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "evidence": ["审计日志字段不足"],
+            },
+        ]
+    )
+
+    assert breakdown["participant_count"] == 2
+    assert breakdown["consensus_bonus"] == 0.0
 
 
 def test_detect_conflicts_penalizes_single_expert_hypothesis_only_issue():
@@ -965,6 +995,182 @@ def test_detect_conflicts_merges_same_line_synonym_problem_types():
 
     assert len(result["conflicts"]) == 1
     assert set(result["conflicts"][0]["finding_ids"]) == {"fdg_null_1", "fdg_null_2"}
+
+
+def test_detect_conflicts_applies_sast_cross_validation_bonus():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_sast_1",
+                "expert_id": "security_compliance",
+                "title": "eval 调用存在注入风险",
+                "summary": "新增代码直接 eval 用户输入，存在代码注入风险。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "code_injection_risk",
+                "severity": "medium",
+                "confidence": 0.77,
+                "verification_needed": True,
+                "file_path": "src/app.py",
+                "line_start": 12,
+                "evidence": ["eval(user_input)"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+                "code_context": {
+                    "sast_prescan_matches": [
+                        {
+                            "tool": "semgrep",
+                            "rule_id": "python.lang.security.audit.eval",
+                            "message": "Use of eval",
+                            "severity": "error",
+                            "file_path": "src/app.py",
+                            "line_start": 12,
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["sast_cross_validated"] is True
+    assert conflict["tool_verified"] is True
+    assert conflict["confidence_breakdown"]["verification_bonus"] > 0
+    assert conflict["confidence_breakdown"]["sast_match_count"] == 1
+    assert any("SAST/linter 佐证" in item for item in conflict["evidence"])
+
+
+def test_detect_conflicts_promotes_sast_supported_medium_even_when_verification_needed():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_sast_medium",
+                "expert_id": "security_compliance",
+                "title": "eval 调用存在注入风险",
+                "summary": "新增代码直接 eval 用户输入，SAST 已命中同一行。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "code_injection_risk",
+                "severity": "medium",
+                "confidence": 0.82,
+                "verification_needed": True,
+                "file_path": "src/app.py",
+                "line_start": 12,
+                "evidence": ["eval(user_input)"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+                "code_context": {
+                    "sast_prescan_matches": [
+                        {
+                            "tool": "semgrep",
+                            "rule_id": "python.lang.security.audit.eval",
+                            "message": "Use of eval",
+                            "file_path": "src/app.py",
+                            "line_start": 12,
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["issue_filter_decisions"] == []
+    assert result["conflicts"][0]["sast_cross_validated"] is True
+
+
+def test_detect_conflicts_promotes_observation_signal_medium_with_enough_evidence():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_obs_medium",
+                "expert_id": "performance_reliability",
+                "title": "循环内远程调用放大",
+                "summary": "观察信号发现新增循环内逐条调用外部 client。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "loop_call_amplification",
+                "severity": "medium",
+                "confidence": 0.83,
+                "verification_needed": True,
+                "file_path": "src/OrderService.java",
+                "line_start": 42,
+                "evidence": ["for item in orders", "client.fetch(item.id)"],
+                "cross_file_evidence": [],
+                "context_files": ["src/OrderService.java"],
+                "matched_rules": [],
+                "violated_guidelines": [],
+                "confidence_breakdown": {"evidence_source": "observation_signal"},
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["issue_filter_decisions"] == []
+
+
+def test_detect_conflicts_uses_issue_jurisdiction_for_primary_expert():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_sec_1",
+                "expert_id": "maintainability_code_health",
+                "title": "接口存在注入风险",
+                "summary": "新增拼接 SQL 的代码需要收敛到安全边界。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "code_injection_risk",
+                "severity": "high",
+                "confidence": 0.86,
+                "verification_needed": False,
+                "file_path": "src/app/UserRepository.java",
+                "line_start": 42,
+                "evidence": ["拼接 SQL"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            },
+            {
+                "finding_id": "fdg_sec_2",
+                "expert_id": "security_compliance",
+                "title": "接口存在注入风险",
+                "summary": "用户输入进入 SQL 字符串拼接，属于注入风险。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "code_injection_risk",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": False,
+                "file_path": "src/app/UserRepository.java",
+                "line_start": 42,
+                "evidence": ["用户输入进入 SQL 字符串拼接"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["primary_expert_id"] == "security_compliance"
+    assert conflict["supporting_expert_ids"] == ["maintainability_code_health"]
 
 
 def test_detect_conflicts_does_not_merge_when_severity_gap_is_large():

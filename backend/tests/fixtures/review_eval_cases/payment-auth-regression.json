@@ -1,0 +1,18 @@
+{
+  "case_id": "payment-auth-regression",
+  "description": "Payment update path removes authorization and transaction safety checks.",
+  "expected_findings": [
+    {
+      "id": "missing-owner-check",
+      "severity": "P1",
+      "file_path": "backend/app/payments/service.py",
+      "keywords": ["owner_id", "authorization"]
+    },
+    {
+      "id": "missing-rollback",
+      "severity": "P2",
+      "file_path": "backend/app/payments/service.py",
+      "keywords": ["rollback", "transaction"]
+    }
+  ]
+}

@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.services.repo_review_policy_service import RepoReviewPolicyService
+
 
 class RepoReviewInstructionService:
     """读取仓库内自带的代码检视规则。
@@ -16,6 +18,18 @@ class RepoReviewInstructionService:
 
     ROOT_FILENAMES = (".codereview.yaml", ".codereview.yml")
     REVIEW_FILENAME = "REVIEW.md"
+    STANDARD_FILES = (
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".cursorrules",
+        ".github/copilot-instructions.md",
+        ".github/instructions.md",
+        "CONTRIBUTING.md",
+        "REVIEW_GUIDELINES.md",
+    )
+
+    def __init__(self, policy_service: RepoReviewPolicyService | None = None) -> None:
+        self._policy_service = policy_service or RepoReviewPolicyService()
 
     def load_for_file(self, repo_root: str | Path, file_path: str) -> dict[str, object]:
         root = Path(str(repo_root or "")).expanduser()
@@ -25,7 +39,9 @@ class RepoReviewInstructionService:
 
         instructions: list[dict[str, object]] = []
         instructions.extend(self._load_review_md_chain(root, normalized_file))
+        instructions.extend(self._load_standard_files(root))
         instructions.extend(self._load_codereview_config(root, normalized_file))
+        instructions.extend(self._load_ai_review_policy(root, normalized_file))
         return {
             "instructions": instructions[:8],
             "summary": self.build_summary(instructions),
@@ -71,6 +87,54 @@ class RepoReviewInstructionService:
                     "path": str(path.relative_to(root)),
                     "content": content[:2400],
                     "matched_globs": ["**/*"],
+                }
+            )
+        return result
+
+    def _load_standard_files(self, root: Path) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for name in self.STANDARD_FILES:
+            path = root / name
+            if not path.exists() or not path.is_file():
+                continue
+            content = self._safe_read_text(path)
+            if not content:
+                continue
+            result.append(
+                {
+                    "source": name,
+                    "title": "团队/Agent 编码规范",
+                    "path": name,
+                    "content": content[:2200],
+                    "matched_globs": ["**/*"],
+                }
+            )
+        return result[:4]
+
+    def _load_ai_review_policy(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        policy = self._policy_service.load_for_files(root, [file_path])
+        result: list[dict[str, object]] = []
+        for rule in list(policy.get("path_rules") or []):
+            if not isinstance(rule, dict):
+                continue
+            body = str(rule.get("instructions") or "").strip()
+            if not body:
+                continue
+            result.append(
+                {
+                    "source": str(policy.get("source") or ".ai-review.yml"),
+                    "title": str(rule.get("title") or "AI review path policy").strip(),
+                    "path": str(policy.get("source") or ".ai-review.yml"),
+                    "content": body[:1800],
+                    "matched_globs": [str(item) for item in list(rule.get("paths") or []) if str(item).strip()],
+                    "matched_files": [str(item) for item in list(rule.get("matched_files") or []) if str(item).strip()],
+                    "expert_ids": [
+                        str(item).strip()
+                        for item in list(rule.get("required_experts") or [])
+                        if str(item).strip()
+                    ],
+                    "comment_level": str(rule.get("comment_level") or "").strip(),
+                    "max_comments": int(rule.get("max_comments") or 0),
                 }
             )
         return result

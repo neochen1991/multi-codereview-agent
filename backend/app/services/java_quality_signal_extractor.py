@@ -191,6 +191,7 @@ class JavaQualitySignalExtractor:
             target_hunk=target_hunk,
             repository_context=repository_context,
             signal_terms=signal_terms,
+            combined_text=combined,
         )
 
         deduped_signals = self._dedupe(signals)
@@ -232,6 +233,7 @@ class JavaQualitySignalExtractor:
         target_hunk: dict[str, Any],
         repository_context: dict[str, Any],
         signal_terms: dict[str, list[str]],
+        combined_text: str = "",
     ) -> list[dict[str, object]]:
         observations: list[dict[str, object]] = []
         for signal_name, terms in signal_terms.items():
@@ -246,6 +248,12 @@ class JavaQualitySignalExtractor:
                 target_hunk=target_hunk,
                 repository_context=repository_context,
             )
+            if signal_name == "exception_swallowed":
+                line_start = self._locate_exception_swallowed_line_start(
+                    target_hunk=target_hunk,
+                    combined_text=combined_text,
+                    fallback=line_start,
+                )
             summary = str(profile.get("summary") or "").format(
                 terms=" / ".join(normalized_terms[:2]),
             )
@@ -477,6 +485,49 @@ class JavaQualitySignalExtractor:
             return int(fallback or 1)
         except Exception:
             return 1
+
+    def _locate_exception_swallowed_line_start(
+        self,
+        *,
+        target_hunk: dict[str, Any],
+        combined_text: str,
+        fallback: int,
+    ) -> int:
+        diff_candidates = [
+            str(target_hunk.get("excerpt") or ""),
+            str(combined_text or ""),
+        ]
+        for source in diff_candidates:
+            located = self._locate_exception_swallowed_from_diff(source)
+            if located is not None:
+                return located
+        return fallback
+
+    def _locate_exception_swallowed_from_diff(self, diff_text: str) -> int | None:
+        current_new_line: int | None = None
+        for raw_line in str(diff_text or "").splitlines():
+            stripped = str(raw_line or "").lstrip()
+            if stripped.startswith("@@"):
+                start_line, _line_count = self._parse_hunk_new_file_range(stripped)
+                current_new_line = start_line
+                continue
+            if stripped.startswith(("+++", "---", "diff --git ", "index ")):
+                continue
+            if current_new_line is None:
+                continue
+
+            is_removed = stripped.startswith("-")
+            is_added = stripped.startswith("+")
+            content = stripped[1:].strip() if is_removed or is_added else stripped.strip()
+            lowered = content.lower()
+            if "catch" in lowered and "printstacktrace" not in lowered:
+                return current_new_line
+            if is_removed and any(token in lowered for token in ("printstacktrace", "logger.error", "log.error", "throw new", "throw e")):
+                return current_new_line
+
+            if not is_removed:
+                current_new_line += 1
+        return None
 
     def _parse_hunk_new_file_range(self, hunk_header: str) -> tuple[int | None, int]:
         match = re.search(r"\+\s*(\d+)(?:,(\d+))?", str(hunk_header or ""))
@@ -715,11 +766,26 @@ class JavaQualitySignalExtractor:
         removed_handling = any(
             token in diff_lower for token in ["printstacktrace", "logger.error", "log.error", "throw new", "throw e"]
         )
+        normalized_added = self._normalized_added_context(combined_lower)
         empty_catch = bool(
             re.search(r"catch\s*\([^)]*\)\s*\{\s*\}", combined_lower, flags=re.DOTALL)
             or re.search(r"catch\s*\([^)]*\)\s*\{\s*\n\s*\}", combined_lower, flags=re.DOTALL)
+            or re.search(r"catch\s*\([^)]*\)\s*\{\s*\}", normalized_added, flags=re.DOTALL)
         )
         return removed_handling or empty_catch
+
+    def _normalized_added_context(self, text: str) -> str:
+        lines: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            stripped = raw_line.strip()
+            if stripped.startswith(("@@", "+++", "---")):
+                continue
+            if stripped.startswith("-"):
+                continue
+            if stripped.startswith("+"):
+                stripped = stripped[1:].strip()
+            lines.append(stripped)
+        return "\n".join(line for line in lines if line)
 
     def _detect_exception_semantics_weakened(self, diff_excerpt: str, combined_context: str) -> list[str]:
         combined = "\n".join([diff_excerpt, combined_context])

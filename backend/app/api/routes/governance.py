@@ -21,6 +21,13 @@ def expert_metrics() -> list[dict[str, object]]:
     return review_service_module.review_service.build_expert_metrics()
 
 
+@router.get("/governance/impact-feedback-profiles")
+def impact_feedback_profiles() -> dict[str, object]:
+    """返回关联影响分析反馈画像，供后续路径排序和治理展示使用。"""
+
+    return review_service_module.review_service.build_impact_feedback_profiles()
+
+
 @router.get("/governance/runtime-threshold-recommendations")
 def runtime_threshold_recommendations() -> dict[str, object]:
     """返回基于历史误报画像生成的阈值建议，不自动写回配置。"""

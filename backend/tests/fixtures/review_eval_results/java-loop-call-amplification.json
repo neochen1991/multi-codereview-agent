@@ -1,0 +1,40 @@
+{
+  "review_id": "eval_java_loop_call",
+  "status": "completed",
+  "phase": "completed",
+  "findings": [],
+  "issues": [
+    {
+      "issue_id": "iss_loop_call_1",
+      "severity": "high",
+      "file_path": "src/main/java/com/example/course/CourseCreator.java",
+      "title": "Loop external call amplification",
+      "summary": "The new loop performs an external call for every course item, creating linear amplification under batch input. Move the dependency access outside the loop or replace it with a batch call.",
+      "primary_expert_id": "performance_reliability",
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "static_analysis", "status": "matched"},
+        {"step": "false_positive_filter", "status": "accepted"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    },
+    {
+      "issue_id": "iss_loop_call_2",
+      "severity": "medium",
+      "file_path": "src/main/java/com/example/course/CourseCreator.java",
+      "title": "Batch remediation should move dependency access outside the loop",
+      "summary": "Use a batch query or precomputed map outside the loop so each item does not trigger a separate repository or remote call.",
+      "primary_expert_id": "architecture_design",
+      "evidence_chain": [
+        {"step": "claim", "status": "present"},
+        {"step": "anchor", "status": "anchored"},
+        {"step": "confidence", "status": "verified"}
+      ]
+    }
+  ],
+  "metadata": {
+    "token_cost_usd": 0.67,
+    "runtime_seconds": 36.4
+  }
+}

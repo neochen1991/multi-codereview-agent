@@ -5,6 +5,15 @@ from app.domain.models.issue import DebateIssue
 from app.domain.models.report import ImpactReport, ReviewReport
 from app.domain.models.review import ReviewTask
 
+QUALITY_FILTER_RULE_CODES = {
+    "llm_judge_rejected",
+    "conditional_conclusion",
+    "removed_line_only",
+    "below_priority_confidence_threshold",
+    "below_issue_priority_threshold",
+    "low_confidence_noise",
+}
+
 
 def build_report(
     *,
@@ -20,37 +29,6 @@ def build_report(
 ) -> ReviewReport:
     findings_total_count = len(findings)
     issues_total_count = len(issues)
-    llm_judged_issues = [item for item in issues if item.llm_judge_result]
-    llm_judge_accepted_count = len(
-        [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "accept"]
-    )
-    llm_judge_needs_verification_count = len(
-        [
-            item
-            for item in llm_judged_issues
-            if str(item.llm_judge_result.get("final_verdict") or "") == "needs_verification"
-        ]
-    )
-    llm_judge_needs_human_count = len(
-        [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
-    )
-    llm_judge_rejected_count = len(
-        [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "llm_judge_rejected"]
-    )
-    quality_filtered_issue_count = len(
-        [
-            item
-            for item in issue_filter_decisions
-            if str(item.get("rule_code") or "")
-            in {
-                "llm_judge_rejected",
-                "conditional_conclusion",
-                "removed_line_only",
-                "below_priority_confidence_threshold",
-                "below_issue_priority_threshold",
-            }
-        ]
-    )
     summary = (
         f"本次代码审核共收敛 {findings_total_count} 条发现，"
         f"形成 {issues_total_count} 个争议/裁决议题，"
@@ -70,23 +48,76 @@ def build_report(
         llm_usage_summary=llm_usage_summary,
         issue_filter_decisions=issue_filter_decisions,
         impact_report=ImpactReport.model_validate(impact_report) if impact_report else None,
-        confidence_summary={
-            "high_confidence_count": len([item for item in findings if item.confidence >= 0.85]),
-            "debated_issue_count": len([item for item in issues if item.status in {"debating", "needs_human", "resolved"}]),
-            "needs_human_count": len([item for item in issues if item.needs_human]),
-            "verified_issue_count": len([item for item in issues if item.verified]),
-            "direct_defect_count": len([item for item in findings if item.finding_type == "direct_defect"]),
-            "risk_hypothesis_count": len([item for item in findings if item.finding_type == "risk_hypothesis"]),
-            "test_gap_count": len([item for item in findings if item.finding_type == "test_gap"]),
-            "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
-            "llm_judged_issue_count": len(llm_judged_issues),
-            "llm_judge_accepted_count": llm_judge_accepted_count,
-            "llm_judge_needs_verification_count": llm_judge_needs_verification_count,
-            "llm_judge_needs_human_count": llm_judge_needs_human_count,
-            "llm_judge_rejected_count": llm_judge_rejected_count,
-            "quality_filtered_issue_count": quality_filtered_issue_count,
-        },
+        confidence_summary=build_confidence_summary(
+            review=review,
+            findings=findings,
+            issues=issues,
+            issue_filter_decisions=issue_filter_decisions,
+        ),
     )
+
+
+def build_confidence_summary(
+    *,
+    review: ReviewTask,
+    findings: list[ReviewFinding],
+    issues: list[DebateIssue],
+    issue_filter_decisions: list[dict[str, object]],
+) -> dict[str, object]:
+    llm_judged_issues = [item for item in issues if item.llm_judge_result]
+    evidence_chain_issue_count = len([item for item in issues if item.evidence_chain])
+    review_policy = _review_policy_from_review(review)
+    return {
+        "high_confidence_count": len([item for item in findings if item.confidence >= 0.85]),
+        "debated_issue_count": len([item for item in issues if item.status in {"debating", "needs_human", "resolved"}]),
+        "needs_human_count": len([item for item in issues if item.needs_human]),
+        "verified_issue_count": len([item for item in issues if item.verified]),
+        "direct_defect_count": len([item for item in findings if item.finding_type == "direct_defect"]),
+        "risk_hypothesis_count": len([item for item in findings if item.finding_type == "risk_hypothesis"]),
+        "test_gap_count": len([item for item in findings if item.finding_type == "test_gap"]),
+        "design_concern_count": len([item for item in findings if item.finding_type == "design_concern"]),
+        "llm_judged_issue_count": len(llm_judged_issues),
+        "llm_judge_accepted_count": len(
+            [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "accept"]
+        ),
+        "llm_judge_needs_verification_count": len(
+            [
+                item
+                for item in llm_judged_issues
+                if str(item.llm_judge_result.get("final_verdict") or "") == "needs_verification"
+            ]
+        ),
+        "llm_judge_needs_human_count": len(
+            [item for item in llm_judged_issues if str(item.llm_judge_result.get("final_verdict") or "") == "needs_human"]
+        ),
+        "llm_judge_rejected_count": len(
+            [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "llm_judge_rejected"]
+        ),
+        "quality_filtered_issue_count": len(
+            [item for item in issue_filter_decisions if str(item.get("rule_code") or "") in QUALITY_FILTER_RULE_CODES]
+        ),
+        "evidence_chain_issue_count": evidence_chain_issue_count,
+        "evidence_chain_coverage": round(evidence_chain_issue_count / len(issues), 4) if issues else 0.0,
+        "policy_comment_budget_filtered_count": len(
+            [item for item in issue_filter_decisions if str(item.get("rule_code") or "") == "repo_policy_comment_budget"]
+        ),
+        "review_policy_excluded_file_count": len(_string_list(review_policy.get("excluded_changed_files"))),
+        "review_policy_reviewable_file_count": len(_string_list(review_policy.get("reviewable_changed_files"))),
+        "review_policy_path_rule_count": len(review_policy.get("path_rules") or [])
+        if isinstance(review_policy.get("path_rules"), list)
+        else 0,
+        "review_policy_required_expert_count": len(_string_list(review_policy.get("required_experts"))),
+    }
+
+
+def _review_policy_from_review(review: ReviewTask) -> dict[str, object]:
+    metadata = dict(review.subject.metadata or {})
+    policy = metadata.get("review_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item).strip() for item in value or [] if str(item).strip()] if isinstance(value, list) else []
 
 
 def build_issue_summary_from_finding(finding: ReviewFinding) -> str:

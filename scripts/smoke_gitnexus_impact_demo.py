@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from app.services.review_service import ReviewService
 
 
 class FakeGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
         return {
             "detect_changes": {
                 "affected_files": [
@@ -53,7 +54,7 @@ class FakeGitNexusImpactClient:
 
 
 class FailingGitNexusImpactClient:
-    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols):
+    def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None):
         raise RuntimeError("simulated mcp failure")
 
 
@@ -67,7 +68,7 @@ def _prepare_repo(root: Path) -> Path:
     repo_path = root / "repo"
     (repo_path / "src/main/java/com/example/order").mkdir(parents=True)
     (repo_path / "src/test/java/com/example/order").mkdir(parents=True)
-    _run(f"git init {repo_path}")
+    _run(f"git init -b main {repo_path}")
     _run(f"git -C {repo_path} config user.email test@example.com")
     _run(f"git -C {repo_path} config user.name test")
     (repo_path / "src/main/java/com/example/order/OrderRepository.java").write_text(
@@ -172,17 +173,26 @@ def _run_case(name: str, client) -> dict[str, object]:
         service = ReviewService(storage_root=storage_root)
         service.gitnexus_impact_service = GitNexusImpactService(storage_root, mcp_client=client)
         service.runner.gitnexus_impact_service = service.gitnexus_impact_service
-        service.runtime_settings_service.update({"code_repo_local_path": str(repo_path)})
+        service.runtime_settings_service.update(
+            {
+                "code_repo_local_path": str(repo_path),
+                "allow_llm_fallback": True,
+            }
+        )
         import os
 
         original_home_env = os.environ.get("HOME")
         os.environ["HOME"] = str(root)
         try:
             review = service.create_review(_build_review_payload(repo_path))
+            review = service.start_review(review.review_id)
             report = service.build_report(review.review_id)
             impact = report.impact_report
             return {
                 "case": name,
+                "review_status": review.status,
+                "review_phase": review.phase,
+                "impact_progress": dict(review.subject.metadata.get("impact_analysis_progress") or {}),
                 "registry_path": str(registry_path),
                 "graph_status": impact.graph_status if impact else None,
                 "graph_commit": impact.graph_commit if impact else None,
@@ -199,12 +209,47 @@ def _run_case(name: str, client) -> dict[str, object]:
                 os.environ["HOME"] = original_home_env
 
 
+def _assert_smoke_results(results: list[dict[str, object]]) -> None:
+    by_case = {str(item.get("case") or ""): item for item in results}
+    success = by_case.get("graph_ready_success") or {}
+    failure = by_case.get("graph_ready_but_mcp_failed") or {}
+
+    errors: list[str] = []
+    if success.get("review_status") != "completed":
+        errors.append(f"success case review_status expected completed, got {success.get('review_status')}")
+    if success.get("graph_status") != "ready":
+        errors.append(f"success case graph_status expected ready, got {success.get('graph_status')}")
+    if not success.get("impact_paths"):
+        errors.append("success case expected at least one GitNexus impact path")
+    if "下单主链路接口回归" not in list(success.get("recommended_test_scope") or []):
+        errors.append("success case expected GitNexus recommended test scope")
+    if dict(success.get("impact_progress") or {}).get("state") != "completed":
+        errors.append(f"success case impact progress expected completed, got {success.get('impact_progress')}")
+
+    if failure.get("review_status") != "completed":
+        errors.append(f"failure case review_status expected completed, got {failure.get('review_status')}")
+    if dict(failure.get("impact_progress") or {}).get("state") != "failed":
+        errors.append(f"failure case impact progress expected failed, got {failure.get('impact_progress')}")
+    if failure.get("graph_status") is not None:
+        errors.append(f"failure case should not expose fallback impact report, got graph_status={failure.get('graph_status')}")
+    if failure.get("impact_paths"):
+        errors.append("failure case should not expose fallback impact paths")
+
+    if errors:
+        raise AssertionError("\n".join(errors))
+
+
 def main() -> None:
     results = [
         _run_case("graph_ready_success", FakeGitNexusImpactClient()),
         _run_case("graph_ready_but_mcp_failed", FailingGitNexusImpactClient()),
     ]
     print(json.dumps(results, ensure_ascii=False, indent=2))
+    try:
+        _assert_smoke_results(results)
+    except AssertionError as error:
+        print(f"smoke_gitnexus_impact_demo failed:\n{error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 if __name__ == "__main__":

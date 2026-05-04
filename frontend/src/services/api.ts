@@ -33,6 +33,19 @@ export interface ReviewSummary {
     changed_files?: string[];
     metadata?: Record<string, unknown>;
   };
+  quality_summary?: {
+    evidence_chain_issue_count?: number;
+    quality_filtered_issue_count?: number;
+    policy_comment_budget_filtered_count?: number;
+  };
+  impact_summary?: {
+    graph_status?: string;
+    risk_level?: string;
+    impacted_file_count?: number;
+    recommended_test_scope_count?: number;
+    successful_context_target_count?: number;
+    successful_impact_target_count?: number;
+  };
   selected_experts?: string[];
   created_at?: string;
   started_at?: string | null;
@@ -60,8 +73,11 @@ export interface ReviewFinding {
   title: string;
   summary: string;
   finding_type: string;
+  normalized_issue_type?: string;
+  category_label?: string;
   severity: string;
   confidence: number;
+  confidence_rationale?: string;
   file_path: string;
   line_start: number;
   evidence: string[];
@@ -186,16 +202,19 @@ export interface DebateIssue {
   summary: string;
   finding_type?: string;
   normalized_issue_type?: string;
+  category_label?: string;
   aggregated_finding_types?: string[];
   file_path?: string;
   line_start?: number;
   status: string;
   severity: string;
   confidence: number;
+  confidence_rationale?: string;
   confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
   primary_expert_id?: string;
   participant_expert_ids: string[];
+  supporting_expert_ids?: string[];
   expert_views?: Array<Record<string, unknown>>;
   aggregated_titles?: string[];
   aggregated_summaries?: string[];
@@ -208,12 +227,15 @@ export interface DebateIssue {
   current_code?: string;
   suggested_code?: string;
   evidence: string[];
+  evidence_chain?: EvidenceChainStep[];
   needs_human: boolean;
   verified: boolean;
   needs_debate: boolean;
   verifier_name?: string;
   tool_name?: string;
   tool_verified?: boolean;
+  sast_cross_validated?: boolean;
+  sast_prescan_matches?: Record<string, unknown>[];
   human_decision: string;
   resolution?: string;
   consistency_check_status?: string;
@@ -224,6 +246,30 @@ export interface DebateIssue {
   remediation_filtered?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface EvidenceChainStep {
+  step: string;
+  status?: string;
+  claim?: string;
+  issue_id?: string;
+  file_path?: string;
+  line_start?: number;
+  evidence?: string[];
+  cross_file_evidence?: string[];
+  reasons?: string[];
+  tool_name?: string;
+  tool_verified?: boolean;
+  score?: number;
+  summary?: string;
+  signals?: string[];
+  verdict?: string;
+  confidence_adjustment?: number;
+  reason?: string;
+  original_confidence?: number;
+  final_confidence?: number;
+  confidence_delta?: number;
+  false_positive_risk?: string;
 }
 
 export interface ConversationMessage {
@@ -307,6 +353,13 @@ export interface FeedbackLabel {
   created_at: string;
 }
 
+export interface ImpactFeedbackPayload {
+  target_type: "impact_path" | "impact_file" | "test_scope" | string;
+  target_key: string;
+  label: "confirmed" | "false_positive" | "impact_confirmed" | "impact_false_positive" | string;
+  comment?: string;
+}
+
 export interface ConfidenceSummary {
   high_confidence_count: number;
   debated_issue_count: number;
@@ -322,6 +375,13 @@ export interface ConfidenceSummary {
   llm_judge_needs_human_count?: number;
   llm_judge_rejected_count?: number;
   quality_filtered_issue_count?: number;
+  evidence_chain_issue_count?: number;
+  evidence_chain_coverage?: number;
+  policy_comment_budget_filtered_count?: number;
+  review_policy_excluded_file_count?: number;
+  review_policy_reviewable_file_count?: number;
+  review_policy_path_rule_count?: number;
+  review_policy_required_expert_count?: number;
 }
 
 export interface LlmUsageSummary {
@@ -352,6 +412,8 @@ export interface ImpactPath {
   path: string[];
   depth: number;
   risk: string;
+  confidence_label?: string;
+  confirmation_reason?: string;
 }
 
 export interface ImpactGraphNode {
@@ -401,6 +463,7 @@ export interface ImpactReport {
   queried_targets?: string[];
   successful_context_targets?: string[];
   successful_impact_targets?: string[];
+  dynamic_targets?: string[];
   skipped_invalid_targets?: string[];
   skipped_missing_context_targets?: string[];
   skipped_missing_impact_targets?: string[];
@@ -574,6 +637,7 @@ export interface RuntimeSettings {
   rule_screening_llm_timeout_seconds: number;
   enable_llm_targeted_debate: boolean;
   llm_targeted_debate_timeout_seconds: number;
+  enable_sast_prescan: boolean;
   default_max_debate_rounds: number;
   standard_llm_timeout_seconds: number;
   standard_llm_retry_count: number;
@@ -634,6 +698,42 @@ export interface GitNexusIndexStatus {
   stdout?: string;
   stderr?: string;
   trigger?: string;
+}
+
+export interface GitNexusPreflightCheck {
+  name: string;
+  status: "passed" | "warning" | "failed" | string;
+  message: string;
+}
+
+export interface GitNexusPreflightStatus {
+  repository_id?: string;
+  status: "ready" | "warning" | "failed" | string;
+  checks: GitNexusPreflightCheck[];
+  recommended_actions: string[];
+}
+
+export interface ImpactFeedbackTargetProfile {
+  target_id: string;
+  target_type: string;
+  target_key: string;
+  sample_count: number;
+  confirmed_count: number;
+  false_positive_count: number;
+  false_positive_rate: number;
+  accept_rate: number;
+  recommended_action: "require_manual_verification" | "boost_confidence" | "keep_observing" | string;
+}
+
+export interface ImpactFeedbackProfiles {
+  summary: {
+    sample_count: number;
+    confirmed_count: number;
+    false_positive_count: number;
+    false_positive_rate: number;
+    accept_rate: number;
+  };
+  targets: Record<string, ImpactFeedbackTargetProfile>;
 }
 
 export interface ImpactReportTemplate {
@@ -935,6 +1035,10 @@ export const reviewApi = {
     const { data } = await api.post(`/reviews/${reviewId}/human-decisions`, payload);
     return data;
   },
+  async submitImpactFeedback(reviewId: string, payload: ImpactFeedbackPayload): Promise<FeedbackLabel> {
+    const { data } = await api.post(`/reviews/${reviewId}/impact-feedback`, payload);
+    return data;
+  },
   async exportIssuesToCodehub(
     reviewId: string,
     payload: { issue_ids: string[] },
@@ -1070,6 +1174,10 @@ export const governanceApi = {
     const { data } = await api.get("/governance/runtime-threshold-recommendations");
     return data;
   },
+  async getImpactFeedbackProfiles(): Promise<ImpactFeedbackProfiles> {
+    const { data } = await api.get("/governance/impact-feedback-profiles");
+    return data;
+  },
 };
 
 export const settingsApi = {
@@ -1089,12 +1197,20 @@ export const settingsApi = {
     const { data } = await api.post("/settings/gitnexus/index/run");
     return data;
   },
+  async getGitNexusPreflight(): Promise<GitNexusPreflightStatus> {
+    const { data } = await api.get("/settings/gitnexus/preflight");
+    return data;
+  },
   async getRepositoryGitNexusIndexStatus(repositoryId: string): Promise<GitNexusIndexStatus> {
     const { data } = await api.get(`/settings/repositories/${encodeURIComponent(repositoryId)}/gitnexus/status`);
     return data;
   },
   async runRepositoryGitNexusIndex(repositoryId: string): Promise<GitNexusIndexStatus> {
     const { data } = await api.post(`/settings/repositories/${encodeURIComponent(repositoryId)}/gitnexus/index/run`);
+    return data;
+  },
+  async getRepositoryGitNexusPreflight(repositoryId: string): Promise<GitNexusPreflightStatus> {
+    const { data } = await api.get(`/settings/repositories/${encodeURIComponent(repositoryId)}/gitnexus/preflight`);
     return data;
   },
   async getImpactReportTemplate(): Promise<ImpactReportTemplate> {

@@ -116,3 +116,68 @@ def test_human_review_issues_include_canonical_issue_id(client):
     target_issue = next(item for item in issues if item["needs_human"])
 
     assert target_issue["canonical_issue_id"] == target_issue["issue_id"]
+
+
+def test_impact_feedback_api_records_path_decision(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/impact-feedback-api",
+            "target_ref": "main",
+            "title": "impact feedback api review",
+            "changed_files": ["backend/app/orders/service.py"],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/reviews/{created['review_id']}/impact-feedback",
+        json={
+            "target_type": "impact_path",
+            "target_key": "OrderController -> OrderService -> PaymentClient",
+            "label": "confirmed",
+            "comment": "实际验证命中",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["review_id"] == created["review_id"]
+    assert payload["issue_id"].startswith("impact:impact_path:")
+    assert payload["label"] == "impact_confirmed"
+    assert payload["source"] == "impact_feedback"
+
+
+def test_governance_impact_feedback_profiles_api_includes_recorded_feedback(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/impact-feedback-governance",
+            "target_ref": "main",
+            "title": "impact feedback governance review",
+            "changed_files": ["backend/app/orders/service.py"],
+        },
+    ).json()
+    client.post(
+        f"/api/reviews/{created['review_id']}/impact-feedback",
+        json={
+            "target_type": "impact_path",
+            "target_key": "OrderController -> OrderService -> PaymentClient",
+            "label": "false_positive",
+            "comment": "验证未命中",
+        },
+    )
+
+    response = client.get("/api/governance/impact-feedback-profiles")
+
+    assert response.status_code == 200
+    payload = response.json()
+    target_profile = payload["targets"]["impact_path:OrderController -> OrderService -> PaymentClient"]
+    assert payload["summary"]["sample_count"] == 1
+    assert target_profile["false_positive_count"] == 1
+    assert target_profile["recommended_action"] == "keep_observing"

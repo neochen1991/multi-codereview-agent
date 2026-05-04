@@ -73,6 +73,7 @@ class RuntimeSettingsService:
             "rule_screening_llm_timeout_seconds",
             "enable_llm_targeted_debate",
             "llm_targeted_debate_timeout_seconds",
+            "enable_sast_prescan",
             "default_max_debate_rounds",
             "standard_llm_timeout_seconds",
             "standard_llm_retry_count",

@@ -108,6 +108,7 @@ class RuntimeSettings(BaseModel):
     llm_issue_judge_timeout_seconds: int = 45
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
+    enable_sast_prescan: bool = False
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150

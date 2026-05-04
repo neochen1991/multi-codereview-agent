@@ -236,13 +236,31 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           {
             key: "finding_type",
             label: "问题类型",
-            children: <Tag color="purple">{getFindingTypeLabel(finding.finding_type)}</Tag>,
+            children: (
+              <Space wrap>
+                <Tag color="purple">{getFindingTypeLabel(finding.finding_type)}</Tag>
+                {finding.category_label ? <Tag color="cyan">{finding.category_label}</Tag> : null}
+              </Space>
+            ),
           },
           {
             key: "confidence",
             label: "置信度",
             children: `${(finding.confidence * 100).toFixed(0)}%`,
           },
+          ...(finding.confidence_rationale
+            ? [
+                {
+                  key: "confidence_rationale",
+                  label: "置信度理由",
+                  children: (
+                    <Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}>
+                      {finding.confidence_rationale}
+                    </Paragraph>
+                  ),
+                },
+              ]
+            : []),
           {
             key: "merge_impact",
             label: "合并影响",

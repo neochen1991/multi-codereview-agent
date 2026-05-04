@@ -36,7 +36,9 @@ const isReviewStillRunning = (review?: ReviewSummary | null): boolean =>
   Boolean(review && ["pending", "queued", "running"].includes(String(review.status || "").toLowerCase()));
 
 const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[], review?: ReviewSummary | null): string => {
-  if (isReviewStillRunning(review)) return "审核进行中，结果尚未最终收敛";
+  if (isReviewStillRunning(review) || ["pending", "queued", "running"].includes(String(report?.status || "").toLowerCase())) {
+    return "审核进行中，结果尚未最终收敛";
+  }
   const highRiskCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
   if ((report?.confidence_summary.needs_human_count || 0) > 0) return "阻塞合并，等待人工确认";
   if (highRiskCount > 0) return "建议修复高风险问题后再合并";
@@ -45,7 +47,9 @@ const getMergeDecision = (report: ReviewReport | null, findings: ReviewFinding[]
 };
 
 const getVerdict = (report: ReviewReport | null, findings: ReviewFinding[], review?: ReviewSummary | null): { label: string; color: string } => {
-  if (isReviewStillRunning(review)) return { label: "In progress", color: "processing" };
+  if (isReviewStillRunning(review) || ["pending", "queued", "running"].includes(String(report?.status || "").toLowerCase())) {
+    return { label: "In progress", color: "processing" };
+  }
   const decision = getMergeDecision(report, findings, review);
   if (decision.includes("阻塞")) return { label: "Request changes", color: "error" };
   if (findings.length > 0 || decision.includes("修复")) return { label: "Comment", color: "warning" };
@@ -110,7 +114,9 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
     `- 优先级: ${getPriority(finding)}`,
     `- 合并影响: ${getFindingMergeImpact(finding, report.confidence_summary.needs_human_count)}`,
     `- 提出专家: ${finding.expert_id}`,
+    `- 问题分类: ${finding.category_label || finding.normalized_issue_type || finding.finding_type || "未分类"}`,
     `- 置信度: ${(finding.confidence * 100).toFixed(0)}%`,
+    `- 置信度理由: ${finding.confidence_rationale || "未提供"}`,
     `- 问题说明: ${finding.summary}`,
     `- 修复建议: ${finding.remediation_suggestion || "无"}`,
     "",

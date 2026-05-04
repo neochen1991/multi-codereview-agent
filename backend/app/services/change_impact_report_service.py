@@ -111,6 +111,14 @@ class ChangeImpactReportService:
                 summary=summary,
                 template_variables=template_variables,
             )
+        if report.graph_status != "ready" or (
+            report.queried_targets and not report.successful_context_targets and not report.successful_impact_targets
+        ):
+            summary = (
+                "GitNexus 图谱事实不足，本次关联影响分析已降级为候选范围；"
+                "请优先执行建议测试，并人工确认真实调用链。"
+            )
+            markdown = ""
         updated = report.model_copy(
             update={
                 "report_summary": summary,

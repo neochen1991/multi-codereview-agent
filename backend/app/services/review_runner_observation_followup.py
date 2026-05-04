@@ -239,7 +239,7 @@ def build_forced_observation_candidates(
                     "line_start": line_start,
                     "line_end": line_start,
                     "title": "循环调用放大",
-                    "finding_type": "direct_defect",
+                    "finding_type": "risk_hypothesis",
                     "claim": f"当前实现把外部依赖调用放进循环路径（{symbol_display}），批量场景会线性放大数据库/网络往返与整体时延。",
                     "severity": "high",
                     "matched_rules": [],
@@ -254,10 +254,11 @@ def build_forced_observation_candidates(
                     "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
                     "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
                     "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
-                    "confidence": max(float(item.get("confidence") or 0.0), 0.86),
-                    "verification_needed": False,
-                    "verification_plan": "",
-                    "direct_evidence": True,
+                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "verification_needed": True,
+                    "verification_plan": "该问题来自结构化观察信号，需要结合调用频率、批量规模和外部依赖成本复核后再升级为确定缺陷。",
+                    "direct_evidence": False,
+                    "evidence_source": "observation_signal",
                 }
             )
         elif expert.expert_id == "ddd_architecture" and kind == "construction_path_changed":
@@ -267,7 +268,7 @@ def build_forced_observation_candidates(
                     "line_start": line_start,
                     "line_end": line_start,
                     "title": "聚合工厂绕过",
-                    "finding_type": "direct_defect",
+                    "finding_type": "risk_hypothesis",
                     "claim": f"当前变更把原本的工厂创建路径替换成直接构造（{symbol_display}），可能绕过聚合根内的不变量和领域事件记录。",
                     "severity": "blocker",
                     "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
@@ -282,10 +283,11 @@ def build_forced_observation_candidates(
                     "suggested_fix": "把直接 new 聚合根的代码改回调用原有 create 工厂方法；如工厂方法被删除，应在聚合根内恢复该工厂方法并保留领域事件记录。",
                     "change_steps": ["定位被替换的工厂方法调用", "恢复调用聚合根工厂方法", "确认工厂方法内仍记录必要领域事件"],
                     "suggested_code": "// TODO: 恢复为 Course.create(...) 这类聚合工厂调用，避免绕过领域事件记录",
-                    "confidence": max(float(item.get("confidence") or 0.0), 0.9),
-                    "verification_needed": False,
-                    "verification_plan": "",
-                    "direct_evidence": True,
+                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "verification_needed": True,
+                    "verification_plan": "该问题来自结构化观察信号，需要确认被替换的工厂方法是否确实承载不变量校验或领域事件记录。",
+                    "direct_evidence": False,
+                    "evidence_source": "observation_signal",
                 }
             )
         elif expert.expert_id == "correctness_business" and kind == "declared_intent_without_implementation":
@@ -295,7 +297,7 @@ def build_forced_observation_candidates(
                     "line_start": line_start,
                     "line_end": line_start,
                     "title": "承诺未落地",
-                    "finding_type": "direct_defect",
+                    "finding_type": "risk_hypothesis",
                     "claim": f"注释、TODO 或方法意图已经承诺了行为（{symbol_display}），但当前实现没有对应动作，调用方会误以为能力已经落地。",
                     "severity": "high",
                     "matched_rules": [],
@@ -310,10 +312,11 @@ def build_forced_observation_candidates(
                     "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
                     "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
                     "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
-                    "confidence": max(float(item.get("confidence") or 0.0), 0.88),
-                    "verification_needed": False,
-                    "verification_plan": "",
-                    "direct_evidence": True,
+                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "verification_needed": True,
+                    "verification_plan": "该问题来自结构化观察信号，需要确认注释、TODO 或命名表达是否仍是当前有效业务契约。",
+                    "direct_evidence": False,
+                    "evidence_source": "observation_signal",
                 }
             )
 

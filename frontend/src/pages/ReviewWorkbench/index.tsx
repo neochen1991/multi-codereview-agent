@@ -44,6 +44,7 @@ const IssueDetailPanel = lazy(() => import("@/components/review/IssueDetailPanel
 const IssueThresholdFilteredPanel = lazy(() => import("@/components/review/IssueThresholdFilteredPanel"));
 const IssueThreadList = lazy(() => import("@/components/review/IssueThreadList"));
 const KnowledgeRefPanel = lazy(() => import("@/components/review/KnowledgeRefPanel"));
+const QualityGovernancePanel = lazy(() => import("@/components/review/QualityGovernancePanel"));
 const ReplayConsolePanel = lazy(() => import("@/components/review/ReplayConsolePanel"));
 const ResultIssuePanel = lazy(() => import("@/components/review/ResultIssuePanel"));
 const ReportSummaryPanel = lazy(() => import("@/components/review/ReportSummaryPanel"));
@@ -908,6 +909,20 @@ const ReviewWorkbenchPage: React.FC = () => {
   }, [activeStep, processMainTab, review, reviewId]);
 
   useEffect(() => {
+    // 结果页也允许在审核尚未最终收敛时打开。此时需要轮询完整报告，
+    // 避免停留在 issues/findings 尚未落库的中间态快照上。
+    if (!reviewId || activeStep !== "result") return;
+    const reviewStatus = String(review?.status || "").toLowerCase();
+    const reportStatus = String(report?.status || "").toLowerCase();
+    const stillRunning = ["pending", "queued", "running"].includes(reviewStatus) || ["pending", "queued", "running"].includes(reportStatus);
+    if (!stillRunning) return;
+    const timer = window.setInterval(() => {
+      void loadWorkspaceData(reviewId);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [activeStep, report?.status, review?.status, reviewId]);
+
+  useEffect(() => {
     if (activeStep !== "process" || review?.status !== "running" || !review?.started_at) return;
     setElapsedNow(Date.now());
     const timer = window.setInterval(() => {
@@ -1711,6 +1726,14 @@ const ReviewWorkbenchPage: React.FC = () => {
                   children: (
                     <Space direction="vertical" size={16} style={{ width: "100%" }}>
                       <ExpertRuleCoveragePanel items={expertRuleCoverage} />
+                      <Suspense fallback={<WorkbenchPanelFallback description="质量治理信息加载中..." />}>
+                        <QualityGovernancePanel
+                          report={report}
+                          review={review}
+                          issues={issues}
+                          issueFilterDecisions={issueFilterDecisions}
+                        />
+                      </Suspense>
                       <Suspense fallback={<WorkbenchPanelFallback description="有效问题清单加载中..." />}>
                         <ResultIssuePanel
                           reviewId={reviewId}

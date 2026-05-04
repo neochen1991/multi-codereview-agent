@@ -93,21 +93,60 @@ class SqliteReviewRepository:
         """List lightweight review summaries without loading full subject payloads."""
 
         query = """
+            WITH issue_counts AS (
+                SELECT
+                    review_id,
+                    COUNT(1) AS issue_count,
+                    SUM(
+                        CASE
+                            WHEN json_array_length(json_extract(payload_json, '$.evidence_chain')) > 0 THEN 1
+                            ELSE 0
+                        END
+                    ) AS evidence_chain_issue_count
+                FROM issues
+                GROUP BY review_id
+            ),
+            issue_filter_counts AS (
+                SELECT
+                    m.review_id,
+                    SUM(
+                        CASE
+                            WHEN json_extract(decision.value, '$.rule_code') IN (
+                                'llm_judge_rejected',
+                                'conditional_conclusion',
+                                'removed_line_only',
+                                'below_priority_confidence_threshold',
+                                'below_issue_priority_threshold',
+                                'low_confidence_noise'
+                            ) THEN 1
+                            ELSE 0
+                        END
+                    ) AS quality_filtered_issue_count,
+                    SUM(
+                        CASE
+                            WHEN json_extract(decision.value, '$.rule_code') = 'repo_policy_comment_budget' THEN 1
+                            ELSE 0
+                        END
+                    ) AS policy_comment_budget_filtered_count
+                FROM messages m, json_each(json_extract(m.metadata_json, '$.issue_filter_decisions')) decision
+                WHERE m.message_type = 'issue_filter_applied'
+                GROUP BY m.review_id
+            )
             SELECT
-                review_id,
-                status,
-                phase,
-                analysis_mode,
-                selected_experts_json,
-                human_review_status,
-                pending_human_issue_ids_json,
-                report_summary,
-                failure_reason,
-                created_at,
-                started_at,
-                completed_at,
-                duration_seconds,
-                updated_at,
+                reviews.review_id,
+                reviews.status,
+                reviews.phase,
+                reviews.analysis_mode,
+                reviews.selected_experts_json,
+                reviews.human_review_status,
+                reviews.pending_human_issue_ids_json,
+                reviews.report_summary,
+                reviews.failure_reason,
+                reviews.created_at,
+                reviews.started_at,
+                reviews.completed_at,
+                reviews.duration_seconds,
+                reviews.updated_at,
                 json_extract(subject_json, '$.subject_type') AS subject_type,
                 json_extract(subject_json, '$.repo_id') AS repo_id,
                 json_extract(subject_json, '$.project_id') AS project_id,
@@ -117,13 +156,20 @@ class SqliteReviewRepository:
                 json_extract(subject_json, '$.mr_url') AS mr_url,
                 json_extract(subject_json, '$.changed_files') AS changed_files_json,
                 json_extract(subject_json, '$.metadata.trigger_source') AS trigger_source,
-                (
-                    SELECT COUNT(1)
-                    FROM issues i
-                    WHERE i.review_id = reviews.review_id
-                ) AS issue_count
+                json_extract(subject_json, '$.metadata.impact_report.graph_status') AS impact_graph_status,
+                json_extract(subject_json, '$.metadata.impact_report.risk_level') AS impact_risk_level,
+                json_array_length(json_extract(subject_json, '$.metadata.impact_report.impacted_files')) AS impacted_file_count,
+                json_array_length(json_extract(subject_json, '$.metadata.impact_report.recommended_test_scope')) AS recommended_test_scope_count,
+                json_array_length(json_extract(subject_json, '$.metadata.impact_report.successful_context_targets')) AS successful_context_target_count,
+                json_array_length(json_extract(subject_json, '$.metadata.impact_report.successful_impact_targets')) AS successful_impact_target_count,
+                COALESCE(issue_counts.evidence_chain_issue_count, 0) AS evidence_chain_issue_count,
+                COALESCE(issue_filter_counts.quality_filtered_issue_count, 0) AS quality_filtered_issue_count,
+                COALESCE(issue_filter_counts.policy_comment_budget_filtered_count, 0) AS policy_comment_budget_filtered_count,
+                COALESCE(issue_counts.issue_count, 0) AS issue_count
             FROM reviews
-            ORDER BY updated_at DESC
+            LEFT JOIN issue_counts ON issue_counts.review_id = reviews.review_id
+            LEFT JOIN issue_filter_counts ON issue_filter_counts.review_id = reviews.review_id
+            ORDER BY reviews.updated_at DESC
         """
         with self._db.connect() as connection:
             rows = connection.execute(query).fetchall()
@@ -164,6 +210,21 @@ class SqliteReviewRepository:
     def _deserialize_light_row(self, row: object) -> dict[str, object]:
         trigger_source = row["trigger_source"]
         metadata = {"trigger_source": trigger_source} if trigger_source else {}
+        quality_summary = {
+            "evidence_chain_issue_count": int(row["evidence_chain_issue_count"] or 0),
+            "quality_filtered_issue_count": int(row["quality_filtered_issue_count"] or 0),
+            "policy_comment_budget_filtered_count": int(row["policy_comment_budget_filtered_count"] or 0),
+        }
+        impact_summary = {
+            "graph_status": row["impact_graph_status"] or "",
+            "risk_level": row["impact_risk_level"] or "",
+            "impacted_file_count": int(row["impacted_file_count"] or 0),
+            "recommended_test_scope_count": int(row["recommended_test_scope_count"] or 0),
+            "successful_context_target_count": int(row["successful_context_target_count"] or 0),
+            "successful_impact_target_count": int(row["successful_impact_target_count"] or 0),
+        }
+        metadata["quality_summary"] = quality_summary
+        metadata["impact_summary"] = impact_summary
         changed_files = self._loads_list(row["changed_files_json"])
         return {
             "review_id": row["review_id"],
@@ -181,6 +242,8 @@ class SqliteReviewRepository:
             "duration_seconds": row["duration_seconds"],
             "updated_at": row["updated_at"],
             "issue_count": int(row["issue_count"] or 0),
+            "quality_summary": quality_summary,
+            "impact_summary": impact_summary,
             "subject": {
                 "subject_type": row["subject_type"] or "",
                 "repo_id": row["repo_id"] or "",
