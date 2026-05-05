@@ -4254,9 +4254,9 @@ class ReviewRunner(
                 target_hunks=per_file_target_hunks,
                 used_hunk_line_starts=file_used_lines,
             )
-            matched_hunk_line_start = (
-                self._normalize_optional_line_value(matched_target_hunk.get("start_line"))
-                or int((per_file_batch_item or {}).get("line_start") or line_start)
+            matched_hunk_line_start = self._target_hunk_anchor_line(
+                matched_target_hunk,
+                fallback=int((per_file_batch_item or {}).get("line_start") or line_start or 1),
             )
             file_used_lines.add(int(matched_hunk_line_start or line_start or 1))
             parsed = self._stabilize_expert_analysis(
@@ -4289,6 +4289,31 @@ class ReviewRunner(
             parsed_line_start = self._refine_line_start_within_hunk(parsed, matched_target_hunk, parsed_line_start)
             if not self._line_in_target_hunks(parsed_line_start, per_file_target_hunks):
                 parsed_line_start = int(matched_hunk_line_start or parsed_line_start or 1)
+            if not self._finding_has_valid_diff_anchor(
+                review.subject,
+                finding_file_path,
+                parsed_line_start,
+                matched_target_hunk,
+            ):
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_dropped_outside_diff",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 返回的 finding 未锚定到 MR 变更后的 diff 行，已丢弃。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "file_path": finding_file_path,
+                            "line_start": parsed_line_start,
+                            "title": str(parsed.get("title") or "").strip(),
+                            "target_hunk_changed_lines": self._normalize_changed_line_values(
+                                matched_target_hunk.get("changed_lines")
+                            ),
+                        },
+                    )
+                )
+                continue
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -5074,12 +5099,12 @@ class ReviewRunner(
         line_start: int,
         expert_id: str,
     ) -> str:
-        repository_excerpt = self._load_repository_source_excerpt(subject, file_path, line_start)
-        if repository_excerpt:
-            return repository_excerpt
         excerpt = self.diff_excerpt_service.extract_excerpt(subject.unified_diff, file_path, line_start)
         if excerpt:
             return excerpt
+        repository_excerpt = self._load_repository_source_excerpt(subject, file_path, line_start)
+        if repository_excerpt:
+            return repository_excerpt
         return self._build_fallback_code_excerpt(file_path, line_start, expert_id)
 
     def _subject_cache_token(self, subject: ReviewSubject | dict[str, object]) -> tuple[object, ...]:
@@ -6501,8 +6526,10 @@ class ReviewRunner(
             return True
         for hunk in normalized_hunks:
             changed_lines = self._normalize_changed_line_values(hunk.get("changed_lines"))
-            if changed_lines and normalized_line in changed_lines:
-                return True
+            if changed_lines:
+                if normalized_line in changed_lines:
+                    return True
+                continue
             start_line = (
                 self._normalize_optional_line_value(hunk.get("start_line"))
                 or self._normalize_optional_line_value(hunk.get("line_start"))
@@ -6511,6 +6538,42 @@ class ReviewRunner(
             if start_line is not None and end_line is not None and start_line <= normalized_line <= end_line:
                 return True
         return False
+
+    def _target_hunk_anchor_line(self, target_hunk: dict[str, object], *, fallback: int) -> int:
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if changed_lines:
+            return min(changed_lines)
+        start_line = (
+            self._normalize_optional_line_value(target_hunk.get("start_line"))
+            or self._normalize_optional_line_value(target_hunk.get("line_start"))
+        )
+        return int(start_line or fallback or 1)
+
+    def _finding_has_valid_diff_anchor(
+        self,
+        subject: ReviewSubject,
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object] | None = None,
+    ) -> bool:
+        """Only allow formal findings anchored to post-change lines in the MR diff."""
+
+        if not str(subject.unified_diff or "").strip():
+            return True
+        normalized_file = str(file_path or "").strip().replace("\\", "/")
+        if not normalized_file:
+            return False
+        normalized_line = int(line_start or 0)
+        if normalized_line <= 0:
+            return False
+        hunk_file = str((target_hunk or {}).get("file_path") or "").strip().replace("\\", "/")
+        if hunk_file and hunk_file != normalized_file:
+            return False
+        hunk_changed_lines = self._normalize_changed_line_values((target_hunk or {}).get("changed_lines"))
+        if hunk_changed_lines:
+            return normalized_line in set(hunk_changed_lines)
+        changed_lines = set(self.diff_excerpt_service.changed_line_numbers(subject.unified_diff, normalized_file))
+        return normalized_line in changed_lines
 
     def _match_target_hunk_for_line(
         self,

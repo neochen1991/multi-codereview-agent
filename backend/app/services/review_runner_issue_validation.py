@@ -504,10 +504,10 @@ class ReviewRunnerIssueValidationMixin:
         target_hunk = code_context.get("target_hunk") if isinstance(code_context.get("target_hunk"), dict) else {}
         primary_context = code_context.get("primary_context") if isinstance(code_context.get("primary_context"), dict) else {}
         for candidate in (
-            str(problem_source.get("snippet") or "").strip(),
             str(target_hunk.get("excerpt") or "").strip(),
-            str(primary_context.get("snippet") or "").strip(),
             str(finding.code_excerpt or "").strip(),
+            str(problem_source.get("snippet") or "").strip(),
+            str(primary_context.get("snippet") or "").strip(),
         ):
             if candidate:
                 return candidate

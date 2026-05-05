@@ -186,6 +186,11 @@ class DiffExcerptService:
             return None
         return min(line_numbers, key=lambda line: abs(line - target_line))
 
+    def changed_line_numbers(self, unified_diff: str, file_path: str) -> list[int]:
+        """Return post-change line numbers that correspond to added lines in the diff."""
+
+        return self._collect_changed_line_numbers(unified_diff, file_path)
+
     def extract_excerpt(
         self,
         unified_diff: str,

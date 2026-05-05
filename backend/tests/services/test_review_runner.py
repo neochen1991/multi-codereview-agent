@@ -4816,7 +4816,7 @@ def test_review_runner_build_expert_prompt_includes_complete_repository_context_
     assert "createOrder" in prompt
 
 
-def test_review_runner_build_code_excerpt_prefers_repository_source_context(storage_root: Path):
+def test_review_runner_build_code_excerpt_prefers_diff_anchor_over_repository_source_context(storage_root: Path):
     repo_root = storage_root / "repo"
     target_file = repo_root / "apps" / "api" / "order" / "order.service.ts"
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -4866,9 +4866,71 @@ def test_review_runner_build_code_excerpt_prefers_repository_source_context(stor
 
     excerpt = runner._build_code_excerpt(subject, "apps/api/order/order.service.ts", 6, "correctness_business")
 
-    assert "constructor(private readonly client: HttpClient)" in excerpt
+    assert "+    auditCreate(payload.id);" in excerpt
     assert "auditCreate(payload.id);" in excerpt
     assert "return this.client.post('/orders', payload);" in excerpt
+    assert "constructor(private readonly client: HttpClient)" not in excerpt
+
+
+def test_review_runner_rejects_formal_finding_anchor_outside_post_change_diff_lines(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/diff-anchor",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -10,3 +10,4 @@\n"
+            " public Order create(Command command) {\n"
+            "+    validate(command);\n"
+            "     return repository.save(command);\n"
+            " }\n"
+        ),
+    )
+    target_hunk = {
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "start_line": 10,
+        "end_line": 13,
+        "changed_lines": [11],
+        "excerpt": "# src/main/java/com/example/OrderService.java\n  10 |  public Order create(Command command) {\n  11 | +    validate(command);\n  12 |      return repository.save(command);\n  13 |  }",
+    }
+
+    assert runner._finding_has_valid_diff_anchor(subject, "src/main/java/com/example/OrderService.java", 11, target_hunk)
+    assert not runner._finding_has_valid_diff_anchor(subject, "src/main/java/com/example/OrderService.java", 12, target_hunk)
+    assert not runner._finding_has_valid_diff_anchor(subject, "src/main/java/com/example/Other.java", 11, target_hunk)
+
+
+def test_issue_current_code_prefers_target_hunk_over_repository_source_context(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        finding_id="fdg_anchor",
+        review_id="rev_anchor",
+        expert_id="correctness_business",
+        title="校验逻辑错误",
+        summary="新增校验逻辑使用了错误条件。",
+        finding_type="direct_defect",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=11,
+        code_excerpt="# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+        code_context={
+            "target_hunk": {
+                "excerpt": "# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+            },
+            "problem_source_context": {
+                "snippet": "public Order create(Command command) {\n    legacyValidate(command);\n    return repository.save(command);\n}",
+            },
+        },
+    )
+
+    current_code = runner._extract_issue_current_code(finding)
+
+    assert "+    validate(command);" in current_code
+    assert "legacyValidate" not in current_code
 
 
 def test_review_runner_build_finding_code_context_contains_diff_and_related_context(storage_root: Path):
