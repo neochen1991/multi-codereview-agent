@@ -231,33 +231,48 @@ class GitNexusMcpImpactClient:
             max_dynamic_targets,
         )
         try:
-            initial_payloads = self._call_tools_batch(
+            list_repos_payload = self._call_tools_batch(
                 command,
                 repo_path,
                 [
                     ("list_repos", {}),
-                    (
-                        "detect_changes",
-                        {
-                            "repo": repo_name,
-                            "scope": "all",
-                        },
-                    ),
                 ],
                 runtime_env,
                 raise_on_error=False,
                 mcp_session=mcp_session,
                 include_initialize=True,
-            )
+            )[0]
         except Exception:
             if mcp_session is not None:
                 mcp_session.close()
             raise
-        list_repos_payload = initial_payloads[0]
         if "__error" in list_repos_payload:
             raise RuntimeError(f"GitNexus list_repos 调用失败: {list_repos_payload.get('__error')}")
         available_repos = self._extract_repo_names(list_repos_payload)
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
+        if available_repos and effective_repo_name not in available_repos:
+            if mcp_session is not None:
+                mcp_session.close()
+            raise RuntimeError(
+                f"GitNexus MCP 未发现仓库 {effective_repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
+            )
+        detect_changes_result = self._call_tools_batch(
+            command,
+            repo_path,
+            [
+                (
+                    "detect_changes",
+                    {
+                        "repo": effective_repo_name,
+                        "scope": "all",
+                    },
+                ),
+            ],
+            runtime_env,
+            raise_on_error=False,
+            mcp_session=mcp_session,
+            include_initialize=mcp_session is None,
+        )[0]
         detect_changes_payload: dict[str, Any] = {}
         detect_changes_error = ""
         skipped_invalid_targets: list[str] = []
@@ -266,7 +281,6 @@ class GitNexusMcpImpactClient:
         successful_context_targets: list[str] = []
         successful_impact_targets: list[str] = []
         dynamic_targets: list[str] = []
-        detect_changes_result = initial_payloads[1]
         if "__error" in detect_changes_result:
             detect_changes_error = str(detect_changes_result.get("__error") or "")
             logger.warning(
@@ -343,12 +357,6 @@ class GitNexusMcpImpactClient:
             len(impact_payloads),
             ",".join(targets[:8]),
         )
-        if available_repos and effective_repo_name not in available_repos:
-            if mcp_session is not None:
-                mcp_session.close()
-            raise RuntimeError(
-                f"GitNexus MCP 未发现仓库 {effective_repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
-            )
         try:
             return {
                 "repo": effective_repo_name,
@@ -1982,6 +1990,8 @@ class GitNexusImpactService:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=20,
                 check=False,
             )
@@ -2193,6 +2203,8 @@ class GitNexusImpactService:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
                 check=False,
             )
@@ -2263,6 +2275,8 @@ class GitNexusImpactService:
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=10,
                     check=False,
                 )

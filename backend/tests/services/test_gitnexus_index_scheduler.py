@@ -66,6 +66,48 @@ def test_gitnexus_index_scheduler_records_registry_status(storage_root: Path, tm
     assert str(status["registry_path"]).endswith(".gitnexus/registry.json")
 
 
+def test_gitnexus_index_scheduler_registers_repo_when_registry_has_other_repo(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    fake_bin = tmp_path / "bin" / "gitnexus"
+    fake_bin.parent.mkdir()
+    fake_bin.write_text("", encoding="utf-8")
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    (repo_b / ".gitnexus").mkdir()
+    registry_dir = tmp_path / ".gitnexus"
+    registry_dir.mkdir(exist_ok=True)
+    write_json(registry_dir / "registry.json", {"repositories": [{"name": "repo-a", "path": str(repo_a)}]})
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "default_repository_id": "repo-a",
+            "code_repositories": [
+                CodeRepositorySettings(repository_id="repo-a", local_path=str(repo_a)),
+                CodeRepositorySettings(repository_id="repo-b", local_path=str(repo_b)),
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: str(fake_bin) if command == "gitnexus" else None)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick("repo-b")
+
+    assert status["state"] == "ready"
+    assert status["registry_registered"] is True
+    assert status["registry_auto_registered"] is True
+    assert status["registry_repo_name"] == "repo-b"
+    assert "MCP registry" in str(status["message"])
+    registry_payload = scheduler._registry_path().read_text(encoding="utf-8")
+    assert str(repo_a) in registry_payload
+    assert str(repo_b) in registry_payload
+
+
 def test_gitnexus_index_scheduler_fails_when_repo_path_missing(storage_root: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
     missing_repo = tmp_path / "missing-repo"
@@ -96,10 +138,10 @@ def test_gitnexus_index_scheduler_uses_resolved_gitnexus_binary(storage_root: Pa
     monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
     monkeypatch.setattr("shutil.which", lambda command: str(fake_bin) if command == "gitnexus" else None)
 
-    captured: list[object] = []
+    captured: list[tuple[object, dict[str, object]]] = []
 
     def _fake_run(command, **kwargs):
-        captured.append(command)
+        captured.append((command, kwargs))
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("subprocess.run", _fake_run)
@@ -108,7 +150,10 @@ def test_gitnexus_index_scheduler_uses_resolved_gitnexus_binary(storage_root: Pa
     status = scheduler.tick()
 
     assert status["state"] == "ready"
-    assert captured[0] == [str(fake_bin), "analyze"]
+    assert captured[0][0] == [str(fake_bin), "analyze"]
+    assert captured[0][1]["encoding"] == "utf-8"
+    assert captured[0][1]["errors"] == "replace"
+    assert (captured[0][1]["env"] or {})["PYTHONUTF8"] == "1"
 
 
 def test_gitnexus_index_scheduler_retries_non_git_folder_with_skip_git(storage_root: Path, tmp_path: Path, monkeypatch):

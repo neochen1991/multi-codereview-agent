@@ -84,6 +84,8 @@ def _resolve_with_system_where(executable: str) -> str:
             [where_command, executable],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )

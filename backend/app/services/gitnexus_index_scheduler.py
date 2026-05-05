@@ -152,8 +152,11 @@ class GitNexusIndexScheduler:
                 cwd=str(repo_dir),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
+                env=self._gitnexus_process_env(),
             )
             effective_command = command
             retry_reason = ""
@@ -172,8 +175,11 @@ class GitNexusIndexScheduler:
                     cwd=str(repo_dir),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     check=False,
+                    env=self._gitnexus_process_env(),
                 )
                 effective_command = retry_command
         except FileNotFoundError as error:
@@ -201,13 +207,26 @@ class GitNexusIndexScheduler:
                 error,
             )
             return status
-        state = "ready" if completed.returncode == 0 else "failed"
         registry_registered, registry_path = self._registry_status(str(repo_dir))
+        registry_auto_registered = False
+        registry_registration_error = ""
+        registry_repo_name = repo_dir.name
+        if completed.returncode == 0 and not registry_registered:
+            (
+                registry_auto_registered,
+                registry_path,
+                registry_repo_name,
+                registry_registration_error,
+            ) = self._ensure_registry_entry(str(repo_dir), resolved_repository_id)
+            registry_registered = registry_auto_registered
         if completed.returncode == 0 and registry_registered:
-            message = "GitNexus 建图完成，仓库已写入官方 registry。"
+            state = "ready"
+            message = "GitNexus 建图完成，仓库已写入 MCP registry。" if registry_auto_registered else "GitNexus 建图完成，仓库已写入官方 registry。"
         elif completed.returncode == 0:
-            message = "GitNexus 建图完成，但未在官方 registry 中发现当前仓库，建议执行 gitnexus setup 后重新 analyze。"
+            state = "degraded"
+            message = "GitNexus 建图完成，但自动写入 MCP registry 失败；关联影响分析会降级。请检查 registry 文件权限。"
         else:
+            state = "failed"
             message = "GitNexus 建图失败。"
         status = self._status(
             state,
@@ -224,6 +243,9 @@ class GitNexusIndexScheduler:
             gitnexus_path=binary_path,
             registry_path=registry_path,
             registry_registered=registry_registered,
+            registry_auto_registered=registry_auto_registered,
+            registry_registration_error=registry_registration_error,
+            registry_repo_name=registry_repo_name,
             return_code=completed.returncode,
             retry_reason=retry_reason,
             stdout=(completed.stdout or "")[-2000:],
@@ -281,6 +303,23 @@ class GitNexusIndexScheduler:
             )
             if command_available and stale_missing_message:
                 refreshed["message"] = "已检测到 GitNexus，可手动建立图谱更新最近状态。"
+            if repo_path:
+                registered, registry_path = self._registry_status(repo_path)
+                refreshed["registry_path"] = registry_path
+                refreshed["registry_registered"] = registered
+                if not registered and (Path(repo_path) / ".gitnexus").exists() and str(refreshed.get("state") or "") in {"ready", "degraded"}:
+                    registered, registry_path, registry_repo_name, registry_error = self._ensure_registry_entry(
+                        repo_path,
+                        resolved_repository_id,
+                    )
+                    refreshed["registry_path"] = registry_path
+                    refreshed["registry_registered"] = registered
+                    refreshed["registry_auto_registered"] = registered
+                    refreshed["registry_repo_name"] = registry_repo_name
+                    refreshed["registry_registration_error"] = registry_error
+                    if registered:
+                        refreshed["state"] = "ready"
+                        refreshed["message"] = "GitNexus 图谱文件存在，已自动写入 MCP registry。"
             return refreshed
         return self._status(
             "unknown",
@@ -489,6 +528,8 @@ class GitNexusIndexScheduler:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 check=False,
             )
@@ -497,6 +538,107 @@ class GitNexusIndexScheduler:
         if completed.returncode != 0:
             return ""
         return str(completed.stdout or "").strip()
+
+    def _gitnexus_process_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("FORCE_COLOR", "0")
+        return env
+
+    def _ensure_registry_entry(self, repo_path: str, repository_id: str = "") -> tuple[bool, str, str, str]:
+        registry_path = self._registry_path()
+        try:
+            payload = read_json(registry_path) if registry_path.exists() else []
+            entries, container, key = self._registry_entries_for_update(payload)
+            repo_path_resolved = _normalize_path_for_compare(repo_path)
+            repo_dir = Path(repo_path).expanduser()
+            repo_name = self._registry_repo_name(repo_dir, repository_id, entries)
+            entry = self._build_registry_entry(repo_dir, repo_name)
+            replaced = False
+            for index, item in enumerate(entries):
+                candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+                if candidate_path and _normalize_path_for_compare(candidate_path) == repo_path_resolved:
+                    entries[index] = {**item, **entry}
+                    replaced = True
+                    break
+            if not replaced:
+                entries.append(entry)
+            if isinstance(container, dict):
+                container[key] = entries
+                next_payload: object = container
+            else:
+                next_payload = entries
+            write_json(registry_path, next_payload)
+        except Exception as error:
+            logger.exception("gitnexus registry auto registration failed repo_path=%s registry_path=%s", repo_path, registry_path)
+            return False, str(registry_path), "", f"{error.__class__.__name__}: {error}"
+        registered, used_registry_path = self._registry_status(repo_path)
+        return registered, used_registry_path, repo_name, "" if registered else "registry 写入后仍未匹配当前仓库"
+
+    def _registry_entries_for_update(self, payload: object) -> tuple[list[dict[str, object]], object, str]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)], payload, ""
+        if isinstance(payload, dict):
+            for key in ("repositories", "repos", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)], dict(payload), key
+            container = dict(payload)
+            return [], container, "repositories"
+        return [], [], ""
+
+    def _registry_repo_name(self, repo_dir: Path, repository_id: str, entries: list[dict[str, object]]) -> str:
+        base_candidates = [
+            repo_dir.name,
+            str(repository_id or "").strip(),
+            f"{repo_dir.name}-{str(repository_id or '').strip()}".strip("-"),
+        ]
+        candidate_paths_by_name: dict[str, set[str]] = {}
+        for item in entries:
+            name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+            path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+            if name and path:
+                candidate_paths_by_name.setdefault(name, set()).add(_normalize_path_for_compare(path))
+        repo_path_resolved = _normalize_path_for_compare(str(repo_dir))
+        for candidate in [item for item in base_candidates if item]:
+            paths = candidate_paths_by_name.get(candidate, set())
+            if not paths or paths == {repo_path_resolved}:
+                return candidate
+        seed = repo_dir.name or str(repository_id or "").strip() or "repository"
+        for index in range(2, 100):
+            candidate = f"{seed}-{index}"
+            if candidate not in candidate_paths_by_name:
+                return candidate
+        return f"{seed}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+
+    def _build_registry_entry(self, repo_dir: Path, repo_name: str) -> dict[str, object]:
+        meta = self._load_local_gitnexus_meta(repo_dir)
+        indexed_at = str(meta.get("indexedAt") or meta.get("indexed_at") or datetime.now(UTC).isoformat())
+        last_commit = str(meta.get("lastCommit") or meta.get("last_commit") or self._current_commit(str(repo_dir)) or "")
+        entry: dict[str, object] = {
+            "name": repo_name,
+            "path": str(repo_dir),
+            "storagePath": str(repo_dir / ".gitnexus"),
+            "indexedAt": indexed_at,
+            "lastCommit": last_commit,
+            "stats": dict(meta.get("stats") or {}),
+        }
+        remote_url = str(meta.get("remoteUrl") or meta.get("remote_url") or "").strip()
+        if remote_url:
+            entry["remoteUrl"] = remote_url
+        return entry
+
+    def _load_local_gitnexus_meta(self, repo_dir: Path) -> dict[str, object]:
+        meta_path = repo_dir / ".gitnexus" / "meta.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            payload = read_json(meta_path)
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def _registry_status(self, repo_path: str) -> tuple[bool, str]:
         registry_path = self._registry_path()

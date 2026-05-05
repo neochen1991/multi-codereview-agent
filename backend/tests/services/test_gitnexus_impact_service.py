@@ -3,6 +3,8 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.report import ImpactSymbol
 from app.domain.models.review import ReviewSubject
@@ -171,7 +173,7 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(capl
                 runtime_env=None,
             )
 
-    assert len(call_batches) == 2
+    assert len(call_batches) == 3
     tool_names = [
         (request.get("params") or {}).get("name")
         for batch in call_batches
@@ -188,6 +190,48 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(capl
     assert '"name": "OrderService.create"' in log_text
     assert "gitnexus mcp tool response tool=impact" in log_text
     assert '"paths": [["Controller", "OrderService.create"]]' in log_text
+
+
+def test_gitnexus_mcp_impact_client_stops_when_repo_missing_from_mcp_registry():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-b",
+        project_id="proj",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+    call_batches: list[list[dict[str, object]]] = []
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        del command, repo_path, runtime_env
+        call_batches.append(requests)
+        responses = {}
+        for request in requests:
+            params = request.get("params") or {}
+            if params.get("name") == "list_repos":
+                responses[request.get("id")] = {"result": {"content": [{"text": '[{"name":"repo-a"}]'}]}}
+        return responses
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        with pytest.raises(RuntimeError, match="GitNexus MCP 未发现仓库 repo-b"):
+            client.analyze_mr(
+                repo_name="repo-b",
+                repo_path="/tmp/repo-b",
+                subject=subject,
+                changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})()],
+                runtime_env=None,
+            )
+
+    tool_names = [
+        (request.get("params") or {}).get("name")
+        for batch in call_batches
+        for request in batch
+        if request.get("method") == "tools/call"
+    ]
+    assert tool_names == ["list_repos"]
 
 
 def test_gitnexus_mcp_impact_client_respects_runtime_query_limits():
@@ -304,7 +348,7 @@ def test_gitnexus_mcp_impact_client_discovers_dynamic_targets_from_context():
             runtime_env=None,
         )
 
-    assert len(call_batches) == 3
+    assert len(call_batches) == 4
     assert "OrderController.create" in payload["queried_targets"]
     assert "PaymentClient.reserve" in payload["queried_targets"]
     assert payload["dynamic_targets"] == ["OrderController.create", "PaymentClient.reserve"]
@@ -1502,7 +1546,7 @@ def test_gitnexus_local_git_diff_resolves_available_refs_before_running(storage_
         unified_diff="",
     )
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         if command[:3] == ["git", "rev-parse", "--verify"]:
             ref = command[3].replace("^{commit}", "")
             if ref in {"abc123", "origin/main"}:
@@ -1543,7 +1587,7 @@ def test_gitnexus_local_git_diff_uses_git_style_paths_for_windows_changed_files(
         unified_diff="",
     )
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         if command[:3] == ["git", "rev-parse", "--verify"]:
             ref = command[3].replace("^{commit}", "")
             if ref in {"abc123", "origin/main"}:
@@ -1575,7 +1619,7 @@ def test_gitnexus_scan_changed_file_symbols_uses_resolved_git_refs(storage_root:
         unified_diff="",
     )
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         if command[:3] == ["git", "rev-parse", "--verify"]:
             ref = command[3].replace("^{commit}", "")
             if ref in {"abc123", "origin/main"}:
@@ -1605,7 +1649,7 @@ def test_gitnexus_load_file_content_uses_git_style_path(storage_root: Path, tmp_
     repo_path.mkdir()
     service = GitNexusImpactService(storage_root)
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         assert command == ["git", "show", "abc123:src/main/java/com/example/OrderController.java"]
         return type("Completed", (), {"returncode": 0, "stdout": "class OrderController {}\n", "stderr": ""})()
 

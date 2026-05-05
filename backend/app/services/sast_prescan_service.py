@@ -65,6 +65,8 @@ class SastPreScanService:
             cwd=str(root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             check=False,
         )
@@ -116,6 +118,8 @@ class SastPreScanService:
             cwd=str(root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             check=False,
         )
@@ -155,6 +159,8 @@ class SastPreScanService:
             cwd=str(root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             check=False,
         )

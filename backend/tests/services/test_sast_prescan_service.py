@@ -39,7 +39,7 @@ def test_sast_prescan_parses_semgrep_json(tmp_path: Path):
     target.parent.mkdir(parents=True)
     target.write_text("eval(user_input)\n", encoding="utf-8")
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         assert command[:3] == ["semgrep", "--json", "--quiet"]
         return type(
             "Completed",
@@ -75,7 +75,7 @@ def test_sast_prescan_uses_project_semgrep_config(tmp_path: Path):
     target.write_text("eval(user_input)\n", encoding="utf-8")
     (repo / ".semgrep.yml").write_text("rules: []\n", encoding="utf-8")
 
-    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
         assert "--config" in command
         assert str(repo / ".semgrep.yml") in command
         return type("Completed", (), {"stdout": '{"results":[]}', "stderr": "", "returncode": 0})()
