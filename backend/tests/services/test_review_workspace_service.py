@@ -102,6 +102,45 @@ def test_review_workspace_service_applies_diff_when_source_ref_missing(storage_r
     assert ".review-workspace" not in _git(Path(result.workspace_path), "ls-tree", "--name-only", "-r", "HEAD").stdout
 
 
+def test_review_workspace_service_fetches_gitlab_mr_head_ref_when_source_branch_is_not_local(storage_root: Path, tmp_path: Path):
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    _git(seed, "remote", "add", "origin", str(remote))
+    _git(seed, "push", "origin", "dev")
+    _git(seed, "checkout", "-b", "feature/hidden")
+    (seed / "src/main/java/com/example/OrderService.java").write_text(
+        "class OrderService { String status() { return \"mr-head\"; } }\n",
+        encoding="utf-8",
+    )
+    _git(seed, "commit", "-am", "mr head")
+    _git(seed, "push", "origin", "HEAD:refs/merge-requests/12/head")
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(remote), str(repo)], check=True, capture_output=True, text=True)
+    _git(repo, "checkout", "dev")
+    runtime = RuntimeSettings(
+        default_repository_id="repo-a",
+        code_repositories=[CodeRepositorySettings(repository_id="repo-a", local_path=str(repo), default_branch="dev")],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-a",
+        project_id="proj",
+        source_ref="mr/12",
+        target_ref="dev",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff="diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n@@ invalid\n",
+        metadata={"repository_id": "repo-a", "platform_kind": "gitlab_like"},
+    )
+
+    result = ReviewWorkspaceService(storage_root).prepare(review_id="rev_gitlab_mr", subject=subject, runtime=runtime)
+
+    assert result.status == "ready"
+    assert result.snapshot_mode == "merge"
+    assert "mr-head" in (Path(result.workspace_path) / "src/main/java/com/example/OrderService.java").read_text(encoding="utf-8")
+
+
 def test_review_workspace_service_reuses_cached_snapshot(storage_root: Path, tmp_path: Path):
     repo = tmp_path / "repo"
     _init_repo(repo)

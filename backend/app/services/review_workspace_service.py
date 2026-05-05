@@ -76,6 +76,8 @@ class ReviewWorkspaceService:
 
         self._best_effort_fetch(base_repo, target_ref)
         self._best_effort_fetch(base_repo, source_ref)
+        for source_fetch_ref in self._source_fetch_refspecs(subject, source_ref):
+            self._best_effort_fetch(base_repo, source_fetch_ref)
         base_ref = self._resolve_ref(base_repo, self._target_ref_candidates(target_ref))
         source_resolved_ref = self._resolve_ref(base_repo, self._source_ref_candidates(subject))
         if not base_ref:
@@ -445,15 +447,72 @@ class ReviewWorkspaceService:
     def _source_ref_candidates(self, subject: ReviewSubject) -> list[str]:
         metadata = dict(subject.metadata or {})
         source_ref = str(subject.source_ref or "").strip()
+        mr_number = self._infer_mr_number(subject, source_ref)
         values = [
             *[str(item or "").strip() for item in list(subject.commits or [])],
             str(metadata.get("auto_queue_head_sha") or "").strip(),
             str(metadata.get("head_sha") or "").strip(),
             *self._ref_aliases(source_ref),
         ]
+        if mr_number:
+            values.extend(
+                [
+                    f"refs/remotes/origin/mr/{mr_number}",
+                    f"origin/mr/{mr_number}",
+                    f"refs/remotes/origin/pr/{mr_number}",
+                    f"origin/pr/{mr_number}",
+                ]
+            )
         if source_ref:
             values.append("FETCH_HEAD")
         return self._dedupe(values)
+
+    def _source_fetch_refspecs(self, subject: ReviewSubject, source_ref: str) -> list[str]:
+        mr_number = self._infer_mr_number(subject, source_ref)
+        if not mr_number:
+            return []
+        return self._dedupe(
+            [
+                f"refs/merge-requests/{mr_number}/head:refs/remotes/origin/mr/{mr_number}",
+                f"refs/pull/{mr_number}/head:refs/remotes/origin/pr/{mr_number}",
+            ]
+        )
+
+    def _infer_mr_number(self, subject: ReviewSubject, source_ref: str) -> str:
+        metadata = dict(subject.metadata or {})
+        for value in (
+            source_ref,
+            str(metadata.get("mr_number") or ""),
+            str(metadata.get("mr_id") or ""),
+            str(metadata.get("iid") or ""),
+            str(metadata.get("number") or ""),
+            str(subject.mr_url or ""),
+            str(subject.repo_url or ""),
+        ):
+            number = self._extract_mr_number(value)
+            if number:
+                return number
+        return ""
+
+    def _extract_mr_number(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        normalized = text.replace("\\", "/")
+        markers = ["/merge_requests/", "/pull/", "mr/", "pr/"]
+        for marker in markers:
+            if marker not in normalized:
+                continue
+            tail = normalized.split(marker, 1)[1]
+            digits = []
+            for char in tail:
+                if char.isdigit():
+                    digits.append(char)
+                    continue
+                break
+            if digits:
+                return "".join(digits)
+        return text if text.isdigit() else ""
 
     def _target_ref_candidates(self, target_ref: str) -> list[str]:
         values = self._ref_aliases(str(target_ref or "").strip())
