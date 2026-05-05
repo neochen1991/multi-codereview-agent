@@ -18,6 +18,20 @@ def test_gitnexus_index_scheduler_skips_without_repo_path(storage_root: Path, mo
     assert "本地代码仓路径" in str(status["message"])
 
 
+def test_gitnexus_index_scheduler_uses_large_repo_timeout_default(storage_root: Path, monkeypatch):
+    service = ReviewService(storage_root=storage_root)
+    scheduler = GitNexusIndexScheduler(service)
+
+    monkeypatch.delenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", raising=False)
+    assert scheduler._index_timeout() == 1800
+
+    monkeypatch.setenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "2400")
+    assert scheduler._index_timeout() == 2400
+
+    monkeypatch.setenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "bad")
+    assert scheduler._index_timeout() == 1800
+
+
 def test_gitnexus_index_scheduler_skips_without_gitnexus_binary(storage_root: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
     repo_path = tmp_path / "repo"

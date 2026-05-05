@@ -212,7 +212,7 @@ gitnexus status
 ```bash
 export GITNEXUS_INDEX_ENABLED=true
 export GITNEXUS_INDEX_INTERVAL_SECONDS=3600
-export GITNEXUS_INDEX_TIMEOUT_SECONDS=900
+export GITNEXUS_INDEX_TIMEOUT_SECONDS=1800
 export GITNEXUS_ANALYZE_COMMAND="gitnexus analyze"
 export GITNEXUS_MCP_COMMAND="gitnexus mcp"
 ```
@@ -240,6 +240,19 @@ $env:GITNEXUS_MCP_COMMAND='["npx", "-y", "gitnexus@latest", "mcp"]'
 ```
 
 如果遇到 GitNexus 原生依赖加载错误，通常先检查 Node.js 版本，然后重新执行 `npm install -g gitnexus`。
+
+大仓库或 Windows 机器较慢时，可以适当调大 MR 快照和 worktree 建图时间：
+
+```powershell
+$env:REVIEW_WORKSPACE_FETCH_TIMEOUT_SECONDS="600"
+$env:REVIEW_WORKSPACE_WORKTREE_TIMEOUT_SECONDS="600"
+$env:REVIEW_WORKSPACE_MERGE_TIMEOUT_SECONDS="600"
+$env:REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS="600"
+$env:GITNEXUS_INDEX_TIMEOUT_SECONDS="1800"
+$env:GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS="1800"
+```
+
+其中 `GITNEXUS_INDEX_TIMEOUT_SECONDS` 控制设置页/后台建图最长等待时间，`GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS` 控制检视任务中针对 MR 快照 worktree 自动执行 `gitnexus analyze` 的最长等待时间，默认都是 `1800` 秒。
 
 详细说明见 [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)。
 

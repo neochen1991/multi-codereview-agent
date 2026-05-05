@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, asdict
@@ -83,7 +84,11 @@ class ReviewWorkspaceService:
         base_sha = self._git_commit(base_repo, base_ref)
         source_sha = self._git_commit(base_repo, source_resolved_ref) if source_resolved_ref else ""
         self._reset_workspace(base_repo, workspace_path)
-        added = self._run_git(["git", "worktree", "add", "--detach", str(workspace_path), base_ref], cwd=base_repo, timeout=90)
+        added = self._run_git(
+            ["git", "worktree", "add", "--detach", str(workspace_path), base_ref],
+            cwd=base_repo,
+            timeout=self._timeout("REVIEW_WORKSPACE_WORKTREE_TIMEOUT_SECONDS", 600),
+        )
         if added.returncode != 0:
             return self._result(
                 "failed",
@@ -113,7 +118,7 @@ class ReviewWorkspaceService:
                     source_resolved_ref,
                 ],
                 cwd=workspace_path,
-                timeout=120,
+                timeout=self._timeout("REVIEW_WORKSPACE_MERGE_TIMEOUT_SECONDS", 600),
             )
             if merged.returncode == 0:
                 return self._write_ready_meta(
@@ -281,8 +286,16 @@ class ReviewWorkspaceService:
                 continue
             base_repo = self._base_repo_from_meta(workspace)
             if base_repo:
-                self._run_git(["git", "worktree", "remove", "--force", str(workspace)], cwd=base_repo, timeout=60)
-                self._run_git(["git", "worktree", "prune"], cwd=base_repo, timeout=30)
+                self._run_git(
+                    ["git", "worktree", "remove", "--force", str(workspace)],
+                    cwd=base_repo,
+                    timeout=self._timeout("REVIEW_WORKSPACE_CLEANUP_TIMEOUT_SECONDS", 300),
+                )
+                self._run_git(
+                    ["git", "worktree", "prune"],
+                    cwd=base_repo,
+                    timeout=self._timeout("REVIEW_WORKSPACE_PRUNE_TIMEOUT_SECONDS", 120),
+                )
             if workspace.exists():
                 shutil.rmtree(workspace, ignore_errors=True)
             if workspace.exists():
@@ -321,16 +334,28 @@ class ReviewWorkspaceService:
     def _reset_workspace(self, base_repo: Path, workspace_path: Path) -> None:
         if not workspace_path.exists():
             return
-        self._run_git(["git", "worktree", "remove", "--force", str(workspace_path)], cwd=base_repo, timeout=60)
+        self._run_git(
+            ["git", "worktree", "remove", "--force", str(workspace_path)],
+            cwd=base_repo,
+            timeout=self._timeout("REVIEW_WORKSPACE_CLEANUP_TIMEOUT_SECONDS", 300),
+        )
         if workspace_path.exists():
             shutil.rmtree(workspace_path, ignore_errors=True)
-        self._run_git(["git", "worktree", "prune"], cwd=base_repo, timeout=30)
+        self._run_git(
+            ["git", "worktree", "prune"],
+            cwd=base_repo,
+            timeout=self._timeout("REVIEW_WORKSPACE_PRUNE_TIMEOUT_SECONDS", 120),
+        )
 
     def _apply_diff(self, workspace_path: Path, unified_diff: str) -> subprocess.CompletedProcess[str]:
         diff_path = workspace_path.parent / f"{workspace_path.name}.mr.diff"
         diff_path.write_text(str(unified_diff or ""), encoding="utf-8")
         try:
-            return self._run_git(["git", "apply", "--whitespace=nowarn", str(diff_path)], cwd=workspace_path, timeout=90)
+            return self._run_git(
+                ["git", "apply", "--whitespace=nowarn", str(diff_path)],
+                cwd=workspace_path,
+                timeout=self._timeout("REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS", 600),
+            )
         finally:
             try:
                 diff_path.unlink(missing_ok=True)
@@ -338,7 +363,11 @@ class ReviewWorkspaceService:
                 logger.debug("review workspace temp diff cleanup failed path=%s", diff_path)
 
     def _commit_workspace_changes(self, workspace_path: Path) -> subprocess.CompletedProcess[str]:
-        added = self._run_git(["git", "add", "-A"], cwd=workspace_path, timeout=30)
+        added = self._run_git(
+            ["git", "add", "-A"],
+            cwd=workspace_path,
+            timeout=self._timeout("REVIEW_WORKSPACE_COMMIT_TIMEOUT_SECONDS", 300),
+        )
         if added.returncode != 0:
             return added
         return self._run_git(
@@ -353,17 +382,25 @@ class ReviewWorkspaceService:
                 "review workspace diff snapshot",
             ],
             cwd=workspace_path,
-            timeout=60,
+            timeout=self._timeout("REVIEW_WORKSPACE_COMMIT_TIMEOUT_SECONDS", 300),
         )
 
     def _abort_merge(self, workspace_path: Path) -> None:
-        self._run_git(["git", "merge", "--abort"], cwd=workspace_path, timeout=30)
+        self._run_git(
+            ["git", "merge", "--abort"],
+            cwd=workspace_path,
+            timeout=self._timeout("REVIEW_WORKSPACE_MERGE_TIMEOUT_SECONDS", 600),
+        )
 
     def _best_effort_fetch(self, base_repo: Path, ref: str) -> None:
         normalized = str(ref or "").strip()
         if not normalized:
             return
-        self._run_git(["git", "fetch", "origin", normalized], cwd=base_repo, timeout=60)
+        self._run_git(
+            ["git", "fetch", "origin", normalized],
+            cwd=base_repo,
+            timeout=self._timeout("REVIEW_WORKSPACE_FETCH_TIMEOUT_SECONDS", 600),
+        )
 
     def _resolve_ref(self, repo_path: Path, candidates: list[str]) -> str:
         for candidate in candidates:
@@ -374,13 +411,17 @@ class ReviewWorkspaceService:
     def _git_commit(self, repo_path: Path, ref: str) -> str:
         if not ref:
             return ""
-        completed = self._run_git(["git", "rev-parse", ref], cwd=repo_path, timeout=10)
+        completed = self._run_git(
+            ["git", "rev-parse", ref],
+            cwd=repo_path,
+            timeout=self._timeout("REVIEW_WORKSPACE_GIT_LOOKUP_TIMEOUT_SECONDS", 30),
+        )
         if completed.returncode != 0:
             return ""
         return str(completed.stdout or "").strip()
 
     def _run_git(self, command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
-        logger.info("review workspace git command cwd=%s command=%s", cwd, " ".join(command))
+        logger.info("review workspace git command cwd=%s timeout=%s command=%s", cwd, timeout, " ".join(command))
         try:
             return subprocess.run(
                 command,
@@ -394,6 +435,12 @@ class ReviewWorkspaceService:
             )
         except Exception as error:
             return subprocess.CompletedProcess(command, returncode=1, stdout="", stderr=f"{error.__class__.__name__}: {error}")
+
+    def _timeout(self, env_name: str, default_seconds: int) -> int:
+        try:
+            return max(1, int(os.getenv(env_name, str(default_seconds)) or default_seconds))
+        except (TypeError, ValueError):
+            return int(default_seconds)
 
     def _source_ref_candidates(self, subject: ReviewSubject) -> list[str]:
         metadata = dict(subject.metadata or {})

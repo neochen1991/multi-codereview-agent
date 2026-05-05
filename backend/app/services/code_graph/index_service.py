@@ -29,6 +29,7 @@ class CodeGraphIndexService:
         self.parser = parser
 
     def full_build(self, *, repository_id: str = "", languages: list[str] | None = None) -> dict[str, object]:
+        self.storage.initialize()
         selected_files = self.selector.select_files(languages=languages or ["java"])
         logger.info(
             "tree_sitter index full_build request repository_id=%s repo_root=%s languages=%s selected_file_count=%s graph_db_path=%s",

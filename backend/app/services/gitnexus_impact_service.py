@@ -1548,6 +1548,9 @@ class GitNexusImpactService:
                 "当前机器未预装 GitNexus，或配置的 GitNexus MCP 命令不可用。"
                 f"请检查 GITNEXUS_BIN/GITNEXUS_MCP_COMMAND/PATH，当前命令: {' '.join(command)}"
             )
+        workspace_unready_reason = self._mr_review_workspace_unready_reason(subject)
+        if workspace_unready_reason:
+            raise RuntimeError(workspace_unready_reason)
         self._ensure_review_workspace_gitnexus_index(repo_path, subject, runtime, command)
         registry = self._load_gitnexus_registry(subject, runtime)
         graph_status = self._load_graph_status(repo_path, registry, subject=subject, runtime=runtime)
@@ -1652,6 +1655,34 @@ class GitNexusImpactService:
         }
         return report, trace
 
+    def _mr_review_workspace_unready_reason(self, subject: ReviewSubject) -> str:
+        if str(subject.subject_type or "").lower() != "mr" or not str(subject.unified_diff or "").strip():
+            return ""
+        metadata = dict(subject.metadata or {})
+        workspace_record = metadata.get("review_workspace")
+        status = str(metadata.get("review_workspace_status") or "").strip().lower()
+        if isinstance(workspace_record, dict):
+            status = status or str(workspace_record.get("status") or "").strip().lower()
+        if not status or status == "ready":
+            return ""
+        message = str(metadata.get("review_workspace_message") or "").strip()
+        if isinstance(workspace_record, dict) and not message:
+            message = str(workspace_record.get("message") or "").strip()
+        base_repo_path = str(
+            metadata.get("review_workspace_base_repo_path")
+            or metadata.get("base_workspace_repo_path")
+            or metadata.get("configured_workspace_repo_path")
+            or metadata.get("workspace_repo_path")
+            or ""
+        ).strip()
+        return (
+            "GitNexus 图谱不可用于本次 MR：MR 快照工作区未就绪，"
+            "为避免分析设置页基础仓库的旧代码，本次 GitNexus 关联影响分析已降级。"
+            f" review_workspace_status={status}"
+            f" base_repo_path={base_repo_path}"
+            f" message={message or '未记录原因'}"
+        )
+
     def _review_workspace_trace(self, subject: ReviewSubject) -> dict[str, Any]:
         metadata = dict(subject.metadata or {})
         if str(metadata.get("review_workspace_status") or "") != "ready":
@@ -1666,23 +1697,56 @@ class GitNexusImpactService:
             "message": str(metadata.get("review_workspace_message") or ""),
         }
 
+    def ensure_review_workspace_index(
+        self,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings | None = None,
+    ) -> dict[str, Any]:
+        """确保本次 MR worktree 下有 GitNexus 图谱，供 intake 阶段主动预热。"""
+
+        repo_path = self._repo_path(subject, runtime)
+        if not repo_path:
+            return {"status": "skipped", "message": "未解析到代码仓路径，跳过 GitNexus worktree 建图。"}
+        command = self._gitnexus_command_for_diagnostics()
+        if not self._gitnexus_command_available(command):
+            return {
+                "status": "skipped",
+                "message": f"GitNexus 命令不可用，跳过 worktree 建图：{' '.join(command)}",
+                "repo_path": repo_path,
+            }
+        return self._ensure_review_workspace_gitnexus_index(repo_path, subject, runtime, command)
+
     def _ensure_review_workspace_gitnexus_index(
         self,
         repo_path: str,
         subject: ReviewSubject,
         runtime: RuntimeSettings | None,
         mcp_command: list[str],
-    ) -> None:
+    ) -> dict[str, Any]:
         metadata = dict(subject.metadata or {})
         if str(metadata.get("review_workspace_status") or "") != "ready":
-            return
+            return {
+                "status": "skipped",
+                "message": "当前任务不是 ready 状态的 MR worktree，跳过 GitNexus worktree 建图。",
+                "repo_path": repo_path,
+            }
         if _normalize_path_for_compare(str(metadata.get("review_workspace_path") or "")) != _normalize_path_for_compare(repo_path):
-            return
+            return {
+                "status": "skipped",
+                "message": "当前 repo_path 与 review_workspace_path 不一致，跳过 GitNexus worktree 建图。",
+                "repo_path": repo_path,
+                "review_workspace_path": str(metadata.get("review_workspace_path") or ""),
+            }
         repo_root = Path(repo_path).expanduser()
         if (repo_root / ".gitnexus" / "meta.json").exists() or (repo_root / ".gitnexus" / "index_status.json").exists():
-            return
+            return {
+                "status": "ready",
+                "message": "GitNexus worktree 图谱已存在。",
+                "repo_path": repo_path,
+                "graph_dir": str(repo_root / ".gitnexus"),
+            }
         analyze_command = self._gitnexus_analyze_command_from_mcp(mcp_command)
-        timeout = max(60, int(os.getenv("GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS", "900") or 900))
+        timeout = self._review_workspace_index_timeout()
         logger.info("gitnexus review workspace auto index start repo_path=%s command=%s", repo_path, " ".join(analyze_command))
         try:
             completed = subprocess.run(
@@ -1698,7 +1762,13 @@ class GitNexusImpactService:
             )
         except Exception as error:
             logger.warning("gitnexus review workspace auto index failed repo_path=%s error=%s", repo_path, error)
-            return
+            return {
+                "status": "failed",
+                "message": f"GitNexus worktree 建图异常：{error}",
+                "error_type": error.__class__.__name__,
+                "repo_path": repo_path,
+                "timeout_seconds": timeout,
+            }
         logger.info(
             "gitnexus review workspace auto index finish repo_path=%s return_code=%s stdout=%s stderr=%s",
             repo_path,
@@ -1706,6 +1776,23 @@ class GitNexusImpactService:
             (completed.stdout or "")[-1200:],
             (completed.stderr or "")[-1200:],
         )
+        graph_ready = (repo_root / ".gitnexus" / "meta.json").exists() or (repo_root / ".gitnexus" / "index_status.json").exists()
+        return {
+            "status": "ready" if completed.returncode == 0 and graph_ready else "failed",
+            "message": "GitNexus worktree 图谱已创建。" if completed.returncode == 0 and graph_ready else "GitNexus worktree 建图未生成图谱文件。",
+            "repo_path": repo_path,
+            "graph_dir": str(repo_root / ".gitnexus"),
+            "return_code": completed.returncode,
+            "timeout_seconds": timeout,
+            "stdout_tail": (completed.stdout or "")[-1200:],
+            "stderr_tail": (completed.stderr or "")[-1200:],
+        }
+
+    def _review_workspace_index_timeout(self) -> int:
+        try:
+            return max(60, int(os.getenv("GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS", "1800") or 1800))
+        except (TypeError, ValueError):
+            return 1800
 
     def _gitnexus_analyze_command_from_mcp(self, mcp_command: list[str]) -> list[str]:
         raw = str(os.getenv("GITNEXUS_ANALYZE_COMMAND") or "").strip()

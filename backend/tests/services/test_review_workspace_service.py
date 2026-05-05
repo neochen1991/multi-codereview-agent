@@ -155,3 +155,19 @@ def test_review_workspace_service_cleanup_stale_workspace(storage_root: Path, tm
     assert result["removed_count"] == 1
     assert result["failed"] == []
     assert not stale.exists()
+
+
+def test_review_workspace_service_uses_configurable_git_timeouts(storage_root: Path, monkeypatch):
+    service = ReviewWorkspaceService(storage_root)
+    monkeypatch.setenv("REVIEW_WORKSPACE_FETCH_TIMEOUT_SECONDS", "777")
+    calls: list[int] = []
+
+    def fake_run_git(command, *, cwd, timeout):
+        calls.append(timeout)
+        return subprocess.CompletedProcess(command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "_run_git", fake_run_git)
+
+    service._best_effort_fetch(storage_root, "refs/heads/feature")
+
+    assert calls == [777]

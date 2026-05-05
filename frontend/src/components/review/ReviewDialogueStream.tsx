@@ -764,6 +764,10 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "main_agent_expert_execution_completed" ||
     eventType === "issue_filter_applied" ||
     eventType === "expert_rule_screening_batch" ||
+    eventType === "review_workspace_code_graph_started" ||
+    eventType === "review_workspace_code_graph_completed" ||
+    eventType === "review_workspace_gitnexus_graph_started" ||
+    eventType === "review_workspace_gitnexus_graph_completed" ||
     eventType === "code_graph_context_started" ||
     eventType === "code_graph_context_ready" ||
     eventType === "code_graph_context_fallback" ||
@@ -836,6 +840,14 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("审核调度正在构建派工上下文");
   } else if (eventType === "main_agent_routing_ready") {
     summaryParts.push("审核调度已完成派工规划，准备下发检查任务");
+  } else if (eventType === "review_workspace_code_graph_started") {
+    summaryParts.push("Tree-sitter 快照图谱正在初始化");
+  } else if (eventType === "review_workspace_code_graph_completed") {
+    summaryParts.push(`Tree-sitter 快照图谱初始化完成：${String(metadata.graph_status || "unknown")}`);
+  } else if (eventType === "review_workspace_gitnexus_graph_started") {
+    summaryParts.push("GitNexus 快照图谱正在初始化");
+  } else if (eventType === "review_workspace_gitnexus_graph_completed") {
+    summaryParts.push(`GitNexus 快照图谱初始化完成：${String(metadata.graph_status || "unknown")}`);
   } else if (eventType === "code_graph_context_started") {
     summaryParts.push("正在用 Tree-sitter 查找代码关联上下文");
   } else if (eventType === "code_graph_context_ready") {
@@ -1162,6 +1174,36 @@ const buildStructuredGroups = (
     return {
       summaryText: row.summary,
       groups: [issueFilterGroup],
+    };
+  }
+
+  if (
+    row.eventType === "review_workspace_code_graph_started" ||
+    row.eventType === "review_workspace_code_graph_completed" ||
+    row.eventType === "review_workspace_gitnexus_graph_started" ||
+    row.eventType === "review_workspace_gitnexus_graph_completed"
+  ) {
+    const graphPath = String(metadata.graph_db_path || metadata.graph_dir || "").trim();
+    const graphScale = [
+      typeof metadata.indexed_file_count === "number" ? `文件 ${metadata.indexed_file_count}` : "",
+      typeof metadata.node_count === "number" ? `节点 ${metadata.node_count}` : "",
+      typeof metadata.edge_count === "number" ? `关系 ${metadata.edge_count}` : "",
+    ].filter(Boolean);
+    return {
+      summaryText: row.summary,
+      groups: [
+        {
+          title: "快照图谱初始化",
+          sections: [
+            { label: "图谱类型", values: normalizeSingleValue(metadata.graph_name) },
+            { label: "状态", values: normalizeSingleValue(metadata.graph_status) },
+            { label: "代码快照", values: normalizeSingleValue(metadata.repo_path) },
+            { label: "图谱路径", values: normalizeSingleValue(graphPath) },
+            { label: "图谱规模", values: graphScale },
+            { label: "说明", values: normalizeSingleValue(metadata.message) },
+          ].filter((section) => section.values.length > 0),
+        },
+      ],
     };
   }
 

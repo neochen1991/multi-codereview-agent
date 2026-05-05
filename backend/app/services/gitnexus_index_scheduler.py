@@ -33,7 +33,7 @@ class GitNexusIndexScheduler:
 
     - `GITNEXUS_INDEX_ENABLED=true`
     - 可选：`GITNEXUS_INDEX_INTERVAL_SECONDS=3600`
-    - 可选：`GITNEXUS_INDEX_TIMEOUT_SECONDS=900`
+    - 可选：`GITNEXUS_INDEX_TIMEOUT_SECONDS=1800`
     """
 
     def __init__(self, review_service: ReviewService) -> None:
@@ -145,7 +145,7 @@ class GitNexusIndexScheduler:
             )
             write_json(status_path, status)
             return status
-        timeout = max(60, int(os.getenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "900") or 900))
+        timeout = self._index_timeout()
         try:
             completed = subprocess.run(
                 command,
@@ -453,6 +453,12 @@ class GitNexusIndexScheduler:
 
     def _enabled(self) -> bool:
         return str(os.getenv("GITNEXUS_INDEX_ENABLED", "")).strip().lower() in {"1", "true", "on", "yes"}
+
+    def _index_timeout(self) -> int:
+        try:
+            return max(60, int(os.getenv("GITNEXUS_INDEX_TIMEOUT_SECONDS", "1800") or 1800))
+        except (TypeError, ValueError):
+            return 1800
 
     def _index_command(self) -> list[str]:
         raw = str(os.getenv("GITNEXUS_ANALYZE_COMMAND") or "").strip()

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.llm_chat_service import LLMResolution, LLMTextResult
 from app.services.code_graph.storage import CodeGraphStorage
 from app.services.review_runner import ReviewRunner
+from app.services.review_workspace_service import ReviewWorkspaceResult
 
 PERFORMANCE_SPEC_PATH = (
     Path(__file__).resolve().parents[3]
@@ -175,6 +177,79 @@ def test_review_runner_prefers_workspace_code_graph_db_from_review_metadata(stor
 
     assert storage is not None
     assert storage.db_path == graph_db_path
+
+
+def test_review_runner_workspace_message_shows_snapshot_graph_status(storage_root: Path, tmp_path: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    workspace = tmp_path / "rw" / "repo" / "rev"
+    result = SimpleNamespace(
+        status="ready",
+        base_repo_path=str(tmp_path / "repo"),
+        workspace_path=str(workspace),
+        snapshot_mode="diff_apply",
+        snapshot_commit="1234567890abcdef",
+        message="已基于目标分支应用 MR diff。",
+        target_ref="dev",
+        source_ref="feature/order",
+    )
+
+    content = runner._review_workspace_message_content(
+        result,
+        {"status": "ready", "graph_db_path": str(workspace / ".code-review-graph" / "graph.db")},
+        {"status": "ready", "graph_dir": str(workspace / ".gitnexus")},
+    )
+
+    assert "Tree-sitter 快照图谱：ready" in content
+    assert "GitNexus 快照图谱：ready" in content
+    assert str(workspace / ".code-review-graph" / "graph.db") in content
+    assert str(workspace / ".gitnexus") in content
+
+
+def test_review_runner_records_workspace_graph_initialization_messages(storage_root: Path, tmp_path: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.subject.subject_type = "mr"
+    review.subject.unified_diff = "diff --git a/src/App.java b/src/App.java\n@@ -1 +1,2 @@\n+class App {}\n"
+    review.subject.metadata = {"repository_id": "repo-a"}
+    result = ReviewWorkspaceResult(
+        status="ready",
+        workspace_path=str(tmp_path / "rw" / "repo-a" / review_id),
+        base_repo_path=str(tmp_path / "repo-a"),
+        repository_id="repo-a",
+        review_id=review_id,
+        target_ref="dev",
+        source_ref="feature/a",
+        base_sha="base",
+        source_sha="source",
+        snapshot_commit="1234567890abcdef",
+        snapshot_mode="diff_apply",
+        diff_hash="hash",
+        message="已基于目标分支应用 MR diff。",
+    )
+    monkeypatch.setattr(runner.review_workspace_service, "prepare", lambda **_kwargs: result)
+    monkeypatch.setattr(
+        runner,
+        "_build_review_workspace_code_graph",
+        lambda *_args, **_kwargs: {"status": "ready", "graph_db_path": str(tmp_path / "rw" / "repo-a" / review_id / ".code-review-graph" / "graph.db")},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_review_workspace_gitnexus_graph",
+        lambda *_args, **_kwargs: {"status": "ready", "graph_dir": str(tmp_path / "rw" / "repo-a" / review_id / ".gitnexus")},
+    )
+
+    runner._prepare_review_workspace(review, runner.runtime_settings_service.get())
+
+    messages = runner.message_repo.list(review_id)
+    message_types = [message.message_type for message in messages]
+    assert "review_workspace_code_graph_started" in message_types
+    assert "review_workspace_code_graph_completed" in message_types
+    assert "review_workspace_gitnexus_graph_started" in message_types
+    assert "review_workspace_gitnexus_graph_completed" in message_types
+    assert any("Tree-sitter 快照图谱初始化完成" in message.content for message in messages)
+    assert any("GitNexus 快照图谱初始化完成" in message.content for message in messages)
 
 
 def test_change_impact_analysis_findings_are_always_suppressed(storage_root: Path):

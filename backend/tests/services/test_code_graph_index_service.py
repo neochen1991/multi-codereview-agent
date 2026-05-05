@@ -83,3 +83,20 @@ def test_code_graph_index_service_skips_unchanged_files(tmp_path: Path) -> None:
     assert second["indexed_file_count"] == 0
     assert second["skipped_unchanged_file_count"] == 1
     assert len(parser.calls) == 1
+
+
+def test_code_graph_index_service_initializes_storage_when_no_files_selected(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    graph_db_path = tmp_path / "graph.db"
+    storage = CodeGraphStorage(graph_db_path)
+    selector = FakeSelector([])
+    parser = FakeParser()
+    service = CodeGraphIndexService(repo_root=repo, storage=storage, selector=selector, parser=parser)
+
+    status = service.full_build(repository_id="orders", languages=["java"])
+
+    assert status["state"] == "ready"
+    assert status["indexed_file_count"] == 0
+    assert graph_db_path.exists()
+    assert parser.calls == []

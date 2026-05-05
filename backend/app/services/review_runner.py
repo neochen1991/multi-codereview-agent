@@ -1368,6 +1368,8 @@ class ReviewRunner(
                 "message": f"MR 快照工作区准备失败：{error}",
                 "error_type": error.__class__.__name__,
             }
+            metadata["review_workspace_status"] = "failed"
+            metadata["review_workspace_message"] = str(metadata["review_workspace"]["message"])
             review.subject.metadata = metadata
             self.review_repo.save(review)
             self.event_repo.append(
@@ -1385,6 +1387,8 @@ class ReviewRunner(
         metadata = dict(review.subject.metadata or {})
         previous_workspace = str(metadata.get("workspace_repo_path") or "").strip()
         metadata["review_workspace"] = payload
+        metadata["review_workspace_status"] = result.status
+        metadata["review_workspace_message"] = result.message
         if result.status == "ready":
             metadata["base_workspace_repo_path"] = result.base_repo_path or previous_workspace
             metadata["workspace_repo_path"] = result.workspace_path
@@ -1395,9 +1399,43 @@ class ReviewRunner(
             metadata["review_workspace_commit"] = result.snapshot_commit
             metadata["review_workspace_diff_hash"] = result.diff_hash
             metadata["review_workspace_base_repo_path"] = result.base_repo_path
-            metadata["review_workspace_message"] = result.message
+            self._append_review_workspace_graph_message(
+                review.review_id,
+                message_type="review_workspace_code_graph_started",
+                content="Tree-sitter 快照图谱初始化开始，将基于本次 MR 合入快照解析 Java 符号和调用关系。",
+                graph_name="Tree-sitter",
+                graph_status="started",
+                payload={"repo_path": result.workspace_path},
+            )
             code_graph_result = self._build_review_workspace_code_graph(review.review_id, result)
             metadata["review_workspace_code_graph"] = code_graph_result
+            self._append_review_workspace_graph_message(
+                review.review_id,
+                message_type="review_workspace_code_graph_completed",
+                content=self._workspace_graph_completed_content("Tree-sitter", code_graph_result),
+                graph_name="Tree-sitter",
+                graph_status=str(code_graph_result.get("status") or ""),
+                payload=code_graph_result,
+            )
+            prepared_subject = review.subject.model_copy(update={"metadata": metadata})
+            self._append_review_workspace_graph_message(
+                review.review_id,
+                message_type="review_workspace_gitnexus_graph_started",
+                content="GitNexus 快照图谱初始化开始，将在本次 MR 合入快照 worktree 上执行建图/确认图谱。",
+                graph_name="GitNexus",
+                graph_status="started",
+                payload={"repo_path": result.workspace_path},
+            )
+            gitnexus_result = self._build_review_workspace_gitnexus_graph(prepared_subject, runtime_settings)
+            metadata["review_workspace_gitnexus_graph"] = gitnexus_result
+            self._append_review_workspace_graph_message(
+                review.review_id,
+                message_type="review_workspace_gitnexus_graph_completed",
+                content=self._workspace_graph_completed_content("GitNexus", gitnexus_result),
+                graph_name="GitNexus",
+                graph_status=str(gitnexus_result.get("status") or ""),
+                payload=gitnexus_result,
+            )
         review.subject.metadata = metadata
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
@@ -1420,17 +1458,77 @@ class ReviewRunner(
                 issue_id="review_orchestration",
                 expert_id=self.main_agent_service.agent_id,
                 message_type="review_workspace",
-                content=self._review_workspace_message_content(result, metadata.get("review_workspace_code_graph")),
+                content=self._review_workspace_message_content(
+                    result,
+                    metadata.get("review_workspace_code_graph"),
+                    metadata.get("review_workspace_gitnexus_graph"),
+                ),
                 metadata={"phase": "intake", **payload},
             )
         )
         return review
 
-    def _review_workspace_message_content(self, result, code_graph_result: object | None = None) -> str:
+    def _append_review_workspace_graph_message(
+        self,
+        review_id: str,
+        *,
+        message_type: str,
+        content: str,
+        graph_name: str,
+        graph_status: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        payload = dict(payload or {})
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type=message_type,
+                content=content,
+                metadata={
+                    "phase": "intake",
+                    "graph_name": graph_name,
+                    "graph_status": graph_status,
+                    **payload,
+                },
+            )
+        )
+
+    def _workspace_graph_completed_content(self, graph_name: str, graph_result: dict[str, object]) -> str:
+        status = str(graph_result.get("status") or "unknown")
+        message = str(graph_result.get("message") or "").strip()
+        graph_path = str(graph_result.get("graph_db_path") or graph_result.get("graph_dir") or "").strip()
+        lines = [f"{graph_name} 快照图谱初始化完成。", f"- 状态：{status}"]
+        if graph_path:
+            lines.append(f"- 图谱路径：{graph_path}")
+        indexed_file_count = graph_result.get("indexed_file_count")
+        node_count = graph_result.get("node_count")
+        edge_count = graph_result.get("edge_count")
+        if any(isinstance(value, int) for value in (indexed_file_count, node_count, edge_count)):
+            lines.append(
+                "- 图谱规模："
+                f"文件 {indexed_file_count if isinstance(indexed_file_count, int) else 0}，"
+                f"节点 {node_count if isinstance(node_count, int) else 0}，"
+                f"关系 {edge_count if isinstance(edge_count, int) else 0}"
+            )
+        if message:
+            lines.append(f"- 说明：{message}")
+        return "\n".join(lines)
+
+    def _review_workspace_message_content(
+        self,
+        result,
+        code_graph_result: object | None = None,
+        gitnexus_result: object | None = None,
+    ) -> str:
         if result.status == "ready":
             code_graph = dict(code_graph_result or {}) if isinstance(code_graph_result, dict) else {}
             code_graph_status = str(code_graph.get("status") or "skipped")
             graph_db_path = str(code_graph.get("graph_db_path") or "")
+            gitnexus_graph = dict(gitnexus_result or {}) if isinstance(gitnexus_result, dict) else {}
+            gitnexus_status = str(gitnexus_graph.get("status") or "skipped")
+            gitnexus_graph_dir = str(gitnexus_graph.get("graph_dir") or "")
             lines = [
                 "MR 合入快照已准备完成。",
                 f"- 基础仓库：{result.base_repo_path}",
@@ -1438,9 +1536,12 @@ class ReviewRunner(
                 f"- 快照方式：{result.snapshot_mode}",
                 f"- 快照 commit：{result.snapshot_commit[:12] if result.snapshot_commit else ''}",
                 f"- Tree-sitter 快照图谱：{code_graph_status}",
+                f"- GitNexus 快照图谱：{gitnexus_status}",
             ]
             if graph_db_path:
                 lines.append(f"- Tree-sitter 图谱路径：{graph_db_path}")
+            if gitnexus_graph_dir:
+                lines.append(f"- GitNexus 图谱路径：{gitnexus_graph_dir}")
             lines.append(f"- 说明：{result.message}")
             return "\n".join(lines)
         return "\n".join(
@@ -1470,6 +1571,23 @@ class ReviewRunner(
                 "message": f"Tree-sitter 快照建图失败：{error}",
                 "error_type": error.__class__.__name__,
                 "repo_path": result.workspace_path,
+            }
+
+    def _build_review_workspace_gitnexus_graph(self, subject: ReviewSubject, runtime_settings: object) -> dict[str, object]:
+        runtime_tool_allowlist = set(getattr(runtime_settings, "runtime_tool_allowlist", []) or [])
+        if "gitnexus_impact_analysis" not in runtime_tool_allowlist:
+            return {"status": "skipped", "message": "运行时未启用 GitNexus 关联影响分析，跳过 worktree 建图。"}
+        try:
+            repository = self.repository_resolver.resolve(runtime_settings, subject)  # type: ignore[arg-type]
+            if not bool(getattr(repository, "gitnexus_enabled", True)):
+                return {"status": "skipped", "message": "当前仓库未启用 GitNexus，跳过 worktree 建图。"}
+            return dict(self.gitnexus_impact_service.ensure_review_workspace_index(subject, runtime_settings))  # type: ignore[arg-type]
+        except Exception as error:
+            logger.exception("review workspace gitnexus graph build failed review_id=%s", subject.repo_id)
+            return {
+                "status": "failed",
+                "message": f"GitNexus worktree 建图失败：{error}",
+                "error_type": error.__class__.__name__,
             }
 
     def _attach_impact_report(self, review: ReviewTask, runtime_settings) -> ReviewTask:
