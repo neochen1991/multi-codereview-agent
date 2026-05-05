@@ -1038,6 +1038,10 @@ const ReviewWorkbenchPage: React.FC = () => {
     [findings, issueByFindingId, issueFilterDecisionByFindingId],
   );
   const formalIssueCount = useMemo(() => issues.filter(isFormalIssueForDisplay).length, [issues]);
+  const failedExpertCount = useMemo(() => {
+    const expertExecution = review?.subject?.metadata?.expert_execution as { failed_experts?: unknown[] } | undefined;
+    return Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
+  }, [review?.subject?.metadata]);
   const overviewFindingCount = useMemo(
     () =>
       Math.max(
@@ -1048,6 +1052,22 @@ const ReviewWorkbenchPage: React.FC = () => {
       ),
     [findings.length, report?.summary, review?.report_summary, visibleFindings.length],
   );
+  const reviewInlineSummary = useMemo(() => {
+    if (!review?.report_summary && !report?.summary) return "";
+    const pendingHumanCount = Number(report?.confidence_summary?.needs_human_count || review?.pending_human_issue_ids?.length || 0);
+    const failedExpertSuffix = failedExpertCount
+      ? ` 本轮另有 ${failedExpertCount} 个检查角色执行失败，已保留其余检视结果。`
+      : "";
+    return `审核报告已生成，共收敛 ${overviewFindingCount} 条检视发现，形成 ${formalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${failedExpertSuffix}`;
+  }, [
+    failedExpertCount,
+    formalIssueCount,
+    overviewFindingCount,
+    report?.confidence_summary?.needs_human_count,
+    report?.summary,
+    review?.pending_human_issue_ids?.length,
+    review?.report_summary,
+  ]);
   const selectedFindingGovernanceDecision = useMemo(
     () => (selectedFinding ? issueFilterDecisionByFindingId.get(selectedFinding.finding_id) || null : null),
     [issueFilterDecisionByFindingId, selectedFinding],
@@ -1430,8 +1450,8 @@ const ReviewWorkbenchPage: React.FC = () => {
           <Title level={3} style={{ margin: 0 }}>
             {headerTitle}
           </Title>
-          {review?.report_summary ? (
-            <Paragraph className="review-inline-summary">{humanizeReviewText(review.report_summary)}</Paragraph>
+          {reviewInlineSummary ? (
+            <Paragraph className="review-inline-summary">{reviewInlineSummary}</Paragraph>
           ) : null}
           <Space wrap>
             {reviewId ? <Text type="secondary">Review ID: {reviewId}</Text> : <Text type="secondary">尚未创建审核</Text>}

@@ -1,3 +1,41 @@
+from app.domain.models.finding import ReviewFinding
+from app.domain.models.issue import DebateIssue
+
+
+def _seed_export_issue(review_id: str) -> None:
+    import app.services.review_service as review_service_module
+
+    service = review_service_module.review_service
+    finding = ReviewFinding(
+        review_id=review_id,
+        finding_id="fdg_export_seed",
+        expert_id="correctness_business",
+        title="订单创建失败路径未处理",
+        summary="订单创建失败路径未处理。",
+        file_path="backend/app/orders/service.py",
+        line_start=12,
+        suggested_code="if (!repository.save(order)) { throw new OrderCreateException(\"create failed\"); }",
+    )
+    issue = DebateIssue(
+        review_id=review_id,
+        issue_id="iss_export_seed",
+        title=finding.title,
+        summary=finding.summary,
+        file_path=finding.file_path,
+        line_start=finding.line_start,
+        status="needs_human",
+        severity="high",
+        confidence=0.91,
+        finding_ids=[finding.finding_id],
+        participant_expert_ids=[finding.expert_id],
+        needs_human=True,
+        remediation_suggestion="补齐保存失败的错误处理，并用测试覆盖失败分支。",
+        suggested_code=finding.suggested_code,
+    )
+    service.finding_repo.save_many(review_id, [finding])
+    service.issue_repo.save_all(review_id, [issue])
+
+
 def test_export_issues_to_codehub_mock_returns_selected_issue_payloads(client):
     created = client.post(
         "/api/reviews",
@@ -16,6 +54,7 @@ def test_export_issues_to_codehub_mock_returns_selected_issue_payloads(client):
     ).json()
 
     client.post(f"/api/reviews/{created['review_id']}/start")
+    _seed_export_issue(created["review_id"])
 
     issues_response = client.get(f"/api/reviews/{created['review_id']}/issues")
     findings_response = client.get(f"/api/reviews/{created['review_id']}/findings")

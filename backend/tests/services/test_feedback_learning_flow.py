@@ -375,8 +375,8 @@ def test_rehydrated_issue_preserves_canonical_issue_id_for_human_decision(storag
 
     listed_issues = service.list_issues(review.review_id)
 
-    assert len(listed_issues) == 2
-    assert {item.issue_id for item in listed_issues} == {"fdg_a", "fdg_b"}
+    assert len(listed_issues) == 1
+    assert listed_issues[0].issue_id == persisted_issue.issue_id
     assert {item.canonical_issue_id for item in listed_issues} == {persisted_issue.issue_id}
 
     updated = service.record_human_decision(

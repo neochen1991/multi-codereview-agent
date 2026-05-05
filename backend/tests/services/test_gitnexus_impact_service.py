@@ -1,11 +1,12 @@
 import json
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.report import ImpactSymbol
 from app.domain.models.review import ReviewSubject
-from app.domain.models.runtime_settings import RuntimeSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, RuntimeSettings
 from app.repositories.fs import write_json
 from app.services.gitnexus_impact_service import GitNexusImpactService, GitNexusMcpImpactClient
 from app.services.review_service import ReviewService
@@ -122,7 +123,7 @@ def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error(
     assert payload["dynamic_targets"] == ["OrderController.create"]
 
 
-def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls():
+def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(caplog):
     client = GitNexusMcpImpactClient(timeout_seconds=5)
     subject = ReviewSubject(
         subject_type="mr",
@@ -157,17 +158,18 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls():
                 }
         return responses
 
-    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
-        payload = client.analyze_mr(
-            repo_name="repo",
-            repo_path="/tmp/repo",
-            subject=subject,
-            changed_symbols=[
-                type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})(),
-                type("ChangedSymbol", (), {"symbol": "save", "container": "OrderRepository"})(),
-            ],
-            runtime_env=None,
-        )
+    with caplog.at_level(logging.INFO, logger="app.services.gitnexus_impact_service"):
+        with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+            payload = client.analyze_mr(
+                repo_name="repo",
+                repo_path="/tmp/repo",
+                subject=subject,
+                changed_symbols=[
+                    type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})(),
+                    type("ChangedSymbol", (), {"symbol": "save", "container": "OrderRepository"})(),
+                ],
+                runtime_env=None,
+            )
 
     assert len(call_batches) == 2
     tool_names = [
@@ -181,6 +183,11 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls():
     assert tool_names.count("impact") == 6
     assert len(payload["context_results"]) == 6
     assert len(payload["impact_results"]) == 6
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gitnexus mcp tool request tool=context" in log_text
+    assert '"name": "OrderService.create"' in log_text
+    assert "gitnexus mcp tool response tool=impact" in log_text
+    assert '"paths": [["Controller", "OrderService.create"]]' in log_text
 
 
 def test_gitnexus_mcp_impact_client_respects_runtime_query_limits():
@@ -1630,6 +1637,45 @@ def test_gitnexus_builds_precise_must_run_test_commands(storage_root: Path):
     assert "npm test -- frontend/src/pages/OrderPage.test.tsx" in commands
     assert "npm run lint -- frontend/src/pages/OrderPage.tsx" in commands
     assert "pytest tests/backend/app/orders/test_service.py" in commands
+
+
+def test_gitnexus_impact_uses_repository_specific_path_and_status(storage_root: Path, tmp_path: Path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    service = GitNexusImpactService(storage_root)
+    runtime = RuntimeSettings(
+        default_repository_id="repo-a",
+        code_repositories=[
+            CodeRepositorySettings(repository_id="repo-a", local_path=str(repo_a), clone_url="https://example.com/a.git"),
+            CodeRepositorySettings(repository_id="repo-b", local_path=str(repo_b), clone_url="https://example.com/b.git"),
+        ],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-b",
+        project_id="proj",
+        source_ref="feature/demo",
+        target_ref="main",
+        changed_files=["src/main/java/Demo.java"],
+        metadata={"repository_id": "repo-b"},
+    )
+    write_json(
+        storage_root / "gitnexus" / "repo-a" / "index_status.json",
+        {"state": "ready", "repo_path": str(repo_a), "repo_name": "repo-a"},
+    )
+    write_json(
+        storage_root / "gitnexus" / "repo-b" / "index_status.json",
+        {"state": "ready", "repo_path": str(repo_b), "repo_name": "repo-b"},
+    )
+
+    repo_path = service._repo_path(subject, runtime)
+    graph_status = service._load_graph_status(repo_path, subject=subject, runtime=runtime)
+
+    assert repo_path == str(repo_b)
+    assert graph_status["repo_name"] == "repo-b"
+    assert graph_status["repo_path"] == str(repo_b)
 
 
 def test_tool_gateway_invokes_gitnexus_impact_analysis(storage_root: Path):

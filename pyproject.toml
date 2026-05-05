@@ -10,6 +10,18 @@ dependencies = [
   "psycopg[binary]>=3.2"
 ]
 
+[project.optional-dependencies]
+code-graph = [
+  "tree-sitter>=0.23,<1",
+  "tree-sitter-language-pack>=0.3,<1",
+  "networkx>=3.2,<4",
+  "watchdog>=4,<6",
+]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["app*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]

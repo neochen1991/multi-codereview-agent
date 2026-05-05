@@ -111,6 +111,43 @@ def test_gitnexus_index_scheduler_uses_resolved_gitnexus_binary(storage_root: Pa
     assert captured[0] == [str(fake_bin), "analyze"]
 
 
+def test_gitnexus_index_scheduler_retries_non_git_folder_with_skip_git(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
+    fake_bin = tmp_path / "bin" / "gitnexus"
+    fake_bin.parent.mkdir()
+    fake_bin.write_text("", encoding="utf-8")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(update={"code_repo_local_path": str(repo_path)})
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: str(fake_bin) if command == "gitnexus" else None)
+
+    captured: list[object] = []
+
+    def _fake_run(command, **kwargs):
+        captured.append(command)
+        if command == [str(fake_bin), "analyze"]:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="Not inside a git repository. Tip: pass --skip-git to index any folder without a .git directory.",
+                stderr="fatal: not a git repository",
+            )
+        return SimpleNamespace(returncode=0, stdout="indexed with skip git", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    analyze_commands = [command for command in captured if command and command[0] == str(fake_bin)]
+    assert analyze_commands == [[str(fake_bin), "analyze"], [str(fake_bin), "analyze", "--skip-git"]]
+    assert status["gitnexus_command"] == f"{fake_bin} analyze --skip-git"
+    assert "--skip-git" in str(status["retry_reason"])
+
+
 def test_gitnexus_index_scheduler_uses_gitnexus_bin_with_space_path(storage_root: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
     fake_bin = tmp_path / "Program Files" / "GitNexus" / "gitnexus.exe"
@@ -312,3 +349,42 @@ def test_gitnexus_manual_index_skips_unknown_repository_without_spawning(storage
     assert status["state"] == "skipped"
     assert status["repository_id"] == "missing"
     assert status["trigger"] == "manual"
+
+
+def test_gitnexus_manual_index_reports_other_repository_running(storage_root: Path, tmp_path: Path, monkeypatch):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "default_repository_id": "repo-a",
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="repo-a",
+                    clone_url="https://example.com/a.git",
+                    local_path=str(repo_a),
+                ),
+                CodeRepositorySettings(
+                    repository_id="repo-b",
+                    clone_url="https://example.com/b.git",
+                    local_path=str(repo_b),
+                ),
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+
+    scheduler = GitNexusIndexScheduler(service)
+    scheduler._manual_process = SimpleNamespace(is_alive=lambda: True)
+    scheduler._manual_repository_id = "repo-a"
+
+    status = scheduler.trigger_manual_index("repo-b")
+
+    assert status["state"] == "blocked"
+    assert status["repository_id"] == "repo-b"
+    assert status["blocked_by_repository_id"] == "repo-a"
+    assert "repo-a" in str(status["message"])

@@ -54,6 +54,8 @@ class ReviewFinding(BaseModel):
     remediation_steps: list[str] = Field(default_factory=list)
     code_excerpt: str = ""
     code_context: dict[str, object] = Field(default_factory=dict)
+    context_source: str = ""
+    evidence_chain: list[dict[str, object]] = Field(default_factory=list)
     suggested_code: str = ""
     suggested_code_language: str = ""
     created_at: datetime = Field(default_factory=utc_now)

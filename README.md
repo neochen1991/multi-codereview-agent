@@ -9,13 +9,15 @@
 请先在运行机器上准备：
 
 - Python `>= 3.11`
-- Node.js + npm
-- Git
-- 可访问模型服务的网络与 API Key
-- 可访问待审核代码仓的 Git Token 或本地代码仓路径
-- macOS / Linux 需要 `bash`、`curl`
-- Windows 需要 PowerShell，建议使用 Python Launcher `py`
+- Node.js `>= 18` + npm
+- Git，可在命令行执行 `git --version`
+- 可访问模型服务的网络与 API Key，例如通义千问、OpenAI 兼容网关或公司内部模型网关
+- 可访问待审核代码仓的 Git Token，或者已经克隆好的本地代码仓路径
+- macOS / Linux：需要 `bash`、`curl`
+- Windows：需要 PowerShell，建议安装 Python Launcher `py`
 - 可选：GitNexus，用于生成 MR 关联影响分析报告
+
+Python 依赖会通过 `pip install -e .` 安装，前端依赖会通过 `npm install` 安装。GitNexus 和 Tree-sitter 属于可选增强能力，未安装时不影响基础代码检视。
 
 后端启动会用到 `uvicorn`。如果是全新环境，请按下面安装步骤安装。
 
@@ -38,6 +40,24 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e . "uvicorn[standard]>=0.30"
 cd frontend
 npm install
+```
+
+安装后可以先检查：
+
+```bash
+python --version
+node --version
+npm --version
+git --version
+```
+
+Windows 如果使用 `py`：
+
+```bat
+py -3.11 --version
+node --version
+npm --version
+git --version
 ```
 
 ## 基础配置
@@ -130,14 +150,45 @@ npm --prefix frontend run dev -- --host 127.0.0.1 --port 5174 --strictPort
 
 ## 可选：开启 GitNexus
 
-如果需要 MR 关联影响分析，先在机器上安装并确认可执行：
+如果需要 MR 关联影响分析，先安装 GitNexus CLI。GitNexus 依赖 Node.js，建议先确认 `node --version` 为 `18` 或更高。
+
+推荐安装为全局命令：
 
 ```bash
-gitnexus analyze
-gitnexus mcp
+npm install -g gitnexus
 ```
 
-再设置：
+Windows PowerShell 同样使用：
+
+```powershell
+npm install -g gitnexus
+```
+
+如果不想全局安装，也可以使用 `npx` 临时运行：
+
+```bash
+npx -y gitnexus@latest analyze
+```
+
+安装后进入目标代码仓根目录，执行一次建图并确认仓库已注册：
+
+```bash
+cd /path/to/your/repo
+gitnexus analyze
+gitnexus list
+gitnexus status
+```
+
+Windows：
+
+```powershell
+cd D:\workspace\your-repo
+gitnexus analyze
+gitnexus list
+gitnexus status
+```
+
+本工具默认调用全局命令：
 
 ```bash
 export GITNEXUS_INDEX_ENABLED=true
@@ -155,7 +206,61 @@ $env:GITNEXUS_MCP_COMMAND='["C:\\Program Files\\GitNexus\\gitnexus.exe", "mcp"]'
 $env:GITNEXUS_BIN="C:\Program Files\GitNexus\gitnexus.exe"
 ```
 
+如果使用 `npx` 而不是全局安装，推荐显式配置：
+
+```bash
+export GITNEXUS_ANALYZE_COMMAND='["npx", "-y", "gitnexus@latest", "analyze"]'
+export GITNEXUS_MCP_COMMAND='["npx", "-y", "gitnexus@latest", "mcp"]'
+```
+
+Windows PowerShell：
+
+```powershell
+$env:GITNEXUS_ANALYZE_COMMAND='["npx", "-y", "gitnexus@latest", "analyze"]'
+$env:GITNEXUS_MCP_COMMAND='["npx", "-y", "gitnexus@latest", "mcp"]'
+```
+
+如果遇到 GitNexus 原生依赖加载错误，通常先检查 Node.js 版本，然后重新执行 `npm install -g gitnexus`。
+
 详细说明见 [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)。
+
+## 可选：安装 Tree-sitter 依赖
+
+本项目参考 `code-review-graph` 引入了 Tree-sitter 本地代码图谱，用于给 Java 检视提供更准确的调用方、被调方、接口实现、测试影响和最小上下文。该能力是增强项：安装后会优先使用 Tree-sitter 图谱检索关联上下文，没有命中或未安装时会自动退化为关键词搜索。
+
+如果需要启用或验证这部分能力，可以在项目虚拟环境中安装：
+
+macOS / Linux：
+
+```bash
+.venv/bin/python -m pip install -e ".[code-graph]"
+```
+
+Windows：
+
+```bat
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
+```
+
+安装后验证：
+
+```bash
+.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; print('tree-sitter ok')"
+```
+
+Windows：
+
+```bat
+.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; print('tree-sitter ok')"
+```
+
+说明：
+
+- 不需要单独安装 Tree-sitter CLI。
+- `tree-sitter-language-pack` 提供常用语言 grammar，减少 Windows 下本地编译成本。
+- 这些依赖已放在 `pyproject.toml` 的 `code-graph` 可选依赖组中，不会影响基础安装。
+
+方案说明见 [借鉴 code-review-graph 的关联上下文优化方案](docs/plans/2026-05-05-code-review-graph-context-optimization.md)。
 
 ## 常用验证
 
@@ -210,6 +315,7 @@ Windows 下 HTTPS 证书校验失败时，优先检查 `config.json`：
 
 - [系统能力说明](docs/architecture/2026-05-01-system-capabilities.md)
 - [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)
+- [借鉴 code-review-graph 的关联上下文优化方案](docs/plans/2026-05-05-code-review-graph-context-optimization.md)
 - [专家 Agent 职责边界手册](docs/architecture/2026-04-19-expert-agent-boundary-handbook.md)
 - [Review Quality Eval Baseline](docs/architecture/2026-05-01-review-quality-eval-baseline.md)
 - [Repo Review Policy](docs/architecture/2026-05-01-repo-review-policy.md)

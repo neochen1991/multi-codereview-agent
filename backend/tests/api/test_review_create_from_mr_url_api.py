@@ -32,4 +32,5 @@ def test_review_create_persists_selected_experts(client):
         "correctness_business",
         "database_analysis",
         "mq_analysis",
+        "change_impact_analysis",
     ]

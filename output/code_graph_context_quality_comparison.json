@@ -1,0 +1,411 @@
+{
+  "summary": {
+    "case_count": 3,
+    "tree_sitter_avg_score": 90.72,
+    "keyword_avg_score": 71.67,
+    "score_delta": 19.06,
+    "tree_sitter_avg_expected_file_recall": 1.0,
+    "keyword_avg_expected_file_recall": 1.0,
+    "tree_sitter_avg_expected_term_coverage": 0.7778,
+    "keyword_avg_expected_term_coverage": 0.6667,
+    "tree_sitter_total_noise": 3,
+    "keyword_total_noise": 12,
+    "noise_reduction": 9
+  },
+  "results": [
+    {
+      "case_id": "validation_guard_removed",
+      "title": "服务层创建订单时绕过命令校验",
+      "changed_files": [
+        "src/main/java/com/acme/order/OrderService.java"
+      ],
+      "expected_files": [
+        "src/main/java/com/acme/order/OrderService.java",
+        "src/main/java/com/acme/order/OrderController.java",
+        "src/test/java/com/acme/order/OrderServiceTest.java"
+      ],
+      "tree_sitter": {
+        "source": "tree_sitter",
+        "context_count": 9,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 0.6667,
+        "precision": 0.7778,
+        "noise_count": 2,
+        "relationship_richness": 1.0,
+        "review_readiness_score": 84.44,
+        "hit_expected_files": [
+          "src/main/java/com/acme/order/OrderController.java",
+          "src/main/java/com/acme/order/OrderService.java",
+          "src/test/java/com/acme/order/OrderServiceTest.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "ordercommand",
+          "orderservice.create"
+        ],
+        "missing_terms": [
+          "validate"
+        ],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/order/OrderService.java",
+            "line_number": 2,
+            "symbol": "OrderService",
+            "relationship": "defines_type",
+            "snippet": "public class OrderService { private final OrderValidator validator; public OrderService(OrderValidator validator) { this.validator = validator; } public Order create(OrderCommand command) { return new Order(command.userId(), command.quantit"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderService.java",
+            "line_number": 7,
+            "symbol": "create",
+            "relationship": "defines_method",
+            "snippet": "public Order create(OrderCommand command) { return new Order(command.userId(), command.quantity()); }"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderController.java",
+            "line_number": 7,
+            "symbol": "create",
+            "relationship": "defines_method",
+            "snippet": "public Order submit(OrderCommand command) { return orderService.create(command); }"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderController.java",
+            "line_number": 8,
+            "symbol": "create",
+            "relationship": "calls",
+            "snippet": "orderService.create(command)"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderValidator.java",
+            "line_number": 3,
+            "symbol": "validate",
+            "relationship": "defines_method",
+            "snippet": "public void validate(OrderCommand command) { if (command.quantity() <= 0) { throw new IllegalArgumentException(\"quantity must be positive\"); } }"
+          }
+        ]
+      },
+      "keyword": {
+        "source": "keyword_search",
+        "context_count": 12,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 0.6667,
+        "precision": 0.5833,
+        "noise_count": 5,
+        "relationship_richness": 0.0,
+        "review_readiness_score": 69.58,
+        "hit_expected_files": [
+          "src/main/java/com/acme/order/OrderController.java",
+          "src/main/java/com/acme/order/OrderService.java",
+          "src/test/java/com/acme/order/OrderServiceTest.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "ordercommand",
+          "orderservice.create"
+        ],
+        "missing_terms": [
+          "validate"
+        ],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/order/OrderController.java",
+            "line_number": 3,
+            "symbol": "OrderService",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.order; public class OrderController { private final OrderService orderService; public OrderController(OrderService orderService) { this.orderService = orderService;"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderKeywordNoise.java",
+            "line_number": 3,
+            "symbol": "OrderService",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.order; public class OrderKeywordNoise { // validate OrderCommand create OrderService are historical words in this comment. private String notes = \"validate create order command\"; }"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderService.java",
+            "line_number": 2,
+            "symbol": "OrderService",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.order; public class OrderService { private final OrderValidator validator; public OrderService(OrderValidator validator) {"
+          },
+          {
+            "path": "src/test/java/com/acme/order/OrderServiceTest.java",
+            "line_number": 2,
+            "symbol": "OrderService",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.order; public class OrderServiceTest { void rejectsNegativeQuantity(OrderService orderService) { orderService.create(new OrderCommand(\"u1\", -1));"
+          },
+          {
+            "path": "src/main/java/com/acme/order/OrderController.java",
+            "line_number": 8,
+            "symbol": "create",
+            "relationship": "keyword_match",
+            "snippet": "} public Order submit(OrderCommand command) { return orderService.create(command); } }"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "ddd_factory_bypass",
+      "title": "DDD 创建流程绕过聚合工厂与领域事件",
+      "changed_files": [
+        "src/main/java/com/acme/course/CourseCreator.java"
+      ],
+      "expected_files": [
+        "src/main/java/com/acme/course/CourseCreator.java",
+        "src/main/java/com/acme/course/Course.java",
+        "src/main/java/com/acme/course/CourseCreatedDomainEvent.java"
+      ],
+      "tree_sitter": {
+        "source": "tree_sitter",
+        "context_count": 11,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 0.6667,
+        "precision": 0.9091,
+        "noise_count": 1,
+        "relationship_richness": 1.0,
+        "review_readiness_score": 87.73,
+        "hit_expected_files": [
+          "src/main/java/com/acme/course/Course.java",
+          "src/main/java/com/acme/course/CourseCreatedDomainEvent.java",
+          "src/main/java/com/acme/course/CourseCreator.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "coursecreateddomainevent",
+          "pulldomainevents"
+        ],
+        "missing_terms": [
+          "course.create"
+        ],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/course/CourseCreator.java",
+            "line_number": 2,
+            "symbol": "CourseCreator",
+            "relationship": "defines_type",
+            "snippet": "public class CourseCreator { private final CourseRepository repository; private final EventBus eventBus; public CourseCreator(CourseRepository repository, EventBus eventBus) { this.repository = repository; this.eventBus = eventBus; } public"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseCreator.java",
+            "line_number": 9,
+            "symbol": "Course",
+            "relationship": "defines_method",
+            "snippet": "public Course create(String title) { Course course = new Course(title); repository.save(course); return course; }"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseCreator.java",
+            "line_number": 10,
+            "symbol": "Course",
+            "relationship": "references_type",
+            "snippet": "new Course(title)"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseRepository.java",
+            "line_number": 3,
+            "symbol": "Course",
+            "relationship": "defines_method",
+            "snippet": "void save(Course course);"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseCreatedDomainEvent.java",
+            "line_number": 2,
+            "symbol": "CourseCreatedDomainEvent",
+            "relationship": "defines_type",
+            "snippet": "public record CourseCreatedDomainEvent(String title) {}"
+          }
+        ]
+      },
+      "keyword": {
+        "source": "keyword_search",
+        "context_count": 12,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 0.3333,
+        "precision": 0.75,
+        "noise_count": 3,
+        "relationship_richness": 0.0,
+        "review_readiness_score": 63.75,
+        "hit_expected_files": [
+          "src/main/java/com/acme/course/Course.java",
+          "src/main/java/com/acme/course/CourseCreatedDomainEvent.java",
+          "src/main/java/com/acme/course/CourseCreator.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "coursecreateddomainevent"
+        ],
+        "missing_terms": [
+          "course.create",
+          "pulldomainevents"
+        ],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/course/CourseCreator.java",
+            "line_number": 2,
+            "symbol": "CourseCreator",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.course; public class CourseCreator { private final CourseRepository repository; private final EventBus eventBus;"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseGlossary.java",
+            "line_number": 3,
+            "symbol": "CourseCreator",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.course; public class CourseGlossary { // Course create CourseCreator pullDomainEvents CourseCreatedDomainEvent are glossary terms only. }"
+          },
+          {
+            "path": "src/main/java/com/acme/course/Course.java",
+            "line_number": 1,
+            "symbol": "Course",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.course; import java.util.ArrayList; import java.util.List;"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseCreatedDomainEvent.java",
+            "line_number": 1,
+            "symbol": "Course",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.course; public record CourseCreatedDomainEvent(String title) {}"
+          },
+          {
+            "path": "src/main/java/com/acme/course/CourseCreator.java",
+            "line_number": 1,
+            "symbol": "Course",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.course; public class CourseCreator { private final CourseRepository repository;"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "unbounded_query",
+      "title": "列表查询从分页退化为无界查询",
+      "changed_files": [
+        "src/main/java/com/acme/owner/OwnerController.java"
+      ],
+      "expected_files": [
+        "src/main/java/com/acme/owner/OwnerController.java",
+        "src/main/java/com/acme/owner/OwnerRepository.java",
+        "src/test/java/com/acme/owner/OwnerControllerTest.java"
+      ],
+      "tree_sitter": {
+        "source": "tree_sitter",
+        "context_count": 8,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 1.0,
+        "precision": 1.0,
+        "noise_count": 0,
+        "relationship_richness": 1.0,
+        "review_readiness_score": 100.0,
+        "hit_expected_files": [
+          "src/main/java/com/acme/owner/OwnerController.java",
+          "src/main/java/com/acme/owner/OwnerRepository.java",
+          "src/test/java/com/acme/owner/OwnerControllerTest.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "findallbystatus",
+          "ownerrepository.findallbystatus",
+          "pageable"
+        ],
+        "missing_terms": [],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/owner/OwnerController.java",
+            "line_number": 3,
+            "symbol": "OwnerController",
+            "relationship": "defines_type",
+            "snippet": "public class OwnerController { private final OwnerRepository ownerRepository; public OwnerController(OwnerRepository ownerRepository) { this.ownerRepository = ownerRepository; } public List<Owner> search(String status, Pageable pageable) { "
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerController.java",
+            "line_number": 8,
+            "symbol": "search",
+            "relationship": "defines_method",
+            "snippet": "public List<Owner> search(String status, Pageable pageable) { return ownerRepository.findAllByStatus(status); }"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerController.java",
+            "line_number": 9,
+            "symbol": "findAllByStatus",
+            "relationship": "calls",
+            "snippet": "ownerRepository.findAllByStatus(status)"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerRepository.java",
+            "line_number": 3,
+            "symbol": "OwnerRepository",
+            "relationship": "defines_type",
+            "snippet": "public interface OwnerRepository { Page<Owner> findPageByStatus(String status, Pageable pageable); List<Owner> findAllByStatus(String status); }"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerRepository.java",
+            "line_number": 4,
+            "symbol": "Pageable",
+            "relationship": "defines_method",
+            "snippet": "Page<Owner> findPageByStatus(String status, Pageable pageable);"
+          }
+        ]
+      },
+      "keyword": {
+        "source": "keyword_search",
+        "context_count": 12,
+        "expected_file_recall": 1.0,
+        "expected_term_coverage": 1.0,
+        "precision": 0.6667,
+        "noise_count": 4,
+        "relationship_richness": 0.0,
+        "review_readiness_score": 81.67,
+        "hit_expected_files": [
+          "src/main/java/com/acme/owner/OwnerController.java",
+          "src/main/java/com/acme/owner/OwnerRepository.java",
+          "src/test/java/com/acme/owner/OwnerControllerTest.java"
+        ],
+        "missing_expected_files": [],
+        "hit_terms": [
+          "findallbystatus",
+          "ownerrepository.findallbystatus",
+          "pageable"
+        ],
+        "missing_terms": [],
+        "sample_contexts": [
+          {
+            "path": "src/main/java/com/acme/owner/OwnerController.java",
+            "line_number": 3,
+            "symbol": "OwnerController",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.owner; import java.util.List; public class OwnerController { private final OwnerRepository ownerRepository; public OwnerController(OwnerRepository ownerRepository) {"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerQueryNotes.java",
+            "line_number": 3,
+            "symbol": "OwnerController",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.owner; public class OwnerQueryNotes { // OwnerController search findAllByStatus Pageable are mentioned in migration notes only. String doc = \"search Pageable OwnerRepository findAllByStatus\"; }"
+          },
+          {
+            "path": "src/test/java/com/acme/owner/OwnerControllerTest.java",
+            "line_number": 2,
+            "symbol": "OwnerController",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.owner; public class OwnerControllerTest { void keepsSearchBounded(OwnerController controller) { controller.search(\"ACTIVE\", PageRequest.of(0, 20));"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerController.java",
+            "line_number": 8,
+            "symbol": "search",
+            "relationship": "keyword_match",
+            "snippet": "this.ownerRepository = ownerRepository; } public List<Owner> search(String status, Pageable pageable) { return ownerRepository.findAllByStatus(status); }"
+          },
+          {
+            "path": "src/main/java/com/acme/owner/OwnerQueryNotes.java",
+            "line_number": 3,
+            "symbol": "search",
+            "relationship": "keyword_match",
+            "snippet": "package com.acme.owner; public class OwnerQueryNotes { // OwnerController search findAllByStatus Pageable are mentioned in migration notes only. String doc = \"search Pageable OwnerRepository findAllByStatus\"; }"
+          }
+        ]
+      }
+    }
+  ]
+}

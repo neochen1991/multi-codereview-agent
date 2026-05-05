@@ -155,6 +155,27 @@ class GitNexusIndexScheduler:
                 timeout=timeout,
                 check=False,
             )
+            effective_command = command
+            retry_reason = ""
+            if completed.returncode != 0 and self._should_retry_with_skip_git(completed, command):
+                retry_command = [*command, "--skip-git"]
+                retry_reason = "GitNexus 提示当前目录不是 Git 仓库，已自动追加 --skip-git 重试。"
+                logger.warning(
+                    "gitnexus index retry with --skip-git repo_path=%s command=%s stdout=%s stderr=%s",
+                    repo_dir,
+                    " ".join(retry_command),
+                    (completed.stdout or "")[-500:],
+                    (completed.stderr or "")[-500:],
+                )
+                completed = subprocess.run(
+                    retry_command,
+                    cwd=str(repo_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                effective_command = retry_command
         except FileNotFoundError as error:
             executable = command[0] if command else "gitnexus"
             status = self._status(
@@ -199,11 +220,12 @@ class GitNexusIndexScheduler:
             graph_dir=str(repo_dir / ".gitnexus"),
             graph_dir_exists=(repo_dir / ".gitnexus").exists(),
             gitnexus_installed=True,
-            gitnexus_command=command_text,
+            gitnexus_command=self._command_text(effective_command),
             gitnexus_path=binary_path,
             registry_path=registry_path,
             registry_registered=registry_registered,
             return_code=completed.returncode,
+            retry_reason=retry_reason,
             stdout=(completed.stdout or "")[-2000:],
             stderr=(completed.stderr or "")[-2000:],
         )
@@ -267,6 +289,22 @@ class GitNexusIndexScheduler:
 
         with self._manual_lock:
             if self._manual_process and self._manual_process.is_alive():
+                runtime = self._review_service.get_runtime_settings()
+                resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
+                running_repository_id = str(self._manual_repository_id or "").strip()
+                if running_repository_id and resolved_repository_id and running_repository_id != resolved_repository_id:
+                    blocked = self.status(resolved_repository_id)
+                    blocked.update(
+                        {
+                            "state": "blocked",
+                            "message": f"GitNexus 正在为仓库 {running_repository_id} 建图，当前仓库 {resolved_repository_id} 尚未启动。请等待当前任务结束后重试。",
+                            "repository_id": resolved_repository_id,
+                            "trigger": "manual",
+                            "blocked_by_repository_id": running_repository_id,
+                        }
+                    )
+                    write_json(self._status_path(resolved_repository_id), blocked)
+                    return blocked
                 return self.status(repository_id)
             runtime = self._review_service.get_runtime_settings()
             resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
@@ -396,6 +434,12 @@ class GitNexusIndexScheduler:
         if not executable:
             return False
         return bool(resolve_executable(executable))
+
+    def _should_retry_with_skip_git(self, completed: subprocess.CompletedProcess[str], command: list[str]) -> bool:
+        if any(str(part).strip().lower() == "--skip-git" for part in command):
+            return False
+        combined = f"{completed.stdout or ''}\n{completed.stderr or ''}".lower()
+        return "not inside a git repository" in combined or "not a git repository" in combined
 
     def _resolve_repository_id(self, runtime, repository_id: str = "") -> str:
         raw = str(repository_id or "").strip()

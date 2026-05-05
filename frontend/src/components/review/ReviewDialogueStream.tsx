@@ -105,6 +105,12 @@ type Props = {
 
 const INITIAL_VISIBLE_DIALOGUE_ROWS = 160;
 const VISIBLE_DIALOGUE_ROWS_STEP = 160;
+const PINNED_PROCESS_EVENT_TYPES = new Set([
+  "code_graph_context_started",
+  "code_graph_context_ready",
+  "code_graph_context_fallback",
+  "keyword_context_ready",
+]);
 
 const normalizeText = (value: string): string =>
   value
@@ -178,6 +184,46 @@ const formatContextEntry = (value: unknown): string => {
 const normalizeContextValueList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value.map(formatContextEntry).filter(Boolean);
+};
+
+const normalizeImpactNodeValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const name = String(payload.qualified_name || payload.name || "").trim();
+      const path = String(payload.file_path || payload.path || "").trim();
+      const lineStart = typeof payload.line_start === "number" ? payload.line_start : 0;
+      if (name && path) return `${name} · ${path}${lineStart ? `:${lineStart}` : ""}`;
+      return name || path;
+    })
+    .filter(Boolean);
+};
+
+const normalizeImpactGapValueList = (value: unknown): string[] => normalizeImpactNodeValueList(value);
+
+const normalizeAffectedFlowValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const title = String(payload.flow || payload.name || payload.qualified_name || "").trim();
+      const criticality = String(payload.criticality || "").trim();
+      const path = String(payload.file_path || payload.path || "").trim();
+      const lineStart = typeof payload.line_start === "number" ? payload.line_start : 0;
+      const location = path ? `${path}${lineStart ? `:${lineStart}` : ""}` : "";
+      return [title, criticality, location].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+};
+
+const getCodeContextSourceLabel = (value: unknown): string => {
+  const source = String(value || "").trim();
+  if (source === "tree_sitter") return "Tree-sitter 结构化检索";
+  if (source === "keyword_search") return "关键词搜索";
+  return source || "未标明";
 };
 
 const normalizeBoundDocumentEntries = (value: unknown): BoundDocumentEntry[] => {
@@ -718,6 +764,10 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "main_agent_expert_execution_completed" ||
     eventType === "issue_filter_applied" ||
     eventType === "expert_rule_screening_batch" ||
+    eventType === "code_graph_context_started" ||
+    eventType === "code_graph_context_ready" ||
+    eventType === "code_graph_context_fallback" ||
+    eventType === "keyword_context_ready" ||
     eventType === "impact_analysis_started" ||
     eventType === "impact_report_generated"
   ) messageKind = "status";
@@ -786,6 +836,14 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("审核调度正在构建派工上下文");
   } else if (eventType === "main_agent_routing_ready") {
     summaryParts.push("审核调度已完成派工规划，准备下发检查任务");
+  } else if (eventType === "code_graph_context_started") {
+    summaryParts.push("正在用 Tree-sitter 查找代码关联上下文");
+  } else if (eventType === "code_graph_context_ready") {
+    summaryParts.push(`Tree-sitter 已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
+  } else if (eventType === "code_graph_context_fallback") {
+    summaryParts.push(`Tree-sitter 未命中，改用关键词搜索：${String(metadata.fallback_reason || "未找到符号关系")}`);
+  } else if (eventType === "keyword_context_ready") {
+    summaryParts.push(`关键词搜索已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
   } else if (eventType === "main_agent_expert_execution_completed") {
     summaryParts.push("专项检视执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
@@ -1107,6 +1165,66 @@ const buildStructuredGroups = (
     };
   }
 
+  if (
+    row.eventType === "code_graph_context_started" ||
+    row.eventType === "code_graph_context_ready" ||
+    row.eventType === "code_graph_context_fallback" ||
+    row.eventType === "keyword_context_ready"
+  ) {
+    const minimalContext =
+      metadata.minimal_context && typeof metadata.minimal_context === "object"
+        ? (metadata.minimal_context as Record<string, unknown>)
+        : {};
+    const impactAnalysis =
+      metadata.impact_analysis && typeof metadata.impact_analysis === "object"
+        ? (metadata.impact_analysis as Record<string, unknown>)
+        : {};
+    const riskLevel = String(minimalContext.risk_level || impactAnalysis.risk_level || "").trim();
+    const riskScore = minimalContext.risk_score ?? impactAnalysis.risk_score;
+    const sections = [
+      { label: "检索方式", values: [getCodeContextSourceLabel(metadata.context_source || metadata.fallback_source)] },
+      {
+        label: "风险概览",
+        values: riskLevel || typeof riskScore === "number" ? [`${riskLevel || "未分级"}${typeof riskScore === "number" ? ` · ${riskScore}` : ""}`] : [],
+      },
+      {
+        label: "风险优先级",
+        values: limitValueList(normalizeImpactNodeValueList(minimalContext.review_priorities || impactAnalysis.review_priorities), 6),
+      },
+      { label: "变更文件", values: limitValueList(normalizeValueList(metadata.changed_files), 8) },
+      { label: "变更符号", values: limitValueList(normalizeValueList(metadata.changed_symbols), 8) },
+      {
+        label: "变更节点",
+        values: limitValueList(normalizeImpactNodeValueList(impactAnalysis.changed_nodes), 6),
+      },
+      {
+        label: "候选受影响文件",
+        values: limitValueList(normalizeValueList(impactAnalysis.impacted_files), 8),
+      },
+      {
+        label: "测试覆盖缺口",
+        values: limitValueList(normalizeImpactGapValueList(impactAnalysis.test_gaps), 6),
+      },
+      {
+        label: "候选影响流程",
+        values: limitValueList(
+          normalizeAffectedFlowValueList(minimalContext.affected_flows || impactAnalysis.affected_flows),
+          6,
+        ),
+      },
+      {
+        label: "命中数量",
+        values: typeof metadata.context_count === "number" ? [String(metadata.context_count)] : [],
+      },
+      { label: "退化原因", values: normalizeSingleValue(metadata.fallback_reason) },
+      { label: "命中片段", values: limitValueList(normalizeContextValueList(metadata.related_contexts), 8) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: row.summary,
+      groups: sections.length ? [{ title: "代码关联上下文检索", sections }] : [],
+    };
+  }
+
   if (row.eventType === "impact_analysis_started" || row.eventType === "impact_report_generated") {
     const impactReport =
       metadata.impact_report && typeof metadata.impact_report === "object"
@@ -1332,6 +1450,49 @@ const buildLiveWaitingRow = (
   };
 };
 
+const hydrateMessagesWithEvents = (
+  messages: ConversationMessage[],
+  events: ReviewEvent[],
+): ConversationMessage[] => {
+  if (!events.length) return messages;
+  const eventBuckets = new Map<string, ReviewEvent[]>();
+  events
+    .slice()
+    .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+    .forEach((event) => {
+      const bucket = eventBuckets.get(event.event_type) || [];
+      bucket.push(event);
+      eventBuckets.set(event.event_type, bucket);
+    });
+
+  return messages.map((message) => {
+    const metadata = message.metadata || {};
+    const bucket = eventBuckets.get(message.message_type);
+    if (!bucket || bucket.length === 0) return message;
+    const event = bucket.shift();
+    if (!event?.payload || Object.keys(event.payload).length === 0) return message;
+    return {
+      ...message,
+      content: message.content || event.message || "",
+      metadata: {
+        ...event.payload,
+        ...metadata,
+        event_id: event.event_id,
+      },
+    };
+  });
+};
+
+const keepPinnedProcessRowsVisible = (
+  rows: ReviewDialogueViewMessage[],
+  visibleCount: number,
+): ReviewDialogueViewMessage[] => {
+  const tailRows = rows.slice(-visibleCount);
+  const tailIds = new Set(tailRows.map((row) => row.id));
+  const pinnedRows = rows.filter((row) => PINNED_PROCESS_EVENT_TYPES.has(row.eventType) && !tailIds.has(row.id));
+  return [...pinnedRows, ...tailRows];
+};
+
 const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }) => {
   // 过程页本质上是 replay/messages 的可视化回放器。
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
@@ -1341,11 +1502,11 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo(
     () =>
-      messages
+      hydrateMessagesWithEvents(messages, events)
         .slice()
         .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
         .map(mapMessage),
-    [messages],
+    [events, messages],
   );
   const liveWaitingRow = useMemo(() => buildLiveWaitingRow(review, events), [events, review]);
   const displayRows = rows.length === 0 && liveWaitingRow ? [liveWaitingRow] : rows;
@@ -1380,7 +1541,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
     [categoryFilter, displayRows, expertFilter],
   );
   const visibleRows = useMemo(
-    () => filteredRows.slice(-visibleCount),
+    () => keepPinnedProcessRowsVisible(filteredRows, visibleCount),
     [filteredRows, visibleCount],
   );
   const hiddenRowCount = Math.max(filteredRows.length - visibleRows.length, 0);

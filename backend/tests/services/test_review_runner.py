@@ -14,6 +14,7 @@ from app.domain.models.review_skill import ReviewSkillProfile
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.llm_chat_service import LLMResolution, LLMTextResult
+from app.services.code_graph.storage import CodeGraphStorage
 from app.services.review_runner import ReviewRunner
 
 PERFORMANCE_SPEC_PATH = (
@@ -114,6 +115,66 @@ def test_review_runner_emits_finding_created_event(storage_root: Path):
     runner.run_once(review_id)
     events = runner.list_events(review_id)
     assert any(event.event_type == "finding_created" for event in events)
+
+
+def test_review_runner_records_code_graph_context_events_in_process_flow(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    bundle = {
+        "source_summary": {
+            "primary_source": "keyword_search",
+            "fallback_used": True,
+            "fallback_reason": "图谱未建",
+        },
+        "events": [
+            review_runner_module.ReviewEvent(
+                review_id=review_id,
+                event_type="code_graph_context_started",
+                phase="context",
+                message="正在使用 Tree-sitter 代码图谱检索关联上下文",
+                payload={"context_source": "tree_sitter"},
+            ),
+            review_runner_module.ReviewEvent(
+                review_id=review_id,
+                event_type="code_graph_context_fallback",
+                phase="context",
+                message="Tree-sitter 未命中有效关联上下文，已退化为关键词搜索：图谱未建",
+                payload={"context_source": "tree_sitter", "fallback_source": "keyword_search"},
+            ),
+        ],
+    }
+
+    runner._record_code_graph_context_bundle(review_id, bundle)
+
+    events = runner.list_events(review_id)
+    messages = runner.message_repo.list(review_id)
+    assert any(event.event_type == "code_graph_context_fallback" for event in events)
+    assert any(message.message_type == "code_graph_context_fallback" for message in messages)
+    assert any("Tree-sitter" in message.content and "关键词搜索" in message.content for message in messages)
+
+
+def test_review_runner_prefers_workspace_code_graph_db_from_review_metadata(storage_root: Path, tmp_path: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    workspace_repo = tmp_path / "workspace-repo"
+    configured_repo = tmp_path / "configured-repo"
+    graph_db_path = workspace_repo / ".code-review-graph" / "graph.db"
+    CodeGraphStorage(graph_db_path).initialize()
+    configured_repo.mkdir(parents=True)
+    review.subject.metadata = {
+        **dict(review.subject.metadata or {}),
+        "workspace_repo_path": str(workspace_repo),
+    }
+
+    class _RepositoryContext:
+        local_path = configured_repo
+
+    storage = runner._build_code_graph_storage_for_repository(_RepositoryContext(), review)
+
+    assert storage is not None
+    assert storage.db_path == graph_db_path
 
 
 def test_change_impact_analysis_findings_are_always_suppressed(storage_root: Path):
@@ -4898,12 +4959,107 @@ def test_review_runner_build_finding_code_context_contains_diff_and_related_cont
             ],
             "symbol_contexts": [{"symbol": "createOrder", "definitions": [], "references": []}],
             "context_files": ["apps/api/order/order.service.ts", "apps/api/order/order.controller.ts"],
+            "code_graph_context_source_summary": {"primary_source": "tree_sitter", "context_count": 2},
+            "code_graph_minimal_context": {
+                "summary": "Tree-sitter 图谱识别订单创建入口会影响控制器调用链。",
+                "risk_level": "high",
+                "risk_score": 0.82,
+                "review_priorities": [{"reason": "入口调用链命中"}],
+                "affected_flows": [
+                    {
+                        "entrypoint": "OrderController.create",
+                        "changed_node": "OrderService.createOrder",
+                        "criticality": 0.7,
+                    }
+                ],
+            },
+            "code_graph_impact_analysis": {
+                "changed_nodes": [
+                    {
+                        "qualified_name": "OrderService.createOrder",
+                        "file_path": "apps/api/order/order.service.ts",
+                        "line_start": 4,
+                    }
+                ],
+                "relationship_count": 1,
+            },
+            "code_graph_related_contexts": [
+                {
+                    "path": "apps/api/order/order.controller.ts",
+                    "relationship": "calls",
+                    "source_qualified_name": "OrderController.create",
+                    "snippet": "return this.orderService.createOrder(req.body);",
+                }
+            ],
         },
     )
 
     assert "validateOrder(payload);" in str(context["target_file_full_diff"])
     assert "order.controller.ts" in str(context["related_diff_summary"])
     assert context["target_hunk"]["changed_lines"] == [5, 6]
+    assert context["code_graph_source_summary"]["primary_source"] == "tree_sitter"
+    assert context["code_graph_minimal_context"]["risk_level"] == "high"
+    assert context["code_graph_evidence_chain"]
+    assert {step["step"] for step in context["code_graph_evidence_chain"]} >= {
+        "context_source",
+        "minimal_context",
+        "affected_flows",
+        "graph_relationship",
+    }
+
+
+def test_review_runner_sorts_expert_jobs_by_code_graph_priority(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    jobs = [
+        {"expert_id": "architecture_design", "file_path": "B.java", "line_start": 20, "code_graph_priority_score": 0.2},
+        {"expert_id": "correctness_business", "file_path": "A.java", "line_start": 10, "code_graph_priority_score": 0.9},
+        {"expert_id": "security", "file_path": "C.java", "line_start": 30, "code_graph_priority_score": 0.0},
+    ]
+
+    sorted_jobs = runner._sort_expert_jobs_by_code_graph_priority(jobs)
+
+    assert [job["expert_id"] for job in sorted_jobs] == [
+        "correctness_business",
+        "architecture_design",
+        "security",
+    ]
+
+
+def test_review_runner_enriches_issues_with_graph_evidence_chain(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_graph",
+        title="订单创建入口缺少失败路径处理",
+        summary="Tree-sitter 图谱命中入口调用链和变更节点。",
+        finding_type="direct_defect",
+        file_path="src/main/java/com/acme/OrderService.java",
+        line_start=18,
+        status="needs_human",
+        severity="high",
+        confidence=0.9,
+        needs_human=True,
+        finding_ids=["fdg_graph"],
+    )
+    finding_payloads = [
+        {
+            "finding_id": "fdg_graph",
+            "context_source": "tree_sitter",
+            "evidence_chain": [
+                {"step": "minimal_context", "summary": "高风险入口变更"},
+                {"step": "graph_relationship", "relationship": "calls"},
+                {"step": "affected_flows", "flows": [{"entrypoint": "OrderController.submit"}]},
+                {"step": "ignored_step", "summary": "不会透传"},
+            ],
+        }
+    ]
+
+    runner._enrich_issues_with_finding_evidence_chains([issue], finding_payloads)
+
+    assert {step["step"] for step in issue.evidence_chain} == {"minimal_context", "graph_relationship", "affected_flows"}
+    assert issue.confidence_breakdown["tree_sitter_context"] is True
+    assert issue.tool_name == "tree_sitter_code_graph"
+    assert issue.tool_verified is True
 
 
 def test_review_runner_caches_repository_source_excerpt(storage_root: Path, monkeypatch):

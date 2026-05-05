@@ -29,6 +29,8 @@ from app.services.feedback_learner_service import FeedbackLearnerService
 from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.cross_file_impact import build_cross_file_impact_hints
+from app.services.code_graph.context_planner import CodeGraphContextPlanner
+from app.services.code_graph.storage import CodeGraphStorage
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.llm_chat_service import LLMChatService
@@ -97,6 +99,7 @@ class ReviewRunner(
         self.java_quality_signal_extractor = CodeObservationExtractor()
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
         self.change_impact_report_service = ChangeImpactReportService()
+        self.code_graph_context_planner = CodeGraphContextPlanner()
         self.review_tool_gateway = ReviewToolGateway(self.storage_root)
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
@@ -584,6 +587,18 @@ class ReviewRunner(
                     raw_repository_context,
                     target_hunk_payload,
                 )
+                code_graph_bundle = self._build_code_graph_context_bundle(
+                    review=review,
+                    runtime_settings=effective_runtime_settings,
+                    file_path=hunk_file_path,
+                    repository_context=enriched_repository_context,
+                )
+                if code_graph_bundle:
+                    self._record_code_graph_context_bundle(review_id, code_graph_bundle)
+                    enriched_repository_context = self._merge_code_graph_context_bundle(
+                        enriched_repository_context,
+                        code_graph_bundle,
+                    )
                 command_message = self.message_repo.append(
                     ConversationMessage(
                         review_id=review_id,
@@ -660,6 +675,11 @@ class ReviewRunner(
                         "knowledge_context": knowledge_context,
                         "rule_screening": {},
                         "finding_payloads": finding_payloads,
+                        "code_graph_priority_score": self._code_graph_priority_score(
+                            enriched_repository_context,
+                            hunk_file_path,
+                            hunk_line_start,
+                        ),
                     }
                 )
             if expert_route_jobs:
@@ -741,6 +761,7 @@ class ReviewRunner(
                 }
             )
 
+        expert_jobs = self._sort_expert_jobs_by_code_graph_priority(expert_jobs)
         routing_summary = self._build_routing_summary(
             selected_ids=requested_selected_ids,
             experts_by_id={expert.expert_id: expert for expert in enabled_experts},
@@ -1120,6 +1141,7 @@ class ReviewRunner(
                 len(finding_payloads),
                 len(filtered_finding_ids),
             )
+        self._enrich_issues_with_finding_evidence_chains(issues, finding_payloads)
         issues = self._coalesce_duplicate_issues(issues)
         if issue_filter_decisions:
             self.message_repo.append(
@@ -1521,6 +1543,250 @@ class ReviewRunner(
                 primary_context["line_start"] = line_start
             enriched["primary_context"] = primary_context
         return enriched
+
+    def _build_code_graph_context_bundle(
+        self,
+        *,
+        review: ReviewTask,
+        runtime_settings: object,
+        file_path: str,
+        repository_context: dict[str, object],
+    ) -> dict[str, object]:
+        normalized_file_path = str(file_path or "").strip()
+        if not normalized_file_path.lower().endswith(".java"):
+            return {}
+        try:
+            repository = self.repository_resolver.resolve(runtime_settings, review.subject)  # type: ignore[arg-type]
+            repository_id = repository.repository_id
+        except Exception:
+            logger.exception("failed to resolve repository for code graph context review_id=%s", review.review_id)
+            repository_id = str(review.subject.repo_id or "").strip() or "default-repository"
+        try:
+            repository_service = self.repository_resolver.build_context_service(
+                runtime_settings,  # type: ignore[arg-type]
+                review.subject,
+            )
+        except Exception:
+            logger.exception("failed to build repository context service for code graph context review_id=%s", review.review_id)
+            repository_service = None
+        planner = self.code_graph_context_planner
+        graph_storage = self._build_code_graph_storage_for_repository(repository_service, review)
+        if graph_storage is not None:
+            planner = CodeGraphContextPlanner(code_graph_service=graph_storage)
+        return planner.build_context_bundle(
+            review_id=review.review_id,
+            repository_id=repository_id,
+            changed_files=[normalized_file_path],
+            changed_symbols=self._derive_code_graph_changed_symbols(
+                file_path=normalized_file_path,
+                repository_context=repository_context,
+            ),
+            changed_ranges=self._code_graph_changed_ranges_for_file(review, normalized_file_path),
+            repository_context_service=repository_service,
+        )
+
+    def _code_graph_changed_ranges_for_file(self, review: ReviewTask, file_path: str) -> dict[str, list[tuple[int, int]]]:
+        ranges_by_file = self.diff_excerpt_service.changed_line_ranges_by_file(str(review.subject.unified_diff or ""))
+        normalized_path = str(file_path or "").strip().replace("\\", "/")
+        ranges = list(ranges_by_file.get(normalized_path) or [])
+        return {normalized_path: ranges} if ranges else {}
+
+    def _build_code_graph_storage_for_repository(
+        self,
+        repository_service: object | None,
+        review: ReviewTask | None = None,
+    ) -> CodeGraphStorage | None:
+        metadata = dict(getattr(getattr(review, "subject", None), "metadata", None) or {})
+        candidate_paths: list[Path] = []
+        explicit_db_path = str(metadata.get("code_graph_db_path") or "").strip()
+        if explicit_db_path:
+            candidate_paths.append(Path(explicit_db_path).expanduser())
+        workspace_repo_path = str(metadata.get("workspace_repo_path") or "").strip()
+        if workspace_repo_path:
+            candidate_paths.append(Path(workspace_repo_path).expanduser() / ".code-review-graph" / "graph.db")
+        local_path = getattr(repository_service, "local_path", None)
+        if local_path is not None:
+            candidate_paths.append(Path(local_path).expanduser() / ".code-review-graph" / "graph.db")
+
+        seen: set[str] = set()
+        for graph_db_path in candidate_paths:
+            normalized = str(graph_db_path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if graph_db_path.exists():
+                return CodeGraphStorage(graph_db_path)
+        return None
+
+    def _derive_code_graph_changed_symbols(
+        self,
+        *,
+        file_path: str,
+        repository_context: dict[str, object],
+    ) -> list[str]:
+        symbols: list[str] = []
+        primary_context = dict(repository_context.get("primary_context") or {})
+        for key in ("class_name", "method_name", "symbol", "name"):
+            value = str(primary_context.get(key) or "").strip()
+            if value:
+                symbols.append(value)
+        for item in list(repository_context.get("symbol_contexts") or []):
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("symbol") or "").strip()
+            if value:
+                symbols.append(value)
+        stem = Path(file_path).stem.strip()
+        if stem:
+            symbols.append(stem)
+        result: list[str] = []
+        for symbol in symbols:
+            if symbol and symbol not in result:
+                result.append(symbol)
+        return result
+
+    def _merge_code_graph_context_bundle(
+        self,
+        repository_context: dict[str, object],
+        code_graph_bundle: dict[str, object],
+    ) -> dict[str, object]:
+        merged = dict(repository_context or {})
+        related_contexts = [
+            dict(item)
+            for item in list(code_graph_bundle.get("related_contexts") or [])
+            if isinstance(item, dict)
+        ]
+        if related_contexts:
+            existing = [
+                dict(item)
+                for item in list(merged.get("code_graph_related_contexts") or [])
+                if isinstance(item, dict)
+            ]
+            merged["code_graph_related_contexts"] = self._dedupe_context_dicts(existing + related_contexts)
+            existing_related = [
+                dict(item)
+                for item in list(merged.get("related_contexts") or [])
+                if isinstance(item, dict)
+            ]
+            merged["related_contexts"] = self._dedupe_context_dicts(existing_related + related_contexts)
+        source_summary = dict(code_graph_bundle.get("source_summary") or {})
+        if source_summary:
+            merged["code_graph_context_source_summary"] = source_summary
+        minimal_context = dict(code_graph_bundle.get("minimal_context") or {})
+        if minimal_context:
+            merged["code_graph_minimal_context"] = minimal_context
+        impact_analysis = dict(code_graph_bundle.get("impact_analysis") or {})
+        if impact_analysis:
+            merged["code_graph_impact_analysis"] = impact_analysis
+        return merged
+
+    def _record_code_graph_context_bundle(self, review_id: str, code_graph_bundle: dict[str, object]) -> None:
+        events = [
+            event
+            for event in list(code_graph_bundle.get("events") or [])
+            if isinstance(event, ReviewEvent)
+        ]
+        for event in events:
+            self.event_repo.append(event)
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review_id,
+                    issue_id="review_orchestration",
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type=event.event_type,
+                    content=event.message,
+                    metadata={
+                        "phase": event.phase,
+                        **dict(event.payload or {}),
+                    },
+                )
+            )
+
+    def _dedupe_context_dicts(self, contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        seen: set[tuple[str, int, str]] = set()
+        for item in contexts:
+            path = str(item.get("path") or "").strip()
+            try:
+                line_number = int(item.get("line_number") or item.get("line_start") or 0)
+            except (TypeError, ValueError):
+                line_number = 0
+            snippet = str(item.get("snippet") or "").strip()
+            key = (path, line_number, snippet[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
+
+    def _enrich_issues_with_finding_evidence_chains(
+        self,
+        issues: list[DebateIssue],
+        finding_payloads: list[dict[str, object]],
+    ) -> None:
+        if not issues or not finding_payloads:
+            return
+        by_id = {
+            str(item.get("finding_id") or "").strip(): dict(item)
+            for item in finding_payloads
+            if str(item.get("finding_id") or "").strip()
+        }
+        for issue in issues:
+            existing = [
+                dict(item)
+                for item in list(issue.evidence_chain or [])
+                if isinstance(item, dict)
+            ]
+            graph_steps: list[dict[str, object]] = []
+            context_sources: set[str] = set()
+            for finding_id in list(issue.finding_ids or []):
+                finding = by_id.get(str(finding_id))
+                if not finding:
+                    continue
+                context_source = str(finding.get("context_source") or "").strip()
+                if context_source:
+                    context_sources.add(context_source)
+                for step in list(finding.get("evidence_chain") or []):
+                    if not isinstance(step, dict):
+                        continue
+                    if str(step.get("step") or "") in {
+                        "minimal_context",
+                        "changed_node",
+                        "graph_relationship",
+                        "review_priority",
+                        "affected_flows",
+                        "static_observation",
+                        "sast_prescan",
+                    }:
+                        graph_steps.append(dict(step))
+            issue.evidence_chain = self._dedupe_evidence_chain(existing + graph_steps)
+            if any(source == "tree_sitter" for source in context_sources):
+                breakdown = dict(issue.confidence_breakdown or {})
+                breakdown["tree_sitter_context"] = True
+                issue.confidence_breakdown = breakdown
+                issue.tool_name = issue.tool_name or "tree_sitter_code_graph"
+                issue.tool_verified = issue.tool_verified or bool(graph_steps)
+
+    def _dedupe_evidence_chain(self, chain: list[dict[str, object]]) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for item in chain:
+            key = json.dumps(
+                {
+                    "step": item.get("step"),
+                    "status": item.get("status"),
+                    "file_path": item.get("file_path"),
+                    "line_start": item.get("line_start"),
+                    "summary": item.get("summary"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result[:20]
 
     def _append_deterministic_query_bound_findings(
         self,
@@ -2782,6 +3048,7 @@ class ReviewRunner(
             single["batch_file_count"] = 1
             single["batch_hunk_count"] = len([item for item in list(single.get("target_hunks") or []) if isinstance(item, dict)])
             single["batch_token_estimate"] = int(estimated_tokens_sum or self._estimate_expert_job_tokens(single))
+            single["code_graph_priority_score"] = float(single.get("code_graph_priority_score") or 0.0)
             return single
 
         primary = dict(chunk[0])
@@ -2829,6 +3096,7 @@ class ReviewRunner(
                     "target_hunk": target_hunk,
                     "target_hunks": target_hunks,
                     "related_files": related_files,
+                    "code_graph_priority_score": float(item.get("code_graph_priority_score") or 0.0),
                 }
             )
 
@@ -2845,10 +3113,54 @@ class ReviewRunner(
         primary["batch_file_count"] = len(batch_items)
         primary["batch_hunk_count"] = len(merged_target_hunks)
         primary["batch_token_estimate"] = int(max(0, estimated_tokens_sum))
+        primary["code_graph_priority_score"] = max(
+            [float(item.get("code_graph_priority_score") or 0.0) for item in batch_items] or [0.0]
+        )
         routing_reason = str(primary.get("routing_reason") or "").strip()
         if routing_reason:
             primary["routing_reason"] = f"{routing_reason}；本次批量覆盖 {len(batch_items)} 个文件。"
         return primary
+
+    def _sort_expert_jobs_by_code_graph_priority(self, jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+        if not jobs:
+            return []
+        return sorted(
+            jobs,
+            key=lambda item: (
+                float(item.get("code_graph_priority_score") or 0.0),
+                float(item.get("routing_confidence") or 0.0),
+            ),
+            reverse=True,
+        )
+
+    def _code_graph_priority_score(
+        self,
+        repository_context: dict[str, object],
+        file_path: str,
+        line_start: int,
+    ) -> float:
+        impact = dict(repository_context.get("code_graph_impact_analysis") or {})
+        priorities = [
+            dict(item)
+            for item in list(impact.get("review_priorities") or [])
+            if isinstance(item, dict)
+        ]
+        normalized_file = str(file_path or "").strip().replace("\\", "/")
+        best = 0.0
+        for item in priorities:
+            priority_file = str(item.get("file_path") or "").strip().replace("\\", "/")
+            if priority_file and normalized_file and priority_file != normalized_file:
+                continue
+            try:
+                priority_line = int(item.get("line_start") or 0)
+            except (TypeError, ValueError):
+                priority_line = 0
+            if priority_line and abs(priority_line - int(line_start or 1)) > 80:
+                continue
+            best = max(best, float(item.get("risk_score") or 0.0))
+        if best <= 0.0:
+            best = float(impact.get("risk_score") or 0.0)
+        return round(max(0.0, min(best, 1.0)), 4)
 
     def _resolve_expert_call_token_budget(
         self,
@@ -4099,6 +4411,8 @@ class ReviewRunner(
                 code_context = dict(finding.code_context or {})
                 code_context["observation_ids"] = observation_ids
                 finding.code_context = code_context
+            finding.context_source = self._finding_context_source(finding.code_context)
+            finding.evidence_chain = self._build_finding_evidence_chain(finding)
             if not finding.category_label:
                 finding.category_label = self._category_label_for_finding(
                     finding_type=finding.finding_type,
@@ -5143,6 +5457,25 @@ class ReviewRunner(
                 for item in list(repository_context.get("symbol_contexts") or [])[:4]
                 if isinstance(item, dict)
             ],
+            "code_graph_source_summary": dict(repository_context.get("code_graph_context_source_summary") or {})
+            if isinstance(repository_context.get("code_graph_context_source_summary"), dict)
+            else {},
+            "code_graph_minimal_context": dict(repository_context.get("code_graph_minimal_context") or {})
+            if isinstance(repository_context.get("code_graph_minimal_context"), dict)
+            else {},
+            "code_graph_impact_analysis": dict(repository_context.get("code_graph_impact_analysis") or {})
+            if isinstance(repository_context.get("code_graph_impact_analysis"), dict)
+            else {},
+            "code_graph_related_contexts": [
+                dict(item)
+                for item in list(repository_context.get("code_graph_related_contexts") or [])[:6]
+                if isinstance(item, dict)
+            ],
+            "code_graph_evidence_chain": self._build_code_graph_evidence_chain(
+                file_path=file_path,
+                line_start=line_start,
+                repository_context=repository_context,
+            ),
             "context_files": [
                 str(item).strip()
                 for item in list(repository_context.get("context_files") or [])[:10]
@@ -5163,6 +5496,163 @@ class ReviewRunner(
                 language=language,
             ),
         }
+
+    def _build_code_graph_evidence_chain(
+        self,
+        *,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+    ) -> list[dict[str, object]]:
+        source_summary = dict(repository_context.get("code_graph_context_source_summary") or {})
+        minimal_context = dict(repository_context.get("code_graph_minimal_context") or {})
+        impact = dict(repository_context.get("code_graph_impact_analysis") or {})
+        related_contexts = [
+            dict(item)
+            for item in list(repository_context.get("code_graph_related_contexts") or [])[:6]
+            if isinstance(item, dict)
+        ]
+        if not (source_summary or minimal_context or impact or related_contexts):
+            return []
+        normalized_file = str(file_path or "").strip().replace("\\", "/")
+        changed_nodes = [
+            dict(item)
+            for item in list(impact.get("changed_nodes") or [])[:6]
+            if isinstance(item, dict)
+        ]
+        review_priorities = [
+            dict(item)
+            for item in list(minimal_context.get("review_priorities") or impact.get("review_priorities") or [])[:6]
+            if isinstance(item, dict)
+        ]
+        affected_flows = [
+            dict(item)
+            for item in list(minimal_context.get("affected_flows") or impact.get("affected_flows") or [])[:6]
+            if isinstance(item, dict)
+        ]
+        matching_contexts = [
+            item
+            for item in related_contexts
+            if not normalized_file or str(item.get("path") or item.get("file_path") or "").replace("\\", "/") == normalized_file
+        ] or related_contexts[:3]
+        return [
+            {
+                "step": "context_source",
+                "status": str(source_summary.get("primary_source") or "tree_sitter"),
+                "primary_source": str(source_summary.get("primary_source") or ""),
+                "fallback_used": bool(source_summary.get("fallback_used")),
+                "fallback_reason": str(source_summary.get("fallback_reason") or ""),
+            },
+            {
+                "step": "minimal_context",
+                "status": "present" if minimal_context else "missing",
+                "summary": str(minimal_context.get("summary") or impact.get("summary") or ""),
+                "risk_level": str(minimal_context.get("risk_level") or impact.get("risk_level") or ""),
+                "risk_score": float(minimal_context.get("risk_score") or impact.get("risk_score") or 0.0),
+                "key_entities": list(minimal_context.get("key_entities") or [])[:5],
+            },
+            {
+                "step": "changed_node",
+                "status": "anchored" if changed_nodes else "missing",
+                "file_path": normalized_file,
+                "line_start": int(line_start or 1),
+                "nodes": changed_nodes,
+            },
+            {
+                "step": "graph_relationship",
+                "status": "matched" if matching_contexts else "missing",
+                "contexts": [
+                    {
+                        "relationship": str(item.get("relationship") or ""),
+                        "path": str(item.get("path") or item.get("file_path") or ""),
+                        "line_number": int(item.get("line_number") or item.get("line_start") or 0),
+                        "source": str(item.get("source_qualified_name") or ""),
+                        "target": str(item.get("target_qualified_name") or ""),
+                        "context_source": str(item.get("context_source") or "tree_sitter"),
+                    }
+                    for item in matching_contexts[:4]
+                ],
+            },
+            {
+                "step": "review_priority",
+                "status": "ranked" if review_priorities else "missing",
+                "priorities": review_priorities[:5],
+            },
+            {
+                "step": "affected_flows",
+                "status": "matched" if affected_flows else "missing",
+                "flows": affected_flows[:5],
+            },
+        ]
+
+    def _finding_context_source(self, code_context: dict[str, object]) -> str:
+        source_summary = dict(code_context.get("code_graph_source_summary") or {})
+        primary_source = str(source_summary.get("primary_source") or "").strip()
+        if primary_source:
+            return primary_source
+        if list(code_context.get("code_graph_related_contexts") or []):
+            return "tree_sitter"
+        if list(code_context.get("related_contexts") or []):
+            return "repository_context"
+        return "diff"
+
+    def _build_finding_evidence_chain(self, finding: ReviewFinding) -> list[dict[str, object]]:
+        code_context = dict(finding.code_context or {})
+        chain: list[dict[str, object]] = [
+            {
+                "step": "claim",
+                "status": "present" if finding.summary or finding.title else "missing",
+                "claim": finding.summary or finding.title,
+                "finding_id": finding.finding_id,
+            },
+            {
+                "step": "diff_anchor",
+                "status": "anchored" if finding.file_path and finding.line_start else "missing",
+                "file_path": finding.file_path,
+                "line_start": int(finding.line_start or 1),
+                "evidence": list(finding.evidence or [])[:4],
+            },
+        ]
+        graph_chain = [
+            dict(item)
+            for item in list(code_context.get("code_graph_evidence_chain") or [])
+            if isinstance(item, dict)
+        ]
+        chain.extend(graph_chain)
+        observation_ids = [
+            str(item).strip()
+            for item in list(code_context.get("observation_ids") or [])
+            if str(item).strip()
+        ]
+        if observation_ids:
+            chain.append(
+                {
+                    "step": "static_observation",
+                    "status": "matched",
+                    "observation_ids": observation_ids[:8],
+                }
+            )
+        sast_matches = [
+            dict(item)
+            for item in list(code_context.get("sast_prescan_matches") or [])
+            if isinstance(item, dict)
+        ]
+        if sast_matches:
+            chain.append(
+                {
+                    "step": "sast_prescan",
+                    "status": "matched",
+                    "matches": sast_matches[:5],
+                }
+            )
+        chain.append(
+            {
+                "step": "context_source",
+                "status": self._finding_context_source(code_context),
+                "context_source": self._finding_context_source(code_context),
+            }
+        )
+        return chain
 
     def _load_repository_problem_context(
         self,

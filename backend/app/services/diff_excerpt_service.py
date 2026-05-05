@@ -4,6 +4,57 @@ from __future__ import annotations
 class DiffExcerptService:
     """负责从 unified diff 中提取 hunk、行号和代码片段。"""
 
+    def changed_line_ranges_by_file(self, unified_diff: str) -> dict[str, list[tuple[int, int]]]:
+        """按文件收集 unified diff 中真实变更的新文件行号范围。"""
+
+        ranges: dict[str, list[tuple[int, int]]] = {}
+        lines = str(unified_diff or "").splitlines()
+        active_file = ""
+        current_new_line: int | None = None
+        changed_lines: list[int] = []
+
+        def flush_hunk() -> None:
+            nonlocal changed_lines
+            if active_file and changed_lines:
+                ranges.setdefault(active_file, []).extend(self._compact_line_ranges(changed_lines))
+            changed_lines = []
+
+        for raw_line in lines:
+            if raw_line.startswith("diff --git "):
+                flush_hunk()
+                active_file = self._parse_file_path(raw_line)
+                current_new_line = None
+                continue
+            if raw_line.startswith("+++ "):
+                parsed_file = self._parse_new_file_marker(raw_line)
+                if parsed_file:
+                    active_file = parsed_file
+                continue
+            if raw_line.startswith("@@"):
+                flush_hunk()
+                current_new_line = self._parse_hunk_start(raw_line)
+                continue
+            if (
+                not active_file
+                or current_new_line is None
+                or raw_line.startswith("--- ")
+                or raw_line == r"\ No newline at end of file"
+            ):
+                continue
+            prefix = raw_line[0] if raw_line else ""
+            if prefix == "+":
+                changed_lines.append(current_new_line)
+                current_new_line += 1
+                continue
+            if prefix == "-":
+                changed_lines.append(current_new_line)
+                continue
+            if prefix == " ":
+                current_new_line += 1
+
+        flush_hunk()
+        return ranges
+
     def extract_file_diff(self, unified_diff: str, file_path: str) -> str:
         """提取某个文件在 unified diff 中的完整 diff block。"""
 
@@ -304,6 +355,12 @@ class DiffExcerptService:
         right = parts[3]
         return right[2:] if right.startswith("b/") else right
 
+    def _parse_new_file_marker(self, marker: str) -> str:
+        value = marker.removeprefix("+++ ").strip()
+        if value == "/dev/null":
+            return ""
+        return value[2:] if value.startswith("b/") else value
+
     def _parse_hunk_start(self, hunk_header: str) -> int:
         try:
             after_plus = hunk_header.split("+", 1)[1]
@@ -311,3 +368,20 @@ class DiffExcerptService:
             return int(number_part)
         except (IndexError, ValueError):
             return 1
+
+    def _compact_line_ranges(self, line_numbers: list[int]) -> list[tuple[int, int]]:
+        values = sorted({int(line) for line in line_numbers if int(line) > 0})
+        if not values:
+            return []
+        ranges: list[tuple[int, int]] = []
+        start = values[0]
+        end = values[0]
+        for line in values[1:]:
+            if line == end + 1:
+                end = line
+                continue
+            ranges.append((start, end))
+            start = line
+            end = line
+        ranges.append((start, end))
+        return ranges

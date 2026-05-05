@@ -1,7 +1,7 @@
 import React from "react";
 import { Alert, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
-import type { DebateIssue, ReviewFinding } from "@/services/api";
+import type { DebateIssue, EvidenceChainStep, ReviewFinding } from "@/services/api";
 import {
   humanizeExpertId,
   humanizeReviewStatus,
@@ -9,10 +9,28 @@ import {
   humanizeSeverity,
   stripReviewSupplementSections,
 } from "@/utils/displayText";
+import { evidenceContextSourceLabel, evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
 
 const { Paragraph } = Typography;
 
 const uniqueList = (values?: string[]) => Array.from(new Set((values || []).map((item) => String(item || "").trim()).filter(Boolean)));
+
+const normalizeUnknownList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const title = String(payload.flow || payload.name || payload.qualified_name || payload.symbol || payload.title || "").trim();
+      const criticality = String(payload.criticality || payload.risk_level || payload.kind || "").trim();
+      const path = String(payload.file_path || payload.path || "").trim();
+      const lineStart = typeof payload.line_start === "number" ? payload.line_start : 0;
+      const location = path ? `${path}${lineStart ? `:${lineStart}` : ""}` : "";
+      return [title, criticality, location].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+};
 
 type IssueDetailPanelProps = {
   issue: DebateIssue | null;
@@ -30,6 +48,26 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 }) => {
   const confidenceBreakdown = issue?.confidence_breakdown || {};
   const codeContext = finding?.code_context;
+  const codeGraphSourceSummary = codeContext?.code_graph_source_summary || {};
+  const codeGraphMinimalContext = codeContext?.code_graph_minimal_context || {};
+  const codeGraphImpactAnalysis = codeContext?.code_graph_impact_analysis || {};
+  const graphRiskLevel = String(codeGraphMinimalContext.risk_level || codeGraphImpactAnalysis.risk_level || "").trim();
+  const graphRiskScore = codeGraphMinimalContext.risk_score ?? codeGraphImpactAnalysis.risk_score;
+  const graphContextSource =
+    finding?.context_source ||
+    String(codeGraphSourceSummary.primary_source || codeGraphSourceSummary.context_source || "").trim();
+  const graphSummary = String(codeGraphMinimalContext.summary || codeGraphImpactAnalysis.summary || "").trim();
+  const graphReviewPriorities = normalizeUnknownList(
+    codeGraphMinimalContext.review_priorities || codeGraphImpactAnalysis.review_priorities,
+  );
+  const graphAffectedFlows = normalizeUnknownList(
+    codeGraphMinimalContext.affected_flows || codeGraphImpactAnalysis.affected_flows,
+  );
+  const graphEvidenceChain = issue?.evidence_chain?.length
+    ? issue.evidence_chain
+    : finding?.evidence_chain?.length
+      ? finding.evidence_chain
+      : codeContext?.code_graph_evidence_chain || [];
   const contextFiles = codeContext?.context_files || finding?.context_files || [];
   const inputCompleteness = codeContext?.input_completeness;
   const reviewInputs = codeContext?.review_inputs;
@@ -138,6 +176,31 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               ) : null}
             </Descriptions>
 
+            <div style={{ marginTop: 16 }}>
+              <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>证据链</Paragraph>
+              {graphEvidenceChain.length ? (
+                <Descriptions column={1} size="small">
+                  {graphEvidenceChain.slice(0, 8).map((step, index) => (
+                    <Descriptions.Item
+                      key={`${index}-${step.step || "evidence"}`}
+                      label={evidenceStepLabel(step)}
+                    >
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                        {humanizeReviewText(evidenceStepSummary(step))}
+                      </Paragraph>
+                    </Descriptions.Item>
+                  ))}
+                </Descriptions>
+              ) : (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="暂无结构化证据链"
+                  description="当前问题仍会展示基础证据；后续如果命中 Tree-sitter、工具核验或跨文件关系，会在这里展示 claim、代码锚点、工具核验和置信度变化。"
+                />
+              )}
+            </div>
+
             {Object.keys(confidenceBreakdown).length ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>置信度分解</Paragraph>
@@ -238,6 +301,43 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   <Descriptions.Item label="上下文文件">
                     {contextFiles.length ? contextFiles.join("、") : "-"}
                   </Descriptions.Item>
+                  <Descriptions.Item label="关联检索方式">
+                    <Tag color={graphContextSource === "tree_sitter" ? "success" : graphContextSource === "keyword_search" ? "gold" : "default"}>
+                      {evidenceContextSourceLabel(graphContextSource)}
+                    </Tag>
+                  </Descriptions.Item>
+                  {graphRiskLevel || typeof graphRiskScore === "number" ? (
+                    <Descriptions.Item label="图谱风险">
+                      {[graphRiskLevel || "未分级", typeof graphRiskScore === "number" ? graphRiskScore : ""].filter(Boolean).join(" · ")}
+                    </Descriptions.Item>
+                  ) : null}
+                  {graphSummary ? (
+                    <Descriptions.Item label="图谱摘要">
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{graphSummary}</Paragraph>
+                    </Descriptions.Item>
+                  ) : null}
+                  {graphReviewPriorities.length ? (
+                    <Descriptions.Item label="优先检查点">
+                      <Space wrap>
+                        {graphReviewPriorities.slice(0, 6).map((item, index) => (
+                          <Tag key={`${index}-${item}`} color="blue">
+                            {humanizeReviewText(item)}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  {graphAffectedFlows.length ? (
+                    <Descriptions.Item label="候选影响流程">
+                      <div>
+                        {graphAffectedFlows.slice(0, 5).map((item, index) => (
+                          <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
+                            {humanizeReviewText(item)}
+                          </Paragraph>
+                        ))}
+                      </div>
+                    </Descriptions.Item>
+                  ) : null}
                 </Descriptions>
               </div>
             ) : null}

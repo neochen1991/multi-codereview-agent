@@ -56,6 +56,30 @@ export interface ReviewEvent {
   payload?: Record<string, unknown>;
 }
 
+export interface EvidenceChainStep {
+  step: string;
+  status?: string;
+  claim?: string;
+  issue_id?: string;
+  file_path?: string;
+  line_start?: number;
+  evidence?: string[];
+  cross_file_evidence?: string[];
+  reasons?: string[];
+  tool_name?: string;
+  tool_verified?: boolean;
+  score?: number;
+  summary?: string;
+  signals?: string[];
+  verdict?: string;
+  confidence_adjustment?: number;
+  reason?: string;
+  original_confidence?: number;
+  final_confidence?: number;
+  confidence_delta?: number;
+  false_positive_risk?: string;
+}
+
 export interface ReviewFinding {
   finding_id: string;
   review_id: string;
@@ -90,6 +114,8 @@ export interface ReviewFinding {
   remediation_steps?: string[];
   code_excerpt: string;
   code_context?: FindingCodeContext;
+  context_source?: string;
+  evidence_chain?: EvidenceChainStep[];
   suggested_code?: string;
   suggested_code_language?: string;
   created_at: string;
@@ -180,6 +206,11 @@ export interface FindingCodeContext {
   symbol_contexts?: FindingCodeContextSymbol[];
   context_files?: string[];
   routing_reason?: string;
+  code_graph_source_summary?: Record<string, unknown>;
+  code_graph_minimal_context?: Record<string, unknown>;
+  code_graph_impact_analysis?: Record<string, unknown>;
+  code_graph_related_contexts?: FindingCodeContextSnippet[];
+  code_graph_evidence_chain?: EvidenceChainStep[];
   input_completeness?: FindingCodeContextInputCompleteness;
   review_inputs?: FindingCodeContextReviewInputs;
 }
@@ -216,6 +247,7 @@ export interface DebateIssue {
   current_code?: string;
   suggested_code?: string;
   evidence: string[];
+  evidence_chain?: EvidenceChainStep[];
   needs_human: boolean;
   verified: boolean;
   needs_debate: boolean;
@@ -677,6 +709,7 @@ export interface GitNexusIndexStatus {
   stdout?: string;
   stderr?: string;
   trigger?: string;
+  blocked_by_repository_id?: string;
 }
 
 export interface GitNexusPreflightCheck {

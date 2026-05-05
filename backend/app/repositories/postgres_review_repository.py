@@ -249,8 +249,6 @@ class PostgresReviewRepository:
             "successful_context_target_count": int(row.get("successful_context_target_count") or 0),
             "successful_impact_target_count": int(row.get("successful_impact_target_count") or 0),
         }
-        metadata["quality_summary"] = quality_summary
-        metadata["impact_summary"] = impact_summary
         changed_files = self._loads_list(row["changed_files_json"])
         return {
             "review_id": row["review_id"],

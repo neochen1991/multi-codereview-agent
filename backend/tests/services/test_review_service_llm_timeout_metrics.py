@@ -19,6 +19,9 @@ def test_review_service_builds_llm_timeout_metrics_from_backend_log(tmp_path: Pa
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "LOGS_ROOT", logs_root)
+    import app.services.review_service as review_service_module
+
+    monkeypatch.setattr(review_service_module.settings, "LOGS_ROOT", logs_root)
 
     service = ReviewService(storage_root=tmp_path / "storage")
     metrics = service.build_llm_timeout_metrics()

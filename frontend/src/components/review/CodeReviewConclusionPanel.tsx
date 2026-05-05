@@ -3,11 +3,13 @@ import { Alert, Button, Card, Col, Descriptions, Empty, Row, Space, Tag, Typogra
 
 import type {
   DebateIssue,
+  EvidenceChainStep,
   IssueFilterDecision,
   ReviewFinding,
   RuleScreeningMetadata,
 } from "@/services/api";
 import { humanizeExpertId, humanizeReviewStatus, humanizeSeverity } from "@/utils/displayText";
+import { evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
 
 const { Paragraph } = Typography;
 
@@ -75,6 +77,13 @@ const hasDesignEvidence = (finding: ReviewFinding): boolean =>
       (finding.extra_implementation_points || []).length ||
       (finding.design_conflicts || []).length,
   );
+
+const evidenceChainFor = (finding: ReviewFinding, issue: DebateIssue | null): EvidenceChainStep[] => {
+  const codeContext = finding.code_context || {};
+  if (issue?.evidence_chain?.length) return issue.evidence_chain;
+  if (finding.evidence_chain?.length) return finding.evidence_chain;
+  return codeContext.code_graph_evidence_chain || [];
+};
 
 const renderCodeLines = (
   codeExcerpt: string,
@@ -173,6 +182,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       finding.suggested_code ||
       (finding.code_context && Object.keys(finding.code_context).length > 0),
   );
+  const evidenceChain = evidenceChainFor(finding, issue);
 
   return (
     <Card className="module-card" title="问题详情">
@@ -274,6 +284,32 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           },
         ]}
       />
+
+      <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>证据链</Paragraph>
+        {evidenceChain.length ? (
+          <Descriptions
+            column={1}
+            size="small"
+            items={evidenceChain.slice(0, 10).map((step, index) => ({
+              key: `${index}-${step.step || "evidence"}`,
+              label: evidenceStepLabel(step),
+              children: (
+                <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                  {evidenceStepSummary(step)}
+                </Paragraph>
+              ),
+            }))}
+          />
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="暂无结构化证据链"
+            description="当前问题仍保留基础证据；如果命中 Tree-sitter、工具核验或跨文件关系，会在这里展示问题主张、代码锚点、工具核验和置信度变化。"
+          />
+        )}
+      </div>
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>

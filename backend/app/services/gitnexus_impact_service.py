@@ -155,6 +155,16 @@ def _parse_command_text(raw: str) -> list[str]:
     return [_strip_wrapping_quotes(part) for part in parts if _strip_wrapping_quotes(part)]
 
 
+def _compact_json(value: object, *, max_chars: int = 12000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}... [truncated {len(text) - max_chars} chars]"
+
+
 class GitNexusImpactClient(Protocol):
     """GitNexus 图谱查询客户端。"""
 
@@ -469,7 +479,13 @@ class GitNexusMcpImpactClient:
             if raise_on_error:
                 raise RuntimeError(f"GitNexus {tool_name} 调用失败: {payload.get('error')}")
             return {"__error": f"GitNexus {tool_name} 调用失败: {payload.get('error')}"}
-        logger.info("gitnexus mcp tool result tool=%s keys=%s", tool_name, sorted(payload.keys()))
+        logger.info(
+            "gitnexus mcp tool response tool=%s repo_path=%s arguments=%s payload=%s",
+            tool_name,
+            repo_path,
+            _compact_json(arguments),
+            _compact_json(payload),
+        )
         return payload
 
     def _call_tools_batch(
@@ -486,7 +502,13 @@ class GitNexusMcpImpactClient:
         requests = [self._initialize_request(), self._initialized_notification()] if include_initialize else []
         start_offset = 2 if include_initialize else 1
         for offset, (tool_name, arguments) in enumerate(tool_calls, start=start_offset):
-            logger.info("gitnexus mcp tool call tool=%s arguments=%s", tool_name, json.dumps(arguments, ensure_ascii=False))
+            logger.info(
+                "gitnexus mcp tool request tool=%s repo_path=%s command=%s arguments=%s",
+                tool_name,
+                repo_path,
+                " ".join(command),
+                _compact_json(arguments),
+            )
             requests.append(
                 {
                     "id": offset,
@@ -1180,7 +1202,7 @@ class GitNexusImpactService:
             else "",
         )
 
-        graph_status = self._load_graph_status(repo_path, registry)
+        graph_status = self._load_graph_status(repo_path, registry, subject=subject, runtime=runtime)
         state = str(graph_status.get("state") or "").strip().lower()
         add_check(
             "graph_status",
@@ -1305,7 +1327,7 @@ class GitNexusImpactService:
         if not repo_path:
             raise RuntimeError("未配置本地代码仓路径，无法执行 GitNexus 关联影响分析。")
         registry = self._load_gitnexus_registry(subject, runtime)
-        graph_status = self._load_graph_status(repo_path, registry)
+        graph_status = self._load_graph_status(repo_path, registry, subject=subject, runtime=runtime)
         logger.info(
             "gitnexus graph status repo_path=%s state=%s repo_name=%s",
             repo_path,
@@ -1374,12 +1396,22 @@ class GitNexusImpactService:
         }
         return report, trace
 
-    def _load_graph_status(self, repo_path: str, registry: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _load_graph_status(
+        self,
+        repo_path: str,
+        registry: list[dict[str, Any]] | None = None,
+        *,
+        subject: ReviewSubject | None = None,
+        runtime: RuntimeSettings | None = None,
+    ) -> dict[str, Any]:
         repo_root = Path(repo_path)
         candidates: list[tuple[Path, bool]] = [
             (repo_root / ".gitnexus" / "index_status.json", True),
         ]
         if self.storage_root is not None:
+            repository_id = self._repository_id(subject, runtime)
+            if repository_id:
+                candidates.append((self.storage_root / "gitnexus" / self._safe_repository_id(repository_id) / "index_status.json", False))
             candidates.append((self.storage_root / "gitnexus" / "index_status.json", False))
         for path, strict_repo_match in candidates:
             if not path.exists():
@@ -1431,6 +1463,16 @@ class GitNexusImpactService:
         if not candidate_path:
             return False
         return _normalize_path_for_compare(candidate_path) == _normalize_path_for_compare(repo_path)
+
+    def _repository_id(self, subject: ReviewSubject | None, runtime: RuntimeSettings | None) -> str:
+        metadata = dict(subject.metadata or {}) if subject is not None else {}
+        raw = str(metadata.get("repository_id") or getattr(subject, "repo_id", "") or "").strip()
+        if raw:
+            return raw
+        return str(getattr(runtime, "default_repository_id", "") or "").strip() if runtime is not None else ""
+
+    def _safe_repository_id(self, repository_id: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(repository_id or "").strip())
 
     def _resolve_repo_name_from_registry(self, repo_path: str, registry: list[dict[str, Any]] | None = None) -> str:
         registry = registry if registry is not None else self._load_gitnexus_registry()
@@ -3189,6 +3231,13 @@ class GitNexusImpactService:
             if value:
                 return value
         if runtime is not None:
+            repository = runtime.resolve_repository(
+                repository_id=str(metadata.get("repository_id") or subject.repo_id or "").strip(),
+                repo_url=subject.repo_url,
+                mr_url=subject.mr_url,
+            )
+            if repository is not None and str(repository.local_path or "").strip():
+                return str(repository.local_path or "").strip()
             return str(getattr(runtime, "code_repo_local_path", "") or "").strip()
         return ""
 

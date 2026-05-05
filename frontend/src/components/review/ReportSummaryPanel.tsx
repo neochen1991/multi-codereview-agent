@@ -228,6 +228,15 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
     completion_tokens: 0,
     total_tokens: 0,
   };
+  const expertExecution = review?.subject?.metadata?.expert_execution as { failed_experts?: unknown[] } | undefined;
+  const failedExpertCount = Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
+  const computedSummary = report
+    ? `审核报告已生成，共收敛 ${totalCount} 条检视发现，形成 ${formalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${
+        failedExpertCount
+          ? ` 本轮另有 ${failedExpertCount} 个检查角色执行失败，已保留其余检视结果。`
+          : ""
+      }`
+    : "";
   const typeCounts = findings.reduce<Record<string, number>>((acc, item) => {
     const key = item.finding_type || "risk_hypothesis";
     acc[key] = (acc[key] || 0) + 1;
@@ -253,7 +262,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       <Paragraph style={{ marginBottom: 16 }}>
         {isReviewStillRunning(review)
           ? "当前审核仍在运行中，以下统计与建议仅代表阶段性结果，最终结论以任务完成后的收敛结果为准。"
-          : humanizeReviewText(report?.summary) || "运行审核后，这里会显示最终的检视摘要、风险统计和确认状态。"}
+          : computedSummary || humanizeReviewText(report?.summary) || "运行审核后，这里会显示最终的检视摘要、风险统计和确认状态。"}
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>

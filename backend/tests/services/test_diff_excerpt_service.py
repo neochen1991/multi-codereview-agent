@@ -73,6 +73,33 @@ def test_list_hunks_returns_hunk_header_and_changed_lines():
     assert hunks[0]["changed_lines"] == [11, 12]
 
 
+def test_changed_line_ranges_by_file_compacts_additions_and_deletions():
+    service = DiffExcerptService()
+    diff = (
+        "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+        "--- a/src/main/java/com/example/OrderService.java\n"
+        "+++ b/src/main/java/com/example/OrderService.java\n"
+        "@@ -10,6 +10,7 @@ public Order create(Command command) {\n"
+        "   validate(command);\n"
+        "-  audit(command);\n"
+        "+  auditLater(command);\n"
+        "+  return repository.save(command);\n"
+        " }\n"
+        "diff --git a/src/main/java/com/example/OwnerController.java b/src/main/java/com/example/OwnerController.java\n"
+        "--- a/src/main/java/com/example/OwnerController.java\n"
+        "+++ b/src/main/java/com/example/OwnerController.java\n"
+        "@@ -40,3 +41,3 @@ public List<Owner> search(String status) {\n"
+        "-  return repository.findPage(status, pageable);\n"
+        "+  return repository.findAllByStatus(status);\n"
+        " }\n"
+    )
+
+    ranges = service.changed_line_ranges_by_file(diff)
+
+    assert ranges["src/main/java/com/example/OrderService.java"] == [(11, 12)]
+    assert ranges["src/main/java/com/example/OwnerController.java"] == [(41, 41)]
+
+
 def test_find_best_hunk_prefers_closest_changed_lines():
     service = DiffExcerptService()
     diff = (

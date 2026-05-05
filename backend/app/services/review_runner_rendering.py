@@ -118,6 +118,43 @@ class ReviewRunnerRenderingMixin:
             summary = str(repository_context.get("summary") or "").strip()
             if summary:
                 lines.append(f"- 主Agent上下文: {summary}")
+            code_graph_minimal = repository_context.get("code_graph_minimal_context")
+            if isinstance(code_graph_minimal, dict) and code_graph_minimal:
+                graph_summary = str(code_graph_minimal.get("summary") or "").strip()
+                risk_level = str(code_graph_minimal.get("risk_level") or "").strip()
+                risk_score = code_graph_minimal.get("risk_score")
+                if graph_summary:
+                    risk_part = f"；风险 {risk_level}/{risk_score}" if risk_level else ""
+                    lines.append(f"- Tree-sitter 图谱摘要: {graph_summary}{risk_part}")
+                key_entities = [
+                    str(item).strip()
+                    for item in list(code_graph_minimal.get("key_entities") or [])
+                    if str(item).strip()
+                ]
+                if key_entities:
+                    lines.append(f"  * 变更节点: {' / '.join(key_entities[:5])}")
+            code_graph_impact = repository_context.get("code_graph_impact_analysis")
+            if isinstance(code_graph_impact, dict) and code_graph_impact:
+                impacted_files = [
+                    str(item).strip()
+                    for item in list(code_graph_impact.get("impacted_files") or [])
+                    if str(item).strip()
+                ]
+                if impacted_files:
+                    lines.append(f"  * 候选受影响文件: {' / '.join(impacted_files[:6])}")
+                test_gaps = [
+                    item
+                    for item in list(code_graph_impact.get("test_gaps") or [])
+                    if isinstance(item, dict)
+                ]
+                if test_gaps:
+                    formatted_gaps = [
+                        str(item.get("qualified_name") or item.get("name") or "").strip()
+                        for item in test_gaps[:5]
+                        if str(item.get("qualified_name") or item.get("name") or "").strip()
+                    ]
+                    if formatted_gaps:
+                        lines.append(f"  * 测试覆盖缺口: {' / '.join(formatted_gaps)}")
             sast_prescan = repository_context.get("sast_prescan")
             if isinstance(sast_prescan, dict):
                 sast_summary = str(sast_prescan.get("summary") or "").strip()

@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+*.egg-info/
 
 # Node
 frontend/node_modules/
@@ -25,6 +26,7 @@ scripts/logs/
 # Runtime data
 backend/app/storage/
 scripts/backend/app/storage/
+.gitnexus/
 
 # Generated presentation artifacts
 output/project-intro/

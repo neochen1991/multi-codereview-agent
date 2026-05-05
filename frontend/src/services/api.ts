@@ -100,6 +100,8 @@ export interface ReviewFinding {
   remediation_steps?: string[];
   code_excerpt: string;
   code_context?: FindingCodeContext;
+  context_source?: string;
+  evidence_chain?: EvidenceChainStep[];
   suggested_code?: string;
   suggested_code_language?: string;
   created_at: string;
@@ -190,6 +192,11 @@ export interface FindingCodeContext {
   symbol_contexts?: FindingCodeContextSymbol[];
   context_files?: string[];
   routing_reason?: string;
+  code_graph_source_summary?: Record<string, unknown>;
+  code_graph_minimal_context?: Record<string, unknown>;
+  code_graph_impact_analysis?: Record<string, unknown>;
+  code_graph_related_contexts?: FindingCodeContextSnippet[];
+  code_graph_evidence_chain?: EvidenceChainStep[];
   input_completeness?: FindingCodeContextInputCompleteness;
   review_inputs?: FindingCodeContextReviewInputs;
 }
@@ -713,6 +720,7 @@ export interface GitNexusIndexStatus {
   stdout?: string;
   stderr?: string;
   trigger?: string;
+  blocked_by_repository_id?: string;
 }
 
 export interface GitNexusPreflightCheck {

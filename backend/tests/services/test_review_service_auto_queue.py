@@ -693,6 +693,69 @@ def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_pa
     }
 
 
+def test_build_process_messages_keeps_code_graph_context_fields(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_code_graph_process",
+            "project_id": "proj_code_graph_process",
+            "source_ref": "feature/code-graph-process",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/112",
+            "title": "code graph process review",
+        }
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="code_graph_context_ready",
+            content="Tree-sitter 已命中关联上下文",
+            metadata={
+                "phase": "context",
+                "context_source": "tree_sitter",
+                "context_count": 1,
+                "changed_files": ["src/main/java/A.java"],
+                "changed_symbols": ["A"],
+                "changed_ranges": {"src/main/java/A.java": [[10, 18]]},
+                "related_contexts": [
+                    {
+                        "path": "src/main/java/A.java",
+                        "line_start": 10,
+                        "snippet": "class A {}",
+                    }
+                ],
+                "minimal_context": {"risk_level": "medium", "risk_score": 0.65},
+                "impact_analysis": {"impacted_files": ["src/test/java/ATest.java"]},
+                "large_unused_blob": "x" * 500,
+            },
+        )
+    )
+
+    messages = service.build_process_messages(review.review_id)
+
+    assert len(messages) == 1
+    assert messages[0]["metadata"] == {
+        "phase": "context",
+        "context_source": "tree_sitter",
+        "context_count": 1,
+        "changed_files": ["src/main/java/A.java"],
+        "changed_symbols": ["A"],
+        "changed_ranges": {"src/main/java/A.java": [[10, 18]]},
+        "related_contexts": [
+            {
+                "path": "src/main/java/A.java",
+                "line_start": 10,
+                "snippet": "class A {}",
+            }
+        ],
+        "minimal_context": {"risk_level": "medium", "risk_score": 0.65},
+        "impact_analysis": {"impacted_files": ["src/test/java/ATest.java"]},
+    }
+
+
 def test_list_review_summaries_returns_lightweight_subject_payload(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     review = service.create_review(

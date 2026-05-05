@@ -165,6 +165,46 @@ const normalizeContextValueList = (value: unknown): string[] => {
   return value.map(formatContextEntry).filter(Boolean);
 };
 
+const normalizeImpactNodeValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const name = String(payload.qualified_name || payload.name || "").trim();
+      const path = String(payload.file_path || payload.path || "").trim();
+      const lineStart = typeof payload.line_start === "number" ? payload.line_start : 0;
+      if (name && path) return `${name} · ${path}${lineStart ? `:${lineStart}` : ""}`;
+      return name || path;
+    })
+    .filter(Boolean);
+};
+
+const normalizeImpactGapValueList = (value: unknown): string[] => normalizeImpactNodeValueList(value);
+
+const normalizeAffectedFlowValueList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const entrypoint = String(payload.entrypoint || "").trim();
+      const changedNode = String(payload.changed_node || "").trim();
+      const relationship = String(payload.relationship || "").trim();
+      const criticality = typeof payload.criticality === "number" ? ` · ${(payload.criticality * 100).toFixed(0)}%` : "";
+      if (entrypoint && changedNode && entrypoint !== changedNode) return `${entrypoint} -> ${changedNode}${relationship ? ` · ${relationship}` : ""}${criticality}`;
+      return entrypoint || changedNode;
+    })
+    .filter(Boolean);
+};
+
+const getCodeContextSourceLabel = (value: unknown): string => {
+  const source = String(value || "").trim();
+  if (source === "tree_sitter") return "Tree-sitter 结构化检索";
+  if (source === "keyword_search") return "关键词搜索";
+  return source || "未标明";
+};
+
 const normalizeBoundDocumentEntries = (value: unknown): BoundDocumentEntry[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -738,7 +778,11 @@ export const mapDialogueMessage = (message: ConversationMessage): ReviewDialogue
     eventType === "main_agent_routing_ready" ||
     eventType === "main_agent_expert_execution_completed" ||
     eventType === "issue_filter_applied" ||
-    eventType === "expert_rule_screening_batch"
+    eventType === "expert_rule_screening_batch" ||
+    eventType === "code_graph_context_started" ||
+    eventType === "code_graph_context_ready" ||
+    eventType === "code_graph_context_fallback" ||
+    eventType === "keyword_context_ready"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
@@ -802,6 +846,14 @@ export const mapDialogueMessage = (message: ConversationMessage): ReviewDialogue
     summaryParts.push("主Agent 正在构建派工上下文");
   } else if (eventType === "main_agent_routing_ready") {
     summaryParts.push("主Agent 已完成派工规划，准备下发专家任务");
+  } else if (eventType === "code_graph_context_started") {
+    summaryParts.push("正在用 Tree-sitter 查找代码关联上下文");
+  } else if (eventType === "code_graph_context_ready") {
+    summaryParts.push(`Tree-sitter 已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
+  } else if (eventType === "code_graph_context_fallback") {
+    summaryParts.push(`Tree-sitter 未命中，改用关键词搜索：${String(metadata.fallback_reason || "未找到符号关系")}`);
+  } else if (eventType === "keyword_context_ready") {
+    summaryParts.push(`关键词搜索已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
   } else if (eventType === "main_agent_expert_execution_completed") {
     summaryParts.push("专家审查执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
@@ -1074,6 +1126,63 @@ export const buildStructuredGroups = (
     return {
       summaryText: row.summary,
       groups: [issueFilterGroup],
+    };
+  }
+
+  if (
+    row.eventType === "code_graph_context_started" ||
+    row.eventType === "code_graph_context_ready" ||
+    row.eventType === "code_graph_context_fallback" ||
+    row.eventType === "keyword_context_ready"
+  ) {
+    const minimalContext =
+      metadata.minimal_context && typeof metadata.minimal_context === "object"
+        ? (metadata.minimal_context as Record<string, unknown>)
+        : {};
+    const impactAnalysis =
+      metadata.impact_analysis && typeof metadata.impact_analysis === "object"
+        ? (metadata.impact_analysis as Record<string, unknown>)
+        : {};
+    const riskLevel = String(minimalContext.risk_level || impactAnalysis.risk_level || "").trim();
+    const riskScore = minimalContext.risk_score ?? impactAnalysis.risk_score;
+    const sections = [
+      { label: "检索方式", values: [getCodeContextSourceLabel(metadata.context_source || metadata.fallback_source)] },
+      {
+        label: "风险概览",
+        values: riskLevel || typeof riskScore === "number" ? [`${riskLevel || "未分级"}${typeof riskScore === "number" ? ` · ${riskScore}` : ""}`] : [],
+      },
+      { label: "变更文件", values: limitValueList(normalizeValueList(metadata.changed_files), 8) },
+      { label: "变更符号", values: limitValueList(normalizeValueList(metadata.changed_symbols), 8) },
+      {
+        label: "变更节点",
+        values: limitValueList(normalizeImpactNodeValueList(impactAnalysis.changed_nodes), 6),
+      },
+      {
+        label: "候选受影响文件",
+        values: limitValueList(normalizeValueList(impactAnalysis.impacted_files), 8),
+      },
+      {
+        label: "测试覆盖缺口",
+        values: limitValueList(normalizeImpactGapValueList(impactAnalysis.test_gaps), 6),
+      },
+      {
+        label: "风险优先级",
+        values: limitValueList(normalizeImpactNodeValueList(minimalContext.review_priorities || impactAnalysis.review_priorities), 6),
+      },
+      {
+        label: "候选影响流程",
+        values: limitValueList(normalizeAffectedFlowValueList(minimalContext.affected_flows || impactAnalysis.affected_flows), 6),
+      },
+      {
+        label: "命中数量",
+        values: typeof metadata.context_count === "number" ? [String(metadata.context_count)] : [],
+      },
+      { label: "退化原因", values: normalizeSingleValue(metadata.fallback_reason) },
+      { label: "命中片段", values: limitValueList(normalizeContextValueList(metadata.related_contexts), 8) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: row.summary,
+      groups: sections.length ? [{ title: "代码关联上下文检索", sections }] : [],
     };
   }
 

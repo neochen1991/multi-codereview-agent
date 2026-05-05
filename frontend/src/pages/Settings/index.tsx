@@ -355,7 +355,11 @@ const SettingsPage: React.FC = () => {
     try {
       const status = await settingsApi.runRepositoryGitNexusIndex(id);
       setRepositoryGitnexusStatuses((prev) => ({ ...prev, [id]: status }));
-      message.success(`GitNexus 建图任务已触发：${id}`);
+      if (status.state === "blocked") {
+        message.warning(status.message || `GitNexus 当前正在处理其他仓库，${id} 暂未启动`);
+      } else {
+        message.success(`GitNexus 建图任务已触发：${id}`);
+      }
       window.setTimeout(() => {
         void handleRefreshRepositoryGitNexusStatus(id);
       }, 1500);
@@ -518,6 +522,7 @@ const SettingsPage: React.FC = () => {
     if (state === "running") return "processing";
     if (state === "failed") return "error";
     if (state === "skipped") return "warning";
+    if (state === "blocked") return "warning";
     return "default";
   };
 

@@ -122,7 +122,7 @@ def test_reviews_queue_sync_prefers_code_repo_clone_url(client, monkeypatch):
 
     captured: dict[str, str] = {}
 
-    def fake_enqueue(repo_url: str):
+    def fake_enqueue(repo_url: str, repository_id: str = ""):
         captured["repo_url"] = repo_url
         return []
 
