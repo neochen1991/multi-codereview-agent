@@ -147,3 +147,14 @@ def test_gitnexus_preflight_endpoint_returns_diagnostics(client):
     assert isinstance(payload["checks"], list)
     assert isinstance(payload["recommended_actions"], list)
     assert {item["name"] for item in payload["checks"]} >= {"git_binary", "gitnexus_command", "repo_path"}
+
+
+def test_code_graph_status_endpoint_returns_tree_sitter_diagnostics(client):
+    response = client.get("/api/settings/code-graph/index/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] in {"idle", "ready", "skipped", "unknown"}
+    assert payload["repository_id"]
+    assert isinstance(payload["dependency_checks"], list)
+    assert {item["name"] for item in payload["dependency_checks"]} >= {"tree_sitter", "tree_sitter_java"}

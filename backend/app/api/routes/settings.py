@@ -7,6 +7,7 @@ from typing import Literal
 from app.config import settings
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings
+from app.services.code_graph_index_scheduler import CodeGraphIndexScheduler
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
 import app.services.review_service as review_service_module
@@ -19,6 +20,13 @@ def _gitnexus_scheduler(request: Request) -> GitNexusIndexScheduler:
     if isinstance(scheduler, GitNexusIndexScheduler):
         return scheduler
     return GitNexusIndexScheduler(review_service_module.review_service)
+
+
+def _code_graph_scheduler(request: Request) -> CodeGraphIndexScheduler:
+    scheduler = getattr(request.app.state, "code_graph_index_scheduler", None)
+    if isinstance(scheduler, CodeGraphIndexScheduler):
+        return scheduler
+    return CodeGraphIndexScheduler(review_service_module.review_service)
 
 
 def _gitnexus_preflight(repository_id: str = "") -> dict[str, object]:
@@ -253,6 +261,34 @@ def run_repository_gitnexus_index(repository_id: str, request: Request) -> dict[
     """手动触发指定代码仓的 GitNexus 建图。"""
 
     return _gitnexus_scheduler(request).trigger_manual_index(repository_id)
+
+
+@router.get("/settings/code-graph/index/status")
+def get_code_graph_index_status(request: Request) -> dict[str, object]:
+    """返回默认代码仓最近一次 Tree-sitter 代码图谱状态。"""
+
+    return _code_graph_scheduler(request).status()
+
+
+@router.get("/settings/repositories/{repository_id}/code-graph/status")
+def get_repository_code_graph_index_status(repository_id: str, request: Request) -> dict[str, object]:
+    """返回指定代码仓最近一次 Tree-sitter 代码图谱状态。"""
+
+    return _code_graph_scheduler(request).status(repository_id)
+
+
+@router.post("/settings/code-graph/index/run", status_code=status.HTTP_202_ACCEPTED)
+def run_code_graph_index(request: Request) -> dict[str, object]:
+    """手动触发默认代码仓的 Tree-sitter 代码图谱建图。"""
+
+    return _code_graph_scheduler(request).trigger_manual_index()
+
+
+@router.post("/settings/repositories/{repository_id}/code-graph/index/run", status_code=status.HTTP_202_ACCEPTED)
+def run_repository_code_graph_index(repository_id: str, request: Request) -> dict[str, object]:
+    """手动触发指定代码仓的 Tree-sitter 代码图谱建图。"""
+
+    return _code_graph_scheduler(request).trigger_manual_index(repository_id)
 
 
 @router.get("/settings/impact-report-template")

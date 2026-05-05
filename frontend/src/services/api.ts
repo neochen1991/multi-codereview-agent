@@ -723,6 +723,41 @@ export interface GitNexusIndexStatus {
   blocked_by_repository_id?: string;
 }
 
+export interface CodeGraphDependencyCheck {
+  name: string;
+  status: "passed" | "warning" | "failed" | string;
+  message: string;
+}
+
+export interface CodeGraphIndexStatus {
+  repository_id?: string;
+  state: "idle" | "running" | "ready" | "failed" | "skipped" | "blocked" | "unknown" | string;
+  message: string;
+  updated_at?: string;
+  indexed_at?: string;
+  repo_path?: string;
+  repo_name?: string;
+  graph_dir?: string;
+  graph_dir_exists?: boolean;
+  graph_db_path?: string;
+  graph_db_exists?: boolean;
+  graph_db_updated_at?: string;
+  graph_file_count?: number;
+  graph_node_count?: number;
+  graph_edge_count?: number;
+  graph_db_readable?: boolean;
+  selected_file_count?: number;
+  indexed_file_count?: number;
+  skipped_unchanged_file_count?: number;
+  failed_file_count?: number;
+  tree_sitter_installed?: boolean;
+  tree_sitter_parser_available?: boolean;
+  dependency_checks?: CodeGraphDependencyCheck[];
+  languages?: string[];
+  trigger?: string;
+  blocked_by_repository_id?: string;
+}
+
 export interface GitNexusPreflightCheck {
   name: string;
   status: "passed" | "warning" | "failed" | string;
@@ -1234,6 +1269,22 @@ export const settingsApi = {
   },
   async getRepositoryGitNexusPreflight(repositoryId: string): Promise<GitNexusPreflightStatus> {
     const { data } = await api.get(`/settings/repositories/${encodeURIComponent(repositoryId)}/gitnexus/preflight`);
+    return data;
+  },
+  async getCodeGraphIndexStatus(): Promise<CodeGraphIndexStatus> {
+    const { data } = await api.get("/settings/code-graph/index/status");
+    return data;
+  },
+  async runCodeGraphIndex(): Promise<CodeGraphIndexStatus> {
+    const { data } = await api.post("/settings/code-graph/index/run");
+    return data;
+  },
+  async getRepositoryCodeGraphIndexStatus(repositoryId: string): Promise<CodeGraphIndexStatus> {
+    const { data } = await api.get(`/settings/repositories/${encodeURIComponent(repositoryId)}/code-graph/status`);
+    return data;
+  },
+  async runRepositoryCodeGraphIndex(repositoryId: string): Promise<CodeGraphIndexStatus> {
+    const { data } = await api.post(`/settings/repositories/${encodeURIComponent(repositoryId)}/code-graph/index/run`);
     return data;
   },
   async getImpactReportTemplate(): Promise<ImpactReportTemplate> {

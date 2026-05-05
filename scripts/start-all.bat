@@ -20,6 +20,7 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 call :check_python || exit /b 1
 call :ensure_backend_dependencies || exit /b 1
+call :ensure_tree_sitter_dependencies || exit /b 1
 call :check_node || exit /b 1
 call :ensure_frontend_dependencies || exit /b 1
 
@@ -110,19 +111,45 @@ exit /b 0
 
 :ensure_backend_dependencies
 echo checking backend dependencies...
-"%VENV_PYTHON%" -c "import sys, httpx, fastapi, pydantic, yaml; parts = tuple(int(p) for p in httpx.__version__.split('.')[:2]); sys.exit(0 if parts >= (0, 27) else 1)" >nul 2>nul
+"%VENV_PYTHON%" -c "import sys, httpx, fastapi, pydantic, yaml, uvicorn; parts = tuple(int(p) for p in httpx.__version__.split('.')[:2]); sys.exit(0 if parts >= (0, 27) else 1)" >nul 2>nul
 if not errorlevel 1 (
   exit /b 0
 )
 
-echo backend dependencies missing or outdated, running pip install -e .
+echo backend dependencies missing or outdated, running pip install -e . "uvicorn[standard]>=0.30"
 pushd "%ROOT_DIR%" >nul
-call "%VENV_PYTHON%" -m pip install -e .
+call "%VENV_PYTHON%" -m pip install -e . "uvicorn[standard]>=0.30"
 set "PIP_EXIT=%ERRORLEVEL%"
 popd >nul
 
 if not "%PIP_EXIT%"=="0" (
   echo backend dependency install failed
+  exit /b 1
+)
+exit /b 0
+
+:ensure_tree_sitter_dependencies
+echo checking Tree-sitter code graph dependencies...
+"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_language; get_language('java')" >nul 2>nul
+if not errorlevel 1 (
+  exit /b 0
+)
+
+echo Tree-sitter dependencies missing, running pip install -e ".[code-graph]"
+pushd "%ROOT_DIR%" >nul
+call "%VENV_PYTHON%" -m pip install -e ".[code-graph]"
+set "TREE_SITTER_PIP_EXIT=%ERRORLEVEL%"
+popd >nul
+
+if not "%TREE_SITTER_PIP_EXIT%"=="0" (
+  echo Tree-sitter dependency install failed
+  echo If you use an internal PyPI mirror, make sure it provides tree-sitter and tree-sitter-language-pack wheels.
+  exit /b 1
+)
+
+"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_language; get_language('java')" >nul 2>nul
+if errorlevel 1 (
+  echo Tree-sitter dependencies installed, but Java grammar check failed.
   exit /b 1
 )
 exit /b 0

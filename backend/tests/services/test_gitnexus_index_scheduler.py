@@ -324,6 +324,117 @@ def test_gitnexus_index_scheduler_does_not_fallback_for_unknown_repository_id(st
     assert "repo_path" not in status
 
 
+def test_gitnexus_index_scheduler_uses_first_repository_when_default_id_is_empty(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_path = tmp_path / "configured-repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "default_repository_id": "",
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="configured",
+                    clone_url="https://example.com/configured.git",
+                    local_path=str(repo_path),
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    assert status["repository_id"] == "configured"
+    assert status["repo_path"] == str(repo_path.resolve(strict=False))
+    assert (storage_root / "gitnexus" / "configured" / "index_status.json").exists()
+
+
+def test_gitnexus_index_scheduler_uses_first_repository_when_default_id_is_stale(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_path = tmp_path / "configured-repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "default_repository_id": "deleted-repo",
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="configured",
+                    clone_url="https://example.com/configured.git",
+                    local_path=str(repo_path),
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.tick()
+
+    assert status["state"] == "ready"
+    assert status["repository_id"] == "configured"
+    assert status["repo_path"] == str(repo_path.resolve(strict=False))
+
+
+def test_gitnexus_index_status_refreshes_repo_path_from_runtime_config(
+    storage_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_path = tmp_path / "configured-repo"
+    repo_path.mkdir()
+
+    service = ReviewService(storage_root=storage_root)
+    runtime = service.get_runtime_settings().model_copy(
+        update={
+            "code_repositories": [
+                CodeRepositorySettings(
+                    repository_id="configured",
+                    clone_url="https://example.com/configured.git",
+                    local_path=str(repo_path),
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "get_runtime_settings", lambda: runtime)
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/local/bin/gitnexus" if command == "gitnexus" else None)
+    write_json(
+        storage_root / "gitnexus" / "configured" / "index_status.json",
+        {
+            "state": "ready",
+            "message": "old",
+            "repository_id": "configured",
+            "repo_path": "C:/stale/path",
+            "repo_name": "path",
+            "graph_dir": "C:/stale/path/.gitnexus",
+            "graph_dir_exists": True,
+        },
+    )
+
+    scheduler = GitNexusIndexScheduler(service)
+    status = scheduler.status("configured")
+
+    assert status["repo_path"] == str(repo_path.resolve(strict=False))
+    assert status["repo_name"] == "configured-repo"
+    assert status["graph_dir"] == str(repo_path.resolve(strict=False) / ".gitnexus")
+    assert status["graph_dir_exists"] is False
+
+
 def test_gitnexus_manual_index_skips_unknown_repository_without_spawning(storage_root: Path, tmp_path: Path, monkeypatch):
     configured_repo = tmp_path / "configured-repo"
     configured_repo.mkdir()

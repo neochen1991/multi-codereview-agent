@@ -16,8 +16,9 @@
 - macOS / Linux：需要 `bash`、`curl`
 - Windows：需要 PowerShell，建议安装 Python Launcher `py`
 - 可选：GitNexus，用于生成 MR 关联影响分析报告
+- 推荐：Tree-sitter Python 依赖，用于 Java 代码图谱和更准确的关联上下文
 
-Python 依赖会通过 `pip install -e .` 安装，前端依赖会通过 `npm install` 安装。GitNexus 和 Tree-sitter 属于可选增强能力，未安装时不影响基础代码检视。
+Python 依赖会通过 `pip install -e ".[code-graph]"` 安装，前端依赖会通过 `npm install` 安装。GitNexus 属于可选增强能力；Tree-sitter 不需要单独安装系统命令，本工具通过 Python 包 `tree-sitter` 和 `tree-sitter-language-pack` 使用它。
 
 后端启动会用到 `uvicorn`。如果是全新环境，请按下面安装步骤安装。
 
@@ -28,7 +29,7 @@ macOS / Linux：
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e . "uvicorn[standard]>=0.30"
+.venv/bin/python -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
 npm --prefix frontend install
 ```
 
@@ -36,8 +37,8 @@ Windows：
 
 ```bat
 py -3.11 -m venv .venv
-.venv\Scripts\python.exe -m pip install -U pip
-.venv\Scripts\python.exe -m pip install -e . "uvicorn[standard]>=0.30"
+.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
 cd frontend
 npm install
 ```
@@ -100,6 +101,18 @@ Windows：
 
 ```bat
 scripts\start-all.bat
+```
+
+Windows 一键启动脚本会自动检查并补装：
+
+- 后端基础依赖
+- Tree-sitter 代码图谱依赖：`tree-sitter`、`tree-sitter-language-pack`、`networkx`
+- 前端 `node_modules`
+
+启动后进入设置页，在“Tree-sitter 代码图谱”区块中为目标代码仓点击“建立/刷新图谱”。图谱生成后会写入目标仓库：
+
+```text
+<repo>/.code-review-graph/graph.db
 ```
 
 启动成功后访问：
@@ -226,39 +239,70 @@ $env:GITNEXUS_MCP_COMMAND='["npx", "-y", "gitnexus@latest", "mcp"]'
 
 ## 可选：安装 Tree-sitter 依赖
 
-本项目参考 `code-review-graph` 引入了 Tree-sitter 本地代码图谱，用于给 Java 检视提供更准确的调用方、被调方、接口实现、测试影响和最小上下文。该能力是增强项：安装后会优先使用 Tree-sitter 图谱检索关联上下文，没有命中或未安装时会自动退化为关键词搜索。
+本项目参考 `code-review-graph` 引入了 Tree-sitter 本地代码图谱，用于给 Java 检视提供更准确的调用方、被调方、接口实现、测试影响和最小上下文。安装后会优先使用 Tree-sitter 图谱检索关联上下文，没有命中或不可用时会自动退化为关键词搜索。
 
-如果需要启用或验证这部分能力，可以在项目虚拟环境中安装：
+注意：本工具使用的是 Python 包，不需要在 Windows 上安装 `tree-sitter.exe`，也不需要执行 `npm install -g tree-sitter-cli`。
 
-macOS / Linux：
+Windows 推荐安装方式：
+
+```bat
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
+.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_language; get_language('java'); print('tree-sitter java ok')"
+```
+
+也可以直接运行一键启动脚本，它会自动做同样的依赖检查和安装：
+
+```bat
+scripts\start-all.bat
+```
+
+安装完成后，进入前端设置页 `/settings`，在“Tree-sitter 代码图谱”区块中点击目标仓库的“建立/刷新图谱”。成功后页面会展示：
+
+- 图谱数据库路径：`<repo>/.code-review-graph/graph.db`
+- 图谱规模：已索引文件数、节点数、关系数
+- 最近更新时间
+- 本次索引、跳过和失败文件数量
+
+macOS / Linux 安装方式：
 
 ```bash
 .venv/bin/python -m pip install -e ".[code-graph]"
+.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_language; get_language('java'); print('tree-sitter java ok')"
 ```
 
-Windows：
+如果 Windows 使用公司内网 PyPI 镜像，确认镜像里有以下包：
+
+- `tree-sitter`
+- `tree-sitter-language-pack`
+- `networkx`
+
+例如需要临时指定镜像：
 
 ```bat
+set PIP_INDEX_URL=https://your-internal-pypi/simple
 .venv\Scripts\python.exe -m pip install -e ".[code-graph]"
 ```
 
-安装后验证：
+PowerShell：
 
-```bash
-.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; print('tree-sitter ok')"
+```powershell
+$env:PIP_INDEX_URL="https://your-internal-pypi/simple"
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
 ```
 
-Windows：
+如果 pip 尝试从源码编译并失败，优先升级 pip / wheel：
 
 ```bat
-.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; print('tree-sitter ok')"
+.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
 ```
 
 说明：
 
 - 不需要单独安装 Tree-sitter CLI。
 - `tree-sitter-language-pack` 提供常用语言 grammar，减少 Windows 下本地编译成本。
-- 这些依赖已放在 `pyproject.toml` 的 `code-graph` 可选依赖组中，不会影响基础安装。
+- 这些依赖已放在 `pyproject.toml` 的 `code-graph` 可选依赖组中。
 
 方案说明见 [借鉴 code-review-graph 的关联上下文优化方案](docs/plans/2026-05-05-code-review-graph-context-optimization.md)。
 

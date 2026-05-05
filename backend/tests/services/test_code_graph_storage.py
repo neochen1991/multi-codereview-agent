@@ -292,3 +292,40 @@ def test_code_graph_storage_builds_context_from_changed_ranges_when_symbol_searc
     assert result["contexts"][0]["source_qualified_name"] == "com.example.OrderService.cancel"
     assert "order.cancel" in result["contexts"][0]["snippet"]
     assert result["minimal_context"]["next_tool_suggestions"]
+
+
+def test_code_graph_storage_matches_windows_style_changed_file_paths(tmp_path: Path) -> None:
+    storage = CodeGraphStorage(tmp_path / "graph.db")
+    storage.initialize()
+    service_file = "src/main/java/com/example/OrderService.java"
+    storage.replace_file_graph(
+        file_path=service_file,
+        file_hash="hash-service",
+        nodes=[
+            CodeGraphNode(
+                kind="method",
+                name="cancel",
+                qualified_name="com.example.OrderService.cancel",
+                language="java",
+                file_path=service_file,
+                line_start=30,
+                line_end=38,
+                snippet="public void cancel(Order order) { order.cancel(); }",
+            ),
+        ],
+        edges=[],
+    )
+
+    result = storage.search_related_context(
+        repository_id="repo",
+        changed_files=[r"src\main\java\com\example\OrderService.java"],
+        changed_symbols=["DefinitelyMissingSymbol"],
+        limit=5,
+    )
+
+    assert result["fallback_reason"] == ""
+    assert result["stats"]["changed_file_count"] == 1
+    assert result["stats"]["changed_node_count"] == 1
+    assert result["contexts"][0]["context_source"] == "tree_sitter"
+    assert result["contexts"][0]["path"] == service_file
+    assert result["contexts"][0]["relationship"] == "changed_node"

@@ -194,7 +194,7 @@ class CodeGraphStorage:
         limit: int = 12,
         changed_ranges: dict[str, list[tuple[int, int]]] | None = None,
     ) -> dict[str, object]:
-        normalized_files = list(changed_files or [])
+        normalized_files = [self._normalize_path(item) for item in list(changed_files or []) if self._normalize_path(item)]
         symbols = list(changed_symbols or [])
         normalized_ranges = self._normalize_changed_ranges(changed_ranges or {})
         impact_analysis = self.analyze_change_impact(
@@ -324,10 +324,11 @@ class CodeGraphStorage:
     def _find_changed_nodes(self, changed_files: list[str], changed_symbols: list[str]) -> list[dict[str, Any]]:
         clauses = []
         params: list[Any] = []
-        if changed_files:
-            placeholders = ",".join("?" for _ in changed_files)
+        normalized_files = [self._normalize_path(item) for item in list(changed_files or []) if self._normalize_path(item)]
+        if normalized_files:
+            placeholders = ",".join("?" for _ in normalized_files)
             clauses.append(f"file_path IN ({placeholders})")
-            params.extend(changed_files)
+            params.extend(normalized_files)
         for symbol in changed_symbols:
             like = f"%{symbol}%"
             clauses.append("(qualified_name LIKE ? OR name LIKE ? OR signature LIKE ?)")

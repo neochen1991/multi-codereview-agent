@@ -5,6 +5,7 @@ import type { UploadProps } from "antd";
 import {
   expertApi,
   settingsApi,
+  type CodeGraphIndexStatus,
   type CodeRepositorySettings,
   type ExpertProfile,
   type ExtensionSkill,
@@ -182,6 +183,10 @@ const SettingsPage: React.FC = () => {
   const [repositoryGitnexusStatuses, setRepositoryGitnexusStatuses] = React.useState<Record<string, GitNexusIndexStatus>>({});
   const [repositoryGitnexusPreflights, setRepositoryGitnexusPreflights] = React.useState<Record<string, GitNexusPreflightStatus>>({});
   const [repositoryGitnexusRunning, setRepositoryGitnexusRunning] = React.useState<Record<string, boolean>>({});
+  const [codeGraphStatus, setCodeGraphStatus] = React.useState<CodeGraphIndexStatus | null>(null);
+  const [codeGraphRunning, setCodeGraphRunning] = React.useState(false);
+  const [repositoryCodeGraphStatuses, setRepositoryCodeGraphStatuses] = React.useState<Record<string, CodeGraphIndexStatus>>({});
+  const [repositoryCodeGraphRunning, setRepositoryCodeGraphRunning] = React.useState<Record<string, boolean>>({});
   const [impactTemplate, setImpactTemplate] = React.useState<ImpactReportTemplate | null>(null);
   const [impactTemplateContent, setImpactTemplateContent] = React.useState("");
   const [impactTemplateSchemaContent, setImpactTemplateSchemaContent] = React.useState("");
@@ -243,26 +248,68 @@ const SettingsPage: React.FC = () => {
     setRepositoryGitnexusPreflights(Object.fromEntries(preflightResults));
   }, [form]);
 
+  const refreshRepositoryCodeGraphStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
+    const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
+      String(repo?.repository_id || "").trim(),
+    );
+    if (!repoList.length) {
+      setRepositoryCodeGraphStatuses({});
+      return;
+    }
+    const statusResults = await Promise.all(
+      repoList.map(async (repo) => {
+        const repositoryId = String(repo.repository_id || "").trim();
+        try {
+          const status = await settingsApi.getRepositoryCodeGraphIndexStatus(repositoryId);
+          return [repositoryId, status] as const;
+        } catch (error: any) {
+          return [
+            repositoryId,
+            {
+              repository_id: repositoryId,
+              state: "failed",
+              message: error?.message || "读取 Tree-sitter 图谱状态失败",
+            } satisfies CodeGraphIndexStatus,
+          ] as const;
+        }
+      }),
+    );
+    setRepositoryCodeGraphStatuses(Object.fromEntries(statusResults));
+  }, [form]);
+
   const loadPage = React.useCallback(async () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, impactTemplatePayload] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, codeGraph, impactTemplatePayload] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
-        settingsApi.getGitNexusIndexStatus(),
+        settingsApi.getGitNexusIndexStatus().catch(() => null),
         settingsApi.getGitNexusPreflight().catch(() => null),
+        settingsApi.getCodeGraphIndexStatus().catch(() => null),
         settingsApi.getImpactReportTemplate(),
       ]);
       form.setFieldsValue(runtime);
       void refreshRepositoryGitNexusStatuses(runtime.code_repositories || []);
+      void refreshRepositoryCodeGraphStatuses(runtime.code_repositories || []);
       setExperts(expertList);
       setExtensionSkills(skills);
       setExtensionTools(tools);
-      setGitnexusStatus(gitnexus);
+      setGitnexusStatus(
+        gitnexus || {
+          state: "unknown",
+          message: "GitNexus 图谱状态暂时不可用，不影响读取已保存设置。",
+        },
+      );
       setGitnexusPreflight(gitnexusDiagnostic);
+      setCodeGraphStatus(
+        codeGraph || {
+          state: "unknown",
+          message: "Tree-sitter 图谱状态暂时不可用，不影响读取已保存设置。",
+        },
+      );
       setImpactTemplate(impactTemplatePayload);
       setImpactTemplateContent(impactTemplatePayload.content || "");
       setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
@@ -300,20 +347,30 @@ const SettingsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [form, refreshRepositoryGitNexusStatuses, skillForm, toolForm]);
+  }, [form, refreshRepositoryCodeGraphStatuses, refreshRepositoryGitNexusStatuses, skillForm, toolForm]);
 
   React.useEffect(() => {
     void loadPage();
   }, [loadPage]);
 
   const refreshGitNexusStatus = React.useCallback(async () => {
-    const [status, diagnostic] = await Promise.all([
-      settingsApi.getGitNexusIndexStatus(),
-      settingsApi.getGitNexusPreflight().catch(() => null),
-    ]);
-    setGitnexusStatus(status);
-    setGitnexusPreflight(diagnostic);
-    await refreshRepositoryGitNexusStatuses();
+    try {
+      const [status, diagnostic] = await Promise.all([
+        settingsApi.getGitNexusIndexStatus(),
+        settingsApi.getGitNexusPreflight().catch(() => null),
+      ]);
+      setGitnexusStatus(status);
+      setGitnexusPreflight(diagnostic);
+      await refreshRepositoryGitNexusStatuses();
+    } catch (error: any) {
+      setGitnexusStatus((prev) =>
+        prev || {
+          state: "unknown",
+          message: error?.message || "GitNexus 图谱状态暂时不可用。",
+        },
+      );
+      message.warning(error?.message || "刷新 GitNexus 图谱状态失败");
+    }
   }, [refreshRepositoryGitNexusStatuses]);
 
   const handleRunGitNexusIndex = React.useCallback(async () => {
@@ -369,6 +426,74 @@ const SettingsPage: React.FC = () => {
       setRepositoryGitnexusRunning((prev) => ({ ...prev, [id]: false }));
     }
   }, [handleRefreshRepositoryGitNexusStatus]);
+
+  const refreshCodeGraphStatus = React.useCallback(async () => {
+    try {
+      const status = await settingsApi.getCodeGraphIndexStatus();
+      setCodeGraphStatus(status);
+      await refreshRepositoryCodeGraphStatuses();
+    } catch (error: any) {
+      setCodeGraphStatus((prev) =>
+        prev || {
+          state: "unknown",
+          message: error?.message || "Tree-sitter 图谱状态暂时不可用。",
+        },
+      );
+      message.warning(error?.message || "刷新 Tree-sitter 图谱状态失败");
+    }
+  }, [refreshRepositoryCodeGraphStatuses]);
+
+  const handleRunCodeGraphIndex = React.useCallback(async () => {
+    setCodeGraphRunning(true);
+    try {
+      const status = await settingsApi.runCodeGraphIndex();
+      setCodeGraphStatus(status);
+      if (status.state === "blocked") {
+        message.warning(status.message || "Tree-sitter 当前正在处理其他仓库");
+      } else {
+        message.success("Tree-sitter 图谱建图任务已触发");
+      }
+      window.setTimeout(() => {
+        void refreshCodeGraphStatus();
+      }, 1500);
+    } catch (error: any) {
+      message.error(error?.message || "触发 Tree-sitter 图谱建图失败");
+    } finally {
+      setCodeGraphRunning(false);
+    }
+  }, [refreshCodeGraphStatus]);
+
+  const handleRefreshRepositoryCodeGraphStatus = React.useCallback(async (repositoryId: string) => {
+    const id = String(repositoryId || "").trim();
+    if (!id) return;
+    const status = await settingsApi.getRepositoryCodeGraphIndexStatus(id);
+    setRepositoryCodeGraphStatuses((prev) => ({ ...prev, [id]: status }));
+  }, []);
+
+  const handleRunRepositoryCodeGraphIndex = React.useCallback(async (repositoryId: string) => {
+    const id = String(repositoryId || "").trim();
+    if (!id) {
+      message.warning("请先填写仓库 ID");
+      return;
+    }
+    setRepositoryCodeGraphRunning((prev) => ({ ...prev, [id]: true }));
+    try {
+      const status = await settingsApi.runRepositoryCodeGraphIndex(id);
+      setRepositoryCodeGraphStatuses((prev) => ({ ...prev, [id]: status }));
+      if (status.state === "blocked") {
+        message.warning(status.message || `Tree-sitter 当前正在处理其他仓库，${id} 暂未启动`);
+      } else {
+        message.success(`Tree-sitter 图谱建图任务已触发：${id}`);
+      }
+      window.setTimeout(() => {
+        void handleRefreshRepositoryCodeGraphStatus(id);
+      }, 1500);
+    } catch (error: any) {
+      message.error(error?.message || `触发 ${id} Tree-sitter 图谱建图失败`);
+    } finally {
+      setRepositoryCodeGraphRunning((prev) => ({ ...prev, [id]: false }));
+    }
+  }, [handleRefreshRepositoryCodeGraphStatus]);
 
   const handleSaveImpactTemplate = React.useCallback(async () => {
     setSavingImpactTemplate(true);
@@ -533,6 +658,30 @@ const SettingsPage: React.FC = () => {
     return "default";
   };
 
+  const renderCodeGraphDependencyChecks = (status?: CodeGraphIndexStatus | null) => {
+    const checks = status?.dependency_checks || [];
+    if (!checks.length) {
+      return <span>暂无依赖检查结果，点击刷新后查看。</span>;
+    }
+    return (
+      <Space direction="vertical" size={4}>
+        {checks.map((check) => (
+          <Tag key={check.name} color={gitnexusDiagnosticColor(check.status)}>
+            {check.message}
+          </Tag>
+        ))}
+      </Space>
+    );
+  };
+
+  const codeGraphCountSummary = (status?: CodeGraphIndexStatus | null) => {
+    if (!status?.graph_db_exists) return "暂无图谱数据";
+    const fileCount = Number(status.graph_file_count || 0);
+    const nodeCount = Number(status.graph_node_count || 0);
+    const edgeCount = Number(status.graph_edge_count || 0);
+    return `${fileCount} 个文件，${nodeCount} 个节点，${edgeCount} 条关系`;
+  };
+
   const gitnexusCommandCheck = (diagnostic?: GitNexusPreflightStatus | null) =>
     (diagnostic?.checks || []).find((check) => check.name === "gitnexus_command") || null;
 
@@ -634,6 +783,129 @@ const SettingsPage: React.FC = () => {
           <Descriptions.Item label="代码仓上下文">所有检查角色可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
           <Descriptions.Item label="问题治理">低风险、提示性、常见建议类问题可只保留为检视发现，不升级为正式问题</Descriptions.Item>
         </Descriptions>
+      </Card>
+
+      <Card
+        className="module-card"
+        title="Tree-sitter 代码图谱"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Button onClick={() => void refreshCodeGraphStatus()}>刷新全部状态</Button>
+            <Button type="primary" loading={codeGraphRunning} onClick={() => void handleRunCodeGraphIndex()}>
+              兼容单仓建图
+            </Button>
+          </Space>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Tree-sitter 图谱用于代码检视前的结构化上下文检索"
+          description="首次使用或代码仓变更较多时，请先建立图谱。建图会在目标仓库生成 .code-review-graph/graph.db；检视 Java 变更时会优先使用该图谱提取调用关系、影响文件、测试缺口和最小审查上下文，未命中时再退化为关键词搜索。"
+        />
+        <Form.Item noStyle shouldUpdate>
+          {() => {
+            const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
+            if (!repositories.length) {
+              return (
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="状态">
+                    <Space wrap>
+                      <Tag color={gitnexusStateColor(codeGraphStatus?.state)}>{codeGraphStatus?.state || "idle"}</Tag>
+                      <span>{codeGraphStatus?.message || "尚未读取 Tree-sitter 图谱状态。"}</span>
+                    </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="依赖检查">{renderCodeGraphDependencyChecks(codeGraphStatus)}</Descriptions.Item>
+                  <Descriptions.Item label="代码仓路径">
+                    {codeGraphStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="图谱数据库">
+                    {codeGraphStatus?.graph_db_path || "建图后会生成在代码仓 .code-review-graph/graph.db"}
+                    {typeof codeGraphStatus?.graph_db_exists === "boolean" ? (
+                      <Tag style={{ marginLeft: 8 }} color={codeGraphStatus.graph_db_exists ? "success" : "warning"}>
+                        {codeGraphStatus.graph_db_exists ? "已生成" : "未生成"}
+                      </Tag>
+                    ) : null}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="图谱规模">{codeGraphCountSummary(codeGraphStatus)}</Descriptions.Item>
+                  <Descriptions.Item label="最近更新时间">
+                    {formatBeijingTime(codeGraphStatus?.indexed_at || codeGraphStatus?.graph_db_updated_at || codeGraphStatus?.updated_at)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="本次建图">
+                    {`索引 ${Number(codeGraphStatus?.indexed_file_count || 0)} 个，跳过 ${Number(codeGraphStatus?.skipped_unchanged_file_count || 0)} 个，失败 ${Number(codeGraphStatus?.failed_file_count || 0)} 个`}
+                  </Descriptions.Item>
+                </Descriptions>
+              );
+            }
+            return (
+              <div className="settings-gitnexus-grid">
+                {repositories.map((repo, index) => {
+                  const repositoryId = String(repo.repository_id || "").trim();
+                  const status = repositoryId ? repositoryCodeGraphStatuses[repositoryId] : undefined;
+                  return (
+                    <Card
+                      key={repositoryId || `code-graph-repo-${index}`}
+                      size="small"
+                      className="settings-gitnexus-repo-card"
+                      title={
+                        <Space wrap>
+                          <span>{repo.name || repositoryId || `代码仓 ${index + 1}`}</span>
+                          <Tag>{repo.provider || "generic"}</Tag>
+                          {repo.enabled === false ? <Tag color="warning">未启用</Tag> : null}
+                        </Space>
+                      }
+                      extra={
+                        <Space>
+                          <Button size="small" disabled={!repositoryId} onClick={() => void handleRefreshRepositoryCodeGraphStatus(repositoryId)}>
+                            刷新
+                          </Button>
+                          <Button
+                            size="small"
+                            type="primary"
+                            disabled={!repositoryId || repo.enabled === false}
+                            loading={Boolean(repositoryCodeGraphRunning[repositoryId])}
+                            onClick={() => void handleRunRepositoryCodeGraphIndex(repositoryId)}
+                          >
+                            建立/刷新图谱
+                          </Button>
+                        </Space>
+                      }
+                    >
+                      <Descriptions column={1} size="small">
+                        <Descriptions.Item label="仓库 ID">{repositoryId || "未填写"}</Descriptions.Item>
+                        <Descriptions.Item label="状态">
+                          <Space wrap>
+                            <Tag color={gitnexusStateColor(status?.state)}>{status?.state || "idle"}</Tag>
+                            <span>{status?.message || "尚未读取该仓库的 Tree-sitter 图谱状态。"}</span>
+                          </Space>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="依赖检查">{renderCodeGraphDependencyChecks(status)}</Descriptions.Item>
+                        <Descriptions.Item label="本地路径">{status?.repo_path || repo.local_path || "未配置"}</Descriptions.Item>
+                        <Descriptions.Item label="图谱数据库">
+                          {status?.graph_db_path || "建图后会生成在代码仓 .code-review-graph/graph.db"}
+                          {typeof status?.graph_db_exists === "boolean" ? (
+                            <Tag style={{ marginLeft: 8 }} color={status.graph_db_exists ? "success" : "warning"}>
+                              {status.graph_db_exists ? "已生成" : "未生成"}
+                            </Tag>
+                          ) : null}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="图谱规模">{codeGraphCountSummary(status)}</Descriptions.Item>
+                        <Descriptions.Item label="最近更新时间">
+                          {formatBeijingTime(status?.indexed_at || status?.graph_db_updated_at || status?.updated_at)}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="本次建图">
+                          {`索引 ${Number(status?.indexed_file_count || 0)} 个，跳过 ${Number(status?.skipped_unchanged_file_count || 0)} 个，失败 ${Number(status?.failed_file_count || 0)} 个`}
+                        </Descriptions.Item>
+                      </Descriptions>
+                    </Card>
+                  );
+                })}
+              </div>
+            );
+          }}
+        </Form.Item>
       </Card>
 
       <Card
@@ -1013,6 +1285,7 @@ const SettingsPage: React.FC = () => {
               message.success("运行时设置已更新");
               form.setFieldsValue(updatedRuntime);
               void refreshRepositoryGitNexusStatuses(updatedRuntime.code_repositories || []);
+              void refreshRepositoryCodeGraphStatuses(updatedRuntime.code_repositories || []);
               form.setFieldValue("default_llm_api_key", "");
               form.setFieldValue("storage_pg_password", "");
               form.setFieldValue("code_repo_access_token", "");

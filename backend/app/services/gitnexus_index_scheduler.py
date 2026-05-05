@@ -237,6 +237,7 @@ class GitNexusIndexScheduler:
 
         runtime = self._review_service.get_runtime_settings()
         resolved_repository_id = self._resolve_repository_id(runtime, repository_id)
+        repo_path = self._resolve_repo_path(runtime, resolved_repository_id)
         status_path = self._status_path(resolved_repository_id)
         command = self._index_command()
         command_text = self._command_text(command)
@@ -268,6 +269,12 @@ class GitNexusIndexScheduler:
             refreshed["gitnexus_command"] = command_text
             refreshed["gitnexus_path"] = binary_path
             refreshed["repository_id"] = resolved_repository_id
+            if repo_path:
+                repo_dir = Path(repo_path)
+                refreshed["repo_path"] = str(repo_dir)
+                refreshed["repo_name"] = repo_dir.name
+                refreshed["graph_dir"] = str(repo_dir / ".gitnexus")
+                refreshed["graph_dir_exists"] = (repo_dir / ".gitnexus").exists()
             stale_missing_message = any(
                 token in str(refreshed.get("message") or "")
                 for token in ("未预装 GitNexus", "未安装 GitNexus", "未发现 gitnexus", "未发现 GitNexus")
@@ -445,7 +452,18 @@ class GitNexusIndexScheduler:
         raw = str(repository_id or "").strip()
         if raw:
             return raw
-        return str(getattr(runtime, "default_repository_id", "") or "").strip()
+        repositories = list(getattr(runtime, "code_repositories", []) or [])
+        default_repository_id = str(getattr(runtime, "default_repository_id", "") or "").strip()
+        if default_repository_id and (
+            not repositories
+            or any(str(getattr(repository, "repository_id", "") or "").strip() == default_repository_id for repository in repositories)
+        ):
+            return default_repository_id
+        for repository in repositories:
+            candidate = str(getattr(repository, "repository_id", "") or "").strip()
+            if candidate:
+                return candidate
+        return ""
 
     def _resolve_repo_path(self, runtime, repository_id: str = "") -> str:
         normalized_repository_id = str(repository_id or "").strip()
@@ -456,7 +474,7 @@ class GitNexusIndexScheduler:
         raw = str((repository.local_path if repository is not None else "") or getattr(runtime, "code_repo_local_path", "") or "").strip()
         if not raw:
             return ""
-        return str(Path(raw).expanduser())
+        return str(Path(raw).expanduser().resolve(strict=False))
 
     def _status_path(self, repository_id: str = "") -> Path:
         normalized = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(repository_id or "").strip())
