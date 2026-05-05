@@ -236,7 +236,17 @@ class McpStdioSession:
             raise RuntimeError(f"MCP 调用超时: timeout_seconds={self.timeout_seconds}")
         kind, payload = result_queue.get()
         if kind == "error":
-            raise payload  # type: ignore[misc]
+            stderr = self._stderr_text()
+            logger.error(
+                "mcp stdio communication failed executable=%s cwd=%s error=%s stderr_tail=%s",
+                self.command[0] if self.command else "",
+                self.cwd,
+                payload,
+                stderr,
+            )
+            if isinstance(payload, BaseException):
+                raise RuntimeError(f"MCP 通信失败: {payload}; stderr={stderr}") from payload
+            raise RuntimeError(f"MCP 通信失败: {payload}; stderr={stderr}")
         return dict(payload) if isinstance(payload, dict) else {}
 
     def _drain_stderr(self, stderr: BufferedReader) -> None:

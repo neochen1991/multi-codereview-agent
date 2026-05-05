@@ -180,8 +180,10 @@ class ChangeImpactReportService:
 
     def _user_prompt(self, report: ImpactReport, trace: dict[str, Any]) -> str:
         template_variables = self._schema_variables()
+        now_text = datetime.now(self.SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
         facts = {
             "workflow": self.WORKFLOW,
+            "current_time": now_text,
             "repo": trace.get("repo") or "",
             "source_branch": trace.get("source_branch") or "",
             "target_branch": trace.get("target_branch") or "",
@@ -225,7 +227,8 @@ class ChangeImpactReportService:
             "7. 模板中的每一个变量都要由你结合 GitNexus facts 判断并填充，不要在最终 markdown 中保留任何 {{ }} 占位符。\n"
             "8. 如果模板中出现“遍历”“列出”“无则显示”这类说明，必须在 markdown 里展开成最终内容，而不是把说明原样抄回去。\n"
             "9. source_hint 只是参考，不是限制；最终值仍然由你基于 facts 生成，但不能虚构不存在的证据。\n"
-            "10. 输出必须是 JSON，不要输出 Markdown 之外的解释。\n\n"
+            "10. 时间字段只能使用 facts.current_time，禁止生成 202X、示例日期、占位日期或自行推测的时间。\n"
+            "11. 输出必须是 JSON，不要输出 Markdown 之外的解释。\n\n"
             f"Markdown 模板:\n{self._report_template}\n\n"
             f"模板变量 schema:\n{json.dumps(self._template_schema, ensure_ascii=False, indent=2)}\n\n"
             f"输出 schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"

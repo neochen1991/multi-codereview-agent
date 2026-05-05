@@ -103,7 +103,7 @@ def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error(
             if tool == "list_repos":
                 responses[request_id] = {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}
             elif tool == "detect_changes":
-                responses[request_id] = {"error": {"code": -32000, "message": "detect failed", "data": {"reason": "repo not indexed"}}}
+                responses[request_id] = {"error": {"code": -32000, "message": "detect failed", "data": {"reason": "transient analyzer error"}}}
             elif tool == "context":
                 responses[request_id] = {
                     "result": {"content": [{"text": '{"symbol":{"name":"OrderService.create"},"incoming":{"calls":[{"name":"OrderController.create"}]}}'}]}
@@ -130,6 +130,52 @@ def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error(
     assert "create" in payload["successful_context_targets"]
     assert "create" in payload["successful_impact_targets"]
     assert payload["dynamic_targets"] == ["OrderController.create"]
+
+
+def test_gitnexus_mcp_impact_client_stops_when_detect_changes_reports_repo_unavailable():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+    call_batches: list[list[dict[str, object]]] = []
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        del command, repo_path, runtime_env
+        call_batches.append(requests)
+        responses = {}
+        for request in requests:
+            params = request.get("params") or {}
+            tool = params.get("name")
+            request_id = request.get("id")
+            if tool == "list_repos":
+                responses[request_id] = {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}
+            elif tool == "detect_changes":
+                responses[request_id] = {"result": {"content": [{"text": '{"error":"repository repo not indexed"}'}]}}
+        return responses
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        with pytest.raises(RuntimeError, match="GitNexus MCP 对当前仓库不可用"):
+            client.analyze_mr(
+                repo_name="repo",
+                repo_path="/tmp/repo",
+                subject=subject,
+                changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": ""})()],
+                runtime_env=None,
+            )
+
+    tool_names = [
+        (request.get("params") or {}).get("name")
+        for batch in call_batches
+        for request in batch
+        if request.get("method") == "tools/call"
+    ]
+    assert tool_names == ["list_repos", "detect_changes"]
 
 
 def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(caplog):
@@ -199,7 +245,65 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(capl
     assert '"paths": [["Controller", "OrderService.create"]]' in log_text
 
 
-def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_repo(caplog):
+def test_gitnexus_mcp_impact_client_continues_when_cli_list_confirms_repo(caplog):
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-b",
+        project_id="proj",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff="",
+    )
+    call_batches: list[list[dict[str, object]]] = []
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        del command, repo_path, runtime_env
+        call_batches.append(requests)
+        responses = {}
+        for request in requests:
+            params = request.get("params") or {}
+            tool = params.get("name")
+            args = params.get("arguments") or {}
+            request_id = request.get("id")
+            if tool == "list_repos":
+                responses[request_id] = {"result": {"content": [{"text": '[{"name":"repo-a"}]'}]}}
+            elif tool == "detect_changes":
+                responses[request_id] = {"result": {"content": [{"text": '{"changed_symbols":[]}'}]}}
+            elif tool == "context":
+                responses[request_id] = {"result": {"content": [{"text": '{"symbol":{"name":"%s"}}' % args.get("name")}]}}
+            elif tool == "impact":
+                responses[request_id] = {"result": {"content": [{"text": '{"paths":[["Entry","%s"]]}' % args.get("target")}]}}
+        return responses
+
+    with caplog.at_level(logging.WARNING, logger="app.services.gitnexus_impact_service"):
+        with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+            payload = client.analyze_mr(
+                repo_name="repo-b",
+                repo_path="/tmp/repo-b",
+                subject=subject,
+                changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})()],
+                runtime_env=None,
+                cli_available_repos=["repo-a", "repo-b"],
+            )
+
+    tool_names = [
+        (request.get("params") or {}).get("name")
+        for batch in call_batches
+        for request in batch
+        if request.get("method") == "tools/call"
+    ]
+    assert tool_names[:2] == ["list_repos", "detect_changes"]
+    assert payload["list_repos_missing_repo"] is True
+    assert payload["cli_list_has_repo"] is True
+    assert payload["context_results"]
+    assert payload["impact_results"]
+    assert "list_repos did not include target repo" in caplog.text
+    assert "cli list confirmed it" in caplog.text
+
+
+def test_gitnexus_mcp_impact_client_stops_when_mcp_and_cli_miss_repo():
     client = GitNexusMcpImpactClient(timeout_seconds=5)
     subject = ReviewSubject(
         subject_type="mr",
@@ -222,15 +326,15 @@ def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_re
                 responses[request.get("id")] = {"result": {"content": [{"text": '[{"name":"repo-a"}]'}]}}
         return responses
 
-    with caplog.at_level(logging.WARNING, logger="app.services.gitnexus_impact_service"):
-        with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
-            payload = client.analyze_mr(
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        with pytest.raises(RuntimeError, match="GitNexus MCP 未加载当前仓库"):
+            client.analyze_mr(
                 repo_name="repo-b",
                 repo_path="/tmp/repo-b",
                 subject=subject,
                 changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})()],
                 runtime_env=None,
-                cli_available_repos=["repo-a", "repo-b"],
+                cli_available_repos=["repo-a"],
             )
 
     tool_names = [
@@ -239,13 +343,7 @@ def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_re
         for request in batch
         if request.get("method") == "tools/call"
     ]
-    assert tool_names[:2] == ["list_repos", "detect_changes"]
-    assert payload["repo"] == "repo-b"
-    assert payload["available_repos"] == ["repo-a"]
-    assert payload["cli_available_repos"] == ["repo-a", "repo-b"]
-    assert payload["cli_list_has_repo"] is True
-    assert payload["list_repos_missing_repo"] is True
-    assert "list_repos did not include target repo" in caplog.text
+    assert tool_names == ["list_repos"]
 
 
 def test_gitnexus_mcp_impact_client_respects_runtime_query_limits():
@@ -429,8 +527,9 @@ def test_gitnexus_mcp_impact_client_prioritizes_high_value_targets():
     )
 
     assert skipped_invalid == ["private"]
-    assert targets[0] == "OrderController.createOrder"
-    assert "OrderRepository.save" in targets[:3]
+    assert targets[0] == "OrderController"
+    assert "OrderController.createOrder" in targets[:4]
+    assert "OrderRepository" in targets[:4]
     assert "OrderDto" in targets
 
 
@@ -457,6 +556,45 @@ def test_gitnexus_mcp_impact_client_uses_feedback_profiles_in_target_priority():
 
     assert skipped_invalid == []
     assert targets.index("OrderRepository.save") > targets.index("OrderController.create")
+
+
+def test_gitnexus_mcp_impact_client_prioritizes_gitnexus_method_uids_from_class_context():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+
+    dynamic_targets = client._dynamic_targets_from_contexts(
+        [
+            {
+                "outgoing": {
+                    "has_method": [
+                        {
+                            "uid": "Method:src/main/java/com/example/OrderService.java:OrderService.createOrder#1",
+                            "name": "createOrder",
+                            "filePath": "src/main/java/com/example/OrderService.java",
+                        },
+                        {
+                            "uid": "Method:src/test/java/com/example/OrderServiceTest.java:OrderServiceTest.setUp#0",
+                            "name": "setUp",
+                            "filePath": "src/test/java/com/example/OrderServiceTest.java",
+                        },
+                    ]
+                }
+            }
+        ],
+        existing_targets=["OrderService"],
+        max_targets=2,
+        changed_symbols=[
+            ImpactSymbol(
+                file_path="src/main/java/com/example/OrderService.java",
+                symbol="createOrder",
+                kind="function",
+                container="OrderService",
+                line_start=12,
+            )
+        ],
+    )
+
+    assert dynamic_targets[0] == "Method:src/main/java/com/example/OrderService.java:OrderService.createOrder#1"
+    assert "OrderServiceTest.setUp" not in dynamic_targets[0]
 
 
 def test_gitnexus_mcp_impact_client_skips_missing_symbol_context_and_impact():
@@ -957,6 +1095,91 @@ def test_gitnexus_impact_service_ignores_stale_local_failed_status_when_storage_
     assert report.graph_commit == "ready-storage-commit"
 
 
+def test_gitnexus_impact_service_downgrades_when_graph_commit_differs_from_mr_source(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        storage_root / "gitnexus" / "repo_impact" / "index_status.json",
+        {
+            "state": "ready",
+            "repo_path": str(repo_path),
+            "repo_name": "repo",
+            "indexed_at": "2026-04-29T00:00:00+00:00",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+    )
+    service = GitNexusImpactService(storage_root, mcp_client=FailingGitNexusImpactClient())
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/batch",
+        target_ref="dev",
+        changed_files=["inventory/src/main/java/com/example/StockRepository.java"],
+        unified_diff=(
+            "diff --git a/inventory/src/main/java/com/example/StockRepository.java "
+            "b/inventory/src/main/java/com/example/StockRepository.java\n"
+            "@@ -20,2 +20,5 @@\n"
+            "+public List<Stock> findByStatus(String status) {\n"
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+            "+}\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_path), "repository_id": "repo_impact"},
+    )
+
+    with (
+        patch.object(service, "_resolve_existing_git_ref", return_value="feature/batch"),
+        patch.object(service, "_git_commit", return_value="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    ):
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert report.graph_status == "degraded"
+    assert any("图谱 commit 与 MR source/head commit 不一致" in item for item in report.limitations)
+
+
+def test_gitnexus_impact_service_downgrades_when_mr_source_ref_missing_locally(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        storage_root / "gitnexus" / "repo_impact" / "index_status.json",
+        {
+            "state": "ready",
+            "repo_path": str(repo_path),
+            "repo_name": "repo",
+            "indexed_at": "2026-04-29T00:00:00+00:00",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+    )
+    service = GitNexusImpactService(storage_root, mcp_client=FailingGitNexusImpactClient())
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/not-fetched",
+        target_ref="dev",
+        changed_files=["inventory/src/main/java/com/example/StockRepository.java"],
+        unified_diff=(
+            "diff --git a/inventory/src/main/java/com/example/StockRepository.java "
+            "b/inventory/src/main/java/com/example/StockRepository.java\n"
+            "@@ -20,2 +20,5 @@\n"
+            "+public List<Stock> findByStatus(String status) {\n"
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+            "+}\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_path), "repository_id": "repo_impact"},
+    )
+
+    with patch.object(service, "_resolve_existing_git_ref", return_value=""):
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert report.graph_status == "degraded"
+    assert any("MR 的 source/head 代码未在本地代码仓中找到" in item for item in report.limitations)
+
+
 def test_gitnexus_impact_service_prefers_repo_local_graph_status_over_storage_root(storage_root: Path, tmp_path: Path):
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -1396,12 +1619,87 @@ def test_gitnexus_impact_service_uses_home_registry_path_for_mcp_env(storage_roo
     assert env["GITNEXUS_HOME"] == str(tmp_path)
 
 
+def test_gitnexus_impact_service_auto_indexes_review_workspace(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "rev-workspace"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    registry_path = tmp_path / ".gitnexus" / "registry.json"
+    registry_path.parent.mkdir()
+    write_json(registry_path, {"repositories": [{"name": "rev-workspace", "path": str(repo_path)}]})
+    capture = CaptureGitNexusImpactClient()
+    service = GitNexusImpactService(storage_root, mcp_client=capture)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderController.java "
+            "b/src/main/java/com/example/OrderController.java\n"
+            "@@ -1,0 +1,3 @@\n"
+            "+class OrderController {\n"
+            "+  void createOrder() {}\n"
+            "+}\n"
+        ),
+        metadata={
+            "workspace_repo_path": str(repo_path),
+            "review_workspace_status": "ready",
+            "review_workspace_path": str(repo_path),
+            "review_workspace_commit": "snapshot-commit",
+            "gitnexus_registry_path": str(registry_path),
+        },
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        if len(command) >= 2 and command[-1] == "analyze":
+            (repo_path / ".gitnexus").mkdir(exist_ok=True)
+            write_json(
+                repo_path / ".gitnexus" / "meta.json",
+                {"repoPath": str(repo_path), "lastCommit": "snapshot-commit", "indexedAt": "2026-04-28T00:00:00Z"},
+            )
+            return SimpleNamespace(returncode=0, stdout="indexed", stderr="")
+        if len(command) >= 2 and command[-1] == "list":
+            return SimpleNamespace(returncode=0, stdout='[{"name":"rev-workspace"}]', stderr="")
+        return SimpleNamespace(returncode=0, stdout="snapshot-commit\n", stderr="")
+
+    with (
+        patch("app.services.gitnexus_impact_service.shutil.which", return_value="/usr/local/bin/gitnexus"),
+        patch("app.services.gitnexus_impact_service.subprocess.run", side_effect=fake_run),
+    ):
+        report, trace = service.analyze_with_trace(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert report.graph_status == "ready"
+    assert any(len(command) >= 2 and command[-1] == "analyze" for command in calls)
+    assert trace["review_workspace"]["workspace_path"] == str(repo_path)
+
+
 def test_gitnexus_impact_service_parses_gitnexus_list_outputs(storage_root: Path):
     service = GitNexusImpactService(storage_root)
 
     assert service._parse_gitnexus_list_output('[{"name":"repo-a"},{"name":"repo-b"}]') == ["repo-a", "repo-b"]
     assert service._parse_gitnexus_list_output("Name | Path\nrepo-a | C:/a\nrepo-b | C:/b\n") == ["repo-a", "repo-b"]
     assert service._parse_gitnexus_list_output("- repo-a\n- repo-b\n") == ["repo-a", "repo-b"]
+    assert service._parse_gitnexus_list_output(
+        """
+  Indexed Repositories (2)
+
+  repo-a
+    Path:    C:/work/repo-a
+    Indexed: 5/5/2026, 7:25:32 PM
+    Commit:  abc123
+    Stats:   305 files, 2391 symbols, 6614 edges
+
+  java-ddd-example
+    Path:    /workspace/rw/java-ddd-example/rev_1
+    Indexed: 5/5/2026, 7:25:32 PM
+    Commit:  abbbc1b
+    Stats:   305 files, 2391 symbols, 6614 edges
+"""
+    ) == ["repo-a", "java-ddd-example"]
 
 
 def test_gitnexus_impact_service_normalizes_dot_gitnexus_home_for_mcp_env(storage_root: Path, tmp_path: Path):

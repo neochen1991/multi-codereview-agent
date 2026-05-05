@@ -75,7 +75,10 @@ def run_case(
     ]
     issues = list(report.get("issues") or []) if isinstance(report, dict) else []
     findings = list(report.get("findings") or []) if isinstance(report, dict) else []
-    llm_usage = dict((report.get("llm_usage") or {})) if isinstance(report, dict) else {}
+    llm_usage = {}
+    if isinstance(report, dict):
+        raw_llm_usage = report.get("llm_usage_summary") or report.get("llm_usage") or {}
+        llm_usage = dict(raw_llm_usage) if isinstance(raw_llm_usage, dict) else {}
     return {
         "case_id": case_id,
         "review_id": review_id,

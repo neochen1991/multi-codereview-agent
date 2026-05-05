@@ -771,6 +771,17 @@ export interface GitNexusPreflightStatus {
   recommended_actions: string[];
 }
 
+export interface ReviewWorkspaceCleanupResult {
+  root: string;
+  older_than_days: number;
+  removed_count: number;
+  removed_paths: string[];
+  failed: Array<{
+    path: string;
+    error: string;
+  }>;
+}
+
 export interface ImpactFeedbackTargetProfile {
   target_id: string;
   target_type: string;
@@ -1285,6 +1296,10 @@ export const settingsApi = {
   },
   async runRepositoryCodeGraphIndex(repositoryId: string): Promise<CodeGraphIndexStatus> {
     const { data } = await api.post(`/settings/repositories/${encodeURIComponent(repositoryId)}/code-graph/index/run`);
+    return data;
+  },
+  async cleanupReviewWorkspaces(olderThanDays = 7): Promise<ReviewWorkspaceCleanupResult> {
+    const { data } = await api.post("/settings/review-workspaces/cleanup", null, { params: { older_than_days: olderThanDays } });
     return data;
   },
   async getImpactReportTemplate(): Promise<ImpactReportTemplate> {

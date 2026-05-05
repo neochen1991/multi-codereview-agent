@@ -258,12 +258,24 @@ class GitNexusMcpImpactClient:
         if available_repos and effective_repo_name not in available_repos:
             list_repos_missing_repo = True
             logger.warning(
-                "gitnexus list_repos did not include target repo; continue with registry-matched repo repo=%s repo_path=%s mcp_available_repos=%s cli_available_repos=%s cli_has_repo=%s",
+                "gitnexus list_repos did not include target repo repo=%s repo_path=%s mcp_available_repos=%s cli_available_repos=%s cli_has_repo=%s",
                 effective_repo_name,
                 repo_path,
                 available_repos[:8],
                 cli_repos[:8],
                 cli_list_has_repo,
+            )
+            if not cli_list_has_repo:
+                if mcp_session is not None:
+                    mcp_session.close()
+                raise RuntimeError(
+                    "GitNexus MCP 未加载当前仓库，已停止后续 MCP 调用，避免检视流程卡住。"
+                    f" target_repo={effective_repo_name} mcp_available_repos={available_repos[:8]} cli_available_repos={cli_repos[:8]}"
+                )
+            logger.warning(
+                "gitnexus list_repos missed target repo but cli list confirmed it; continue to detect_changes repo=%s repo_path=%s",
+                effective_repo_name,
+                repo_path,
             )
         detect_changes_result = self._call_tools_batch(
             command,
@@ -292,6 +304,13 @@ class GitNexusMcpImpactClient:
         dynamic_targets: list[str] = []
         if "__error" in detect_changes_result:
             detect_changes_error = str(detect_changes_result.get("__error") or "")
+            if self._is_repo_unavailable_error(detect_changes_error):
+                if mcp_session is not None:
+                    mcp_session.close()
+                raise RuntimeError(
+                    "GitNexus MCP 对当前仓库不可用，已停止后续 context/impact 调用，避免检视流程卡住。"
+                    f" repo={effective_repo_name} error={detect_changes_error}"
+                )
             logger.warning(
                 "gitnexus detect_changes unavailable repo=%s repo_path=%s error=%s; continue with changed symbols + context/impact",
                 effective_repo_name,
@@ -330,6 +349,7 @@ class GitNexusMcpImpactClient:
                 context_payloads,
                 existing_targets=targets,
                 max_targets=max_dynamic_targets,
+                changed_symbols=changed_symbols,
             )
             if dynamic_targets:
                 (
@@ -431,6 +451,8 @@ class GitNexusMcpImpactClient:
         repo_path: str,
         runtime_env: dict[str, str] | None = None,
     ):
+        if str(os.getenv("GITNEXUS_MCP_PERSISTENT", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+            return None
         if "_call_mcp" in self.__dict__:
             return None
         try:
@@ -785,12 +807,12 @@ class GitNexusMcpImpactClient:
         for item in changed_symbols:
             symbol = str(item.symbol or "").strip()
             container = str(item.container or "").strip()
+            if container:
+                candidates.append({"target": container, "source": "changed_container", "symbol": item})
             if container and symbol and container != symbol:
                 candidates.append({"target": f"{container}.{symbol}", "source": "changed_container_symbol", "symbol": item})
             if symbol:
                 candidates.append({"target": symbol, "source": "changed_symbol", "symbol": item})
-            if container:
-                candidates.append({"target": container, "source": "changed_container", "symbol": item})
         for key in ("changed_symbols", "changedSymbols", "symbols"):
             for item in list(detect_changes_payload.get(key) or []):
                 if isinstance(item, str) and item.strip():
@@ -821,8 +843,10 @@ class GitNexusMcpImpactClient:
         *,
         existing_targets: list[str],
         max_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
+        changed_symbols: list[ImpactSymbol] | None = None,
     ) -> list[str]:
         existing = {str(item or "").strip() for item in existing_targets if str(item or "").strip()}
+        changed_symbols = list(changed_symbols or [])
         candidates: dict[str, float] = {}
         for context in context_payloads:
             for relation_key, base_score in (
@@ -838,6 +862,7 @@ class GitNexusMcpImpactClient:
                     if not target or target in existing or not self._is_valid_symbol_target(target):
                         continue
                     score = base_score + self._dynamic_target_priority_bonus(target)
+                    score += self._dynamic_changed_symbol_bonus(target, changed_symbols)
                     candidates[target] = max(candidates.get(target, 0.0), score)
         ordered = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
         return [target for target, _score in ordered[: self._coerce_limit(max_targets, MAX_GITNEXUS_DYNAMIC_TARGETS, allow_zero=True)]]
@@ -849,11 +874,22 @@ class GitNexusMcpImpactClient:
                 names.append(value.strip())
             return names
         if isinstance(value, dict):
-            for key in ("name", "symbol", "target", "method", "qualifiedName", "qualified_name", "signature"):
+            for key in ("uid", "id", "name", "symbol", "target", "method", "qualifiedName", "qualified_name", "signature"):
                 candidate = str(value.get(key) or "").strip()
                 if candidate:
                     names.append(candidate)
-            for key in ("calls", "symbols", "items", "nodes", "children", "results", "entries"):
+            for key in (
+                "calls",
+                "has_method",
+                "hasMethod",
+                "methods",
+                "symbols",
+                "items",
+                "nodes",
+                "children",
+                "results",
+                "entries",
+            ):
                 names.extend(self._extract_context_symbol_names(value.get(key)))
             return names
         if isinstance(value, list):
@@ -864,6 +900,10 @@ class GitNexusMcpImpactClient:
     def _dynamic_target_priority_bonus(self, target: str) -> float:
         lowered = str(target or "").lower()
         score = 0.0
+        if lowered.startswith("method:"):
+            score += 24
+        if lowered.startswith("constructor:"):
+            score -= 10
         if "." in target:
             score += 4
         if any(token in lowered for token in ("controller", "endpoint", "router", "resource", "api")):
@@ -874,7 +914,26 @@ class GitNexusMcpImpactClient:
             score += 6
         if any(token in lowered for token in ("test", "dto", "request", "response", "config", "constant")):
             score -= 8
+        if "/test/" in lowered or "\\test\\" in lowered:
+            score -= 16
         return score
+
+    def _dynamic_changed_symbol_bonus(self, target: str, changed_symbols: list[ImpactSymbol]) -> float:
+        target_text = str(target or "").strip()
+        if not target_text:
+            return 0.0
+        target_lower = target_text.lower().replace("\\", "/")
+        score = 0.0
+        for symbol in changed_symbols:
+            name = str(getattr(symbol, "symbol", "") or "").strip().lower()
+            file_path = str(getattr(symbol, "file_path", "") or "").strip().lower().replace("\\", "/")
+            if not name:
+                continue
+            if name in target_lower:
+                score += 16
+                if file_path and file_path in target_lower:
+                    score += 28
+        return min(score, 52.0)
 
     def _target_priority_score(
         self,
@@ -885,13 +944,13 @@ class GitNexusMcpImpactClient:
         score = 0.0
         source = str(candidate.get("source") or "")
         if source == "changed_container_symbol":
-            score += 50
+            score += 45
         elif source == "changed_symbol":
-            score += 35
+            score += 28
         elif source == "detect_changes":
             score += 30
         elif source == "changed_container":
-            score += 20
+            score += 56
         symbol = candidate.get("symbol")
         file_path = str(getattr(symbol, "file_path", "") or "").lower()
         kind = str(getattr(symbol, "kind", "") or "").lower()
@@ -953,6 +1012,25 @@ class GitNexusMcpImpactClient:
         return ("symbol " in message and " not found" in message) or (
             "target " in message and " not found" in message
         )
+
+    def _is_repo_unavailable_error(self, error: str) -> bool:
+        message = str(error or "").lower()
+        repo_terms = ("repo", "repository", "仓库", "图谱", "graph")
+        unavailable_terms = (
+            "not found",
+            "not indexed",
+            "not loaded",
+            "not available",
+            "missing",
+            "unknown",
+            "未发现",
+            "未找到",
+            "未索引",
+            "未加载",
+            "不可用",
+            "不存在",
+        )
+        return any(term in message for term in repo_terms) and any(term in message for term in unavailable_terms)
 
     def _is_valid_symbol_target(self, target: str) -> bool:
         normalized = str(target or "").strip()
@@ -1327,7 +1405,24 @@ class GitNexusImpactService:
             if not line:
                 continue
             lowered = line.lower()
-            if lowered in {"name", "repo", "repository", "path"} or lowered.startswith(("name ", "name|", "repo ", "repo|", "repository ", "repository|", "path ", "path|", "----", "====")):
+            if (
+                lowered in {"name", "repo", "repository", "path"}
+                or lowered.startswith(
+                    (
+                        "indexed repositories",
+                        "name ",
+                        "name|",
+                        "repo ",
+                        "repo|",
+                        "repository ",
+                        "repository|",
+                        "path ",
+                        "path|",
+                        "----",
+                        "====",
+                    )
+                )
+            ):
                 continue
             if line.startswith(("-", "*")):
                 line = line[1:].strip()
@@ -1339,6 +1434,8 @@ class GitNexusImpactService:
                 if line.lower().startswith(prefix):
                     line = line[len(prefix) :].strip()
                     break
+            if ":" in line:
+                continue
             if not line:
                 continue
             token = line.split()[0].strip().strip(",;")
@@ -1445,6 +1542,13 @@ class GitNexusImpactService:
         repo_path = self._repo_path(subject, runtime)
         if not repo_path:
             raise RuntimeError("未配置本地代码仓路径，无法执行 GitNexus 关联影响分析。")
+        command = self._gitnexus_command_for_diagnostics()
+        if not self._gitnexus_command_available(command):
+            raise RuntimeError(
+                "当前机器未预装 GitNexus，或配置的 GitNexus MCP 命令不可用。"
+                f"请检查 GITNEXUS_BIN/GITNEXUS_MCP_COMMAND/PATH，当前命令: {' '.join(command)}"
+            )
+        self._ensure_review_workspace_gitnexus_index(repo_path, subject, runtime, command)
         registry = self._load_gitnexus_registry(subject, runtime)
         graph_status = self._load_graph_status(repo_path, registry, subject=subject, runtime=runtime)
         logger.info(
@@ -1455,12 +1559,9 @@ class GitNexusImpactService:
         )
         if str(graph_status.get("state") or "") != "ready":
             raise RuntimeError("GitNexus 图谱未就绪，请先完成 gitnexus analyze 建图。")
-        command = self._gitnexus_command_for_diagnostics()
-        if not self._gitnexus_command_available(command):
-            raise RuntimeError(
-                "当前机器未预装 GitNexus，或配置的 GitNexus MCP 命令不可用。"
-                f"请检查 GITNEXUS_BIN/GITNEXUS_MCP_COMMAND/PATH，当前命令: {' '.join(command)}"
-            )
+        source_alignment_error = self._validate_graph_matches_mr_source(repo_path, subject, graph_status)
+        if source_alignment_error:
+            raise RuntimeError(source_alignment_error)
         if not self._resolve_repo_name_from_registry(repo_path, registry):
             registered, registry_path, repo_name, registry_error = self._ensure_gitnexus_registry_entry(repo_path, subject, runtime)
             if registered:
@@ -1546,9 +1647,78 @@ class GitNexusImpactService:
                 "context(key symbols)",
                 "impact(key symbols)",
             ],
+            "review_workspace": self._review_workspace_trace(subject),
             **raw,
         }
         return report, trace
+
+    def _review_workspace_trace(self, subject: ReviewSubject) -> dict[str, Any]:
+        metadata = dict(subject.metadata or {})
+        if str(metadata.get("review_workspace_status") or "") != "ready":
+            return {}
+        return {
+            "status": "ready",
+            "workspace_path": str(metadata.get("review_workspace_path") or metadata.get("workspace_repo_path") or ""),
+            "base_repo_path": str(metadata.get("review_workspace_base_repo_path") or metadata.get("base_workspace_repo_path") or ""),
+            "snapshot_mode": str(metadata.get("review_workspace_snapshot_mode") or ""),
+            "snapshot_commit": str(metadata.get("review_workspace_commit") or ""),
+            "diff_hash": str(metadata.get("review_workspace_diff_hash") or ""),
+            "message": str(metadata.get("review_workspace_message") or ""),
+        }
+
+    def _ensure_review_workspace_gitnexus_index(
+        self,
+        repo_path: str,
+        subject: ReviewSubject,
+        runtime: RuntimeSettings | None,
+        mcp_command: list[str],
+    ) -> None:
+        metadata = dict(subject.metadata or {})
+        if str(metadata.get("review_workspace_status") or "") != "ready":
+            return
+        if _normalize_path_for_compare(str(metadata.get("review_workspace_path") or "")) != _normalize_path_for_compare(repo_path):
+            return
+        repo_root = Path(repo_path).expanduser()
+        if (repo_root / ".gitnexus" / "meta.json").exists() or (repo_root / ".gitnexus" / "index_status.json").exists():
+            return
+        analyze_command = self._gitnexus_analyze_command_from_mcp(mcp_command)
+        timeout = max(60, int(os.getenv("GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS", "900") or 900))
+        logger.info("gitnexus review workspace auto index start repo_path=%s command=%s", repo_path, " ".join(analyze_command))
+        try:
+            completed = subprocess.run(
+                analyze_command,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+                env=self._gitnexus_runtime_env(subject, runtime),
+            )
+        except Exception as error:
+            logger.warning("gitnexus review workspace auto index failed repo_path=%s error=%s", repo_path, error)
+            return
+        logger.info(
+            "gitnexus review workspace auto index finish repo_path=%s return_code=%s stdout=%s stderr=%s",
+            repo_path,
+            completed.returncode,
+            (completed.stdout or "")[-1200:],
+            (completed.stderr or "")[-1200:],
+        )
+
+    def _gitnexus_analyze_command_from_mcp(self, mcp_command: list[str]) -> list[str]:
+        raw = str(os.getenv("GITNEXUS_ANALYZE_COMMAND") or "").strip()
+        if raw:
+            parsed = _parse_command_text(raw)
+            if parsed:
+                return parsed
+        if mcp_command:
+            command = list(mcp_command)
+            if str(command[-1]).strip().lower() == "mcp":
+                return [*command[:-1], "analyze"]
+            return [command[0], "analyze"]
+        return [resolve_executable("gitnexus") or "gitnexus", "analyze"]
 
     def _load_graph_status(
         self,
@@ -1629,6 +1799,102 @@ class GitNexusImpactService:
         if not candidate_path:
             return False
         return _normalize_path_for_compare(candidate_path) == _normalize_path_for_compare(repo_path)
+
+    def _validate_graph_matches_mr_source(
+        self,
+        repo_path: str,
+        subject: ReviewSubject,
+        graph_status: dict[str, Any],
+    ) -> str:
+        if str(subject.subject_type or "").lower() != "mr" or not str(subject.unified_diff or "").strip():
+            return ""
+        if not (Path(repo_path).expanduser() / ".git").exists():
+            return ""
+        metadata = dict(subject.metadata or {})
+        if str(metadata.get("review_workspace_status") or "") == "ready" and _normalize_path_for_compare(
+            str(metadata.get("review_workspace_path") or "")
+        ) == _normalize_path_for_compare(repo_path):
+            snapshot_commit = str(metadata.get("review_workspace_commit") or "").strip()
+            graph_commit = str(
+                graph_status.get("commit")
+                or graph_status.get("lastCommit")
+                or graph_status.get("last_commit")
+                or ""
+            ).strip()
+            if snapshot_commit and graph_commit and not self._same_git_commit(graph_commit, snapshot_commit):
+                return (
+                    "GitNexus 图谱不可用于本次 MR：图谱 commit 与 MR 快照 commit 不一致。"
+                    f" graph_commit={graph_commit[:12]} snapshot_commit={snapshot_commit[:12]}"
+                )
+            return ""
+        source_ref = self._resolve_existing_git_ref(repo_path, self._mr_source_ref_candidates(subject))
+        if not source_ref:
+            return (
+                "GitNexus 图谱不可用于本次 MR：MR 的 source/head 代码未在本地代码仓中找到。"
+                "当前本地仓库很可能停留在目标/dev 分支，继续调用 MCP 会分析合入前代码。"
+                f" source_ref={subject.source_ref or ''}"
+            )
+        source_commit = self._git_commit(repo_path, source_ref)
+        graph_commit = str(
+            graph_status.get("commit")
+            or graph_status.get("lastCommit")
+            or graph_status.get("last_commit")
+            or ""
+        ).strip()
+        if not source_commit:
+            return (
+                "GitNexus 图谱不可用于本次 MR：无法解析 MR source/head commit，"
+                "无法确认图谱是否对应待合入代码。"
+                f" source_ref={source_ref}"
+            )
+        if not graph_commit:
+            return (
+                "GitNexus 图谱不可用于本次 MR：图谱状态缺少 commit，"
+                "无法确认图谱是否对应待合入代码。请在 MR source 分支上重新执行 gitnexus analyze。"
+            )
+        if not self._same_git_commit(graph_commit, source_commit):
+            return (
+                "GitNexus 图谱不可用于本次 MR：图谱 commit 与 MR source/head commit 不一致。"
+                "请先在本地检出 MR source 分支并重新执行 gitnexus analyze，或让系统降级为 diff 候选影响分析。"
+                f" graph_commit={graph_commit[:12]} source_commit={source_commit[:12]} source_ref={source_ref}"
+            )
+        return ""
+
+    def _mr_source_ref_candidates(self, subject: ReviewSubject) -> list[str]:
+        metadata = dict(subject.metadata or {})
+        candidates: list[str] = []
+        candidates.extend(str(item or "").strip() for item in list(subject.commits or []))
+        candidates.append(str(metadata.get("auto_queue_head_sha") or "").strip())
+        candidates.append(str(metadata.get("head_sha") or "").strip())
+        candidates.extend(self._ref_aliases(str(subject.source_ref or "").strip()))
+        return self._dedupe(candidates)
+
+    def _git_commit(self, repo_path: str, ref: str) -> str:
+        if not repo_path or not ref:
+            return ""
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", ref],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            return ""
+        if completed.returncode != 0:
+            return ""
+        return str(completed.stdout or "").strip()
+
+    def _same_git_commit(self, left: str, right: str) -> bool:
+        normalized_left = str(left or "").strip().lower()
+        normalized_right = str(right or "").strip().lower()
+        if not normalized_left or not normalized_right:
+            return False
+        return normalized_left == normalized_right or normalized_left.startswith(normalized_right) or normalized_right.startswith(normalized_left)
 
     def _repository_id(self, subject: ReviewSubject | None, runtime: RuntimeSettings | None) -> str:
         metadata = dict(subject.metadata or {}) if subject is not None else {}

@@ -760,6 +760,17 @@ export interface GitNexusPreflightStatus {
   recommended_actions: string[];
 }
 
+export interface ReviewWorkspaceCleanupResult {
+  root: string;
+  older_than_days: number;
+  removed_count: number;
+  removed_paths: string[];
+  failed: Array<{
+    path: string;
+    error: string;
+  }>;
+}
+
 export interface ImpactFeedbackTargetProfile {
   target_id: string;
   target_type: string;

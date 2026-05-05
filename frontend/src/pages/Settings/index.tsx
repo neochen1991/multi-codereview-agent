@@ -16,6 +16,7 @@ import {
   type ImpactReportTemplate,
   type ImpactReportTemplatePreview,
   type PostgresDataSourceSettings,
+  type ReviewWorkspaceCleanupResult,
   type RuntimeSettings,
 } from "@/services/api";
 
@@ -195,6 +196,8 @@ const SettingsPage: React.FC = () => {
   const [previewingImpactTemplate, setPreviewingImpactTemplate] = React.useState(false);
   const [impactTemplatePreview, setImpactTemplatePreview] = React.useState<ImpactReportTemplatePreview | null>(null);
   const [impactTemplateAnalysis, setImpactTemplateAnalysis] = React.useState<ImpactReportTemplateAnalysis | null>(null);
+  const [reviewWorkspaceCleanupRunning, setReviewWorkspaceCleanupRunning] = React.useState(false);
+  const [reviewWorkspaceCleanupResult, setReviewWorkspaceCleanupResult] = React.useState<ReviewWorkspaceCleanupResult | null>(null);
 
   const refreshRepositoryGitNexusStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
     const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
@@ -494,6 +497,23 @@ const SettingsPage: React.FC = () => {
       setRepositoryCodeGraphRunning((prev) => ({ ...prev, [id]: false }));
     }
   }, [handleRefreshRepositoryCodeGraphStatus]);
+
+  const handleCleanupReviewWorkspaces = React.useCallback(async () => {
+    setReviewWorkspaceCleanupRunning(true);
+    try {
+      const result = await settingsApi.cleanupReviewWorkspaces(7);
+      setReviewWorkspaceCleanupResult(result);
+      if (result.failed.length > 0) {
+        message.warning(`已清理 ${result.removed_count} 个临时检视工作区，${result.failed.length} 个目录清理失败`);
+      } else {
+        message.success(`已清理 ${result.removed_count} 个临时检视工作区`);
+      }
+    } catch (error: any) {
+      message.error(error?.message || "清理临时检视工作区失败");
+    } finally {
+      setReviewWorkspaceCleanupRunning(false);
+    }
+  }, []);
 
   const handleSaveImpactTemplate = React.useCallback(async () => {
     setSavingImpactTemplate(true);
@@ -1051,6 +1071,51 @@ const SettingsPage: React.FC = () => {
             );
           }}
         </Form.Item>
+      </Card>
+
+      <Card
+        className="module-card"
+        title="临时检视工作区"
+        style={{ marginTop: 16 }}
+        extra={
+          <Button danger loading={reviewWorkspaceCleanupRunning} onClick={() => void handleCleanupReviewWorkspaces()}>
+            清理 7 天前目录
+          </Button>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="MR 检视会先生成合入后的临时代码快照"
+          description="Tree-sitter 和 GitNexus 会分析这个快照，避免只看本地目标分支导致问题代码不在 MR 变更范围内。快照保存在系统存储目录下，可定期清理，清理动作不会修改真实代码仓。"
+        />
+        <Descriptions column={1} size="small">
+          <Descriptions.Item label="保留策略">默认复用同一 MR 的最新快照，手工清理只删除 7 天前的临时目录。</Descriptions.Item>
+          <Descriptions.Item label="上次清理">
+            {reviewWorkspaceCleanupResult ? (
+              <Space direction="vertical" size={4}>
+                <span>
+                  {`已删除 ${reviewWorkspaceCleanupResult.removed_count} 个目录，失败 ${reviewWorkspaceCleanupResult.failed.length} 个`}
+                </span>
+                <span className="settings-gitnexus-actions">{reviewWorkspaceCleanupResult.root}</span>
+              </Space>
+            ) : (
+              "尚未执行清理"
+            )}
+          </Descriptions.Item>
+          {reviewWorkspaceCleanupResult?.failed.length ? (
+            <Descriptions.Item label="失败目录">
+              <Space direction="vertical" size={4}>
+                {reviewWorkspaceCleanupResult.failed.slice(0, 3).map((item) => (
+                  <span key={item.path} className="settings-gitnexus-actions">
+                    {`${item.path}: ${item.error}`}
+                  </span>
+                ))}
+              </Space>
+            </Descriptions.Item>
+          ) : null}
+        </Descriptions>
       </Card>
 
       <Card

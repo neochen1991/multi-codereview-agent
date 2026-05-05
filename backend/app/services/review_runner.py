@@ -30,6 +30,8 @@ from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.code_graph.context_planner import CodeGraphContextPlanner
+from app.services.code_graph.index_service import CodeGraphIndexService
+from app.services.code_graph.java_tree_sitter_parser import JavaTreeSitterParser
 from app.services.code_graph.storage import CodeGraphStorage
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
@@ -41,6 +43,7 @@ from app.services.prompt_budget_planner import PromptBudgetPlanner
 from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.repository_context_service import RepositoryContextService
 from app.services.repo_review_policy_service import RepoReviewPolicyService
+from app.services.review_workspace_service import ReviewWorkspaceService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
 from app.services.review_runner_common import ReviewRunnerCommonMixin
@@ -90,6 +93,7 @@ class ReviewRunner(
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.repository_resolver = RepositoryConfigResolver()
+        self.review_workspace_service = ReviewWorkspaceService(self.storage_root, self.repository_resolver)
         self.review_policy_service = RepoReviewPolicyService()
         self.artifact_service = ArtifactService(self.storage_root)
         self.diff_excerpt_service = DiffExcerptService()
@@ -203,6 +207,7 @@ class ReviewRunner(
         self._abort_if_closed(review_id)
 
         runtime_settings = self.runtime_settings_service.get()
+        review = self._prepare_review_workspace(review, runtime_settings)
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
         effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
@@ -1347,6 +1352,125 @@ class ReviewRunner(
             issue_count=len(issues),
         )
         return review
+
+    def _prepare_review_workspace(self, review: ReviewTask, runtime_settings: object) -> ReviewTask:
+        try:
+            result = self.review_workspace_service.prepare(
+                review_id=review.review_id,
+                subject=review.subject,
+                runtime=runtime_settings,  # type: ignore[arg-type]
+            )
+        except Exception as error:
+            logger.exception("review workspace prepare failed review_id=%s", review.review_id)
+            metadata = dict(review.subject.metadata or {})
+            metadata["review_workspace"] = {
+                "status": "failed",
+                "message": f"MR 快照工作区准备失败：{error}",
+                "error_type": error.__class__.__name__,
+            }
+            review.subject.metadata = metadata
+            self.review_repo.save(review)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="review_workspace_failed",
+                    phase="intake",
+                    message="MR 代码快照准备失败，后续将使用原始仓库上下文。",
+                    payload=metadata["review_workspace"],
+                )
+            )
+            return review
+
+        payload = result.model_dump()
+        metadata = dict(review.subject.metadata or {})
+        previous_workspace = str(metadata.get("workspace_repo_path") or "").strip()
+        metadata["review_workspace"] = payload
+        if result.status == "ready":
+            metadata["base_workspace_repo_path"] = result.base_repo_path or previous_workspace
+            metadata["workspace_repo_path"] = result.workspace_path
+            metadata["repo_context_workspace_path"] = result.workspace_path
+            metadata["review_workspace_path"] = result.workspace_path
+            metadata["review_workspace_status"] = "ready"
+            metadata["review_workspace_snapshot_mode"] = result.snapshot_mode
+            metadata["review_workspace_commit"] = result.snapshot_commit
+            metadata["review_workspace_diff_hash"] = result.diff_hash
+            metadata["review_workspace_base_repo_path"] = result.base_repo_path
+            metadata["review_workspace_message"] = result.message
+            code_graph_result = self._build_review_workspace_code_graph(review.review_id, result)
+            metadata["review_workspace_code_graph"] = code_graph_result
+        review.subject.metadata = metadata
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="review_workspace_prepared",
+                phase="intake",
+                message=(
+                    "MR 合入快照已准备完成，GitNexus/Tree-sitter 将读取快照代码。"
+                    if result.status == "ready"
+                    else f"MR 合入快照未启用：{result.message}"
+                ),
+                payload=payload,
+            )
+        )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="review_workspace",
+                content=self._review_workspace_message_content(result, metadata.get("review_workspace_code_graph")),
+                metadata={"phase": "intake", **payload},
+            )
+        )
+        return review
+
+    def _review_workspace_message_content(self, result, code_graph_result: object | None = None) -> str:
+        if result.status == "ready":
+            code_graph = dict(code_graph_result or {}) if isinstance(code_graph_result, dict) else {}
+            code_graph_status = str(code_graph.get("status") or "skipped")
+            graph_db_path = str(code_graph.get("graph_db_path") or "")
+            lines = [
+                "MR 合入快照已准备完成。",
+                f"- 基础仓库：{result.base_repo_path}",
+                f"- 快照路径：{result.workspace_path}",
+                f"- 快照方式：{result.snapshot_mode}",
+                f"- 快照 commit：{result.snapshot_commit[:12] if result.snapshot_commit else ''}",
+                f"- Tree-sitter 快照图谱：{code_graph_status}",
+            ]
+            if graph_db_path:
+                lines.append(f"- Tree-sitter 图谱路径：{graph_db_path}")
+            lines.append(f"- 说明：{result.message}")
+            return "\n".join(lines)
+        return "\n".join(
+            [
+                "MR 合入快照未启用。",
+                f"- 基础仓库：{result.base_repo_path}",
+                f"- 目标分支：{result.target_ref}",
+                f"- 源分支：{result.source_ref}",
+                f"- 状态：{result.status}",
+                f"- 说明：{result.message}",
+            ]
+        )
+
+    def _build_review_workspace_code_graph(self, review_id: str, result) -> dict[str, object]:
+        if result.status != "ready" or not result.workspace_path:
+            return {"status": "skipped", "message": "MR 快照未就绪，跳过 Tree-sitter 快照建图。"}
+        try:
+            index_result = CodeGraphIndexService(
+                repo_root=result.workspace_path,
+                parser=JavaTreeSitterParser(),
+            ).full_build(repository_id=f"{result.repository_id}__{review_id}", languages=["java"])
+            return {"status": "ready", **index_result}
+        except Exception as error:
+            logger.exception("review workspace code graph build failed review_id=%s workspace_path=%s", review_id, result.workspace_path)
+            return {
+                "status": "failed",
+                "message": f"Tree-sitter 快照建图失败：{error}",
+                "error_type": error.__class__.__name__,
+                "repo_path": result.workspace_path,
+            }
 
     def _attach_impact_report(self, review: ReviewTask, runtime_settings) -> ReviewTask:
         """在任务结果里持久化每个 MR 的关联影响报告。"""

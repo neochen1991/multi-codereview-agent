@@ -10,6 +10,7 @@ from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresD
 from app.services.code_graph_index_scheduler import CodeGraphIndexScheduler
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
+from app.services.review_workspace_service import ReviewWorkspaceService
 import app.services.review_service as review_service_module
 
 router = APIRouter()
@@ -289,6 +290,15 @@ def run_repository_code_graph_index(repository_id: str, request: Request) -> dic
     """手动触发指定代码仓的 Tree-sitter 代码图谱建图。"""
 
     return _code_graph_scheduler(request).trigger_manual_index(repository_id)
+
+
+@router.post("/settings/review-workspaces/cleanup")
+def cleanup_review_workspaces(older_than_days: int = 7) -> dict[str, object]:
+    """清理过期 MR 临时检视工作区。"""
+
+    return ReviewWorkspaceService(review_service_module.review_service.storage_root).cleanup_stale(
+        older_than_days=older_than_days
+    )
 
 
 @router.get("/settings/impact-report-template")
