@@ -154,6 +154,48 @@ def test_change_impact_report_service_falls_back_when_llm_output_not_json():
     assert updated.llm_generated is False
 
 
+def test_change_impact_report_service_degrades_to_fact_report_when_llm_times_out():
+    service = ChangeImpactReportService()
+    captured: dict[str, object] = {}
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    def fail_with_timeout(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("request_timeout: impact report llm timed out")
+
+    service._llm.complete_text = fail_with_timeout  # type: ignore[method-assign]
+
+    updated, llm_result = service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(),
+        report=_report(),
+        trace={
+            "repo": "repo",
+            "source_branch": "feature/order-impact",
+            "target_branch": "main",
+            "detect_changes": {},
+            "context_results": [],
+            "impact_results": [],
+        },
+        review_id="rev_test",
+    )
+
+    assert captured["timeout_seconds"] == 120.0
+    assert llm_result is not None
+    assert llm_result.mode == "fallback"
+    assert "request_timeout" in llm_result.error
+    assert updated.llm_generated is False
+    assert updated.llm_markdown
+    assert "feature/order-impact -> main" in updated.llm_markdown
+    assert "OrderController -> OrderApplicationService -> OrderRepository" in updated.llm_markdown
+    assert any("LLM" in item and "降级" in item for item in updated.limitations)
+
+
 def test_change_impact_report_service_supports_schema_driven_custom_placeholder():
     service = ChangeImpactReportService()
     service._report_template = "# 自定义报告\n\n## 风险摘要\n{{custom_risk_summary}}\n\n## 结论\n{{summary}}"

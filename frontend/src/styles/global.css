@@ -3012,3 +3012,46 @@ body {
   padding: 0 16px 16px;
   border-top: 1px solid rgba(148, 163, 184, 0.2);
 }
+
+.issue-call-chain-panel {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.issue-call-chain-canvas {
+  min-height: 120px;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.issue-call-chain-canvas:empty::before {
+  content: "调用链图生成中...";
+  color: #64748b;
+  font-size: 13px;
+}
+
+.issue-call-chain-canvas svg {
+  display: block;
+  max-width: 100%;
+  min-width: 520px;
+  margin: 0 auto;
+}
+
+.issue-call-chain-summary.ant-typography {
+  margin: 10px 0 8px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.issue-call-chain-code {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}

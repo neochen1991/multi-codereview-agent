@@ -109,6 +109,12 @@ Windows 一键启动脚本会自动检查并补装：
 - Tree-sitter 代码图谱依赖：`tree-sitter`、`tree-sitter-language-pack`、`networkx`
 - 前端 `node_modules`
 
+Windows 下后端日志默认写入 `logs/backend.log`，不再默认持续写控制台，避免 cmd/PowerShell 控制台输出阻塞导致页面假死。确实需要控制台日志调试时，可先设置：
+
+```bat
+set CODE_REVIEW_CONSOLE_LOG=true
+```
+
 启动后进入设置页，在“Tree-sitter 代码图谱”区块中为目标代码仓点击“建立/刷新图谱”。图谱生成后会写入目标仓库：
 
 ```text

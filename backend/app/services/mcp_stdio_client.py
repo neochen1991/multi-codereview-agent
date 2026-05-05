@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import queue
 import subprocess
+import threading
 from io import BufferedReader, BufferedWriter
 from typing import Any
 
@@ -14,7 +17,7 @@ logger = logging.getLogger(__name__)
 class McpStdioClient:
     """Lightweight JSON-RPC stdio client for MCP servers."""
 
-    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: int, env: dict[str, str] | None = None) -> None:
+    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: float, env: dict[str, str] | None = None) -> None:
         self.command = list(command)
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
@@ -81,14 +84,17 @@ class McpStdioClient:
 class McpStdioSession:
     """Reusable JSON-RPC stdio session for multiple MCP batches."""
 
-    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: int, env: dict[str, str] | None = None) -> None:
+    def __init__(self, command: list[str], *, cwd: str, timeout_seconds: float, env: dict[str, str] | None = None) -> None:
         self.command = list(command)
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
-        self.env = env
+        self.env = _build_process_env(env)
         self.process: subprocess.Popen[bytes] | None = None
         self.stdin: BufferedWriter | None = None
         self.stdout: BufferedReader | None = None
+        self.stderr: BufferedReader | None = None
+        self._stderr_tail = bytearray()
+        self._stderr_thread: threading.Thread | None = None
 
     def __enter__(self) -> "McpStdioSession":
         self.start()
@@ -111,7 +117,7 @@ class McpStdioSession:
             process = subprocess.Popen(
                 self.command,
                 cwd=self.cwd,
-                env=self.env or None,
+                env=self.env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -129,6 +135,15 @@ class McpStdioSession:
         self.process = process
         self.stdin = process.stdin
         self.stdout = process.stdout
+        self.stderr = process.stderr
+        if process.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(process.stderr,),
+                name="mcp-stdio-stderr-drain",
+                daemon=True,
+            )
+            self._stderr_thread.start()
 
     def call_many(self, requests: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         self.start()
@@ -139,7 +154,7 @@ class McpStdioSession:
             self.cwd,
             len(requests),
         )
-        return _exchange_messages(self.stdin, self.stdout, requests)
+        return self._exchange_messages_with_timeout(requests)
 
     def close(self) -> None:
         process = self.process
@@ -151,11 +166,14 @@ class McpStdioSession:
                     self.stdin.close()
             except OSError:
                 pass
-            _, stderr_bytes = process.communicate(timeout=self.timeout_seconds)
+            process.wait(timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired as error:
             process.kill()
-            _, stderr_bytes = process.communicate()
-            stderr = stderr_bytes.decode("utf-8", errors="ignore")[-800:]
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+            stderr = self._stderr_text()
             logger.error(
                 "mcp stdio call timeout executable=%s cwd=%s timeout_seconds=%s stderr=%s",
                 self.command[0] if self.command else "",
@@ -165,7 +183,7 @@ class McpStdioSession:
             )
             raise RuntimeError(f"MCP 调用超时: timeout_seconds={self.timeout_seconds}") from error
         if process.returncode != 0:
-            stderr = stderr_bytes.decode("utf-8", errors="ignore")[-800:]
+            stderr = self._stderr_text()
             logger.error(
                 "mcp stdio call failed executable=%s cwd=%s return_code=%s stderr=%s",
                 self.command[0] if self.command else "",
@@ -183,6 +201,58 @@ class McpStdioSession:
         self.process = None
         self.stdin = None
         self.stdout = None
+        self.stderr = None
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=0.2)
+        self._stderr_thread = None
+
+    def _exchange_messages_with_timeout(self, requests: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def worker() -> None:
+            try:
+                assert self.stdin is not None and self.stdout is not None
+                result_queue.put(("result", _exchange_messages(self.stdin, self.stdout, requests)))
+            except BaseException as error:  # noqa: BLE001 - propagate worker failures to caller.
+                result_queue.put(("error", error))
+
+        thread = threading.Thread(target=worker, name="mcp-stdio-response-reader", daemon=True)
+        thread.start()
+        thread.join(timeout=max(0.001, float(self.timeout_seconds or 0)))
+        if thread.is_alive():
+            process = self.process
+            if process is not None:
+                logger.error(
+                    "mcp stdio response timeout executable=%s cwd=%s timeout_seconds=%s stderr_tail=%s",
+                    self.command[0] if self.command else "",
+                    self.cwd,
+                    self.timeout_seconds,
+                    self._stderr_text(),
+                )
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            raise RuntimeError(f"MCP 调用超时: timeout_seconds={self.timeout_seconds}")
+        kind, payload = result_queue.get()
+        if kind == "error":
+            raise payload  # type: ignore[misc]
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _drain_stderr(self, stderr: BufferedReader) -> None:
+        try:
+            while True:
+                chunk = stderr.read(4096)
+                if not chunk:
+                    return
+                self._stderr_tail.extend(chunk)
+                if len(self._stderr_tail) > 8192:
+                    del self._stderr_tail[:-8192]
+        except OSError:
+            return
+
+    def _stderr_text(self) -> str:
+        return bytes(self._stderr_tail).decode("utf-8", errors="ignore")[-800:]
 
 
 def _exchange_messages(
@@ -242,3 +312,18 @@ def _read_one_message(stdout: BufferedReader) -> dict[str, Any] | None:
 def _encode_message(message: dict[str, Any]) -> bytes:
     body = json.dumps({"jsonrpc": "2.0", **message}, ensure_ascii=False).encode("utf-8")
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+
+def _build_process_env(overrides: dict[str, str] | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env.update({str(key): str(value) for key, value in (overrides or {}).items() if str(key)})
+
+    # Windows may default Python subprocess text decoding to GBK. GitNexus MCP
+    # can launch Python helpers, so force UTF-8 at the process boundary.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.setdefault("LANG", "C.UTF-8")
+    env.setdefault("LC_ALL", "C.UTF-8")
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("FORCE_COLOR", "0")
+    return env

@@ -9,7 +9,9 @@ import type {
   RuleScreeningMetadata,
 } from "@/services/api";
 import { humanizeExpertId, humanizeReviewStatus, humanizeSeverity } from "@/utils/displayText";
+import { buildIssueCallChainGraph } from "./callChainGraph";
 import { evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
+import MermaidBlock from "./MermaidBlock";
 
 const { Paragraph } = Typography;
 
@@ -183,6 +185,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       (finding.code_context && Object.keys(finding.code_context).length > 0),
   );
   const evidenceChain = evidenceChainFor(finding, issue);
+  const callChainGraph = buildIssueCallChainGraph(finding, issue, evidenceChain);
 
   return (
     <Card className="module-card" title="问题详情">
@@ -307,6 +310,31 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             showIcon
             message="暂无结构化证据链"
             description="当前问题仍保留基础证据；如果命中 Tree-sitter、工具核验或跨文件关系，会在这里展示问题主张、代码锚点、工具核验和置信度变化。"
+          />
+        )}
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>调用关系依据</Paragraph>
+        {callChainGraph ? (
+          <div className="issue-call-chain-panel">
+            <MermaidBlock chart={callChainGraph.chart} />
+            <Paragraph className="issue-call-chain-summary">
+              {callChainGraph.summary}
+            </Paragraph>
+            <Space wrap>
+              <Tag color="green">{callChainGraph.sourceLabel}</Tag>
+              {callChainGraph.nodes.slice(0, 6).map((node) => (
+                <Tag key={node}>{node}</Tag>
+              ))}
+            </Space>
+          </div>
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="暂无可视化调用链"
+            description="当前证据尚未形成稳定的上游到下游调用关系；如 Tree-sitter 或 GitNexus 后续命中调用链，会在这里以 Mermaid 图展示。"
           />
         )}
       </div>

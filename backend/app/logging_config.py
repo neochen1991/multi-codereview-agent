@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 
@@ -24,14 +25,20 @@ def configure_logging(logs_root: Path) -> None:
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
 
-    has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
-        for handler in root_logger.handlers
-    )
-    if not has_stream_handler:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        root_logger.addHandler(stream_handler)
+    if _console_logging_enabled():
+        has_stream_handler = any(
+            isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+            for handler in root_logger.handlers
+        )
+        if not has_stream_handler:
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(formatter)
+            root_logger.addHandler(stream_handler)
+    else:
+        for handler in list(root_logger.handlers):
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                root_logger.removeHandler(handler)
+                handler.close()
 
     # 统一 uvicorn 系列 logger 到 root，确保 API 请求日志也带 asctime。
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
@@ -39,3 +46,12 @@ def configure_logging(logs_root: Path) -> None:
         uvicorn_logger.handlers = []
         uvicorn_logger.propagate = True
         uvicorn_logger.setLevel(logging.INFO)
+
+
+def _console_logging_enabled() -> bool:
+    raw = str(os.getenv("CODE_REVIEW_CONSOLE_LOG", "")).strip().lower()
+    if raw in {"1", "true", "on", "yes"}:
+        return True
+    if raw in {"0", "false", "off", "no"}:
+        return False
+    return os.name != "nt"

@@ -58,22 +58,41 @@ class ChangeImpactReportService:
         report.fact_source = "gitnexus_mcp"
         resolution = self._llm.resolve_expert(expert, runtime_settings)
         fallback = self._fallback_payload(report)
-        llm_result = self._llm.complete_text(
-            system_prompt=self._system_prompt(expert),
-            user_prompt=self._user_prompt(report, trace),
-            resolution=resolution,
-            runtime_settings=runtime_settings,
-            fallback_text=json.dumps(fallback, ensure_ascii=False),
-            allow_fallback=bool(runtime_settings.allow_llm_fallback),
-            timeout_seconds=45.0,
-            max_attempts=2,
-            log_context={
-                "review_id": review_id,
-                "issue_id": "impact_report",
-                "expert_id": expert.expert_id,
-                "phase": "impact_analysis_report",
-            },
-        )
+        llm_failure_reason = ""
+        try:
+            llm_result = self._llm.complete_text(
+                system_prompt=self._system_prompt(expert),
+                user_prompt=self._user_prompt(report, trace),
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=json.dumps(fallback, ensure_ascii=False),
+                allow_fallback=bool(runtime_settings.allow_llm_fallback),
+                timeout_seconds=120.0,
+                max_attempts=2,
+                log_context={
+                    "review_id": review_id,
+                    "issue_id": "impact_report",
+                    "expert_id": expert.expert_id,
+                    "phase": "impact_analysis_report",
+                },
+            )
+        except Exception as error:
+            llm_failure_reason = str(error)
+            logger.warning(
+                "impact report llm synthesis degraded to fact template review_id=%s expert_id=%s error=%s",
+                review_id,
+                expert.expert_id,
+                error,
+            )
+            llm_result = LLMTextResult(
+                text=json.dumps(fallback, ensure_ascii=False),
+                mode="fallback",
+                provider=resolution.provider,
+                model=resolution.model,
+                base_url=resolution.base_url,
+                api_key_env=resolution.api_key_env,
+                error=llm_failure_reason,
+            )
         payload = self._parse_json_payload(llm_result.text) or fallback
         summary = str(payload.get("summary") or fallback["summary"])
         key_impact_points = self._normalize_string_list(payload.get("key_impact_points")) or list(fallback["key_impact_points"])
@@ -127,6 +146,16 @@ class ChangeImpactReportService:
                 "manual_verification": manual_checks,
                 "llm_markdown": markdown,
                 "llm_generated": llm_result.mode == "live",
+                "limitations": self._dedupe(
+                    [
+                        *(
+                            [f"LLM 影响报告生成失败，已降级使用 GitNexus 图谱事实生成确定性报告：{llm_failure_reason}"]
+                            if llm_failure_reason
+                            else []
+                        ),
+                        *report.limitations,
+                    ]
+                ),
             }
         )
         return updated, llm_result
@@ -165,9 +194,9 @@ class ChangeImpactReportService:
             "impact_paths": [item.model_dump(mode="json") for item in report.impact_paths[:24]],
             "recommended_test_scope": [item.model_dump(mode="json") for item in report.recommended_test_scope[:16]],
             "manual_verification": report.manual_verification[:12],
-            "detect_changes": trace.get("detect_changes") or {},
-            "context_results": list(trace.get("context_results") or [])[:12],
-            "impact_results": list(trace.get("impact_results") or [])[:12],
+            "detect_changes": self._compact_fact_value(trace.get("detect_changes") or {}, max_depth=3),
+            "context_results": [self._compact_fact_value(item, max_depth=3) for item in list(trace.get("context_results") or [])[:8]],
+            "impact_results": [self._compact_fact_value(item, max_depth=3) for item in list(trace.get("impact_results") or [])[:8]],
         }
         schema = {
             "summary": "一句话总结本次 MR 的核心影响范围和最优先测试项",
@@ -202,6 +231,49 @@ class ChangeImpactReportService:
             f"输出 schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
             f"facts:\n{json.dumps(facts, ensure_ascii=False, indent=2)}"
         )
+
+    def _compact_fact_value(self, value: Any, *, max_depth: int = 2) -> Any:
+        if max_depth <= 0:
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return self._clip_string(value)
+            return self._clip_string(json.dumps(value, ensure_ascii=False, default=str))
+        if isinstance(value, dict):
+            priority_keys = [
+                "name",
+                "repo",
+                "symbol",
+                "qualified_name",
+                "source",
+                "target",
+                "path",
+                "paths",
+                "call_chain",
+                "callers",
+                "callees",
+                "affected_flows",
+                "impacted_files",
+                "test_files",
+                "risk",
+                "risk_level",
+                "summary",
+                "reason",
+                "description",
+            ]
+            ordered_keys = [key for key in priority_keys if key in value]
+            ordered_keys.extend(key for key in value.keys() if key not in ordered_keys)
+            return {
+                str(key): self._compact_fact_value(value.get(key), max_depth=max_depth - 1)
+                for key in ordered_keys[:18]
+            }
+        if isinstance(value, list):
+            return [self._compact_fact_value(item, max_depth=max_depth - 1) for item in value[:12]]
+        return self._clip_string(value)
+
+    def _clip_string(self, value: Any, *, max_chars: int = 700) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        return text if len(text) <= max_chars else f"{text[:max_chars].rstrip()}... [truncated {len(text) - max_chars} chars]"
 
     def _fallback_payload(self, report: ImpactReport) -> dict[str, Any]:
         key_impact_points = [
