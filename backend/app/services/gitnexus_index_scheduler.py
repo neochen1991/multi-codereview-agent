@@ -670,7 +670,10 @@ class GitNexusIndexScheduler:
             return Path(raw_registry).expanduser()
         raw_home = str(os.getenv("GITNEXUS_HOME") or "").strip()
         if raw_home:
-            return Path(raw_home).expanduser() / "registry.json"
+            home_path = Path(raw_home).expanduser()
+            if home_path.name.lower() == ".gitnexus":
+                return home_path / "registry.json"
+            return home_path / ".gitnexus" / "registry.json"
         return Path.home() / ".gitnexus" / "registry.json"
 
     def _status(self, state: str, message: str, **extra: object) -> dict[str, object]:

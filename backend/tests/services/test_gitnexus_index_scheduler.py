@@ -108,6 +108,23 @@ def test_gitnexus_index_scheduler_registers_repo_when_registry_has_other_repo(st
     assert str(repo_b) in registry_payload
 
 
+def test_gitnexus_index_scheduler_uses_home_dot_gitnexus_registry(storage_root: Path, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITNEXUS_HOME", str(tmp_path))
+    service = ReviewService(storage_root=storage_root)
+    scheduler = GitNexusIndexScheduler(service)
+
+    assert scheduler._registry_path() == tmp_path / ".gitnexus" / "registry.json"
+
+
+def test_gitnexus_index_scheduler_accepts_dot_gitnexus_home(storage_root: Path, tmp_path: Path, monkeypatch):
+    registry_dir = tmp_path / ".gitnexus"
+    monkeypatch.setenv("GITNEXUS_HOME", str(registry_dir))
+    service = ReviewService(storage_root=storage_root)
+    scheduler = GitNexusIndexScheduler(service)
+
+    assert scheduler._registry_path() == registry_dir / "registry.json"
+
+
 def test_gitnexus_index_scheduler_fails_when_repo_path_missing(storage_root: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setenv("GITNEXUS_INDEX_ENABLED", "true")
     missing_repo = tmp_path / "missing-repo"

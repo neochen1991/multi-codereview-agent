@@ -57,8 +57,12 @@ class FakeGitNexusImpactClient:
 class CaptureGitNexusImpactClient:
     def __init__(self) -> None:
         self.changed_symbols = []
+        self.repo_name = ""
+        self.runtime_env = None
 
     def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
+        self.repo_name = repo_name
+        self.runtime_env = runtime_env
         self.changed_symbols = list(changed_symbols)
         return {
             "detect_changes": {
@@ -192,7 +196,7 @@ def test_gitnexus_mcp_impact_client_batches_one_analysis_into_two_mcp_calls(capl
     assert '"paths": [["Controller", "OrderService.create"]]' in log_text
 
 
-def test_gitnexus_mcp_impact_client_stops_when_repo_missing_from_mcp_registry():
+def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_repo(caplog):
     client = GitNexusMcpImpactClient(timeout_seconds=5)
     subject = ReviewSubject(
         subject_type="mr",
@@ -215,9 +219,9 @@ def test_gitnexus_mcp_impact_client_stops_when_repo_missing_from_mcp_registry():
                 responses[request.get("id")] = {"result": {"content": [{"text": '[{"name":"repo-a"}]'}]}}
         return responses
 
-    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
-        with pytest.raises(RuntimeError, match="GitNexus MCP 未发现仓库 repo-b"):
-            client.analyze_mr(
+    with caplog.at_level(logging.WARNING, logger="app.services.gitnexus_impact_service"):
+        with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+            payload = client.analyze_mr(
                 repo_name="repo-b",
                 repo_path="/tmp/repo-b",
                 subject=subject,
@@ -231,7 +235,11 @@ def test_gitnexus_mcp_impact_client_stops_when_repo_missing_from_mcp_registry():
         for request in batch
         if request.get("method") == "tools/call"
     ]
-    assert tool_names == ["list_repos"]
+    assert tool_names[:2] == ["list_repos", "detect_changes"]
+    assert payload["repo"] == "repo-b"
+    assert payload["available_repos"] == ["repo-a"]
+    assert payload["list_repos_missing_repo"] is True
+    assert "list_repos did not include target repo" in caplog.text
 
 
 def test_gitnexus_mcp_impact_client_respects_runtime_query_limits():
@@ -1246,6 +1254,104 @@ def test_gitnexus_impact_service_rejects_duplicate_registry_repo_names(storage_r
 
     assert report.graph_status == "degraded"
     assert any("重复仓库名" in item for item in report.limitations)
+
+
+def test_gitnexus_impact_service_self_heals_registry_when_local_graph_ready(storage_root: Path, tmp_path: Path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    (repo_b / ".gitnexus").mkdir()
+    write_json(
+        repo_b / ".gitnexus" / "meta.json",
+        {
+            "repoPath": str(repo_b),
+            "lastCommit": "meta-commit",
+            "indexedAt": "2026-04-28T00:00:00Z",
+            "stats": {"files": 3},
+        },
+    )
+    registry_path = tmp_path / ".gitnexus" / "registry.json"
+    registry_path.parent.mkdir()
+    write_json(registry_path, {"repositories": [{"name": "repo-a", "path": str(repo_a)}]})
+    capture = CaptureGitNexusImpactClient()
+    service = GitNexusImpactService(storage_root, mcp_client=capture)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-b",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderController.java "
+            "b/src/main/java/com/example/OrderController.java\n"
+            "@@ -10,0 +10,4 @@\n"
+            " public class OrderController {\n"
+            "+  public OrderDTO createOrder() {\n"
+            "+    return service.create();\n"
+            "+  }\n"
+            " }\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_b), "gitnexus_registry_path": str(registry_path)},
+    )
+
+    with patch("app.services.gitnexus_impact_service.shutil.which", return_value="/usr/local/bin/gitnexus"):
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_b)))
+
+    assert report.graph_status == "ready"
+    assert capture.repo_name == "repo-b"
+    assert capture.runtime_env is not None
+    assert capture.runtime_env["GITNEXUS_REGISTRY_PATH"] == str(registry_path)
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert [item["name"] for item in payload["repositories"]] == ["repo-a", "repo-b"]
+    repo_b_entry = payload["repositories"][1]
+    assert repo_b_entry["path"] == str(repo_b)
+    assert repo_b_entry["storagePath"] == str(repo_b / ".gitnexus")
+    assert repo_b_entry["lastCommit"] == "meta-commit"
+
+
+def test_gitnexus_impact_service_uses_home_registry_path_for_mcp_env(storage_root: Path, tmp_path: Path):
+    service = GitNexusImpactService(storage_root)
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature",
+        target_ref="main",
+        changed_files=[],
+        metadata={"workspace_repo_path": str(repo_path), "gitnexus_home": str(tmp_path)},
+    )
+
+    env = service._gitnexus_runtime_env(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert service._gitnexus_registry_path(subject, RuntimeSettings()).as_posix().endswith("/.gitnexus/registry.json")
+    assert env is not None
+    assert env["HOME"] == str(tmp_path)
+    assert env["GITNEXUS_HOME"] == str(tmp_path)
+
+
+def test_gitnexus_impact_service_normalizes_dot_gitnexus_home_for_mcp_env(storage_root: Path, tmp_path: Path):
+    service = GitNexusImpactService(storage_root)
+    gitnexus_home = tmp_path / ".gitnexus"
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature",
+        target_ref="main",
+        changed_files=[],
+        metadata={"gitnexus_home": str(gitnexus_home)},
+    )
+
+    env = service._gitnexus_runtime_env(subject, RuntimeSettings())
+
+    assert service._gitnexus_registry_path(subject, RuntimeSettings()) == gitnexus_home / "registry.json"
+    assert env is not None
+    assert env["HOME"] == str(tmp_path)
+    assert env["GITNEXUS_HOME"] == str(tmp_path)
 
 
 def test_gitnexus_impact_service_extracts_symbols_from_local_git_diff_when_subject_diff_missing(storage_root: Path, tmp_path: Path):

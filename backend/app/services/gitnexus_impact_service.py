@@ -24,7 +24,7 @@ from app.domain.models.report import (
 )
 from app.domain.models.review import ReviewSubject
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.repositories.fs import read_json
+from app.repositories.fs import read_json, write_json
 from app.services.command_resolver import resolve_executable
 from app.services.cross_file_impact import _detect_signature_change
 from app.services.feedback_learner_service import FeedbackLearnerService
@@ -250,11 +250,14 @@ class GitNexusMcpImpactClient:
             raise RuntimeError(f"GitNexus list_repos 调用失败: {list_repos_payload.get('__error')}")
         available_repos = self._extract_repo_names(list_repos_payload)
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
+        list_repos_missing_repo = False
         if available_repos and effective_repo_name not in available_repos:
-            if mcp_session is not None:
-                mcp_session.close()
-            raise RuntimeError(
-                f"GitNexus MCP 未发现仓库 {effective_repo_name}，当前可用仓库: {', '.join(available_repos[:8])}"
+            list_repos_missing_repo = True
+            logger.warning(
+                "gitnexus list_repos did not include target repo; continue with registry-matched repo repo=%s repo_path=%s available_repos=%s",
+                effective_repo_name,
+                repo_path,
+                available_repos[:8],
             )
         detect_changes_result = self._call_tools_batch(
             command,
@@ -361,6 +364,7 @@ class GitNexusMcpImpactClient:
             return {
                 "repo": effective_repo_name,
                 "available_repos": available_repos,
+                "list_repos_missing_repo": list_repos_missing_repo,
                 "detect_changes": detect_changes_payload,
                 "context_results": context_payloads,
                 "impact_results": impact_payloads,
@@ -1350,6 +1354,24 @@ class GitNexusImpactService:
                 "当前机器未预装 GitNexus，或配置的 GitNexus MCP 命令不可用。"
                 f"请检查 GITNEXUS_BIN/GITNEXUS_MCP_COMMAND/PATH，当前命令: {' '.join(command)}"
             )
+        if not self._resolve_repo_name_from_registry(repo_path, registry):
+            registered, registry_path, repo_name, registry_error = self._ensure_gitnexus_registry_entry(repo_path, subject, runtime)
+            if registered:
+                logger.info(
+                    "gitnexus registry self-healed before mcp analyze repo=%s repo_path=%s registry_path=%s",
+                    repo_name,
+                    repo_path,
+                    registry_path,
+                )
+                registry = self._load_gitnexus_registry(subject, runtime)
+                graph_status = self._load_graph_status(repo_path, registry, subject=subject, runtime=runtime)
+            elif registry_error:
+                logger.warning(
+                    "gitnexus registry self-heal failed before mcp analyze repo_path=%s registry_path=%s error=%s",
+                    repo_path,
+                    registry_path,
+                    registry_error,
+                )
         resolved_repo_name = self._resolve_gitnexus_repo_name(repo_path, graph_status, registry)
         if not resolved_repo_name:
             raise RuntimeError("GitNexus 图谱已存在，但未在官方 registry 中识别到该仓库。")
@@ -1361,10 +1383,18 @@ class GitNexusImpactService:
                 "请清理旧 registry 条目，或使用唯一仓目录名重新执行 gitnexus analyze。"
             )
         changed_symbols = self._build_changed_symbols(subject, runtime)
+        registry_path = self._gitnexus_registry_path(subject, runtime)
+        runtime_env = self._gitnexus_runtime_env(subject, runtime)
         logger.info(
-            "gitnexus graph analyze repo=%s repo_path=%s changed_files=%s changed_symbols=%s symbols=%s",
+            "gitnexus graph analyze repo=%s repo_path=%s registry_path=%s registry_exists=%s env_HOME=%s env_USERPROFILE=%s env_GITNEXUS_HOME=%s env_GITNEXUS_REGISTRY_PATH=%s changed_files=%s changed_symbols=%s symbols=%s",
             resolved_repo_name,
             repo_path,
+            registry_path,
+            registry_path.exists(),
+            (runtime_env or {}).get("HOME", ""),
+            (runtime_env or {}).get("USERPROFILE", ""),
+            (runtime_env or {}).get("GITNEXUS_HOME", ""),
+            (runtime_env or {}).get("GITNEXUS_REGISTRY_PATH", ""),
             len(self._changed_files(subject)),
             len(changed_symbols),
             ",".join(item.symbol for item in changed_symbols[:10]),
@@ -1375,7 +1405,7 @@ class GitNexusImpactService:
                 repo_path=repo_path,
                 subject=subject,
                 changed_symbols=changed_symbols,
-                runtime_env=self._gitnexus_runtime_env(subject, runtime),
+                runtime_env=runtime_env,
                 max_targets=runtime.gitnexus_max_targets,
                 max_context_queries=runtime.gitnexus_max_context_queries,
                 max_impact_queries=runtime.gitnexus_max_impact_queries,
@@ -1390,7 +1420,13 @@ class GitNexusImpactService:
                 [f"{item.container + '.' if item.container else ''}{item.symbol}" for item in changed_symbols[:12]],
                 self._changed_files(subject)[:20],
             )
-            raise RuntimeError(f"GitNexus 图谱已就绪，但按官方 MCP 流程调用失败：{error}") from error
+            raise RuntimeError(
+                "GitNexus 图谱已就绪，但按官方 MCP 流程调用失败："
+                f"{error}；当前 registry={registry_path}；"
+                f"MCP 环境 HOME={(runtime_env or {}).get('HOME', '')}，"
+                f"GITNEXUS_HOME={(runtime_env or {}).get('GITNEXUS_HOME', '')}，"
+                f"GITNEXUS_REGISTRY_PATH={(runtime_env or {}).get('GITNEXUS_REGISTRY_PATH', '')}"
+            ) from error
         report = self._normalize_gitnexus_payload(subject, runtime, graph_status, raw, changed_symbols)
         trace = {
             "source": "gitnexus_mcp",
@@ -1561,6 +1597,110 @@ class GitNexusImpactService:
                     return [item for item in value if isinstance(item, dict)]
         return []
 
+    def _ensure_gitnexus_registry_entry(
+        self,
+        repo_path: str,
+        subject: ReviewSubject | None,
+        runtime: RuntimeSettings | None,
+    ) -> tuple[bool, str, str, str]:
+        registry_path = self._gitnexus_registry_path(subject, runtime)
+        try:
+            payload = read_json(registry_path) if registry_path.exists() else []
+            entries, container, key = self._registry_entries_for_update(payload)
+            repo_dir = Path(repo_path).expanduser()
+            repo_path_resolved = _normalize_path_for_compare(str(repo_dir))
+            repo_name = self._registry_repo_name(repo_dir, self._repository_id(subject, runtime), entries)
+            entry = self._build_registry_entry(repo_dir, repo_name)
+            replaced = False
+            for index, item in enumerate(entries):
+                candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+                if candidate_path and _normalize_path_for_compare(candidate_path) == repo_path_resolved:
+                    entries[index] = {**item, **entry}
+                    replaced = True
+                    break
+            if not replaced:
+                entries.append(entry)
+            if isinstance(container, dict):
+                container[key] = entries
+                next_payload: object = container
+            else:
+                next_payload = entries
+            write_json(registry_path, next_payload)
+        except Exception as error:
+            logger.exception("gitnexus registry self-heal failed repo_path=%s registry_path=%s", repo_path, registry_path)
+            return False, str(registry_path), "", f"{error.__class__.__name__}: {error}"
+        registry = self._load_gitnexus_registry(subject, runtime)
+        registered = bool(self._resolve_repo_name_from_registry(repo_path, registry))
+        return registered, str(registry_path), repo_name, "" if registered else "registry 写入后仍未匹配当前仓库"
+
+    def _registry_entries_for_update(self, payload: object) -> tuple[list[dict[str, Any]], object, str]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)], payload, ""
+        if isinstance(payload, dict):
+            for key in ("repositories", "repos", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)], dict(payload), key
+            container = dict(payload)
+            return [], container, "repositories"
+        return [], [], ""
+
+    def _registry_repo_name(
+        self,
+        repo_dir: Path,
+        repository_id: str,
+        entries: list[dict[str, Any]],
+    ) -> str:
+        base_candidates = [
+            repo_dir.name,
+            str(repository_id or "").strip(),
+            f"{repo_dir.name}-{str(repository_id or '').strip()}".strip("-"),
+        ]
+        candidate_paths_by_name: dict[str, set[str]] = {}
+        for item in entries:
+            name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+            path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+            if name and path:
+                candidate_paths_by_name.setdefault(name, set()).add(_normalize_path_for_compare(path))
+        repo_path_resolved = _normalize_path_for_compare(str(repo_dir))
+        for candidate in [item for item in base_candidates if item]:
+            paths = candidate_paths_by_name.get(candidate, set())
+            if not paths or paths == {repo_path_resolved}:
+                return candidate
+        seed = repo_dir.name or str(repository_id or "").strip() or "repository"
+        for index in range(2, 100):
+            candidate = f"{seed}-{index}"
+            if candidate not in candidate_paths_by_name:
+                return candidate
+        return f"{seed}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+
+    def _build_registry_entry(self, repo_dir: Path, repo_name: str) -> dict[str, object]:
+        meta = self._load_local_gitnexus_meta(repo_dir)
+        indexed_at = str(meta.get("indexedAt") or meta.get("indexed_at") or datetime.now(UTC).isoformat())
+        last_commit = str(meta.get("lastCommit") or meta.get("last_commit") or "")
+        entry: dict[str, object] = {
+            "name": repo_name,
+            "path": str(repo_dir),
+            "storagePath": str(repo_dir / ".gitnexus"),
+            "indexedAt": indexed_at,
+            "lastCommit": last_commit,
+            "stats": dict(meta.get("stats") or {}),
+        }
+        remote_url = str(meta.get("remoteUrl") or meta.get("remote_url") or "").strip()
+        if remote_url:
+            entry["remoteUrl"] = remote_url
+        return entry
+
+    def _load_local_gitnexus_meta(self, repo_dir: Path) -> dict[str, object]:
+        meta_path = repo_dir / ".gitnexus" / "meta.json"
+        if not meta_path.exists():
+            return {}
+        try:
+            payload = read_json(meta_path)
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
     def _gitnexus_runtime_env(
         self,
         subject: ReviewSubject | None,
@@ -1568,11 +1708,17 @@ class GitNexusImpactService:
     ) -> dict[str, str] | None:
         home_override = self._gitnexus_home(subject, runtime)
         if not home_override:
-            return None
-        env = dict(os.environ)
-        env["HOME"] = home_override
-        env.setdefault("USERPROFILE", home_override)
-        env.setdefault("GITNEXUS_HOME", home_override)
+            env = dict(os.environ)
+        else:
+            env = dict(os.environ)
+            normalized_home = self._normalize_gitnexus_home(home_override)
+            env["HOME"] = normalized_home
+            env.setdefault("USERPROFILE", normalized_home)
+            env.setdefault("GITNEXUS_HOME", normalized_home)
+        metadata = dict(subject.metadata or {}) if subject is not None else {}
+        explicit_registry = str(metadata.get("gitnexus_registry_path") or os.getenv("GITNEXUS_REGISTRY_PATH") or "").strip()
+        if explicit_registry:
+            env["GITNEXUS_REGISTRY_PATH"] = str(Path(explicit_registry).expanduser())
         return env
 
     def _gitnexus_registry_path(
@@ -1586,8 +1732,20 @@ class GitNexusImpactService:
             return Path(explicit).expanduser()
         home_override = self._gitnexus_home(subject, runtime)
         if home_override:
-            return Path(home_override).expanduser() / ".gitnexus" / "registry.json"
+            return self._gitnexus_registry_path_from_home(home_override)
         return Path.home() / ".gitnexus" / "registry.json"
+
+    def _gitnexus_registry_path_from_home(self, home: str) -> Path:
+        home_path = Path(home).expanduser()
+        if home_path.name.lower() == ".gitnexus":
+            return home_path / "registry.json"
+        return home_path / ".gitnexus" / "registry.json"
+
+    def _normalize_gitnexus_home(self, home: str) -> str:
+        home_path = Path(home).expanduser()
+        if home_path.name.lower() == ".gitnexus":
+            return str(home_path.parent)
+        return str(home_path)
 
     def _gitnexus_home(
         self,
