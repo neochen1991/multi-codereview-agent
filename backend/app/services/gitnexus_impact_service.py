@@ -1548,7 +1548,7 @@ class GitNexusImpactService:
                 "当前机器未预装 GitNexus，或配置的 GitNexus MCP 命令不可用。"
                 f"请检查 GITNEXUS_BIN/GITNEXUS_MCP_COMMAND/PATH，当前命令: {' '.join(command)}"
             )
-        workspace_unready_reason = self._mr_review_workspace_unready_reason(subject)
+        workspace_unready_reason = self._mr_review_workspace_unready_reason(subject, runtime)
         if workspace_unready_reason:
             raise RuntimeError(workspace_unready_reason)
         self._ensure_review_workspace_gitnexus_index(repo_path, subject, runtime, command)
@@ -1562,7 +1562,7 @@ class GitNexusImpactService:
         )
         if str(graph_status.get("state") or "") != "ready":
             raise RuntimeError("GitNexus 图谱未就绪，请先完成 gitnexus analyze 建图。")
-        source_alignment_error = self._validate_graph_matches_mr_source(repo_path, subject, graph_status)
+        source_alignment_error = self._validate_graph_matches_mr_source(repo_path, subject, graph_status, runtime)
         if source_alignment_error:
             raise RuntimeError(source_alignment_error)
         if not self._resolve_repo_name_from_registry(repo_path, registry):
@@ -1655,7 +1655,9 @@ class GitNexusImpactService:
         }
         return report, trace
 
-    def _mr_review_workspace_unready_reason(self, subject: ReviewSubject) -> str:
+    def _mr_review_workspace_unready_reason(self, subject: ReviewSubject, runtime: RuntimeSettings | None = None) -> str:
+        if not self._review_workspace_realtime_graph_enabled(runtime):
+            return ""
         if str(subject.subject_type or "").lower() != "mr" or not str(subject.unified_diff or "").strip():
             return ""
         metadata = dict(subject.metadata or {})
@@ -1892,7 +1894,10 @@ class GitNexusImpactService:
         repo_path: str,
         subject: ReviewSubject,
         graph_status: dict[str, Any],
+        runtime: RuntimeSettings | None = None,
     ) -> str:
+        if not self._review_workspace_realtime_graph_enabled(runtime):
+            return ""
         if str(subject.subject_type or "").lower() != "mr" or not str(subject.unified_diff or "").strip():
             return ""
         if not (Path(repo_path).expanduser() / ".git").exists():
@@ -1946,6 +1951,9 @@ class GitNexusImpactService:
                 f" graph_commit={graph_commit[:12]} source_commit={source_commit[:12]} source_ref={source_ref}"
             )
         return ""
+
+    def _review_workspace_realtime_graph_enabled(self, runtime: RuntimeSettings | None) -> bool:
+        return bool(getattr(runtime, "enable_review_workspace_realtime_graph", False)) if runtime is not None else False
 
     def _mr_source_ref_candidates(self, subject: ReviewSubject) -> list[str]:
         metadata = dict(subject.metadata or {})

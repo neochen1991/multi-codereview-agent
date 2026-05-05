@@ -102,6 +102,38 @@ def test_review_workspace_service_applies_diff_when_source_ref_missing(storage_r
     assert ".review-workspace" not in _git(Path(result.workspace_path), "ls-tree", "--name-only", "-r", "HEAD").stdout
 
 
+def test_review_workspace_service_applies_platform_diff_without_ab_prefix_when_source_ref_missing(storage_root: Path, tmp_path: Path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    changed = "class OrderService { String status() { return \"no-prefix\"; } }\n"
+    (repo / "src/main/java/com/example/OrderService.java").write_text(changed, encoding="utf-8")
+    diff = _git(repo, "diff", "--no-prefix", "dev").stdout
+    (repo / "src/main/java/com/example/OrderService.java").write_text(
+        "class OrderService { String status() { return \"old\"; } }\n",
+        encoding="utf-8",
+    )
+    runtime = RuntimeSettings(
+        default_repository_id="repo-a",
+        code_repositories=[CodeRepositorySettings(repository_id="repo-a", local_path=str(repo), default_branch="dev")],
+    )
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-a",
+        project_id="proj",
+        source_ref="feature/not-fetched",
+        target_ref="dev",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=diff,
+        metadata={"repository_id": "repo-a"},
+    )
+
+    result = ReviewWorkspaceService(storage_root).prepare(review_id="rev_apply_p0", subject=subject, runtime=runtime)
+
+    assert result.status == "ready"
+    assert result.snapshot_mode == "diff_apply"
+    assert "no-prefix" in (Path(result.workspace_path) / "src/main/java/com/example/OrderService.java").read_text(encoding="utf-8")
+
+
 def test_review_workspace_service_fetches_gitlab_mr_head_ref_when_source_branch_is_not_local(storage_root: Path, tmp_path: Path):
     remote = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)

@@ -12,6 +12,7 @@ from app.domain.models.message import ConversationMessage
 from app.domain.models.report import ImpactReport, TestScopeRecommendation as ImpactTestScopeRecommendation
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.review_skill import ReviewSkillProfile
+from app.domain.models.runtime_settings import RuntimeSettings
 from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.llm_chat_service import LLMResolution, LLMTextResult
@@ -240,7 +241,7 @@ def test_review_runner_records_workspace_graph_initialization_messages(storage_r
         lambda *_args, **_kwargs: {"status": "ready", "graph_dir": str(tmp_path / "rw" / "repo-a" / review_id / ".gitnexus")},
     )
 
-    runner._prepare_review_workspace(review, runner.runtime_settings_service.get())
+    runner._prepare_review_workspace(review, RuntimeSettings(enable_review_workspace_realtime_graph=True))
 
     messages = runner.message_repo.list(review_id)
     message_types = [message.message_type for message in messages]
@@ -250,6 +251,67 @@ def test_review_runner_records_workspace_graph_initialization_messages(storage_r
     assert "review_workspace_gitnexus_graph_completed" in message_types
     assert any("Tree-sitter 快照图谱初始化完成" in message.content for message in messages)
     assert any("GitNexus 快照图谱初始化完成" in message.content for message in messages)
+
+
+def test_review_runner_skips_worktree_when_realtime_workspace_graph_is_disabled(storage_root: Path, tmp_path: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.subject.subject_type = "mr"
+    review.subject.unified_diff = "diff --git a/src/App.java b/src/App.java\n@@ -0,0 +1 @@\n+class App {}\n"
+    configured_repo = tmp_path / "configured-repo"
+    configured_repo.mkdir()
+    runtime = RuntimeSettings(code_repo_local_path=str(configured_repo), enable_review_workspace_realtime_graph=False)
+
+    def fail_prepare(**_kwargs):
+        raise AssertionError("worktree prepare should not be called when realtime workspace graph is disabled")
+
+    monkeypatch.setattr(runner.review_workspace_service, "prepare", fail_prepare)
+
+    updated = runner._prepare_review_workspace(review, runtime)
+
+    metadata = dict(updated.subject.metadata or {})
+    assert metadata["review_workspace_status"] == "skipped"
+    assert metadata["workspace_repo_path"] == str(configured_repo)
+    assert "review_workspace_path" not in metadata
+    assert any(message.message_type == "review_workspace" and "未创建 MR worktree" in message.content for message in runner.message_repo.list(review_id))
+
+
+def test_review_runner_preheats_gitnexus_graph_even_when_runtime_tool_allowlist_is_missing_binding(storage_root: Path, tmp_path: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo-a",
+        project_id="proj",
+        source_ref="mr/12",
+        target_ref="dev",
+        changed_files=["src/App.java"],
+        unified_diff="diff --git a/src/App.java b/src/App.java\n@@ -0,0 +1 @@\n+class App {}\n",
+        metadata={
+            "repository_id": "repo-a",
+            "review_workspace_status": "ready",
+            "review_workspace_path": str(repo),
+            "workspace_repo_path": str(repo),
+        },
+    )
+    runtime = RuntimeSettings(code_repo_local_path=str(repo), runtime_tool_allowlist=[])
+    called: dict[str, object] = {}
+
+    def fake_ensure_review_workspace_index(received_subject, received_runtime):
+        called["subject"] = received_subject
+        called["runtime"] = received_runtime
+        return {"status": "ready", "graph_dir": str(repo / ".gitnexus")}
+
+    monkeypatch.setattr(runner.gitnexus_impact_service, "ensure_review_workspace_index", fake_ensure_review_workspace_index)
+
+    result = runner._build_review_workspace_gitnexus_graph(subject, runtime)
+
+    assert result["status"] == "ready"
+    assert called["subject"] is subject
+    assert called["runtime"] is runtime
 
 
 def test_change_impact_analysis_findings_are_always_suppressed(storage_root: Path):

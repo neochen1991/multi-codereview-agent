@@ -1321,6 +1321,7 @@ const SettingsPage: React.FC = () => {
                 enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
                 llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
                 enable_sast_prescan: Boolean(values.enable_sast_prescan),
+                enable_review_workspace_realtime_graph: Boolean(values.enable_review_workspace_realtime_graph),
                 gitnexus_max_targets: Number(values.gitnexus_max_targets || 12),
                 gitnexus_max_context_queries: Number(values.gitnexus_max_context_queries || 8),
                 gitnexus_max_impact_queries: Number(values.gitnexus_max_impact_queries || 8),
@@ -1859,6 +1860,16 @@ const SettingsPage: React.FC = () => {
                           label="启用 SAST/linter 预扫描"
                           valuePropName="checked"
                           extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为检查角色补充工具候选信号。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_review_workspace_realtime_graph"
+                          label="启用 MR 快照实时图谱"
+                          valuePropName="checked"
+                          extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有 Tree-sitter/GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
                         >
                           <Switch />
                         </Form.Item>

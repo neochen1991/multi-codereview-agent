@@ -74,6 +74,7 @@ class RuntimeSettingsService:
             "enable_llm_targeted_debate",
             "llm_targeted_debate_timeout_seconds",
             "enable_sast_prescan",
+            "enable_review_workspace_realtime_graph",
             "default_max_debate_rounds",
             "standard_llm_timeout_seconds",
             "standard_llm_retry_count",

@@ -1354,6 +1354,8 @@ class ReviewRunner(
         return review
 
     def _prepare_review_workspace(self, review: ReviewTask, runtime_settings: object) -> ReviewTask:
+        if not bool(getattr(runtime_settings, "enable_review_workspace_realtime_graph", False)):
+            return self._skip_review_workspace_for_configured_repo_graph(review, runtime_settings)
         try:
             result = self.review_workspace_service.prepare(
                 review_id=review.review_id,
@@ -1468,6 +1470,78 @@ class ReviewRunner(
         )
         return review
 
+    def _skip_review_workspace_for_configured_repo_graph(self, review: ReviewTask, runtime_settings: object) -> ReviewTask:
+        metadata = dict(review.subject.metadata or {})
+        configured_repo_path = self._configured_repository_path(review.subject, runtime_settings)
+        payload = {
+            "status": "skipped",
+            "message": "实时快照图谱开关关闭，未创建 MR worktree，后续使用设置页配置代码仓的已有图谱。",
+            "workspace_path": "",
+            "base_repo_path": configured_repo_path,
+            "repository_id": str(metadata.get("repository_id") or review.subject.repo_id or ""),
+            "review_id": review.review_id,
+            "target_ref": review.subject.target_ref,
+            "source_ref": review.subject.source_ref,
+            "snapshot_mode": "configured_repo_graph",
+        }
+        metadata["review_workspace"] = payload
+        metadata["review_workspace_status"] = "skipped"
+        metadata["review_workspace_message"] = str(payload["message"])
+        metadata["configured_workspace_repo_path"] = configured_repo_path
+        if configured_repo_path:
+            metadata["workspace_repo_path"] = configured_repo_path
+            metadata["repo_context_workspace_path"] = configured_repo_path
+        for key in (
+            "review_workspace_path",
+            "review_workspace_commit",
+            "review_workspace_diff_hash",
+            "review_workspace_code_graph",
+            "review_workspace_gitnexus_graph",
+            "code_graph_db_path",
+        ):
+            metadata.pop(key, None)
+        review.subject.metadata = metadata
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="review_workspace_skipped",
+                phase="intake",
+                message=str(payload["message"]),
+                payload=payload,
+            )
+        )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="review_workspace",
+                content="\n".join(
+                    [
+                        "MR 合入快照未启用。",
+                        "- 原因：实时快照图谱开关关闭。",
+                        "- 动作：未创建 MR worktree。",
+                        f"- 使用代码仓：{configured_repo_path or '设置页未配置本地代码仓'}",
+                        "- 图谱来源：设置页配置代码仓的 .code-review-graph 与 .gitnexus。",
+                    ]
+                ),
+                metadata={"phase": "intake", **payload},
+            )
+        )
+        return review
+
+    def _configured_repository_path(self, subject: ReviewSubject, runtime_settings: object) -> str:
+        try:
+            repository = self.repository_resolver.resolve(runtime_settings, subject)  # type: ignore[arg-type]
+            local_path = str(getattr(repository, "local_path", "") or "").strip()
+            if local_path:
+                return local_path
+        except Exception:
+            logger.debug("failed to resolve configured repository path for review workspace skip", exc_info=True)
+        return str(getattr(runtime_settings, "code_repo_local_path", "") or "").strip()
+
     def _append_review_workspace_graph_message(
         self,
         review_id: str,
@@ -1574,9 +1648,6 @@ class ReviewRunner(
             }
 
     def _build_review_workspace_gitnexus_graph(self, subject: ReviewSubject, runtime_settings: object) -> dict[str, object]:
-        runtime_tool_allowlist = set(getattr(runtime_settings, "runtime_tool_allowlist", []) or [])
-        if "gitnexus_impact_analysis" not in runtime_tool_allowlist:
-            return {"status": "skipped", "message": "运行时未启用 GitNexus 关联影响分析，跳过 worktree 建图。"}
         try:
             repository = self.repository_resolver.resolve(runtime_settings, subject)  # type: ignore[arg-type]
             if not bool(getattr(repository, "gitnexus_enabled", True)):

@@ -645,6 +645,7 @@ export interface RuntimeSettings {
   enable_llm_targeted_debate: boolean;
   llm_targeted_debate_timeout_seconds: number;
   enable_sast_prescan: boolean;
+  enable_review_workspace_realtime_graph: boolean;
   gitnexus_max_targets: number;
   gitnexus_max_context_queries: number;
   gitnexus_max_impact_queries: number;

@@ -109,6 +109,7 @@ class RuntimeSettings(BaseModel):
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
     enable_sast_prescan: bool = False
+    enable_review_workspace_realtime_graph: bool = False
     gitnexus_max_targets: int = Field(default=12, ge=1, le=50)
     gitnexus_max_context_queries: int = Field(default=8, ge=1, le=50)
     gitnexus_max_impact_queries: int = Field(default=8, ge=1, le=50)

@@ -1031,7 +1031,7 @@ def test_gitnexus_impact_service_uses_ready_graph_before_fallback(storage_root: 
     )
 
     with patch.object(service, "_registry_paths_for_repo_name", return_value=[]):
-        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=True))
 
     assert report.graph_status == "ready"
     assert report.graph_commit == "abc123"
@@ -1089,7 +1089,7 @@ def test_gitnexus_impact_service_ignores_stale_local_failed_status_when_storage_
     )
 
     with patch.object(service, "_registry_paths_for_repo_name", return_value=[]):
-        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=True))
 
     assert report.graph_status == "ready"
     assert report.graph_commit == "ready-storage-commit"
@@ -1174,7 +1174,10 @@ def test_gitnexus_impact_service_downgrades_when_mr_source_ref_missing_locally(s
     )
 
     with patch.object(service, "_resolve_existing_git_ref", return_value=""):
-        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+        report = service.analyze(
+            subject,
+            RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=True),
+        )
 
     assert report.graph_status == "degraded"
     assert any("MR 的 source/head 代码未在本地代码仓中找到" in item for item in report.limitations)
@@ -1224,11 +1227,44 @@ def test_gitnexus_impact_service_downgrades_when_review_workspace_not_ready(stor
         },
     )
 
-    report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+    report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=True))
 
     assert report.graph_status == "degraded"
     assert any("MR 快照工作区未就绪" in item for item in report.limitations)
     assert not any("source/head 代码未在本地代码仓中找到" in item for item in report.limitations)
+
+
+def test_gitnexus_impact_service_allows_configured_repo_graph_when_realtime_workspace_graph_disabled(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".git").mkdir()
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/not-fetched",
+        target_ref="dev",
+        changed_files=["inventory/src/main/java/com/example/StockRepository.java"],
+        unified_diff=(
+            "diff --git a/inventory/src/main/java/com/example/StockRepository.java "
+            "b/inventory/src/main/java/com/example/StockRepository.java\n"
+            "@@ -20,2 +20,5 @@\n"
+            "+public List<Stock> findByStatus(String status) {\n"
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+            "+}\n"
+        ),
+        metadata={
+            "workspace_repo_path": str(repo_path),
+            "repository_id": "repo_impact",
+            "review_workspace_status": "skipped",
+            "review_workspace_message": "实时快照图谱关闭，使用配置代码仓图谱。",
+        },
+    )
+    runtime = RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=False)
+
+    assert service._mr_review_workspace_unready_reason(subject, runtime) == ""
+    assert service._validate_graph_matches_mr_source(repo_path=str(repo_path), subject=subject, graph_status={}, runtime=runtime) == ""
 
 
 def test_gitnexus_impact_service_review_workspace_index_timeout_default(storage_root: Path, monkeypatch):

@@ -352,17 +352,59 @@ class ReviewWorkspaceService:
     def _apply_diff(self, workspace_path: Path, unified_diff: str) -> subprocess.CompletedProcess[str]:
         diff_path = workspace_path.parent / f"{workspace_path.name}.mr.diff"
         diff_path.write_text(str(unified_diff or ""), encoding="utf-8")
+        attempts = [
+            ["git", "apply", "--3way", "--whitespace=nowarn", str(diff_path)],
+            ["git", "apply", "--whitespace=nowarn", str(diff_path)],
+            ["git", "apply", "-p0", "--whitespace=nowarn", str(diff_path)],
+            ["git", "apply", "--reject", "--whitespace=nowarn", str(diff_path)],
+            ["git", "apply", "-p0", "--reject", "--whitespace=nowarn", str(diff_path)],
+        ]
+        failures: list[str] = []
         try:
-            return self._run_git(
-                ["git", "apply", "--whitespace=nowarn", str(diff_path)],
-                cwd=workspace_path,
-                timeout=self._timeout("REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS", 600),
+            for index, command in enumerate(attempts):
+                if index:
+                    self._reset_diff_attempt(workspace_path)
+                completed = self._run_git(
+                    command,
+                    cwd=workspace_path,
+                    timeout=self._timeout("REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS", 600),
+                )
+                if completed.returncode == 0:
+                    logger.info("review workspace diff apply succeeded cwd=%s command=%s", workspace_path, " ".join(command))
+                    return completed
+                failure = (completed.stderr or completed.stdout or "").strip()
+                failures.append(f"{' '.join(command[:-1])}: {failure[-800:]}")
+                logger.warning(
+                    "review workspace diff apply attempt failed cwd=%s command=%s return_code=%s stderr=%s",
+                    workspace_path,
+                    " ".join(command),
+                    completed.returncode,
+                    failure[-800:],
+                )
+            self._reset_diff_attempt(workspace_path)
+            return subprocess.CompletedProcess(
+                ["git", "apply"],
+                returncode=1,
+                stdout="",
+                stderr="平台 diff 多策略应用失败：\n" + "\n".join(failures[-5:]),
             )
         finally:
             try:
                 diff_path.unlink(missing_ok=True)
             except OSError:
                 logger.debug("review workspace temp diff cleanup failed path=%s", diff_path)
+
+    def _reset_diff_attempt(self, workspace_path: Path) -> None:
+        self._run_git(
+            ["git", "reset", "--hard", "HEAD"],
+            cwd=workspace_path,
+            timeout=self._timeout("REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS", 600),
+        )
+        self._run_git(
+            ["git", "clean", "-fd"],
+            cwd=workspace_path,
+            timeout=self._timeout("REVIEW_WORKSPACE_APPLY_TIMEOUT_SECONDS", 600),
+        )
 
     def _commit_workspace_changes(self, workspace_path: Path) -> subprocess.CompletedProcess[str]:
         added = self._run_git(
