@@ -180,6 +180,7 @@ class GitNexusImpactClient(Protocol):
         max_context_queries: int = MAX_GITNEXUS_CONTEXT_QUERIES,
         max_impact_queries: int = MAX_GITNEXUS_IMPACT_QUERIES,
         max_dynamic_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
+        cli_available_repos: list[str] | None = None,
         impact_feedback_profiles: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """基于已建好的 GitNexus 图谱分析本次 MR 影响。"""
@@ -210,6 +211,7 @@ class GitNexusMcpImpactClient:
         max_context_queries: int = MAX_GITNEXUS_CONTEXT_QUERIES,
         max_impact_queries: int = MAX_GITNEXUS_IMPACT_QUERIES,
         max_dynamic_targets: int = MAX_GITNEXUS_DYNAMIC_TARGETS,
+        cli_available_repos: list[str] | None = None,
         impact_feedback_profiles: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         command = self._command()
@@ -251,13 +253,17 @@ class GitNexusMcpImpactClient:
         available_repos = self._extract_repo_names(list_repos_payload)
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
         list_repos_missing_repo = False
+        cli_repos = self._dedupe_strings(cli_available_repos or [])
+        cli_list_has_repo = bool(cli_repos and effective_repo_name in cli_repos)
         if available_repos and effective_repo_name not in available_repos:
             list_repos_missing_repo = True
             logger.warning(
-                "gitnexus list_repos did not include target repo; continue with registry-matched repo repo=%s repo_path=%s available_repos=%s",
+                "gitnexus list_repos did not include target repo; continue with registry-matched repo repo=%s repo_path=%s mcp_available_repos=%s cli_available_repos=%s cli_has_repo=%s",
                 effective_repo_name,
                 repo_path,
                 available_repos[:8],
+                cli_repos[:8],
+                cli_list_has_repo,
             )
         detect_changes_result = self._call_tools_batch(
             command,
@@ -364,6 +370,8 @@ class GitNexusMcpImpactClient:
             return {
                 "repo": effective_repo_name,
                 "available_repos": available_repos,
+                "cli_available_repos": cli_repos,
+                "cli_list_has_repo": cli_list_has_repo,
                 "list_repos_missing_repo": list_repos_missing_repo,
                 "detect_changes": detect_changes_payload,
                 "context_results": context_payloads,
@@ -1257,6 +1265,105 @@ class GitNexusImpactService:
             return False
         return bool(resolve_executable(executable))
 
+    def _gitnexus_list_command(self, mcp_command: list[str]) -> list[str]:
+        raw = str(os.getenv("GITNEXUS_LIST_COMMAND") or "").strip()
+        if raw:
+            parsed = _parse_command_text(raw)
+            if parsed:
+                return parsed
+        if mcp_command:
+            command = list(mcp_command)
+            if str(command[-1]).strip().lower() == "mcp":
+                return [*command[:-1], "list"]
+        binary = str(os.getenv("GITNEXUS_BIN") or "").strip()
+        if binary:
+            return [binary, "list"]
+        return [resolve_executable("gitnexus") or "gitnexus", "list"]
+
+    def _gitnexus_cli_available_repos(
+        self,
+        mcp_command: list[str],
+        repo_path: str,
+        runtime_env: dict[str, str] | None,
+    ) -> list[str]:
+        command = self._gitnexus_list_command(mcp_command)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=repo_path or None,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                env=runtime_env,
+                check=False,
+            )
+        except Exception as error:
+            logger.warning("gitnexus list failed command=%s repo_path=%s error=%s", " ".join(command), repo_path, error)
+            return []
+        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        repos = self._parse_gitnexus_list_output(output)
+        logger.info(
+            "gitnexus cli list command=%s repo_path=%s returncode=%s repos=%s output=%s",
+            " ".join(command),
+            repo_path,
+            completed.returncode,
+            repos[:8],
+            _compact_json(output, max_chars=1200),
+        )
+        return repos if completed.returncode == 0 else []
+
+    def _parse_gitnexus_list_output(self, output: str) -> list[str]:
+        text = str(output or "").strip()
+        if not text:
+            return []
+        parsed = GitNexusMcpImpactClient()._parse_json_text(text)
+        if parsed is not None:
+            return self._extract_repo_names_from_any(parsed)
+        candidates: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if lowered in {"name", "repo", "repository", "path"} or lowered.startswith(("name ", "name|", "repo ", "repo|", "repository ", "repository|", "path ", "path|", "----", "====")):
+                continue
+            if line.startswith(("-", "*")):
+                line = line[1:].strip()
+            if "|" in line:
+                parts = [part.strip() for part in line.strip("|").split("|") if part.strip()]
+                if parts:
+                    line = parts[0]
+            for prefix in ("name:", "repo:", "repository:"):
+                if line.lower().startswith(prefix):
+                    line = line[len(prefix) :].strip()
+                    break
+            if not line:
+                continue
+            token = line.split()[0].strip().strip(",;")
+            if token and token.lower() not in {"name", "repo", "repository"}:
+                candidates.append(token)
+        return self._dedupe([item for item in candidates if item])
+
+    def _extract_repo_names_from_any(self, value: Any) -> list[str]:
+        names: list[str] = []
+        if isinstance(value, str):
+            if value.strip():
+                names.append(value.strip())
+            return self._dedupe(names)
+        if isinstance(value, list):
+            for item in value:
+                names.extend(self._extract_repo_names_from_any(item))
+            return self._dedupe(names)
+        if isinstance(value, dict):
+            direct = str(value.get("name") or value.get("repo") or value.get("repo_name") or value.get("repository") or "").strip()
+            if direct:
+                names.append(direct)
+            for key in ("repos", "repositories", "items", "results", "value", "data"):
+                names.extend(self._extract_repo_names_from_any(value.get(key)))
+        return self._dedupe(names)
+
     def analyze_with_trace(
         self,
         subject: ReviewSubject,
@@ -1385,12 +1492,14 @@ class GitNexusImpactService:
         changed_symbols = self._build_changed_symbols(subject, runtime)
         registry_path = self._gitnexus_registry_path(subject, runtime)
         runtime_env = self._gitnexus_runtime_env(subject, runtime)
+        cli_available_repos = self._gitnexus_cli_available_repos(command, repo_path, runtime_env)
         logger.info(
-            "gitnexus graph analyze repo=%s repo_path=%s registry_path=%s registry_exists=%s env_HOME=%s env_USERPROFILE=%s env_GITNEXUS_HOME=%s env_GITNEXUS_REGISTRY_PATH=%s changed_files=%s changed_symbols=%s symbols=%s",
+            "gitnexus graph analyze repo=%s repo_path=%s registry_path=%s registry_exists=%s cli_available_repos=%s env_HOME=%s env_USERPROFILE=%s env_GITNEXUS_HOME=%s env_GITNEXUS_REGISTRY_PATH=%s changed_files=%s changed_symbols=%s symbols=%s",
             resolved_repo_name,
             repo_path,
             registry_path,
             registry_path.exists(),
+            cli_available_repos[:8],
             (runtime_env or {}).get("HOME", ""),
             (runtime_env or {}).get("USERPROFILE", ""),
             (runtime_env or {}).get("GITNEXUS_HOME", ""),
@@ -1410,6 +1519,7 @@ class GitNexusImpactService:
                 max_context_queries=runtime.gitnexus_max_context_queries,
                 max_impact_queries=runtime.gitnexus_max_impact_queries,
                 max_dynamic_targets=runtime.gitnexus_max_dynamic_targets,
+                cli_available_repos=cli_available_repos,
                 impact_feedback_profiles=self._impact_feedback_profiles(),
             )
         except Exception as error:

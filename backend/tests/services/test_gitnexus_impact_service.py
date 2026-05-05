@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -59,10 +60,12 @@ class CaptureGitNexusImpactClient:
         self.changed_symbols = []
         self.repo_name = ""
         self.runtime_env = None
+        self.cli_available_repos = []
 
     def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         self.repo_name = repo_name
         self.runtime_env = runtime_env
+        self.cli_available_repos = list(kwargs.get("cli_available_repos") or [])
         self.changed_symbols = list(changed_symbols)
         return {
             "detect_changes": {
@@ -227,6 +230,7 @@ def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_re
                 subject=subject,
                 changed_symbols=[type("ChangedSymbol", (), {"symbol": "create", "container": "OrderService"})()],
                 runtime_env=None,
+                cli_available_repos=["repo-a", "repo-b"],
             )
 
     tool_names = [
@@ -238,6 +242,8 @@ def test_gitnexus_mcp_impact_client_continues_when_list_repos_misses_registry_re
     assert tool_names[:2] == ["list_repos", "detect_changes"]
     assert payload["repo"] == "repo-b"
     assert payload["available_repos"] == ["repo-a"]
+    assert payload["cli_available_repos"] == ["repo-a", "repo-b"]
+    assert payload["cli_list_has_repo"] is True
     assert payload["list_repos_missing_repo"] is True
     assert "list_repos did not include target repo" in caplog.text
 
@@ -1296,11 +1302,18 @@ def test_gitnexus_impact_service_self_heals_registry_when_local_graph_ready(stor
         metadata={"workspace_repo_path": str(repo_b), "gitnexus_registry_path": str(registry_path)},
     )
 
-    with patch("app.services.gitnexus_impact_service.shutil.which", return_value="/usr/local/bin/gitnexus"):
+    with (
+        patch("app.services.gitnexus_impact_service.shutil.which", return_value="/usr/local/bin/gitnexus"),
+        patch(
+            "app.services.gitnexus_impact_service.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout='[{"name":"repo-a"},{"name":"repo-b"}]', stderr=""),
+        ),
+    ):
         report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_b)))
 
     assert report.graph_status == "ready"
     assert capture.repo_name == "repo-b"
+    assert capture.cli_available_repos == ["repo-a", "repo-b"]
     assert capture.runtime_env is not None
     assert capture.runtime_env["GITNEXUS_REGISTRY_PATH"] == str(registry_path)
     payload = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -1331,6 +1344,14 @@ def test_gitnexus_impact_service_uses_home_registry_path_for_mcp_env(storage_roo
     assert env is not None
     assert env["HOME"] == str(tmp_path)
     assert env["GITNEXUS_HOME"] == str(tmp_path)
+
+
+def test_gitnexus_impact_service_parses_gitnexus_list_outputs(storage_root: Path):
+    service = GitNexusImpactService(storage_root)
+
+    assert service._parse_gitnexus_list_output('[{"name":"repo-a"},{"name":"repo-b"}]') == ["repo-a", "repo-b"]
+    assert service._parse_gitnexus_list_output("Name | Path\nrepo-a | C:/a\nrepo-b | C:/b\n") == ["repo-a", "repo-b"]
+    assert service._parse_gitnexus_list_output("- repo-a\n- repo-b\n") == ["repo-a", "repo-b"]
 
 
 def test_gitnexus_impact_service_normalizes_dot_gitnexus_home_for_mcp_env(storage_root: Path, tmp_path: Path):
