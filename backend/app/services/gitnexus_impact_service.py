@@ -1567,6 +1567,7 @@ class GitNexusImpactService:
             if repository_id:
                 candidates.append((self.storage_root / "gitnexus" / self._safe_repository_id(repository_id) / "index_status.json", False))
             candidates.append((self.storage_root / "gitnexus" / "index_status.json", False))
+        non_ready_status: dict[str, Any] | None = None
         for path, strict_repo_match in candidates:
             if not path.exists():
                 continue
@@ -1575,17 +1576,18 @@ class GitNexusImpactService:
             except Exception:
                 continue
             if isinstance(status, dict):
-                if strict_repo_match:
+                if not self._graph_status_matches_repo_path(status, repo_path, strict_repo_match):
+                    logger.info(
+                        "gitnexus graph status ignored because repo_path mismatched status_path=%s expected_repo=%s actual_repo=%s",
+                        path,
+                        repo_path,
+                        status.get("repo_path") or status.get("repoPath") or status.get("path"),
+                    )
+                    continue
+                if str(status.get("state") or "").strip().lower() == "ready":
                     return status
-                if self._status_matches_repo_path(status, repo_path):
-                    return status
-                logger.info(
-                    "gitnexus graph status ignored because repo_path mismatched status_path=%s expected_repo=%s actual_repo=%s",
-                    path,
-                    repo_path,
-                    status.get("repo_path"),
-                )
-                continue
+                if non_ready_status is None:
+                    non_ready_status = status
         meta_path = repo_root / ".gitnexus" / "meta.json"
         if meta_path.exists():
             try:
@@ -1603,6 +1605,8 @@ class GitNexusImpactService:
                     "stats": dict(meta.get("stats") or {}),
                 }
         if (repo_root / ".gitnexus").exists():
+            if non_ready_status is not None:
+                return non_ready_status
             resolved_repo_name = self._resolve_repo_name_from_registry(repo_path, registry)
             return {
                 "state": "ready",
@@ -1610,7 +1614,15 @@ class GitNexusImpactService:
                 "repo_name": resolved_repo_name or repo_root.name,
                 "updated_at": "",
             }
+        if non_ready_status is not None:
+            return non_ready_status
         return {}
+
+    def _graph_status_matches_repo_path(self, status: dict[str, Any], repo_path: str, strict_repo_match: bool) -> bool:
+        candidate_path = str(status.get("repo_path") or status.get("repoPath") or status.get("path") or "").strip()
+        if candidate_path:
+            return _normalize_path_for_compare(candidate_path) == _normalize_path_for_compare(repo_path)
+        return strict_repo_match
 
     def _status_matches_repo_path(self, status: dict[str, Any], repo_path: str) -> bool:
         candidate_path = str(status.get("repo_path") or status.get("repoPath") or status.get("path") or "").strip()

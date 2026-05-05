@@ -907,6 +907,56 @@ def test_gitnexus_impact_service_uses_ready_graph_before_fallback(storage_root: 
     assert any(edge.source == "StockService.reserve" and edge.target == "StockRepository.findByStatus" for edge in report.impact_graph.edges)
 
 
+def test_gitnexus_impact_service_ignores_stale_local_failed_status_when_storage_ready(storage_root: Path, tmp_path: Path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / ".gitnexus").mkdir()
+    write_json(
+        repo_path / ".gitnexus" / "index_status.json",
+        {
+            "state": "failed",
+            "repo_path": str(repo_path),
+            "repo_name": "repo",
+            "message": "stale failed local status",
+            "commit": "stale-commit",
+        },
+    )
+    write_json(
+        storage_root / "gitnexus" / "repo_impact" / "index_status.json",
+        {
+            "state": "ready",
+            "repo_path": str(repo_path),
+            "repo_name": "repo",
+            "indexed_at": "2026-04-29T00:00:00+00:00",
+            "commit": "ready-storage-commit",
+        },
+    )
+    service = GitNexusImpactService(storage_root, mcp_client=FakeGitNexusImpactClient())
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/batch",
+        target_ref="main",
+        changed_files=["inventory/src/main/java/com/example/StockRepository.java"],
+        unified_diff=(
+            "diff --git a/inventory/src/main/java/com/example/StockRepository.java "
+            "b/inventory/src/main/java/com/example/StockRepository.java\n"
+            "@@ -20,2 +20,5 @@\n"
+            "+public List<Stock> findByStatus(String status) {\n"
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+            "+}\n"
+        ),
+        metadata={"workspace_repo_path": str(repo_path), "repository_id": "repo_impact"},
+    )
+
+    with patch.object(service, "_registry_paths_for_repo_name", return_value=[]):
+        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert report.graph_status == "ready"
+    assert report.graph_commit == "ready-storage-commit"
+
+
 def test_gitnexus_impact_service_prefers_repo_local_graph_status_over_storage_root(storage_root: Path, tmp_path: Path):
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
