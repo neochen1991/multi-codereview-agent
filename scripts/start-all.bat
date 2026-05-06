@@ -130,7 +130,7 @@ exit /b 0
 
 :ensure_tree_sitter_dependencies
 echo checking Tree-sitter code graph dependencies...
-"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_language; get_language('java')" >nul 2>nul
+"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }')" >nul 2>nul
 if not errorlevel 1 (
   exit /b 0
 )
@@ -147,9 +147,12 @@ if not "%TREE_SITTER_PIP_EXIT%"=="0" (
   exit /b 1
 )
 
-"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_language; get_language('java')" >nul 2>nul
+"%VENV_PYTHON%" -c "import tree_sitter, tree_sitter_language_pack, networkx; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }')" >nul 2>nul
 if errorlevel 1 (
   echo Tree-sitter dependencies installed, but Java grammar check failed.
+  echo Please run:
+  echo   "%VENV_PYTHON%" -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
+  echo If you use an internal PyPI mirror, make sure it provides Windows wheels for tree-sitter-language-pack 0.13 or newer.
   exit /b 1
 )
 exit /b 0

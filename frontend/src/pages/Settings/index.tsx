@@ -686,7 +686,7 @@ const SettingsPage: React.FC = () => {
     return (
       <Space direction="vertical" size={4}>
         {checks.map((check) => (
-          <Tag key={check.name} color={gitnexusDiagnosticColor(check.status)}>
+          <Tag key={check.name} color={gitnexusDiagnosticColor(check.status)} style={{ whiteSpace: "normal", lineHeight: 1.6 }}>
             {check.message}
           </Tag>
         ))}

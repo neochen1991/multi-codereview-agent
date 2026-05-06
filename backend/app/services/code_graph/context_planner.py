@@ -238,16 +238,16 @@ class CodeGraphContextPlanner:
         limit: int,
     ) -> dict[str, object]:
         try:
-            from tree_sitter_language_pack import get_parser
+            from app.services.code_graph.java_tree_sitter_parser import create_java_tree_sitter_parser
         except Exception:
             return {"ready": False, "contexts": [], "fallback_reason": "Tree-sitter 依赖未安装", "stats": {}}
         local_path = getattr(repository_context_service, "local_path", None)
         if local_path is None:
             return {"ready": False, "contexts": [], "fallback_reason": "目标代码仓上下文不可用", "stats": {}}
         try:
-            parser = get_parser("java")
-        except Exception:
-            return {"ready": False, "contexts": [], "fallback_reason": "Tree-sitter Java parser 不可用", "stats": {}}
+            parser = create_java_tree_sitter_parser()
+        except Exception as error:
+            return {"ready": False, "contexts": [], "fallback_reason": str(error), "stats": {}}
         contexts: list[dict[str, object]] = []
         scanned_file_count = 0
         for relative_path in self._java_candidate_files(repository_context_service, changed_files):

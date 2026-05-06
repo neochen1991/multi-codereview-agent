@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.domain.models.runtime_settings import CodeRepositorySettings
+from app.services.code_graph import java_tree_sitter_parser
 from app.services.code_graph_index_scheduler import CodeGraphIndexScheduler
 from app.services.review_service import ReviewService
 
@@ -98,3 +99,22 @@ def test_code_graph_manual_index_reports_other_repository_running(storage_root: 
     assert status["state"] == "blocked"
     assert status["repository_id"] == "repo-b"
     assert status["blocked_by_repository_id"] == "repo-a"
+
+
+def test_tree_sitter_dependency_status_explains_missing_java_grammar(monkeypatch) -> None:
+    def fail_java_parser():
+        raise java_tree_sitter_parser.JavaTreeSitterUnavailableError(
+            "Tree-sitter Java parser 不可用（LanguageNotFoundError：java）。"
+            f"{java_tree_sitter_parser.JAVA_TREE_SITTER_INSTALL_HINT}"
+        )
+
+    monkeypatch.setattr(java_tree_sitter_parser, "create_java_tree_sitter_parser", fail_java_parser)
+
+    status = java_tree_sitter_parser.tree_sitter_java_dependency_status()
+
+    assert status["parser_available"] is False
+    java_check = next(item for item in status["checks"] if item["name"] == "tree_sitter_java")
+    assert java_check["status"] == "failed"
+    assert "LanguageNotFoundError" in java_check["message"]
+    assert "tree-sitter-language-pack>=0.13" in java_check["message"]
+    assert r".venv\Scripts\python.exe" in java_check["message"]

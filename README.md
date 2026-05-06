@@ -268,7 +268,7 @@ Windows 推荐安装方式：
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -U pip setuptools wheel
 .venv\Scripts\python.exe -m pip install -e ".[code-graph]"
-.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_language; get_language('java'); print('tree-sitter java ok')"
+.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
 ```
 
 也可以直接运行一键启动脚本，它会自动做同样的依赖检查和安装：
@@ -288,14 +288,21 @@ macOS / Linux 安装方式：
 
 ```bash
 .venv/bin/python -m pip install -e ".[code-graph]"
-.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_language; get_language('java'); print('tree-sitter java ok')"
+.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
 ```
 
 如果 Windows 使用公司内网 PyPI 镜像，确认镜像里有以下包：
 
 - `tree-sitter`
-- `tree-sitter-language-pack`
+- `tree-sitter-language-pack`，建议 `0.13` 或更高版本
 - `networkx`
+
+如果设置页提示 `Java grammar 不可用：LanguageNotFoundError`，通常表示 `tree-sitter-language-pack` 已安装但当前 wheel 没有 Java grammar，或公司内网镜像提供的是过旧版本。请在项目根目录重新安装并验证：
+
+```bat
+.venv\Scripts\python.exe -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
+.venv\Scripts\python.exe -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
+```
 
 例如需要临时指定镜像：
 

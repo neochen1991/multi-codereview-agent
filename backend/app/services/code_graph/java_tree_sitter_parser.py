@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import metadata
 import re
 from pathlib import Path
 from typing import Any
@@ -7,13 +8,117 @@ from typing import Any
 from app.services.code_graph.models import CodeGraphEdge, CodeGraphNode
 
 
+JAVA_TREE_SITTER_SMOKE_SOURCE = b"class Smoke { void ok() {} }"
+JAVA_TREE_SITTER_INSTALL_HINT = (
+    r'请在项目根目录运行：.venv\Scripts\python.exe -m pip install -U '
+    r'"tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" '
+    r'"networkx>=3.2,<4"，然后重启工具。'
+)
+
+
+class JavaTreeSitterUnavailableError(RuntimeError):
+    """Raised when the Java Tree-sitter parser cannot be created."""
+
+
+def create_java_tree_sitter_parser() -> Any:
+    """Create and smoke-test a Java Tree-sitter parser."""
+
+    try:
+        from tree_sitter_language_pack import get_parser
+
+        parser = get_parser("java")
+        parser.parse(JAVA_TREE_SITTER_SMOKE_SOURCE)
+        return parser
+    except Exception as error:
+        detail = str(error).strip()
+        suffix = f"：{detail}" if detail else ""
+        raise JavaTreeSitterUnavailableError(
+            f"Tree-sitter Java parser 不可用（{error.__class__.__name__}{suffix}）。{JAVA_TREE_SITTER_INSTALL_HINT}"
+        ) from error
+
+
+def tree_sitter_java_dependency_status() -> dict[str, object]:
+    """Return dependency diagnostics for the settings page and startup checks."""
+
+    checks: list[dict[str, str]] = []
+    installed = True
+    parser_available = True
+
+    def _version(package_name: str) -> str:
+        try:
+            return metadata.version(package_name)
+        except metadata.PackageNotFoundError:
+            return ""
+
+    try:
+        import tree_sitter  # noqa: F401
+
+        version = _version("tree-sitter")
+        message = "已安装 tree-sitter Python 包。"
+        if version:
+            message = f"已安装 tree-sitter Python 包，版本 {version}。"
+        checks.append({"name": "tree_sitter", "status": "passed", "message": message})
+    except Exception as error:
+        installed = False
+        parser_available = False
+        checks.append({"name": "tree_sitter", "status": "failed", "message": f"未安装 tree-sitter：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}"})
+
+    try:
+        import tree_sitter_language_pack  # noqa: F401
+
+        version = _version("tree-sitter-language-pack")
+        message = "已安装 tree-sitter-language-pack。"
+        if version:
+            message = f"已安装 tree-sitter-language-pack，版本 {version}。"
+        checks.append({"name": "tree_sitter_language_pack", "status": "passed", "message": message})
+    except Exception as error:
+        installed = False
+        parser_available = False
+        checks.append(
+            {
+                "name": "tree_sitter_language_pack",
+                "status": "failed",
+                "message": f"未安装 tree-sitter-language-pack：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}",
+            }
+        )
+
+    try:
+        create_java_tree_sitter_parser()
+        checks.append({"name": "tree_sitter_java", "status": "passed", "message": "Java parser 和 grammar 可用，已通过解析烟测。"})
+    except Exception as error:
+        installed = False
+        parser_available = False
+        checks.append({"name": "tree_sitter_java", "status": "failed", "message": str(error)})
+
+    try:
+        import networkx  # noqa: F401
+
+        version = _version("networkx")
+        message = "已安装 networkx。"
+        if version:
+            message = f"已安装 networkx，版本 {version}。"
+        checks.append({"name": "networkx", "status": "passed", "message": message})
+    except Exception as error:
+        installed = False
+        checks.append({"name": "networkx", "status": "failed", "message": f"未安装 networkx：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}"})
+
+    return {
+        "installed": installed,
+        "parser_available": parser_available,
+        "checks": checks,
+        "install_hint": JAVA_TREE_SITTER_INSTALL_HINT,
+        "recommended_actions": [
+            JAVA_TREE_SITTER_INSTALL_HINT,
+            ".venv\\Scripts\\python.exe -c \"from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')\"",
+        ],
+    }
+
+
 class JavaTreeSitterParser:
     """Extract Java nodes and relationship edges with Tree-sitter."""
 
     def __init__(self) -> None:
-        from tree_sitter_language_pack import get_parser
-
-        self.parser = get_parser("java")
+        self.parser = create_java_tree_sitter_parser()
 
     def parse_file(self, repo_root: Path, relative_path: str) -> dict[str, object]:
         target = Path(repo_root) / relative_path

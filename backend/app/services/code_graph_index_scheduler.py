@@ -9,7 +9,7 @@ from typing import Any
 
 from app.repositories.fs import read_json, write_json
 from app.services.code_graph.index_service import CodeGraphIndexService
-from app.services.code_graph.java_tree_sitter_parser import JavaTreeSitterParser
+from app.services.code_graph.java_tree_sitter_parser import JavaTreeSitterParser, tree_sitter_java_dependency_status
 from app.services.review_service import ReviewService
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class CodeGraphIndexScheduler:
                 **details,
             )
         state = "idle" if dependency_status["parser_available"] else "skipped"
-        message = "尚未建立 Tree-sitter 代码图谱。" if state == "idle" else "Tree-sitter Java 解析依赖不可用，请先安装 code-graph 依赖。"
+        message = "尚未建立 Tree-sitter 代码图谱。" if state == "idle" else self._dependency_unavailable_message(dependency_status)
         return self._status(
             state,
             message,
@@ -156,7 +156,7 @@ class CodeGraphIndexScheduler:
             write_json(self._status_path(resolved_repository_id), status)
             return status
         if not dependency_status["parser_available"]:
-            status = self._status("failed", "Tree-sitter Java 解析依赖不可用，请先安装 code-graph 依赖。", **base_payload)
+            status = self._status("failed", self._dependency_unavailable_message(dependency_status), **base_payload)
             write_json(self._status_path(resolved_repository_id), status)
             return status
         try:
@@ -294,34 +294,17 @@ class CodeGraphIndexScheduler:
             return {"graph_db_readable": False}
 
     def _dependency_status(self) -> dict[str, object]:
-        checks: list[dict[str, str]] = []
-        installed = True
-        parser_available = True
-        try:
-            import tree_sitter  # noqa: F401
+        return tree_sitter_java_dependency_status()
 
-            checks.append({"name": "tree_sitter", "status": "passed", "message": "已安装 tree-sitter Python 包。"})
-        except Exception as error:
-            installed = False
-            parser_available = False
-            checks.append({"name": "tree_sitter", "status": "failed", "message": f"未安装 tree-sitter：{error.__class__.__name__}"})
-        try:
-            from tree_sitter_language_pack import get_language
-
-            get_language("java")
-            checks.append({"name": "tree_sitter_java", "status": "passed", "message": "Java grammar 可用。"})
-        except Exception as error:
-            installed = False
-            parser_available = False
-            checks.append({"name": "tree_sitter_java", "status": "failed", "message": f"Java grammar 不可用：{error.__class__.__name__}"})
-        try:
-            import networkx  # noqa: F401
-
-            checks.append({"name": "networkx", "status": "passed", "message": "已安装 networkx。"})
-        except Exception as error:
-            installed = False
-            checks.append({"name": "networkx", "status": "failed", "message": f"未安装 networkx：{error.__class__.__name__}"})
-        return {"installed": installed, "parser_available": parser_available, "checks": checks}
+    def _dependency_unavailable_message(self, dependency_status: dict[str, object]) -> str:
+        checks = list(dependency_status.get("checks") or [])
+        for check in checks:
+            if str(check.get("status") or "") == "failed" and str(check.get("name") or "") == "tree_sitter_java":
+                return f"Tree-sitter Java 解析依赖不可用：{check.get('message')}"
+        for check in checks:
+            if str(check.get("status") or "") == "failed":
+                return f"Tree-sitter 代码图谱依赖不可用：{check.get('message')}"
+        return "Tree-sitter Java 解析依赖不可用，请先安装 code-graph 依赖。"
 
     def _status(self, state: str, message: str, **kwargs: object) -> dict[str, object]:
         payload: dict[str, object] = {
