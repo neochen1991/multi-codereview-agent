@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Alert, Button, Card, Popconfirm, Space, Table, Tag, message } from "antd";
+import React, { useEffect, useMemo, useState } from "react";
+import { Alert, Button, Card, Popconfirm, Select, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
 import { useNavigate } from "react-router-dom";
@@ -89,6 +89,21 @@ const impactGraphColor = (graphStatus: string) => {
   return "default";
 };
 
+const MISSING_REPOSITORY_VALUE = "__missing_repository__";
+
+const getRepositoryFilterValue = (record: ReviewSummary) => {
+  const repoId = String(record.subject.repo_id || "").trim();
+  return repoId || MISSING_REPOSITORY_VALUE;
+};
+
+const getRepositoryLabel = (value: string) => (value === MISSING_REPOSITORY_VALUE ? "未标识代码仓" : value);
+
+const lifecyclePhaseOptions = [
+  { value: "status:pending", status: "pending", label: "排队中" },
+  { value: "status:running", status: "running", label: "执行中" },
+  { value: "status:waiting_human", status: "waiting_human", label: "待人工确认" },
+];
+
 // 历史记录页用于回看审核结果，并从“查看工作台”跳回详情。
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
@@ -100,6 +115,8 @@ const HistoryPage: React.FC = () => {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [repositoryFilter, setRepositoryFilter] = useState<string>();
+  const [phaseFilter, setPhaseFilter] = useState<string>();
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result" | "impact") => {
     navigate(`/review/${reviewId}?tab=${tab}`);
@@ -132,8 +149,54 @@ const HistoryPage: React.FC = () => {
     void loadReviews();
   }, []);
 
+  const repositoryOptions = useMemo(
+    () =>
+      Array.from(new Set(reviews.map(getRepositoryFilterValue)))
+        .sort((left, right) => getRepositoryLabel(left).localeCompare(getRepositoryLabel(right), "zh-CN"))
+        .map((value) => ({ value, label: getRepositoryLabel(value) })),
+    [reviews],
+  );
+
+  const phaseOptions = useMemo(
+    () => {
+      const lifecycleOptions = lifecyclePhaseOptions
+        .filter((option) => reviews.some((record) => record.status === option.status))
+        .map(({ value, label }) => ({ value, label }));
+      const backendPhaseOptions = Array.from(new Set(reviews.map((record) => String(record.phase || "").trim()).filter(Boolean)))
+        .sort((left, right) => getReviewPhaseLabel(left).localeCompare(getReviewPhaseLabel(right), "zh-CN"))
+        .map((value) => ({ value: `phase:${value}`, label: getReviewPhaseLabel(value) }));
+      return [...lifecycleOptions, ...backendPhaseOptions];
+    },
+    [reviews],
+  );
+
+  const filteredReviews = useMemo(
+    () =>
+      reviews.filter((record) => {
+        if (repositoryFilter && getRepositoryFilterValue(record) !== repositoryFilter) {
+          return false;
+        }
+        if (phaseFilter) {
+          if (phaseFilter.startsWith("status:") && record.status !== phaseFilter.slice("status:".length)) {
+            return false;
+          }
+          if (phaseFilter.startsWith("phase:") && record.phase !== phaseFilter.slice("phase:".length)) {
+            return false;
+          }
+        }
+        return true;
+      }),
+    [phaseFilter, repositoryFilter, reviews],
+  );
+
+  const resetFilters = () => {
+    setRepositoryFilter(undefined);
+    setPhaseFilter(undefined);
+    setSelectedRowKeys([]);
+  };
+
   const terminalStatuses = new Set(["completed", "failed", "closed"]);
-  const selectedDeletableIds = reviews
+  const selectedDeletableIds = filteredReviews
     .filter((record) => selectedRowKeys.includes(record.review_id) && terminalStatuses.has(record.status))
     .map((record) => record.review_id);
 
@@ -147,6 +210,12 @@ const HistoryPage: React.FC = () => {
 
   const columns: ColumnsType<ReviewSummary> = [
     { title: "Review ID", dataIndex: "review_id", key: "review_id", width: 160 },
+    {
+      title: "代码仓",
+      key: "repository",
+      width: 150,
+      render: (_, record) => <Tag>{getRepositoryLabel(getRepositoryFilterValue(record))}</Tag>,
+    },
     {
       title: "标题",
       key: "title",
@@ -446,14 +515,48 @@ const HistoryPage: React.FC = () => {
           }
         />
       ) : null}
+      <div className="review-history-filter-bar">
+        <Space size={12} wrap>
+          <Select
+            allowClear
+            showSearch
+            value={repositoryFilter}
+            placeholder="筛选代码仓"
+            optionFilterProp="label"
+            style={{ minWidth: 220 }}
+            options={repositoryOptions}
+            onChange={(value) => {
+              setRepositoryFilter(value);
+              setSelectedRowKeys([]);
+            }}
+          />
+          <Select
+            allowClear
+            value={phaseFilter}
+            placeholder="筛选阶段"
+            style={{ minWidth: 160 }}
+            options={phaseOptions}
+            onChange={(value) => {
+              setPhaseFilter(value);
+              setSelectedRowKeys([]);
+            }}
+          />
+          <Button onClick={resetFilters} disabled={!repositoryFilter && !phaseFilter}>
+            清空筛选
+          </Button>
+          <span className="review-history-filter-summary">
+            {`显示 ${filteredReviews.length} / ${reviews.length} 条`}
+          </span>
+        </Space>
+      </div>
       <Table
         className="review-list-table"
         rowKey="review_id"
         rowSelection={rowSelection}
         columns={columns}
-        dataSource={reviews}
+        dataSource={filteredReviews}
         loading={loading}
-        scroll={{ x: 2120 }}
+        scroll={{ x: 2270 }}
       />
     </Card>
   );

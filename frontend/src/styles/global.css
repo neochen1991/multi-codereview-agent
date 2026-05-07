@@ -294,6 +294,19 @@ body {
   margin-bottom: 16px;
 }
 
+.review-history-filter-bar {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.review-history-filter-summary {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .review-table-link-cell {
   display: inline-block;
   max-width: 100%;
