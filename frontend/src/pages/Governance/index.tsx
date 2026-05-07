@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { Card, Col, Empty, Row, Space, Statistic, Tag, Typography } from "antd";
+import { Button, Card, Col, Empty, Input, Row, Space, Statistic, Tag, Typography } from "antd";
 
 import {
   governanceApi,
   type GovernanceMetrics,
   type LlmTimeoutMetrics,
+  type ReviewLearningCase,
   type RuntimeThresholdRecommendations,
 } from "@/services/api";
 
@@ -15,6 +16,9 @@ const GovernancePage: React.FC = () => {
   const [metrics, setMetrics] = useState<GovernanceMetrics | null>(null);
   const [llmTimeoutMetrics, setLlmTimeoutMetrics] = useState<LlmTimeoutMetrics | null>(null);
   const [thresholdRecommendations, setThresholdRecommendations] = useState<RuntimeThresholdRecommendations | null>(null);
+  const [learningCases, setLearningCases] = useState<ReviewLearningCase[]>([]);
+  const [learningRepoFilter, setLearningRepoFilter] = useState("");
+  const [learningTypeFilter, setLearningTypeFilter] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -23,14 +27,24 @@ const GovernancePage: React.FC = () => {
       governanceApi.getQualityMetrics(),
       governanceApi.getLlmTimeoutMetrics(),
       governanceApi.getRuntimeThresholdRecommendations(),
+      governanceApi.getReviewLearningCases(),
     ])
-      .then(([quality, llmTimeout, recommendations]) => {
+      .then(([quality, llmTimeout, recommendations, cases]) => {
         setMetrics(quality);
         setLlmTimeoutMetrics(llmTimeout);
         setThresholdRecommendations(recommendations);
+        setLearningCases(cases);
       })
       .finally(() => setLoading(false));
   }, []);
+
+  const filteredLearningCases = learningCases.filter((item) => {
+    const repoMatched =
+      !learningRepoFilter.trim() || item.repo_id.toLowerCase().includes(learningRepoFilter.trim().toLowerCase());
+    const typeMatched =
+      !learningTypeFilter.trim() || item.issue_type.toLowerCase().includes(learningTypeFilter.trim().toLowerCase());
+    return repoMatched && typeMatched;
+  });
 
   return (
     <div className="page-container">
@@ -66,7 +80,7 @@ const GovernancePage: React.FC = () => {
           </Col>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
-              <Statistic title="误报标签" value={metrics?.false_positive_count || 0} suffix={<Tag color="warning">feedback</Tag>} />
+              <Statistic title="误报标签" value={metrics?.false_positive_count || 0} suffix={<Tag color="warning">人工反馈</Tag>} />
             </Card>
           </Col>
         </Row>
@@ -132,6 +146,65 @@ const GovernancePage: React.FC = () => {
             ))}
           </Space>
         ) : null}
+      </Card>
+
+      <Card className="module-card" title="人工反馈学习案例" style={{ marginTop: 16 }} loading={loading}>
+        <Paragraph>
+          人工驳回的误报会沉淀为检视边界，后续检视只带入短摘要，并在正式问题入库前做相似案例复核。
+        </Paragraph>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Input
+            allowClear
+            placeholder="按代码仓筛选"
+            value={learningRepoFilter}
+            onChange={(event) => setLearningRepoFilter(event.target.value)}
+            style={{ width: 220 }}
+          />
+          <Input
+            allowClear
+            placeholder="按问题类型筛选"
+            value={learningTypeFilter}
+            onChange={(event) => setLearningTypeFilter(event.target.value)}
+            style={{ width: 260 }}
+          />
+          <Button
+            onClick={() => {
+              setLearningRepoFilter("");
+              setLearningTypeFilter("");
+            }}
+          >
+            清空筛选
+          </Button>
+          <Tag color="default">
+            显示 {filteredLearningCases.length} / {learningCases.length}
+          </Tag>
+        </Space>
+        {filteredLearningCases.length ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {filteredLearningCases.slice(0, 8).map((item) => (
+              <div key={item.case_id} className="routing-skip-item">
+                <Space wrap size={[8, 8]}>
+                  <Tag color="blue">{item.issue_type || "general"}</Tag>
+                  <Tag>{item.repo_id || "未标记仓库"}</Tag>
+                  <Tag color={item.reason_category === "context_counterexample" ? "warning" : "default"}>
+                    {item.reason_category === "context_counterexample" ? "上下文反例" : "误报样本"}
+                  </Tag>
+                </Space>
+                <div style={{ marginTop: 8 }}>
+                  <Text strong>{item.learning_summary || "暂无学习摘要"}</Text>
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  <Text type="secondary">
+                    {item.file_path || "-"}:{item.line_start || 1}
+                    {item.counter_evidence ? ` · ${item.counter_evidence}` : ""}
+                  </Text>
+                </div>
+              </div>
+            ))}
+          </Space>
+        ) : (
+          <Empty description={learningCases.length ? "当前筛选条件下没有学习案例。" : "还没有人工驳回沉淀的学习案例。"} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
       </Card>
 
       <Card className="module-card" title="模型调用超时观测" style={{ marginTop: 16 }} loading={loading}>

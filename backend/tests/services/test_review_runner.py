@@ -17,6 +17,7 @@ from app.repositories.file_expert_repository import FileExpertRepository
 from app.repositories.sqlite_message_repository import SqliteMessageRepository
 from app.services.llm_chat_service import LLMResolution, LLMTextResult
 from app.services.code_graph.storage import CodeGraphStorage
+from app.services.review_learning_service import ReviewLearningService
 from app.services.review_runner import ReviewRunner
 from app.services.review_workspace_service import ReviewWorkspaceResult
 
@@ -6365,6 +6366,127 @@ def test_review_runner_build_expert_prompt_requests_comment_and_implementation_c
     assert "跨文件影响提示" in prompt
     assert "审查阶段说明" in prompt
     assert "规则阶段" in prompt
+
+
+def test_review_runner_prompt_includes_compact_review_learning_hints(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_learning",
+        project_id="proj",
+        source_ref="feature/comment-contract",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderRepository.java"],
+    )
+    ReviewLearningService(storage_root).record_issue_decision_case(
+        review=ReviewTask(review_id="rev_old", subject=subject, status="completed"),
+        issue=DebateIssue(
+            review_id="rev_old",
+            issue_id="iss_old",
+            title="接口声明的方法未在实现类落地",
+            summary="OrderRepository 接口定义方法但实现类没有实现。",
+            normalized_issue_type="comment_contract_unimplemented",
+            file_path="src/main/java/com/example/OrderRepository.java",
+            line_start=12,
+            evidence=[
+                "JdbcOrderRepository implements OrderRepository。",
+                "JdbcOrderRepository 中存在 @Override public List<Order> findActive() { return jdbc.query(...); }。",
+            ],
+            context_files=["src/main/java/com/example/JdbcOrderRepository.java"],
+        ),
+        decision="rejected",
+        comment="误报：实现类已 implements 接口，并且 @Override 了同名方法。",
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性与业务专家",
+        role="correctness",
+        enabled=True,
+        focus_areas=["业务正确性"],
+        system_prompt="prompt",
+        review_spec="关注业务行为与实现是否一致",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/example/OrderRepository.java",
+        12,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={},
+        target_hunk={
+            "hunk_header": "@@ -12,1 +12,2 @@",
+            "excerpt": "+ List<Order> findActive();",
+        },
+        target_hunks=[],
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=[],
+        active_skills=[],
+    )
+
+    assert "历史误报边界" in prompt
+    assert "comment_contract_unimplemented" in prompt
+    assert "不要报承诺未落地" in prompt
+
+
+def test_review_runner_filters_issue_by_review_learning_case_judgement(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_learning",
+        project_id="proj",
+        source_ref="feature/comment-contract",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderRepository.java"],
+    )
+    ReviewLearningService(storage_root).record_issue_decision_case(
+        review=ReviewTask(review_id="rev_old", subject=subject, status="completed"),
+        issue=DebateIssue(
+            review_id="rev_old",
+            issue_id="iss_old",
+            title="接口声明的方法未在实现类落地",
+            summary="OrderRepository 接口定义方法但实现类没有实现。",
+            normalized_issue_type="comment_contract_unimplemented",
+            file_path="src/main/java/com/example/OrderRepository.java",
+            line_start=12,
+            evidence=[
+                "JdbcOrderRepository implements OrderRepository。",
+                "JdbcOrderRepository 中存在 @Override public List<Order> findActive() { return jdbc.query(...); }。",
+            ],
+            context_files=["src/main/java/com/example/JdbcOrderRepository.java"],
+        ),
+        decision="rejected",
+        comment="误报：实现类已 implements 接口，并且 @Override 了同名方法。",
+    )
+
+    filtered, decisions = runner._apply_review_learning_case_judgement(
+        repo_id="repo_learning",
+        issues=[
+            {
+                "issue_id": "iss_new",
+                "title": "接口声明的方法未在实现类落地",
+                "summary": "OrderRepository.findActive 没有实现。",
+                "normalized_issue_type": "comment_contract_unimplemented",
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "line_start": 12,
+                "claim": "接口承诺未落地。",
+                "evidence": [
+                    "JdbcOrderRepository implements OrderRepository。",
+                    "JdbcOrderRepository 存在 @Override public List<Order> findActive() { return jdbc.query(...); }。",
+                ],
+                "context_files": ["src/main/java/com/example/JdbcOrderRepository.java"],
+                "finding_ids": ["fdg_new"],
+            }
+        ],
+        issue_filter_decisions=[],
+    )
+
+    assert filtered == []
+    assert decisions[0]["rule_code"] == "review_learning_false_positive_case"
+    assert decisions[0]["issue_id"] == "iss_new"
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):

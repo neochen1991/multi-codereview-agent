@@ -100,7 +100,7 @@ const getRepositoryLabel = (value: string) => (value === MISSING_REPOSITORY_VALU
 
 const lifecyclePhaseOptions = [
   { value: "status:pending", status: "pending", label: "排队中" },
-  { value: "status:running", status: "running", label: "执行中" },
+  { value: "status:running", status: "running", label: "运行s中" },
   { value: "status:waiting_human", status: "waiting_human", label: "待人工确认" },
 ];
 

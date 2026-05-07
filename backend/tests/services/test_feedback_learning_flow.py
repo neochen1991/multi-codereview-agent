@@ -7,6 +7,7 @@ from app.repositories.fs import read_json
 
 from app.services.review_service import ReviewService
 from app.services.feedback_learner_service import FeedbackLearnerService
+from app.services.review_learning_service import ReviewLearningService
 
 
 def _seed_pending_human_issue(service: ReviewService, review_id: str) -> DebateIssue:
@@ -58,6 +59,61 @@ def test_human_decision_persists_feedback_label(storage_root: Path):
 
     assert labels
     assert labels[0].label == "false_positive"
+
+
+def test_human_rejection_records_review_learning_case(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_java",
+            "project_id": "proj_java",
+            "source_ref": "feature/comment-contract",
+            "target_ref": "dev",
+            "title": "comment contract review",
+            "changed_files": ["src/main/java/com/acme/order/OrderRepository.java"],
+        }
+    )
+    issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_contract_false_positive",
+        title="接口声明的方法未在实现类落地",
+        summary="OrderRepository 接口定义了 findActive 方法，但实现类没有实际实现。",
+        file_path="src/main/java/com/acme/order/OrderRepository.java",
+        line_start=18,
+        status="needs_human",
+        severity="medium",
+        confidence=0.82,
+        participant_expert_ids=["correctness_business"],
+        primary_expert_id="correctness_business",
+        normalized_issue_type="comment_contract_unimplemented",
+        evidence=[
+            "接口 OrderRepository 声明 findActive(Long userId)。",
+            "Tree-sitter 上下文显示 JdbcOrderRepository implements OrderRepository。",
+            "JdbcOrderRepository 中存在 @Override public List<Order> findActive(Long userId) { return jdbc.query(...); }。",
+        ],
+        cross_file_evidence=["src/main/java/com/acme/order/JdbcOrderRepository.java 已实现该接口方法。"],
+        context_files=["src/main/java/com/acme/order/JdbcOrderRepository.java"],
+        needs_human=True,
+    )
+    service.issue_repo.save_all(review.review_id, [issue])
+    review.status = "waiting_human"
+    review.phase = "human_gate"
+    review.human_review_status = "requested"
+    review.pending_human_issue_ids = [issue.issue_id]
+    service.review_repo.save(review)
+
+    service.record_human_decision(
+        review.review_id,
+        issue.issue_id,
+        "rejected",
+        "误报：实现类 JdbcOrderRepository 已 implements OrderRepository，并且 @Override 了 findActive。",
+    )
+
+    cases = ReviewLearningService(storage_root).list_cases(repo_id="repo_java")
+    assert len(cases) == 1
+    assert cases[0]["issue_id"] == issue.issue_id
+    assert cases[0]["reason_category"] == "context_counterexample"
 
 
 def test_record_impact_feedback_persists_normalized_label_and_metadata(storage_root: Path):

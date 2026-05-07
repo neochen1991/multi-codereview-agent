@@ -30,6 +30,7 @@ from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.expert_registry import ExpertRegistry
 from app.services.extension_editor_service import ExtensionEditorService
 from app.services.feedback_learner_service import FeedbackLearnerService
+from app.services.review_learning_service import ReviewLearningService
 from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
@@ -97,6 +98,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.artifact_service = ArtifactService(self.storage_root)
         self.expert_registry = ExpertRegistry(self.storage_root / "experts")
         self.feedback_learner_service = None
+        self.review_learning_service = None
         self.knowledge_service = None
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
@@ -122,6 +124,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.message_repo = repository_factory.create_message_repository()
         self.runner = ReviewRunner(self.storage_root)
         self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
+        self.review_learning_service = ReviewLearningService(self.storage_root)
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.knowledge_service.bootstrap_builtin_documents()
 
@@ -1285,6 +1288,14 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 comment=comment,
             )
         )
+        if decision == "rejected" and self.review_learning_service is not None:
+            refreshed_issue = next((item for item in updated_issues if item.issue_id == issue_id), target_issue)
+            self.review_learning_service.record_issue_decision_case(
+                review=review,
+                issue=refreshed_issue,
+                decision=decision,
+                comment=comment,
+            )
         self.message_repo.append(
             ConversationMessage(
                 review_id=review_id,
@@ -1332,6 +1343,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 )
             )
         return review
+
+    def list_review_learning_cases(self, *, repo_id: str = "", issue_type: str = "") -> list[dict[str, object]]:
+        if self.review_learning_service is None:
+            return []
+        return self.review_learning_service.list_cases(repo_id=repo_id, issue_type=issue_type)
 
     def record_impact_feedback(
         self,

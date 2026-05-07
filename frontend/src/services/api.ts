@@ -536,6 +536,25 @@ export interface RuntimeThresholdRecommendations {
   reason: string;
 }
 
+export interface ReviewLearningCase {
+  case_id: string;
+  review_id: string;
+  issue_id: string;
+  repo_id: string;
+  project_id: string;
+  issue_type: string;
+  decision: string;
+  reason_category: string;
+  file_path: string;
+  line_start: number;
+  learning_summary: string;
+  counter_evidence: string;
+  matched_case_id?: string;
+  similarity?: number;
+  status: string;
+  created_at: string;
+}
+
 export interface LlmTimeoutSample {
   timestamp: string;
   timeout_kind: string;
@@ -1246,6 +1265,10 @@ export const governanceApi = {
   },
   async getImpactFeedbackProfiles(): Promise<ImpactFeedbackProfiles> {
     const { data } = await api.get("/governance/impact-feedback-profiles");
+    return data;
+  },
+  async getReviewLearningCases(): Promise<ReviewLearningCase[]> {
+    const { data } = await api.get("/governance/review-learning-cases");
     return data;
   },
 };

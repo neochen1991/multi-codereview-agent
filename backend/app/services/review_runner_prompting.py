@@ -94,6 +94,15 @@ class ReviewRunnerPromptingMixin:
         language_general_guidance = self._build_language_general_guidance(language)
         java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, prompt_repository_context)
         observation_review_summary = self._build_observation_review_summary(prompt_repository_context)
+        review_learning_hints = ""
+        if hasattr(self, "review_learning_service"):
+            review_learning_hints = self.review_learning_service.build_prompt_hints(
+                repo_id=str(subject.repo_id or ""),
+                issue_types=self._extract_review_learning_issue_types(java_quality, rule_screening or {}),
+                file_paths=[file_path, *[str(item) for item in subject.changed_files or []]],
+                max_items=3,
+                max_chars=600,
+            )
         input_completeness_summary = self._build_review_input_completeness_summary(
             subject,
             file_path,
@@ -143,6 +152,7 @@ class ReviewRunnerPromptingMixin:
                     "repository_source_blocks": repository_source_blocks,
                     "code_excerpt": code_excerpt,
                     "observation_review_summary": observation_review_summary,
+                    "review_learning_hints": review_learning_hints,
                 },
             )
             review_spec_summary = light_sections["review_spec_summary"]
@@ -162,6 +172,7 @@ class ReviewRunnerPromptingMixin:
             repository_source_blocks = light_sections["repository_source_blocks"]
             code_excerpt = light_sections["code_excerpt"]
             observation_review_summary = light_sections["observation_review_summary"]
+            review_learning_hints = light_sections["review_learning_hints"]
             prompt_repository_context["prompt_request_budget"] = light_budget
             if not include_target_file_full_diff:
                 repository_source_blocks = "本轮为多文件批量模式，详细源码片段已在“多文件联合审查补充”逐文件提供，此处不重复展开。"
@@ -194,6 +205,7 @@ class ReviewRunnerPromptingMixin:
             f"关键源码上下文:\n{repository_source_blocks}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"结构化观察点:\n{observation_review_summary}\n"
+            f"历史反馈边界:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工驳回边界。'}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
@@ -211,6 +223,30 @@ class ReviewRunnerPromptingMixin:
             f"每条 finding 的 JSON 字段要求:\n"
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
+
+    def _extract_review_learning_issue_types(
+        self,
+        java_quality: dict[str, object],
+        rule_screening: dict[str, object],
+    ) -> list[str]:
+        issue_types: list[str] = []
+        for signal in list(java_quality.get("signals") or []):
+            normalized = str(signal.get("normalized_issue_type") or "").strip() if isinstance(signal, dict) else ""
+            if normalized:
+                issue_types.append(normalized)
+        for observation in list(java_quality.get("observations") or []):
+            normalized = (
+                str(observation.get("normalized_issue_type") or "").strip()
+                if isinstance(observation, dict)
+                else ""
+            )
+            if normalized:
+                issue_types.append(normalized)
+        for finding in list(rule_screening.get("findings") or []):
+            normalized = str(finding.get("normalized_issue_type") or "").strip() if isinstance(finding, dict) else ""
+            if normalized:
+                issue_types.append(normalized)
+        return list(dict.fromkeys(issue_types))
 
     def _normalize_expert_batch_items(
         self,

@@ -26,6 +26,7 @@ from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.expert_capability_service import ExpertCapabilityService
 from app.services.expert_registry import ExpertRegistry
 from app.services.feedback_learner_service import FeedbackLearnerService
+from app.services.review_learning_service import ReviewLearningService
 from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.change_impact_report_service import ChangeImpactReportService
 from app.services.cross_file_impact import build_cross_file_impact_hints
@@ -108,6 +109,7 @@ class ReviewRunner(
         self.review_skill_registry = ReviewSkillRegistry(Path(__file__).resolve().parents[3] / "extensions" / "skills")
         self.review_skill_activation_service = ReviewSkillActivationService()
         self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
+        self.review_learning_service = ReviewLearningService(self.storage_root)
         self.knowledge_service = KnowledgeService(self.storage_root)
         self.knowledge_service.bootstrap_builtin_documents()
         self.graph = build_review_graph()
@@ -960,6 +962,16 @@ class ReviewRunner(
             for item in list(graph_result.get("issue_filter_decisions", []))
             if isinstance(item, dict)
         ]
+        learning_filtered_issues, issue_filter_decisions = self._apply_review_learning_case_judgement(
+            repo_id=review.subject.repo_id,
+            issues=[
+                dict(item)
+                for item in list(graph_result.get("issues", []))
+                if isinstance(item, dict)
+            ],
+            issue_filter_decisions=issue_filter_decisions,
+        )
+        graph_result["issues"] = learning_filtered_issues
         filtered_finding_ids = {
             str(finding_id)
             for decision in issue_filter_decisions
@@ -1352,6 +1364,55 @@ class ReviewRunner(
             issue_count=len(issues),
         )
         return review
+
+    def _apply_review_learning_case_judgement(
+        self,
+        *,
+        repo_id: str,
+        issues: list[dict[str, object]],
+        issue_filter_decisions: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        filtered_issues: list[dict[str, object]] = []
+        decisions = list(issue_filter_decisions)
+        for issue in issues:
+            learning_decision = self.review_learning_service.evaluate_issue_candidate(
+                repo_id=repo_id,
+                issue=issue,
+            )
+            action = str(learning_decision.get("action") or "keep")
+            if action == "reject":
+                decisions.append(
+                    {
+                        "issue_id": str(issue.get("issue_id") or ""),
+                        "finding_ids": [
+                            str(finding_id)
+                            for finding_id in list(issue.get("finding_ids") or [])
+                            if str(finding_id).strip()
+                        ],
+                        "rule_code": "review_learning_false_positive_case",
+                        "rule_label": "历史人工驳回案例过滤",
+                        "reason": str(learning_decision.get("reason") or "命中历史人工驳回案例，过滤该候选问题。"),
+                        "matched_case_id": str(learning_decision.get("matched_case_id") or ""),
+                        "similarity": float(learning_decision.get("similarity") or 0.0),
+                    }
+                )
+                continue
+            if action == "needs_verification":
+                next_issue = dict(issue)
+                next_issue["status"] = "needs_verification"
+                next_issue["resolution"] = "review_learning_case_requires_verification"
+                next_issue["needs_human"] = False
+                confidence_breakdown = dict(next_issue.get("confidence_breakdown") or {})
+                confidence_breakdown["review_learning_case"] = {
+                    "matched_case_id": str(learning_decision.get("matched_case_id") or ""),
+                    "similarity": float(learning_decision.get("similarity") or 0.0),
+                    "reason": str(learning_decision.get("reason") or ""),
+                }
+                next_issue["confidence_breakdown"] = confidence_breakdown
+                filtered_issues.append(next_issue)
+                continue
+            filtered_issues.append(issue)
+        return filtered_issues, decisions
 
     def _prepare_review_workspace(self, review: ReviewTask, runtime_settings: object) -> ReviewTask:
         if not bool(getattr(runtime_settings, "enable_review_workspace_realtime_graph", False)):
