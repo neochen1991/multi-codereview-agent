@@ -55,6 +55,11 @@ def list_issue_messages(review_id: str, issue_id: str) -> list[dict[str, object]
 def record_human_decision(review_id: str, payload: HumanDecisionRequest) -> dict[str, object]:
     """记录人工批准或驳回结果，并刷新审核状态。"""
 
+    learning_effect = ""
+    if payload.decision == "approved":
+        learning_effect = "confirmed_sample"
+    elif payload.decision == "rejected":
+        learning_effect = "false_positive_sample"
     try:
         updated = review_service_module.review_service.record_human_decision(
             review_id, payload.issue_id, payload.decision, payload.comment
@@ -68,6 +73,8 @@ def record_human_decision(review_id: str, payload: HumanDecisionRequest) -> dict
         "status": updated.status,
         "phase": updated.phase,
         "human_review_status": updated.human_review_status,
+        "learning_recorded": payload.decision in {"approved", "rejected"},
+        "learning_effect": learning_effect,
     }
 
 

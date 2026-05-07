@@ -162,6 +162,58 @@ def test_create_review_persists_design_docs_into_review_metadata(client):
     assert design_docs[0]["filename"] == "order-create-design.md"
 
 
+def test_save_benchmark_evaluation_persists_into_metadata(client):
+    created = client.post(
+        "/api/reviews",
+        json={
+            "subject_type": "mr",
+            "source_ref": "feature/benchmark",
+            "target_ref": "main",
+            "title": "benchmark review",
+            "mr_url": "https://github.com/example/repo/pull/2",
+            "metadata": {
+                "benchmark": True,
+                "trigger_source": "benchmark_manual",
+                "benchmark_expected_findings": ["权限校验缺失", "事务边界错误"],
+            },
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/reviews/{created['review_id']}/benchmark-evaluation",
+        json={
+            "expected_results": [
+                {
+                    "text": "权限校验缺失",
+                    "verdict": "hit",
+                    "matched_issue_ids": ["iss_auth"],
+                    "comment": "正式问题已覆盖",
+                },
+                {
+                    "text": "事务边界错误",
+                    "verdict": "missed",
+                    "matched_issue_ids": [],
+                    "comment": "未找到对应问题",
+                },
+            ],
+            "false_positive_issue_ids": ["iss_noise"],
+            "review_quality_score": 4,
+            "impact_quality_score": 3,
+            "notes": "漏掉事务边界，需要补上下文检索。",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    metadata = payload["subject"]["metadata"]
+    assert metadata["benchmark"] is True
+    assert metadata["benchmark_evaluation"]["review_quality_score"] == 4
+    assert metadata["benchmark_evaluation"]["impact_quality_score"] == 3
+    assert metadata["benchmark_evaluation"]["expected_results"][0]["verdict"] == "hit"
+    assert metadata["benchmark_evaluation"]["false_positive_issue_ids"] == ["iss_noise"]
+    assert metadata["benchmark_evaluation"]["updated_at"]
+
+
 def test_create_review_persists_into_sqlite_without_file_backed_review_json(client, storage_root: Path):
     created = client.post(
         "/api/reviews",

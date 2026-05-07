@@ -5043,6 +5043,90 @@ def test_review_runner_rejects_formal_finding_anchor_outside_post_change_diff_li
     assert not runner._finding_has_valid_diff_anchor(subject, "src/main/java/com/example/Other.java", 11, target_hunk)
 
 
+def test_review_runner_rejects_finding_that_only_matches_removed_code(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "start_line": 20,
+        "end_line": 23,
+        "changed_lines": [21],
+        "excerpt": (
+            "# src/main/java/com/example/OrderService.java\n"
+            "  20 |  public Order create(Command command) {\n"
+            "   - |     legacyValidate(command);\n"
+            "  21 | +    validate(command);\n"
+            "  22 |      return repository.save(command);\n"
+            "  23 |  }"
+        ),
+    }
+    parsed = {
+        "title": "legacyValidate 缺少幂等保护",
+        "claim": "legacyValidate(command) 没有校验重复提交，可能导致重复创建订单。",
+        "finding_type": "direct_defect",
+        "evidence": ["旧校验函数 legacyValidate 仍在当前路径中执行。"],
+    }
+
+    result = runner._finding_matches_current_diff_code(parsed, target_hunk)
+
+    assert result["matched"] is False
+    assert "legacyvalidate" in result["removed_token_overlap"]
+
+
+def test_review_runner_accepts_finding_that_matches_added_code(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "start_line": 20,
+        "end_line": 23,
+        "changed_lines": [21],
+        "excerpt": (
+            "# src/main/java/com/example/OrderService.java\n"
+            "  20 |  public Order create(Command command) {\n"
+            "   - |     legacyValidate(command);\n"
+            "  21 | +    validate(command);\n"
+            "  22 |      return repository.save(command);\n"
+            "  23 |  }"
+        ),
+    }
+    parsed = {
+        "title": "validate 缺少幂等保护",
+        "claim": "validate(command) 没有校验重复提交，可能导致重复创建订单。",
+        "finding_type": "direct_defect",
+        "evidence": ["新增 validate 仍没有检查 command.requestId。"],
+    }
+
+    result = runner._finding_matches_current_diff_code(parsed, target_hunk)
+
+    assert result["matched"] is True
+    assert "validate" in result["added_token_overlap"]
+
+
+def test_review_runner_semantic_line_candidates_parse_formatted_target_hunk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "start_line": 30,
+        "end_line": 35,
+        "changed_lines": [31, 33],
+        "excerpt": (
+            "# src/main/java/com/example/OrderService.java\n"
+            "  30 |  public Order create(Command command) {\n"
+            "  31 | +    validate(command);\n"
+            "  32 |      Order order = mapper.toOrder(command);\n"
+            "  33 | +    repository.saveWithoutTransaction(order);\n"
+            "  34 |      return order;\n"
+            "  35 |  }"
+        ),
+    }
+
+    candidates = runner._extract_semantic_line_candidates(target_hunk)
+
+    assert candidates == {
+        31: ["validate(command);"],
+        33: ["repository.saveWithoutTransaction(order);"],
+    }
+
+
 def test_issue_current_code_prefers_target_hunk_over_repository_source_context(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     finding = ReviewFinding(
@@ -5069,6 +5153,91 @@ def test_issue_current_code_prefers_target_hunk_over_repository_source_context(s
 
     assert "+    validate(command);" in current_code
     assert "legacyValidate" not in current_code
+
+
+def test_issue_consistency_baseline_prefers_finding_hunk_over_stale_issue_code(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_anchor",
+        issue_id="iss_anchor",
+        title="校验逻辑错误",
+        summary="新增校验逻辑使用了错误条件。",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=11,
+        current_code="public class OrderService {\n    void oldCreate() { legacyValidate(command); }\n}",
+        finding_ids=["fdg_anchor"],
+    )
+    finding = ReviewFinding(
+        finding_id="fdg_anchor",
+        review_id="rev_anchor",
+        expert_id="correctness_business",
+        title="校验逻辑错误",
+        summary="新增校验逻辑使用了错误条件。",
+        finding_type="direct_defect",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=11,
+        code_excerpt="# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+        code_context={
+            "target_hunk": {
+                "excerpt": "# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+            },
+        },
+    )
+
+    baseline = runner._build_issue_consistency_baseline(issue, [finding])
+
+    assert "+    validate(command);" in baseline["current_code"]
+    assert "legacyValidate" not in baseline["current_code"]
+
+
+def test_issue_consistency_validation_keeps_diff_anchor_when_judge_returns_full_old_class(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_anchor",
+        issue_id="iss_anchor",
+        title="校验逻辑错误",
+        summary="新增校验逻辑使用了错误条件。",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=11,
+        current_code="# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+        finding_ids=["fdg_anchor"],
+    )
+    baseline = {
+        "title": issue.title,
+        "summary": issue.summary,
+        "normalized_issue_type": "validation_bug",
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "line_start": 11,
+        "remediation_strategy": "修正校验条件。",
+        "remediation_suggestion": "使用新代码中的 validate(command)。",
+        "remediation_steps": ["修正校验"],
+        "current_code": "# src/main/java/com/example/OrderService.java\n  11 | +    validate(command);",
+        "suggested_code": "",
+    }
+    payload = {
+        "status": "repaired",
+        "file_path": "src/main/java/com/example/OrderService.java",
+        "line_start": 99,
+        "current_code": (
+            "public class OrderService {\n"
+            "    public void oldCreate() { legacyValidate(command); }\n"
+            "    public void helperA() {}\n"
+            "    public void helperB() {}\n"
+            "    public void helperC() {}\n"
+            "}"
+        ),
+        "reason": "Judge 试图写回旧代码。",
+    }
+
+    updated, _summary = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline=baseline,
+        payload=payload,
+    )
+
+    assert updated.line_start == 11
+    assert "+    validate(command);" in updated.current_code
+    assert "legacyValidate" not in updated.current_code
 
 
 def test_review_runner_build_finding_code_context_contains_diff_and_related_context(storage_root: Path):
@@ -6427,7 +6596,8 @@ def test_review_runner_prompt_includes_compact_review_learning_hints(storage_roo
         active_skills=[],
     )
 
-    assert "历史误报边界" in prompt
+    assert "历史人工反馈" in prompt
+    assert "[误报样本]" in prompt
     assert "comment_contract_unimplemented" in prompt
     assert "不要报承诺未落地" in prompt
 
@@ -6442,25 +6612,27 @@ def test_review_runner_filters_issue_by_review_learning_case_judgement(storage_r
         target_ref="main",
         changed_files=["src/main/java/com/example/OrderRepository.java"],
     )
-    ReviewLearningService(storage_root).record_issue_decision_case(
-        review=ReviewTask(review_id="rev_old", subject=subject, status="completed"),
-        issue=DebateIssue(
-            review_id="rev_old",
-            issue_id="iss_old",
-            title="接口声明的方法未在实现类落地",
-            summary="OrderRepository 接口定义方法但实现类没有实现。",
-            normalized_issue_type="comment_contract_unimplemented",
-            file_path="src/main/java/com/example/OrderRepository.java",
-            line_start=12,
-            evidence=[
-                "JdbcOrderRepository implements OrderRepository。",
-                "JdbcOrderRepository 中存在 @Override public List<Order> findActive() { return jdbc.query(...); }。",
-            ],
-            context_files=["src/main/java/com/example/JdbcOrderRepository.java"],
-        ),
-        decision="rejected",
-        comment="误报：实现类已 implements 接口，并且 @Override 了同名方法。",
-    )
+    learning_service = ReviewLearningService(storage_root)
+    for index in range(3):
+        learning_service.record_issue_decision_case(
+            review=ReviewTask(review_id=f"rev_old_{index}", subject=subject, status="completed"),
+            issue=DebateIssue(
+                review_id=f"rev_old_{index}",
+                issue_id=f"iss_old_{index}",
+                title="接口声明的方法未在实现类落地",
+                summary="OrderRepository 接口定义方法但实现类没有实现。",
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/OrderRepository.java",
+                line_start=12 + index,
+                evidence=[
+                    "JdbcOrderRepository implements OrderRepository。",
+                    "JdbcOrderRepository 中存在 @Override public List<Order> findActive() { return jdbc.query(...); }。",
+                ],
+                context_files=["src/main/java/com/example/JdbcOrderRepository.java"],
+            ),
+            decision="rejected",
+            comment="误报：实现类已 implements 接口，并且 @Override 了同名方法。",
+        )
 
     filtered, decisions = runner._apply_review_learning_case_judgement(
         repo_id="repo_learning",
@@ -6487,6 +6659,65 @@ def test_review_runner_filters_issue_by_review_learning_case_judgement(storage_r
     assert filtered == []
     assert decisions[0]["rule_code"] == "review_learning_false_positive_case"
     assert decisions[0]["issue_id"] == "iss_new"
+
+
+def test_review_runner_boosts_issue_by_confirmed_review_learning_case(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_learning",
+        project_id="proj",
+        source_ref="feature/auth-filter",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderRepository.java"],
+    )
+    learning_service = ReviewLearningService(storage_root)
+    saved = None
+    for index in range(2):
+        saved = learning_service.record_issue_decision_case(
+            review=ReviewTask(review_id=f"rev_old_auth_{index}", subject=subject, status="completed"),
+            issue=DebateIssue(
+                review_id=f"rev_old_auth_{index}",
+                issue_id=f"iss_old_auth_{index}",
+                title="查询缺少当前用户过滤",
+                summary="queryActive 没有按当前用户过滤。",
+                normalized_issue_type="missing_auth_check",
+                file_path="src/main/java/com/example/OrderRepository.java",
+                line_start=12 + index,
+                evidence=["queryActive 方法没有传入 userId 条件。"],
+                context_files=["src/main/java/com/example/OrderController.java"],
+            ),
+            decision="approved",
+            comment="确认问题成立：缺少当前用户过滤会导致越权查询。",
+        )
+    assert saved is not None
+
+    filtered, decisions = runner._apply_review_learning_case_judgement(
+        repo_id="repo_learning",
+        issues=[
+            {
+                "issue_id": "iss_new_auth",
+                "title": "查询缺少当前用户过滤",
+                "summary": "queryActive 没有按当前用户过滤。",
+                "normalized_issue_type": "missing_auth_check",
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "line_start": 12,
+                "claim": "新增查询缺少 userId 条件，可能越权读取订单。",
+                "evidence": ["queryActive 方法没有传入 userId 条件。"],
+                "context_files": ["src/main/java/com/example/OrderController.java"],
+                "confidence": 0.72,
+                "finding_ids": ["fdg_auth"],
+            }
+        ],
+        issue_filter_decisions=[],
+    )
+
+    assert decisions == []
+    assert len(filtered) == 1
+    assert filtered[0]["confidence"] == 0.76
+    assert filtered[0]["confidence_breakdown"]["review_learning_case"]["action"] == "boost"
+    refreshed_case = ReviewLearningService(storage_root).list_cases(repo_id="repo_learning", issue_type="missing_auth_check")[0]
+    assert refreshed_case["match_count"] == 1
 
 
 def test_review_runner_build_finding_code_context_includes_input_trace(storage_root: Path):

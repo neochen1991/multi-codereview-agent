@@ -211,6 +211,18 @@ body {
   box-shadow: 0 14px 24px rgba(15, 23, 42, 0.08);
 }
 
+.benchmark-summary-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d8e3f2;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: var(--text-main);
+  line-height: 1.6;
+}
+
 .home-hero-card,
 .review-hero-card {
   overflow: hidden;
@@ -364,6 +376,10 @@ body {
 
 .home-entry-knowledge .home-entry-icon {
   background: linear-gradient(135deg, #7c3aed, #a855f7);
+}
+
+.home-entry-benchmark .home-entry-icon {
+  background: linear-gradient(135deg, #0369a1, #22c55e);
 }
 
 .home-entry-settings .home-entry-icon {

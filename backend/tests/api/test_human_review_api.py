@@ -68,6 +68,8 @@ def test_human_review_decision_updates_issue_and_review(client):
     payload = decision_response.json()
     assert payload["review_id"] == created["review_id"]
     assert payload["human_review_status"] == "approved"
+    assert payload["learning_recorded"] is True
+    assert payload["learning_effect"] == "confirmed_sample"
 
     detail_response = client.get(f"/api/reviews/{created['review_id']}")
     detail_payload = detail_response.json()
@@ -93,6 +95,7 @@ def test_human_rejected_issue_is_removed_from_formal_issue_lists(client):
         },
     )
     assert decision_response.status_code == 202
+    assert decision_response.json()["learning_effect"] == "false_positive_sample"
 
     formal_issues = client.get(f"/api/reviews/{created['review_id']}/issues").json()
     report = client.get(f"/api/reviews/{created['review_id']}/report").json()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 
 class DiffExcerptService:
     """负责从 unified diff 中提取 hunk、行号和代码片段。"""
@@ -203,9 +205,13 @@ class DiffExcerptService:
 
         best_hunk = self.find_best_hunk(unified_diff, file_path, target_line)
         if best_hunk:
-            hunk_lines = str(best_hunk.get("excerpt") or "").splitlines()
-            if hunk_lines:
-                return "\n".join(hunk_lines[: 1 + ((context_lines * 2) + 5)])
+            focused = self._focus_hunk_excerpt(
+                str(best_hunk.get("excerpt") or ""),
+                target_line,
+                context_lines=context_lines,
+            )
+            if focused:
+                return focused
         lines = unified_diff.splitlines()
         active_file = ""
         current_new_line: int | None = None
@@ -254,6 +260,25 @@ class DiffExcerptService:
 
         _, best_window = min(candidates, key=lambda item: item[0])
         return f"# {file_path}\n" + "\n".join(entry for _, entry in best_window)
+
+    def _focus_hunk_excerpt(self, excerpt: str, target_line: int, *, context_lines: int) -> str:
+        lines = str(excerpt or "").splitlines()
+        if not lines:
+            return ""
+        header = lines[0] if lines[0].startswith("# ") else ""
+        body = lines[1:] if header else lines
+        numbered: list[tuple[int, int]] = []
+        for index, line in enumerate(body):
+            match = re.match(r"^\s*(\d+)\s+\|", line)
+            if match:
+                numbered.append((index, int(match.group(1))))
+        if not numbered:
+            return "\n".join(lines[: 1 + ((context_lines * 2) + 5)])
+        target_index, _line = min(numbered, key=lambda item: abs(item[1] - int(target_line or 1)))
+        start = max(0, target_index - max(1, context_lines))
+        end = min(len(body), target_index + max(1, context_lines) + 1)
+        focused = body[start:end]
+        return "\n".join([item for item in [header, *focused] if item]).strip()
 
     def _collect_line_numbers(self, unified_diff: str, file_path: str) -> list[int]:
         """收集某个文件在 diff 中出现过的所有新文件行号。"""

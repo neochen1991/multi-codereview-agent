@@ -1500,11 +1500,23 @@ class ReviewRunnerExpertOutputMixin:
         return best_line if best_score > 0 else int(fallback_line_start or 1)
 
     def _extract_semantic_line_candidates(self, target_hunk: dict[str, object]) -> dict[int, list[str]]:
-        excerpt = str(target_hunk.get("excerpt") or "")
         changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
-        if not excerpt or not changed_lines:
+        if not changed_lines:
             return {}
 
+        hunk_lines = self._parse_target_hunk_diff_lines(target_hunk) if hasattr(self, "_parse_target_hunk_diff_lines") else {}
+        added_lines = list(hunk_lines.get("added") or []) if isinstance(hunk_lines, dict) else []
+        if added_lines:
+            line_candidates: dict[int, list[str]] = {}
+            for line_no, text in added_lines:
+                if line_no in set(changed_lines) and str(text).strip():
+                    line_candidates.setdefault(int(line_no), []).append(str(text).strip())
+            if line_candidates:
+                return line_candidates
+
+        excerpt = str(target_hunk.get("excerpt") or "")
+        if not excerpt:
+            return {}
         relevant_lines = [
             raw_line
             for raw_line in excerpt.splitlines()

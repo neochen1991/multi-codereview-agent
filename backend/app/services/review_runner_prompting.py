@@ -196,6 +196,7 @@ class ReviewRunnerPromptingMixin:
             f"语言通用规范提示:\n{language_general_guidance or '当前目标文件未命中已配置的语言通用规范提示，请仅依据专家规范、规则和代码证据审查。'}\n"
             f"本次审核绑定的详细设计文档:\n{design_doc_summary}\n"
             f"目标 hunk:\n{hunk_summary}\n"
+            f"目标 hunk 判读规则: `| +` 行代表 MR 合入后的当前代码，`| -` 行代表旧代码；问题必须落在 `| +` 当前代码或其直接暴露的影响上，旧代码已被新代码修复时不要输出。\n"
             f"同文件其他变更 hunk:\n{hunk_batch_summary}\n"
             f"目标文件完整 diff:\n{target_file_full_diff}\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n"
@@ -205,7 +206,7 @@ class ReviewRunnerPromptingMixin:
             f"关键源码上下文:\n{repository_source_blocks}\n"
             f"当前代码片段:\n{code_excerpt}\n"
             f"结构化观察点:\n{observation_review_summary}\n"
-            f"历史反馈边界:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工驳回边界。'}\n"
+            f"历史反馈边界:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工反馈案例。'}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
@@ -424,6 +425,7 @@ class ReviewRunnerPromptingMixin:
                 )
         lines.append("JSON 字段补充：每条 finding 都必须包含 file_path（来自上述清单），并给出该文件对应的 line_start/line_end。")
         lines.append("多 hunk 强约束：每条 finding 的 line_start/line_end 必须落在该文件某个 hunk 的 changed_lines/start_line/end_line 范围。")
+        lines.append("当前代码强约束：hunk 中 `| +` 是合入后的当前代码，`| -` 是旧代码；不要把只存在于 `| -` 的旧代码问题输出为 finding。")
         lines.append("无法定位到明确 hunk 行号的结论，不要输出。")
         return "\n".join(lines)
 
@@ -1202,9 +1204,10 @@ class ReviewRunnerPromptingMixin:
             f"结构化审查步骤：\n"
             f"1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 findings，不要顺手评论其他专家负责的问题。\n"
             f"2. 对每个候选问题先找代码锚点：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"
-            f"3. 再判断问题是否由本次 diff 引入或暴露；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
-            f"4. 如果结论依赖“调用方可能传空、配置可能缺失、线上流量可能很大”等外部条件，必须降级为 needs_verification，不能写成确定 issue。\n"
-            f"5. 最后输出修复建议：说明为什么错、怎么改、改完后的关键代码形态。\n\n"
+            f"3. 再判断问题是否由本次 diff 引入或暴露；目标 hunk 中 `| +` 是修改后的当前代码，`| -` 是旧代码，只能作为对比证据，不能作为问题主张本身。\n"
+            f"4. 如果旧代码里的问题已经被 `| +` 新代码修复，必须返回空 findings；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
+            f"5. 如果结论依赖“调用方可能传空、配置可能缺失、线上流量可能很大”等外部条件，必须降级为 needs_verification，不能写成确定 issue。\n"
+            f"6. 最后输出修复建议：说明为什么错、怎么改、改完后的关键代码形态。\n\n"
             f"置信度口径：\n"
             f"- 0.90-1.00: diff 中有直接代码证据，且不依赖外部条件。\n"
             f"- 0.75-0.89: 有明确代码锚点，但需要少量上下文补充。\n"

@@ -36,6 +36,25 @@ class BatchDeleteReviewsRequest(BaseModel):
     review_ids: list[str] = Field(default_factory=list)
 
 
+class BenchmarkExpectedResult(BaseModel):
+    """定义评测时对单条预期问题的人工对照结果。"""
+
+    text: str
+    verdict: Literal["pending", "hit", "missed", "not_applicable"] = "pending"
+    matched_issue_ids: list[str] = Field(default_factory=list)
+    comment: str = ""
+
+
+class BenchmarkEvaluationRequest(BaseModel):
+    """定义一次 Benchmark 评测结论。"""
+
+    expected_results: list[BenchmarkExpectedResult] = Field(default_factory=list)
+    false_positive_issue_ids: list[str] = Field(default_factory=list)
+    review_quality_score: int = Field(default=0, ge=0, le=5)
+    impact_quality_score: int = Field(default=0, ge=0, le=5)
+    notes: str = ""
+
+
 @router.post("/reviews", status_code=status.HTTP_201_CREATED)
 def create_review(payload: CreateReviewRequest) -> dict[str, object]:
     """创建一条新的审核任务主记录。"""
@@ -178,6 +197,17 @@ def delete_review(review_id: str) -> dict[str, object]:
     except ValueError as error:
         raise HTTPException(status_code=409, detail="only terminal review can delete") from error
     return {"review_id": review_id, "status": "deleted"}
+
+
+@router.post("/reviews/{review_id}/benchmark-evaluation")
+def save_benchmark_evaluation(review_id: str, payload: BenchmarkEvaluationRequest) -> dict[str, object]:
+    """保存人工评测结论，供 Benchmark 页面复盘检视质量。"""
+
+    try:
+        review = review_service_module.review_service.save_benchmark_evaluation(review_id, payload.model_dump(mode="json"))
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review not found") from error
+    return review.model_dump(mode="json")
 
 
 @router.post("/reviews/batch-delete")

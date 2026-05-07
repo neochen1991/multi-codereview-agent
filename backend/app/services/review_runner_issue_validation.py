@@ -437,8 +437,8 @@ class ReviewRunnerIssueValidationMixin:
             or [str(item).strip() for item in list(issue.aggregated_remediation_steps or []) if str(item).strip()]
         )
         current_code = (
-            str(issue.current_code or "").strip()
-            or self._extract_issue_current_code(primary_finding)
+            self._extract_issue_current_code(primary_finding)
+            or str(issue.current_code or "").strip()
         )
         suggested_code = str(issue.suggested_code or "").strip()
         if not self._looks_like_concrete_suggested_code(suggested_code, file_path=file_path):
@@ -512,6 +512,35 @@ class ReviewRunnerIssueValidationMixin:
             if candidate:
                 return candidate
         return ""
+
+    def _select_issue_current_code_from_anchor(
+        self,
+        payload_current_code: object,
+        baseline_current_code: object,
+        fallback_current_code: object,
+    ) -> str:
+        """当前代码展示必须优先使用 diff/finding 锚点，避免 Judge 写回旧代码或整类代码。"""
+
+        baseline = str(baseline_current_code or "").strip()
+        if baseline:
+            return baseline
+        payload = str(payload_current_code or "").strip()
+        if payload and self._looks_like_precise_issue_code(payload):
+            return payload
+        return str(fallback_current_code or "").strip()
+
+    def _looks_like_precise_issue_code(self, value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) > 24:
+            return False
+        if len(text) > 2400:
+            return False
+        class_like_count = sum(1 for line in lines if re.search(r"\b(class|interface|enum)\s+\w+", line))
+        method_like_count = sum(1 for line in lines if re.search(r"\b(public|private|protected)\b.*\(", line))
+        return not (class_like_count >= 1 and method_like_count >= 3)
 
     def _build_issue_consistency_validation_prompt(
         self,
@@ -654,11 +683,10 @@ class ReviewRunnerIssueValidationMixin:
         next_issue.normalized_issue_type = str(
             payload.get("normalized_issue_type") or baseline.get("normalized_issue_type") or issue.normalized_issue_type
         ).strip()
-        next_issue.file_path = str(payload.get("file_path") or baseline["file_path"] or issue.file_path).strip() or issue.file_path
-        next_issue.line_start = self._normalize_line_start(
-            payload.get("line_start"),
-            int(baseline.get("line_start") or issue.line_start or 1),
-        )
+        baseline_file_path = str(baseline.get("file_path") or issue.file_path or "").strip()
+        baseline_line_start = int(baseline.get("line_start") or issue.line_start or 1)
+        next_issue.file_path = baseline_file_path or issue.file_path
+        next_issue.line_start = baseline_line_start
         next_issue.remediation_strategy = str(
             payload.get("remediation_strategy") or baseline["remediation_strategy"] or issue.remediation_strategy
         ).strip()
@@ -669,7 +697,11 @@ class ReviewRunnerIssueValidationMixin:
             payload.get("remediation_steps"),
             list(baseline.get("remediation_steps") or issue.remediation_steps or []),
         )
-        next_issue.current_code = str(payload.get("current_code") or baseline["current_code"] or issue.current_code).strip()
+        next_issue.current_code = self._select_issue_current_code_from_anchor(
+            payload.get("current_code"),
+            baseline.get("current_code"),
+            issue.current_code,
+        )
         candidate_suggested_code = str(payload.get("suggested_code") or baseline["suggested_code"] or issue.suggested_code).strip()
         if self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=next_issue.file_path):
             next_issue.suggested_code = candidate_suggested_code

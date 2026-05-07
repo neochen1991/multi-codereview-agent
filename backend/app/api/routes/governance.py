@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 import app.services.review_service as review_service_module
 
 router = APIRouter()
+
+
+class ReviewLearningCaseStatusRequest(BaseModel):
+    status: str
 
 
 @router.get("/governance/quality-metrics")
@@ -36,6 +41,21 @@ def review_learning_cases(repo_id: str = "", issue_type: str = "") -> list[dict[
         repo_id=repo_id,
         issue_type=issue_type,
     )
+
+
+@router.patch("/governance/review-learning-cases/{case_id}")
+def update_review_learning_case_status(case_id: str, payload: ReviewLearningCaseStatusRequest) -> dict[str, object]:
+    """启用或停用一条人工反馈学习案例。"""
+
+    try:
+        return review_service_module.review_service.update_review_learning_case_status(
+            case_id,
+            status=payload.status,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="review learning case not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.get("/governance/runtime-threshold-recommendations")

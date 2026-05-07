@@ -1144,6 +1144,10 @@ const ReviewWorkbenchPage: React.FC = () => {
         : null;
   const activeHumanIssue = preferredHumanIssue || pendingHumanIssues[0] || null;
   const humanGateUsingFallbackIssue = Boolean(activeHumanIssue && activeHumanIssue !== preferredHumanIssue);
+  const activeHumanIssueFinding = useMemo(() => {
+    if (!activeHumanIssue) return null;
+    return pickRepresentativeFindingForIssue(activeHumanIssue, findingById);
+  }, [activeHumanIssue, findingById]);
 
   const resolveLatestPendingHumanIssue = useCallback(async () => {
     if (!reviewId) return null;
@@ -1720,6 +1724,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                       className="result-top-card"
                       review={review}
                       selectedIssue={activeHumanIssue}
+                      finding={activeHumanIssueFinding}
                       isFallbackIssue={humanGateUsingFallbackIssue}
                       decisionComment={decisionComment}
                       submitting={submittingDecision}
@@ -1734,14 +1739,14 @@ const ReviewWorkbenchPage: React.FC = () => {
                             message.warning("当前没有待人工确认的问题，已刷新列表");
                             return;
                           }
-                          await reviewApi.submitHumanDecision(reviewId, {
+                          const result = await reviewApi.submitHumanDecision(reviewId, {
                             issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
                             decision: "approved",
                             comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
                           });
                           await loadWorkspaceData(reviewId);
                           setDecisionComment("");
-                          message.success("已记录人工批准结论");
+                          message.success(result.learning_recorded ? "已记录人工批准结论，并沉淀为确认样本" : "已记录人工批准结论");
                         } catch (error: any) {
                           message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
                         } finally {
@@ -1758,14 +1763,14 @@ const ReviewWorkbenchPage: React.FC = () => {
                             message.warning("当前没有待人工确认的问题，已刷新列表");
                             return;
                           }
-                          await reviewApi.submitHumanDecision(reviewId, {
+                          const result = await reviewApi.submitHumanDecision(reviewId, {
                             issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
                             decision: "rejected",
                             comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
                           });
                           await loadWorkspaceData(reviewId);
                           setDecisionComment("");
-                          message.success("已记录人工驳回结论");
+                          message.success(result.learning_recorded ? "已记录人工驳回结论，并沉淀为误报样本" : "已记录人工驳回结论");
                         } catch (error: any) {
                           message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
                         } finally {

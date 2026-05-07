@@ -122,6 +122,36 @@ def test_find_best_hunk_prefers_closest_changed_lines():
     assert hunk["start_line"] == 31
 
 
+def test_extract_excerpt_focuses_target_line_in_large_hunk():
+    service = DiffExcerptService()
+    diff = (
+        "diff --git a/src/main/java/com/example/LargeService.java b/src/main/java/com/example/LargeService.java\n"
+        "--- a/src/main/java/com/example/LargeService.java\n"
+        "+++ b/src/main/java/com/example/LargeService.java\n"
+        "@@ -10,12 +10,14 @@ public class LargeService {\n"
+        "   void handle() {\n"
+        "     step01();\n"
+        "+    step02New();\n"
+        "     step03();\n"
+        "     step04();\n"
+        "     step05();\n"
+        "     step06();\n"
+        "     step07();\n"
+        "     step08();\n"
+        "     step09();\n"
+        "+    riskyCall();\n"
+        "     step11();\n"
+        "   }\n"
+        " }\n"
+    )
+
+    excerpt = service.extract_excerpt(diff, "src/main/java/com/example/LargeService.java", 20, context_lines=1)
+
+    assert "riskyCall" in excerpt
+    assert "step02New" not in excerpt
+    assert "step01" not in excerpt
+
+
 def test_list_hunks_ignores_patch_mail_headers_between_commits():
     service = DiffExcerptService()
     diff = (

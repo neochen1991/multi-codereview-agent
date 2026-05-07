@@ -1378,6 +1378,7 @@ class ReviewRunner(
             learning_decision = self.review_learning_service.evaluate_issue_candidate(
                 repo_id=repo_id,
                 issue=issue,
+                record_match=True,
             )
             action = str(learning_decision.get("action") or "keep")
             if action == "reject":
@@ -1406,6 +1407,22 @@ class ReviewRunner(
                 confidence_breakdown["review_learning_case"] = {
                     "matched_case_id": str(learning_decision.get("matched_case_id") or ""),
                     "similarity": float(learning_decision.get("similarity") or 0.0),
+                    "reason": str(learning_decision.get("reason") or ""),
+                }
+                next_issue["confidence_breakdown"] = confidence_breakdown
+                filtered_issues.append(next_issue)
+                continue
+            if action == "boost":
+                next_issue = dict(issue)
+                adjustment = float(learning_decision.get("confidence_adjustment") or 0.0)
+                current_confidence = float(next_issue.get("confidence") or 0.0)
+                next_issue["confidence"] = round(min(0.99, max(0.01, current_confidence + adjustment)), 2)
+                confidence_breakdown = dict(next_issue.get("confidence_breakdown") or {})
+                confidence_breakdown["review_learning_case"] = {
+                    "action": "boost",
+                    "matched_case_id": str(learning_decision.get("matched_case_id") or ""),
+                    "similarity": float(learning_decision.get("similarity") or 0.0),
+                    "confidence_adjustment": adjustment,
                     "reason": str(learning_decision.get("reason") or ""),
                 }
                 next_issue["confidence_breakdown"] = confidence_breakdown
@@ -4740,6 +4757,28 @@ class ReviewRunner(
                     )
                 )
                 continue
+            current_diff_match = self._finding_matches_current_diff_code(parsed, matched_target_hunk)
+            if not bool(current_diff_match.get("matched", True)):
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_dropped_stale_code",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 返回的 finding 疑似基于 MR 修改前代码，已丢弃。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "file_path": finding_file_path,
+                            "line_start": parsed_line_start,
+                            "title": str(parsed.get("title") or "").strip(),
+                            "removed_token_overlap": list(current_diff_match.get("removed_token_overlap") or [])[:8],
+                            "added_token_overlap": list(current_diff_match.get("added_token_overlap") or [])[:8],
+                            "added_lines": list(current_diff_match.get("added_lines") or [])[:6],
+                            "removed_lines": list(current_diff_match.get("removed_lines") or [])[:6],
+                        },
+                    )
+                )
+                continue
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -7000,6 +7039,155 @@ class ReviewRunner(
             return normalized_line in set(hunk_changed_lines)
         changed_lines = set(self.diff_excerpt_service.changed_line_numbers(subject.unified_diff, normalized_file))
         return normalized_line in changed_lines
+
+    def _finding_matches_current_diff_code(
+        self,
+        parsed: dict[str, object],
+        target_hunk: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """Reject findings whose concrete code anchors only exist in removed lines.
+
+        The line gate above proves the finding is attached to a post-change line.
+        This semantic gate proves the claim itself is not about code that the MR
+        has already deleted or replaced.
+        """
+
+        hunk_lines = self._parse_target_hunk_diff_lines(target_hunk or {})
+        added_lines = [text for _, text in hunk_lines.get("added", []) if str(text).strip()]
+        removed_lines = [text for _, text in hunk_lines.get("removed", []) if str(text).strip()]
+        if not added_lines or not removed_lines:
+            return {"matched": True}
+
+        semantic_parts: list[str] = []
+        for key in (
+            "title",
+            "claim",
+            "summary",
+            "fix_strategy",
+            "suggested_fix",
+            "rule_based_reasoning",
+            "suggested_code",
+        ):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "assumptions", "matched_rules", "violated_guidelines", "change_steps"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        if not finding_tokens:
+            return {"matched": True}
+        generic_tokens = {
+            "current",
+            "change",
+            "changed",
+            "diff",
+            "issue",
+            "problem",
+            "method",
+            "class",
+            "return",
+            "public",
+            "private",
+            "final",
+            "static",
+            "string",
+            "boolean",
+            "object",
+            "null",
+            "true",
+            "false",
+            "风险",
+            "问题",
+            "代码",
+            "方法",
+            "新增",
+            "删除",
+            "当前",
+        }
+        finding_tokens = {token for token in finding_tokens if token not in generic_tokens}
+        if not finding_tokens:
+            return {"matched": True}
+
+        added_tokens = self._extract_anchor_tokens("\n".join(added_lines))
+        removed_tokens = self._extract_anchor_tokens("\n".join(removed_lines))
+        added_overlap = finding_tokens & added_tokens
+        removed_overlap = finding_tokens & removed_tokens
+        removed_only_overlap = removed_overlap - added_tokens
+
+        strong_removed_only_overlap = {
+            token
+            for token in removed_only_overlap
+            if len(token) >= 10 or "_" in token or any(char.isdigit() for char in token)
+        }
+        if strong_removed_only_overlap:
+            return {
+                "matched": False,
+                "added_token_overlap": [],
+                "removed_token_overlap": sorted(strong_removed_only_overlap),
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+            }
+        if added_overlap:
+            return {
+                "matched": True,
+                "added_token_overlap": sorted(added_overlap),
+                "removed_token_overlap": sorted(removed_overlap),
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+            }
+        if removed_only_overlap:
+            return {
+                "matched": False,
+                "added_token_overlap": [],
+                "removed_token_overlap": sorted(removed_only_overlap),
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+            }
+        return {"matched": True}
+
+    def _parse_target_hunk_diff_lines(self, target_hunk: dict[str, object]) -> dict[str, list[tuple[int | None, str]]]:
+        excerpt = str((target_hunk or {}).get("excerpt") or "")
+        if not excerpt:
+            return {"added": [], "removed": [], "context": []}
+
+        parsed: dict[str, list[tuple[int | None, str]]] = {"added": [], "removed": [], "context": []}
+        changed_lines = self._normalize_changed_line_values((target_hunk or {}).get("changed_lines"))
+        changed_index = 0
+        for raw_line in excerpt.splitlines():
+            if not raw_line.strip() or raw_line.startswith("#"):
+                continue
+            formatted = re.match(r"^\s*(\d+)\s+\|\s*([+\- ])(.*)$", raw_line)
+            if formatted:
+                line_no = int(formatted.group(1))
+                marker = formatted.group(2)
+                text = formatted.group(3).strip()
+            else:
+                removed_formatted = re.match(r"^\s*-\s+\|\s*(.*)$", raw_line)
+                if removed_formatted:
+                    line_no = None
+                    marker = "-"
+                    text = removed_formatted.group(1).strip()
+                elif raw_line.startswith("+") and not raw_line.startswith("+++"):
+                    line_no = changed_lines[min(changed_index, len(changed_lines) - 1)] if changed_lines else None
+                    marker = "+"
+                    text = raw_line[1:].strip()
+                elif raw_line.startswith("-") and not raw_line.startswith("---"):
+                    line_no = None
+                    marker = "-"
+                    text = raw_line[1:].strip()
+                else:
+                    continue
+
+            if marker == "+":
+                parsed["added"].append((line_no, text))
+                if changed_index < len(changed_lines) - 1:
+                    changed_index += 1
+            elif marker == "-":
+                parsed["removed"].append((line_no, text))
+            else:
+                parsed["context"].append((line_no, text))
+        return parsed
 
     def _match_target_hunk_for_line(
         self,

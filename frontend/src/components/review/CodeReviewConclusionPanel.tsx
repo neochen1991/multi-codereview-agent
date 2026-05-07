@@ -159,10 +159,10 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
   const codeContext = finding.code_context;
   const currentCode =
-    String(issue?.current_code || "").trim() ||
+    finding.code_excerpt ||
     codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
-    finding.code_excerpt ||
+    String(issue?.current_code || "").trim() ||
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet;
   const suggestedCode = (() => {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Button, Card, Col, Empty, Input, Row, Space, Statistic, Tag, Typography } from "antd";
+import { Button, Card, Col, Empty, Input, Row, Select, Space, Statistic, Tag, Typography } from "antd";
 
 import {
   governanceApi,
@@ -19,7 +19,9 @@ const GovernancePage: React.FC = () => {
   const [learningCases, setLearningCases] = useState<ReviewLearningCase[]>([]);
   const [learningRepoFilter, setLearningRepoFilter] = useState("");
   const [learningTypeFilter, setLearningTypeFilter] = useState("");
+  const [learningStatusFilter, setLearningStatusFilter] = useState<"all" | "active" | "disabled">("all");
   const [loading, setLoading] = useState(false);
+  const [updatingLearningCaseId, setUpdatingLearningCaseId] = useState("");
 
   useEffect(() => {
     setLoading(true);
@@ -43,8 +45,56 @@ const GovernancePage: React.FC = () => {
       !learningRepoFilter.trim() || item.repo_id.toLowerCase().includes(learningRepoFilter.trim().toLowerCase());
     const typeMatched =
       !learningTypeFilter.trim() || item.issue_type.toLowerCase().includes(learningTypeFilter.trim().toLowerCase());
-    return repoMatched && typeMatched;
+    const statusMatched = learningStatusFilter === "all" || item.status === learningStatusFilter;
+    return repoMatched && typeMatched && statusMatched;
   });
+  const learningCaseStats = learningCases.reduce(
+    (acc, item) => {
+      if (item.decision === "approved") {
+        acc.confirmed += 1;
+      } else if (item.decision === "rejected") {
+        acc.rejected += 1;
+      } else if (item.decision === "conflicted") {
+        acc.conflicted += 1;
+      }
+      acc.matchCount += item.match_count || 0;
+      return acc;
+    },
+    { confirmed: 0, rejected: 0, conflicted: 0, matchCount: 0 },
+  );
+  const updateLearningCaseStatus = async (caseId: string, status: "active" | "disabled") => {
+    setUpdatingLearningCaseId(caseId);
+    try {
+      const updated = await governanceApi.updateReviewLearningCaseStatus(caseId, status);
+      setLearningCases((current) => current.map((item) => (item.case_id === caseId ? updated : item)));
+    } finally {
+      setUpdatingLearningCaseId("");
+    }
+  };
+  const effectLevelLabel = (level: string) => {
+    if (level === "enforced") {
+      return "自动执行";
+    }
+    if (level === "conflict_review") {
+      return "待治理";
+    }
+    if (level === "strong_hint") {
+      return "强提示";
+    }
+    return "弱提示";
+  };
+  const effectLevelColor = (level: string) => {
+    if (level === "enforced") {
+      return "error";
+    }
+    if (level === "conflict_review") {
+      return "warning";
+    }
+    if (level === "strong_hint") {
+      return "processing";
+    }
+    return "default";
+  };
 
   return (
     <div className="page-container">
@@ -150,8 +200,14 @@ const GovernancePage: React.FC = () => {
 
       <Card className="module-card" title="人工反馈学习案例" style={{ marginTop: 16 }} loading={loading}>
         <Paragraph>
-          人工驳回的误报会沉淀为检视边界，后续检视只带入短摘要，并在正式问题入库前做相似案例复核。
+          人工反馈会沉淀为检视边界：误报样本用于过滤相似误报，确认样本用于小幅提高同类真实问题置信度。
         </Paragraph>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Tag color="success">确认样本 {learningCaseStats.confirmed}</Tag>
+          <Tag color="warning">误报样本 {learningCaseStats.rejected}</Tag>
+          <Tag color="gold">冲突样本 {learningCaseStats.conflicted}</Tag>
+          <Tag color="processing">累计命中 {learningCaseStats.matchCount}</Tag>
+        </Space>
         <Space wrap style={{ marginBottom: 16 }}>
           <Input
             allowClear
@@ -167,10 +223,21 @@ const GovernancePage: React.FC = () => {
             onChange={(event) => setLearningTypeFilter(event.target.value)}
             style={{ width: 260 }}
           />
+          <Select
+            value={learningStatusFilter}
+            onChange={setLearningStatusFilter}
+            style={{ width: 140 }}
+            options={[
+              { label: "全部状态", value: "all" },
+              { label: "已启用", value: "active" },
+              { label: "已停用", value: "disabled" },
+            ]}
+          />
           <Button
             onClick={() => {
               setLearningRepoFilter("");
               setLearningTypeFilter("");
+              setLearningStatusFilter("all");
             }}
           >
             清空筛选
@@ -186,9 +253,31 @@ const GovernancePage: React.FC = () => {
                 <Space wrap size={[8, 8]}>
                   <Tag color="blue">{item.issue_type || "general"}</Tag>
                   <Tag>{item.repo_id || "未标记仓库"}</Tag>
-                  <Tag color={item.reason_category === "context_counterexample" ? "warning" : "default"}>
-                    {item.reason_category === "context_counterexample" ? "上下文反例" : "误报样本"}
+                  <Tag color={item.decision === "approved" ? "success" : item.decision === "conflicted" ? "gold" : "warning"}>
+                    {item.decision === "approved" ? "确认样本" : item.decision === "conflicted" ? "冲突样本" : "误报样本"}
                   </Tag>
+                  <Tag color={item.reason_category === "context_counterexample" ? "gold" : item.reason_category === "conflicting_feedback" ? "warning" : "default"}>
+                    {item.reason_category === "context_counterexample"
+                      ? "上下文反例"
+                      : item.reason_category === "conflicting_feedback"
+                        ? `反馈冲突 ${item.positive_count || 0}/${item.negative_count || 0}`
+                      : item.reason_category === "confirmed_risk"
+                        ? "真实问题"
+                        : "误报边界"}
+                  </Tag>
+                  <Tag color="default">支持 {item.support_count || 1}</Tag>
+                  <Tag color={effectLevelColor(item.effect_level)}>{effectLevelLabel(item.effect_level)}</Tag>
+                  <Tag color={item.match_count ? "processing" : "default"}>命中 {item.match_count || 0}</Tag>
+                  <Tag color={item.status === "active" ? "success" : "default"}>
+                    {item.status === "active" ? "已启用" : "已停用"}
+                  </Tag>
+                  <Button
+                    size="small"
+                    loading={updatingLearningCaseId === item.case_id}
+                    onClick={() => void updateLearningCaseStatus(item.case_id, item.status === "active" ? "disabled" : "active")}
+                  >
+                    {item.status === "active" ? "停用" : "启用"}
+                  </Button>
                 </Space>
                 <div style={{ marginTop: 8 }}>
                   <Text strong>{item.learning_summary || "暂无学习摘要"}</Text>
@@ -199,6 +288,14 @@ const GovernancePage: React.FC = () => {
                     {item.counter_evidence ? ` · ${item.counter_evidence}` : ""}
                   </Text>
                 </div>
+                {item.last_matched_at ? (
+                  <div style={{ marginTop: 6 }}>
+                    <Text type="secondary">
+                      最近命中：{item.last_matched_at}
+                      {item.last_match_action ? ` · ${item.last_match_action}` : ""}
+                    </Text>
+                  </div>
+                ) : null}
               </div>
             ))}
           </Space>

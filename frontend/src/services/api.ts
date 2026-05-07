@@ -544,13 +544,18 @@ export interface ReviewLearningCase {
   project_id: string;
   issue_type: string;
   decision: string;
+  positive_count?: number;
+  negative_count?: number;
   reason_category: string;
   file_path: string;
   line_start: number;
   learning_summary: string;
   counter_evidence: string;
-  matched_case_id?: string;
-  similarity?: number;
+  support_count: number;
+  effect_level: "weak_hint" | "strong_hint" | "enforced" | string;
+  match_count: number;
+  last_matched_at: string;
+  last_match_action: string;
   status: string;
   created_at: string;
 }
@@ -985,6 +990,21 @@ export interface CodehubExportResponse {
   items: CodehubExportItem[];
 }
 
+export interface BenchmarkExpectedResult {
+  text: string;
+  verdict: "pending" | "hit" | "missed" | "not_applicable";
+  matched_issue_ids: string[];
+  comment?: string;
+}
+
+export interface BenchmarkEvaluationPayload {
+  expected_results: BenchmarkExpectedResult[];
+  false_positive_issue_ids: string[];
+  review_quality_score: number;
+  impact_quality_score: number;
+  notes: string;
+}
+
 export const reviewApi = {
   async create(payload: {
     subject_type: "mr" | "branch";
@@ -1056,6 +1076,10 @@ export const reviewApi = {
     const { data } = await api.post("/reviews/batch-delete", { review_ids: reviewIds });
     return data;
   },
+  async saveBenchmarkEvaluation(reviewId: string, payload: BenchmarkEvaluationPayload): Promise<ReviewSummary> {
+    const { data } = await api.post(`/reviews/${reviewId}/benchmark-evaluation`, payload);
+    return data;
+  },
   async listEvents(
     reviewId: string,
     options?: { since?: string; limit?: number },
@@ -1120,7 +1144,14 @@ export const reviewApi = {
   async submitHumanDecision(
     reviewId: string,
     payload: { issue_id: string; decision: "approved" | "rejected"; comment: string },
-  ): Promise<{ review_id: string; status: string; phase: string; human_review_status: string }> {
+  ): Promise<{
+    review_id: string;
+    status: string;
+    phase: string;
+    human_review_status: string;
+    learning_recorded?: boolean;
+    learning_effect?: "confirmed_sample" | "false_positive_sample" | string;
+  }> {
     const { data } = await api.post(`/reviews/${reviewId}/human-decisions`, payload);
     return data;
   },
@@ -1269,6 +1300,10 @@ export const governanceApi = {
   },
   async getReviewLearningCases(): Promise<ReviewLearningCase[]> {
     const { data } = await api.get("/governance/review-learning-cases");
+    return data;
+  },
+  async updateReviewLearningCaseStatus(caseId: string, status: "active" | "disabled"): Promise<ReviewLearningCase> {
+    const { data } = await api.patch(`/governance/review-learning-cases/${caseId}`, { status });
     return data;
   },
 };

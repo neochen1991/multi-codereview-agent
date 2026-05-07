@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 function intFromEnv(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -18,6 +20,8 @@ export const config = {
   host: process.env.HOST || "127.0.0.1",
   port: intFromEnv("PORT", 8787),
   localProxyKey: process.env.LOCAL_PROXY_KEY || "local-dev-key",
+  sessionDriver: process.env.NGAGENT_SESSION_DRIVER || "pty",
+  useShell: /^true$/i.test(process.env.NGAGENT_USE_SHELL || ""),
   ngagentCommand: process.env.NGAGENT_COMMAND || "ngagent",
   ngagentArgs: splitArgs(process.env.NGAGENT_ARGS),
   readyPattern: new RegExp(process.env.NGAGENT_READY_PATTERN || "(^|\\n|\\r)(>|ngagent>|❯)\\s*$", "m"),

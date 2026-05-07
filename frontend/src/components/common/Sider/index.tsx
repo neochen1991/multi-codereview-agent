@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   CodeOutlined,
   DashboardOutlined,
+  ExperimentOutlined,
 } from "@ant-design/icons";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -28,6 +29,7 @@ const AppSider: React.FC = () => {
       { key: "/experts", icon: <RobotOutlined />, label: "检查角色" },
       { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },
       { key: "/governance", icon: <DashboardOutlined />, label: "治理中心" },
+      { key: "/benchmark", icon: <ExperimentOutlined />, label: "评测中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
     [],

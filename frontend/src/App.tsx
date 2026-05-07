@@ -11,6 +11,7 @@ const HistoryPage = lazy(() => import("@/pages/History"));
 const ExpertsPage = lazy(() => import("@/pages/Experts"));
 const KnowledgePage = lazy(() => import("@/pages/Knowledge"));
 const GovernancePage = lazy(() => import("@/pages/Governance"));
+const BenchmarkPage = lazy(() => import("@/pages/Benchmark"));
 const SettingsPage = lazy(() => import("@/pages/Settings"));
 
 const { Content, Footer } = Layout;
@@ -19,6 +20,7 @@ const preloadCommonRoutes = () => {
   void import("@/pages/History");
   void import("@/pages/Experts");
   void import("@/pages/Knowledge");
+  void import("@/pages/Benchmark");
 };
 
 // 路由懒加载期间使用统一的加载态，避免页面闪烁。
@@ -86,6 +88,7 @@ const App: React.FC = () => (
         <Route path="/experts" element={<ExpertsPage />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
         <Route path="/governance" element={<GovernancePage />} />
+        <Route path="/benchmark" element={<BenchmarkPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

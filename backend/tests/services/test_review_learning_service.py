@@ -59,9 +59,36 @@ def test_review_learning_records_rejected_issue_as_case(storage_root: Path) -> N
     assert saved["issue_type"] == "comment_contract_unimplemented"
     assert saved["reason_category"] == "context_counterexample"
     assert "实现类已 implements" in saved["learning_summary"]
+    assert saved["support_count"] == 1
+    assert saved["effect_level"] == "weak_hint"
 
     cases = service.list_cases(repo_id="repo_java")
     assert [case["case_id"] for case in cases] == [saved["case_id"]]
+
+
+def test_review_learning_merges_repeated_same_pattern_feedback(storage_root: Path) -> None:
+    service = ReviewLearningService(storage_root)
+
+    first = service.record_issue_decision_case(
+        review=_review(),
+        issue=_comment_contract_issue(),
+        decision="rejected",
+        comment="第一次确认误报。",
+    )
+    second = service.record_issue_decision_case(
+        review=_review(),
+        issue=_comment_contract_issue().model_copy(update={"issue_id": "iss_contract_second", "line_start": 24}),
+        decision="rejected",
+        comment="第二次同类误报。",
+    )
+
+    cases = service.list_cases(repo_id="repo_java")
+    assert first is not None
+    assert second is not None
+    assert second["case_id"] == first["case_id"]
+    assert second["support_count"] == 2
+    assert second["effect_level"] == "strong_hint"
+    assert len(cases) == 1
 
 
 def test_review_learning_records_approved_issue_as_confirmed_case(storage_root: Path) -> None:
@@ -107,10 +134,41 @@ def test_review_learning_builds_compact_prompt_hints(storage_root: Path) -> None
         max_chars=600,
     )
 
-    assert "历史误报边界" in hints
+    assert "历史人工反馈" in hints
+    assert "[误报样本]" in hints
     assert "comment_contract_unimplemented" in hints
     assert "不要报承诺未落地" in hints
     assert len(hints) <= 600
+
+
+def test_review_learning_prompt_hints_label_approved_cases_as_confirmed_samples(storage_root: Path) -> None:
+    service = ReviewLearningService(storage_root)
+    service.record_issue_decision_case(
+        review=_review(),
+        issue=_comment_contract_issue().model_copy(
+            update={
+                "summary": "接口说明要求权限过滤，但实现类缺少权限条件。",
+                "normalized_issue_type": "missing_auth_check",
+                "evidence": ["新增 queryActive 方法没有传入 userId 条件。"],
+                "context_files": ["src/main/java/com/acme/order/OrderController.java"],
+            }
+        ),
+        decision="approved",
+        comment="确认问题成立：缺少当前用户过滤会导致越权查询。",
+    )
+
+    hints = service.build_prompt_hints(
+        repo_id="repo_java",
+        issue_types=["missing_auth_check"],
+        file_paths=["src/main/java/com/acme/order/OrderRepository.java"],
+        max_items=3,
+        max_chars=600,
+    )
+
+    assert "历史人工反馈" in hints
+    assert "[确认样本]" in hints
+    assert "历史误报边界" not in hints
+    assert "后续同类结论可小幅提高置信度" in hints
 
 
 def test_review_learning_prompt_hints_do_not_use_same_repo_only_matches(storage_root: Path) -> None:
@@ -135,12 +193,13 @@ def test_review_learning_prompt_hints_do_not_use_same_repo_only_matches(storage_
 
 def test_review_learning_rejects_similar_comment_contract_false_positive(storage_root: Path) -> None:
     service = ReviewLearningService(storage_root)
-    service.record_issue_decision_case(
-        review=_review(),
-        issue=_comment_contract_issue(),
-        decision="rejected",
-        comment="误报：实现类 JdbcOrderRepository 已 implements OrderRepository，并且 @Override 了 findActive。",
-    )
+    for index in range(3):
+        service.record_issue_decision_case(
+            review=_review(),
+            issue=_comment_contract_issue().model_copy(update={"issue_id": f"iss_contract_{index}", "line_start": 18 + index}),
+            decision="rejected",
+            comment="误报：实现类 JdbcOrderRepository 已 implements OrderRepository，并且 @Override 了 findActive。",
+        )
 
     decision = service.evaluate_issue_candidate(
         repo_id="repo_java",
@@ -169,25 +228,100 @@ def test_review_learning_rejects_similar_comment_contract_false_positive(storage
     assert "历史人工驳回案例" in decision["reason"]
 
 
+def test_review_learning_single_rejected_case_is_prompt_only(storage_root: Path) -> None:
+    service = ReviewLearningService(storage_root)
+    service.record_issue_decision_case(
+        review=_review(),
+        issue=_comment_contract_issue(),
+        decision="rejected",
+        comment="误报：实现类 JdbcOrderRepository 已 implements OrderRepository，并且 @Override 了 findActive。",
+    )
+
+    decision = service.evaluate_issue_candidate(
+        repo_id="repo_java",
+        issue={
+            "issue_id": "iss_new",
+            "summary": "OrderRepository.findActive 没有实现。",
+            "normalized_issue_type": "comment_contract_unimplemented",
+            "file_path": "src/main/java/com/acme/order/OrderRepository.java",
+            "claim": "接口承诺未落地。",
+            "evidence": [
+                "JdbcOrderRepository implements OrderRepository。",
+                "JdbcOrderRepository 存在 @Override public List<Order> findActive(Long userId) { return jdbc.query(...); }。",
+            ],
+            "context_files": ["src/main/java/com/acme/order/JdbcOrderRepository.java"],
+        },
+    )
+
+    assert decision["action"] == "keep"
+    assert decision["effect_level"] == "weak_hint"
+
+
+def test_review_learning_conflicting_feedback_marks_case_as_conflicted(storage_root: Path) -> None:
+    service = ReviewLearningService(storage_root)
+    for index, decision in enumerate(["rejected", "approved", "approved"]):
+        service.record_issue_decision_case(
+            review=_review(),
+            issue=_comment_contract_issue().model_copy(
+                update={
+                    "issue_id": f"iss_conflict_{index}",
+                    "line_start": 18 + index,
+                }
+            ),
+            decision=decision,
+            comment="同类模式存在相反人工反馈。",
+        )
+
+    cases = service.list_cases(repo_id="repo_java", issue_type="comment_contract_unimplemented")
+    assert len(cases) == 1
+    assert cases[0]["decision"] == "conflicted"
+    assert cases[0]["effect_level"] == "conflict_review"
+    assert cases[0]["positive_count"] == 2
+    assert cases[0]["negative_count"] == 1
+
+    candidate_decision = service.evaluate_issue_candidate(
+        repo_id="repo_java",
+        issue={
+            "issue_id": "iss_conflict_candidate",
+            "summary": "OrderRepository.findActive 没有实现。",
+            "normalized_issue_type": "comment_contract_unimplemented",
+            "file_path": "src/main/java/com/acme/order/OrderRepository.java",
+            "claim": "接口承诺未落地。",
+            "evidence": [
+                "JdbcOrderRepository implements OrderRepository。",
+                "JdbcOrderRepository 存在 @Override public List<Order> findActive(Long userId) { return jdbc.query(...); }。",
+            ],
+            "context_files": ["src/main/java/com/acme/order/JdbcOrderRepository.java"],
+        },
+    )
+
+    assert candidate_decision["action"] == "keep"
+    assert candidate_decision["effect_level"] == "conflict_review"
+
+
 def test_review_learning_boosts_similar_approved_issue_and_records_match(storage_root: Path) -> None:
     service = ReviewLearningService(storage_root)
-    saved = service.record_issue_decision_case(
-        review=_review(),
-        issue=_comment_contract_issue().model_copy(
-            update={
-                "summary": "接口说明要求权限过滤，但实现类缺少权限条件。",
-                "normalized_issue_type": "missing_auth_check",
-                "file_path": "src/main/java/com/acme/order/OrderRepository.java",
-                "evidence": [
-                    "新增 queryActive 方法没有传入 userId 条件。",
-                    "Controller 入口依赖当前用户过滤订单。",
-                ],
-                "context_files": ["src/main/java/com/acme/order/OrderController.java"],
-            }
-        ),
-        decision="approved",
-        comment="确认问题成立：缺少当前用户过滤会导致越权查询。",
-    )
+    saved = None
+    for index in range(2):
+        saved = service.record_issue_decision_case(
+            review=_review(),
+            issue=_comment_contract_issue().model_copy(
+                update={
+                    "issue_id": f"iss_auth_{index}",
+                    "line_start": 18 + index,
+                    "summary": "接口说明要求权限过滤，但实现类缺少权限条件。",
+                    "normalized_issue_type": "missing_auth_check",
+                    "file_path": "src/main/java/com/acme/order/OrderRepository.java",
+                    "evidence": [
+                        "新增 queryActive 方法没有传入 userId 条件。",
+                        "Controller 入口依赖当前用户过滤订单。",
+                    ],
+                    "context_files": ["src/main/java/com/acme/order/OrderController.java"],
+                }
+            ),
+            decision="approved",
+            comment="确认问题成立：缺少当前用户过滤会导致越权查询。",
+        )
     assert saved is not None
 
     decision = service.evaluate_issue_candidate(
@@ -214,3 +348,41 @@ def test_review_learning_boosts_similar_approved_issue_and_records_match(storage
     refreshed = service.list_cases(repo_id="repo_java", issue_type="missing_auth_check")[0]
     assert refreshed["match_count"] == 1
     assert refreshed["last_matched_at"]
+
+
+def test_review_learning_disabled_case_does_not_affect_prompt_or_candidate(storage_root: Path) -> None:
+    service = ReviewLearningService(storage_root)
+    saved = service.record_issue_decision_case(
+        review=_review(),
+        issue=_comment_contract_issue(),
+        decision="rejected",
+        comment="误报：实现类 JdbcOrderRepository 已 implements OrderRepository，并且 @Override 了 findActive。",
+    )
+    assert saved is not None
+
+    updated = service.update_case_status(saved["case_id"], status="disabled")
+
+    hints = service.build_prompt_hints(
+        repo_id="repo_java",
+        issue_types=["comment_contract_unimplemented"],
+        file_paths=["src/main/java/com/acme/order/OrderRepository.java"],
+    )
+    decision = service.evaluate_issue_candidate(
+        repo_id="repo_java",
+        issue={
+            "issue_id": "iss_new",
+            "summary": "OrderRepository.findActive 没有实现。",
+            "normalized_issue_type": "comment_contract_unimplemented",
+            "file_path": "src/main/java/com/acme/order/OrderRepository.java",
+            "claim": "接口承诺未落地。",
+            "evidence": [
+                "JdbcOrderRepository implements OrderRepository。",
+                "JdbcOrderRepository 存在 @Override public List<Order> findActive(Long userId) { return jdbc.query(...); }。",
+            ],
+            "context_files": ["src/main/java/com/acme/order/JdbcOrderRepository.java"],
+        },
+    )
+
+    assert updated["status"] == "disabled"
+    assert hints == ""
+    assert decision["action"] == "keep"

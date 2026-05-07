@@ -486,6 +486,49 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
     def list_review_summaries(self) -> list[dict[str, object]]:
         return self.review_repo.list_light()
 
+    def save_benchmark_evaluation(self, review_id: str, evaluation: dict[str, object]) -> ReviewTask:
+        """保存 Benchmark 人工评测结论到任务 metadata。"""
+
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        expected_results = [
+            {
+                "text": str(item.get("text") or "").strip(),
+                "verdict": str(item.get("verdict") or "pending").strip() or "pending",
+                "matched_issue_ids": [
+                    str(issue_id).strip()
+                    for issue_id in item.get("matched_issue_ids", []) or []
+                    if str(issue_id).strip()
+                ],
+                "comment": str(item.get("comment") or "").strip(),
+            }
+            for item in evaluation.get("expected_results", []) or []
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        benchmark_evaluation = {
+            "expected_results": expected_results,
+            "false_positive_issue_ids": [
+                str(issue_id).strip()
+                for issue_id in evaluation.get("false_positive_issue_ids", []) or []
+                if str(issue_id).strip()
+            ],
+            "review_quality_score": int(evaluation.get("review_quality_score") or 0),
+            "impact_quality_score": int(evaluation.get("impact_quality_score") or 0),
+            "notes": str(evaluation.get("notes") or "").strip(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        review.subject.metadata = {
+            **dict(review.subject.metadata or {}),
+            "benchmark": True,
+            "trigger_source": dict(review.subject.metadata or {}).get("trigger_source") or "benchmark_manual",
+            "benchmark_evaluation": benchmark_evaluation,
+        }
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        logger.info("benchmark evaluation saved review_id=%s expected_count=%s", review_id, len(expected_results))
+        return review
+
     def list_pending_queue(self) -> list[ReviewTask]:
         """返回待处理队列（pending 状态）并按创建时间升序排列。"""
 
@@ -1288,7 +1331,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 comment=comment,
             )
         )
-        if decision == "rejected" and self.review_learning_service is not None:
+        if decision in {"approved", "rejected"} and self.review_learning_service is not None:
             refreshed_issue = next((item for item in updated_issues if item.issue_id == issue_id), target_issue)
             self.review_learning_service.record_issue_decision_case(
                 review=review,
@@ -1348,6 +1391,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if self.review_learning_service is None:
             return []
         return self.review_learning_service.list_cases(repo_id=repo_id, issue_type=issue_type)
+
+    def update_review_learning_case_status(self, case_id: str, *, status: str) -> dict[str, object]:
+        if self.review_learning_service is None:
+            raise KeyError(case_id)
+        return self.review_learning_service.update_case_status(case_id, status=status)
 
     def record_impact_feedback(
         self,

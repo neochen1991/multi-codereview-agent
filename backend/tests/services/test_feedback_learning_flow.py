@@ -116,6 +116,56 @@ def test_human_rejection_records_review_learning_case(storage_root: Path):
     assert cases[0]["reason_category"] == "context_counterexample"
 
 
+def test_human_approval_records_review_learning_case(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_java",
+            "project_id": "proj_java",
+            "source_ref": "feature/auth-filter",
+            "target_ref": "dev",
+            "title": "auth filter review",
+            "changed_files": ["src/main/java/com/acme/order/OrderRepository.java"],
+        }
+    )
+    issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_auth_confirmed",
+        title="查询缺少当前用户过滤",
+        summary="queryActive 没有按当前用户过滤。",
+        file_path="src/main/java/com/acme/order/OrderRepository.java",
+        line_start=18,
+        status="needs_human",
+        severity="high",
+        confidence=0.86,
+        participant_expert_ids=["security_compliance"],
+        primary_expert_id="security_compliance",
+        normalized_issue_type="missing_auth_check",
+        evidence=["新增 queryActive 方法没有传入 userId 条件。"],
+        context_files=["src/main/java/com/acme/order/OrderController.java"],
+        needs_human=True,
+    )
+    service.issue_repo.save_all(review.review_id, [issue])
+    review.status = "waiting_human"
+    review.phase = "human_gate"
+    review.human_review_status = "requested"
+    review.pending_human_issue_ids = [issue.issue_id]
+    service.review_repo.save(review)
+
+    service.record_human_decision(
+        review.review_id,
+        issue.issue_id,
+        "approved",
+        "确认问题成立：缺少当前用户过滤会导致越权查询。",
+    )
+
+    cases = ReviewLearningService(storage_root).list_cases(repo_id="repo_java", issue_type="missing_auth_check")
+    assert len(cases) == 1
+    assert cases[0]["decision"] == "approved"
+    assert cases[0]["reason_category"] == "confirmed_risk"
+
+
 def test_record_impact_feedback_persists_normalized_label_and_metadata(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

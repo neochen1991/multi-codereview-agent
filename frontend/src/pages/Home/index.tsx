@@ -6,6 +6,7 @@ import {
   BookOutlined,
   CodeOutlined,
   DashboardOutlined,
+  ExperimentOutlined,
   HistoryOutlined,
   RobotOutlined,
   SettingOutlined,
@@ -109,6 +110,14 @@ const HomePage: React.FC = () => {
         icon: <BookOutlined />,
         path: "/knowledge",
         accentClass: "home-entry-knowledge",
+      },
+      {
+        key: "benchmark",
+        title: "评估检视效果",
+        description: "选择指定 MR 发起评测，对照正式问题、证据覆盖和影响分析质量。",
+        icon: <ExperimentOutlined />,
+        path: "/benchmark",
+        accentClass: "home-entry-benchmark",
       },
       {
         key: "settings",

@@ -1,3 +1,4 @@
+import { spawn as spawnChildProcess } from "node:child_process";
 import pty from "node-pty";
 import { normalizeTerminalText } from "./ansi.js";
 
@@ -61,13 +62,7 @@ export class NgAgentSession {
   #ensureStarted() {
     if (this.term) return;
 
-    this.term = pty.spawn(this.config.ngagentCommand, this.config.ngagentArgs, {
-      name: "xterm-256color",
-      cols: 140,
-      rows: 40,
-      cwd: process.cwd(),
-      env: process.env,
-    });
+    this.term = this.#spawnTerminal();
 
     this.term.onData((chunk) => {
       this.bootOutput += chunk;
@@ -93,6 +88,75 @@ export class NgAgentSession {
     return new Promise((resolve) => setTimeout(resolve, this.config.startupGraceMs));
   }
 
+  #spawnTerminal() {
+    const spawnSpec = this.#commandSpec();
+
+    if (this.config.sessionDriver === "pipe") {
+      const child = spawnChildProcess(spawnSpec.command, spawnSpec.args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      return {
+        onData(callback) {
+          const onStdout = (chunk) => callback(chunk.toString("utf8"));
+          const onStderr = (chunk) => callback(chunk.toString("utf8"));
+          child.stdout.on("data", onStdout);
+          child.stderr.on("data", onStderr);
+          return {
+            dispose() {
+              child.stdout.off("data", onStdout);
+              child.stderr.off("data", onStderr);
+            },
+          };
+        },
+        onExit(callback) {
+          child.on("exit", (exitCode) => callback({ exitCode }));
+        },
+        write(input) {
+          child.stdin.write(input);
+        },
+        kill() {
+          child.kill();
+        },
+      };
+    }
+
+    return pty.spawn(spawnSpec.command, spawnSpec.args, {
+      name: "xterm-256color",
+      cols: 140,
+      rows: 40,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+  }
+
+  #commandSpec() {
+    if (!this.config.useShell) {
+      return {
+        command: this.config.ngagentCommand,
+        args: this.config.ngagentArgs,
+      };
+    }
+
+    const commandLine = [this.config.ngagentCommand, ...this.config.ngagentArgs]
+      .map((part) => quoteShellArg(part))
+      .join(" ");
+
+    if (process.platform === "win32") {
+      return {
+        command: "cmd.exe",
+        args: ["/d", "/s", "/c", commandLine],
+      };
+    }
+
+    return {
+      command: "/bin/sh",
+      args: ["-lc", commandLine],
+    };
+  }
+
   #toTerminalInput(text) {
     return `${String(text).replace(/\r?\n/g, "\n")}\r`;
   }
@@ -106,4 +170,15 @@ export class NgAgentSession {
     this.term?.kill();
     this.term = null;
   }
+}
+
+function quoteShellArg(value) {
+  const raw = String(value);
+  if (process.platform === "win32") {
+    if (!/[\s"&|<>^]/.test(raw)) return raw;
+    return `"${raw.replace(/"/g, '\\"')}"`;
+  }
+
+  if (!/[\s"'\\$`]/.test(raw)) return raw;
+  return `'${raw.replace(/'/g, "'\\''")}'`;
 }
