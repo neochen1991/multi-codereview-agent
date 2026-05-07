@@ -1086,6 +1086,8 @@ class ReviewRunnerPromptingMixin:
                 [
                     "- 重点检查注释、方法名、接口说明或 TODO 明确承诺了某个行为，但实现缺失或与承诺不一致的情况。",
                     "- 如果当前改动只保留了说明、占位或半截逻辑，必须明确指出“承诺与实现不一致”这一点。",
+                    "- 如果是接口/抽象类新增方法，必须先核对实现类；只要关联上下文显示实现类已 implements 对应接口并提供同名 @Override 方法体，就不要输出“承诺未落地”。",
+                    "- 只有能证明具体实现类缺少方法、方法体仍是空/TODO/UnsupportedOperationException，或实现行为和接口说明直接矛盾时，才允许输出 comment_contract_unimplemented。",
                 ]
             )
         elif expert_id == "architecture_design":

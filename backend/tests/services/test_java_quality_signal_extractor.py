@@ -274,6 +274,53 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_fr
     assert "comment_contract_unimplemented" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_does_not_flag_interface_contract_when_implementation_context_matches() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderEventPort.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -8,2 +8,6 @@ public interface OrderEventPort {",
+                    "+    // TODO: 发送订单创建事件",
+                    "+    void publishCreated(Order order);",
+                ]
+            )
+        },
+        repository_context={
+            "code_graph_related_contexts": [
+                {
+                    "file_path": "src/main/java/com/example/DefaultOrderEventPort.java",
+                    "snippet": "\n".join(
+                        [
+                            "public class DefaultOrderEventPort implements OrderEventPort {",
+                            "    @Override",
+                            "    public void publishCreated(Order order) {",
+                            "        eventPublisher.publish(new OrderCreatedEvent(order.id()));",
+                            "    }",
+                            "}",
+                        ]
+                    ),
+                }
+            ],
+            "symbol_contexts": [
+                {
+                    "symbol": "publishCreated",
+                    "references": [
+                        {
+                            "path": "src/main/java/com/example/DefaultOrderEventPort.java",
+                            "snippet": "eventPublisher.publish(new OrderCreatedEvent(order.id()));",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+    assert not any(item["signal"] == "comment_contract_unimplemented" for item in payload["observations"])
+
+
 def test_java_quality_signal_extractor_detects_cross_layer_dependency() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(

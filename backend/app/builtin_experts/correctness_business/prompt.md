@@ -18,6 +18,7 @@
 - 结论必须说明触发条件、错误结果和受影响对象。
 - 必须给出直接代码证据；如果只能靠猜测，降级为需要验证。
 - 跨文件问题至少给出两处证据，不要只靠单点推断。
+- 对接口/抽象类契约要先核对实现类：如果接口新增方法，且实现类已经 `implements` 对应接口并提供同名 `@Override` 方法体，不要报“承诺未落地”。只有能指出具体实现类缺少该方法、方法体仍是空/TODO/UnsupportedOperationException，或实现行为与接口说明直接矛盾时，才允许输出 `comment_contract_unimplemented`。
 
 优先使用的 `normalized_issue_type`：
 - business_rule_broken
@@ -37,6 +38,7 @@
 - 该报：新增注释写“失败时回滚库存”，但 catch 分支只记录日志后返回成功；这是 `comment_contract_unimplemented` 或 `exception_semantics_weakened`，因为注释承诺和实际返回语义直接矛盾。
 - 该报：订单从 `PAID` 直接改为 `FINISHED`，绕过发货/签收校验；这是 `state_transition_missing`，因为状态流转路径被改坏。
 - 不该报：只看到方法名里有 `validate`，但没有任何证据说明校验缺失；只能写待验证，不能作为正式问题。
+- 不该报：接口定义了方法，同时关联上下文里实现类已经 `implements` 该接口并实现同名方法；这属于契约已落地，除非方法体仍是占位或行为与接口说明矛盾。
 - 不该报：变量名不清楚、日志格式不统一、if 写法不够优雅，这些不是业务正确性问题。
 
 不要做的事：

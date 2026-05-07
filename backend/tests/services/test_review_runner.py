@@ -6973,7 +6973,7 @@ def test_review_runner_builds_default_finding_category_and_confidence_rationale(
     assert "仍需复核" in rationale
 
 
-def test_review_runner_augments_repository_context_with_java_observations(storage_root: Path):
+def test_review_runner_does_not_add_comment_contract_observation_when_todo_is_implemented(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     subject = ReviewSubject(
         subject_type="mr",
@@ -7022,9 +7022,11 @@ def test_review_runner_augments_repository_context_with_java_observations(storag
         },
     )
 
-    assert "comment_contract_unimplemented" in enriched["java_quality_signals"]
-    assert enriched["review_observations"]
-    assert enriched["review_observations"][0]["kind"] == "declared_intent_without_implementation"
+    assert "comment_contract_unimplemented" not in enriched.get("java_quality_signals", [])
+    assert not any(
+        item.get("kind") == "declared_intent_without_implementation"
+        for item in list(enriched.get("review_observations") or [])
+    )
 
 
 def test_review_runner_appends_deterministic_loop_observation_finding(storage_root: Path):
@@ -7127,6 +7129,53 @@ def test_review_runner_appends_deterministic_comment_contract_finding(storage_ro
     assert findings[0].title == "承诺未落地"
     assert findings[0].line_start == 22
     assert len(finding_payloads) == 1
+
+
+def test_review_runner_does_not_force_comment_contract_when_interface_is_implemented(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_interface_contract_implemented",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/interface-contract",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderEventPort.java"],
+            unified_diff="",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+    expert_jobs = [
+        {
+            "repository_context": {
+                "review_observations": [
+                    {
+                        "observation_id": "obs_contract_implemented",
+                        "kind": "declared_intent_without_implementation",
+                        "signal": "comment_contract_unimplemented",
+                        "file_path": "src/main/java/com/example/OrderEventPort.java",
+                        "line_start": 12,
+                        "summary": "接口声明了发送订单创建事件的承诺，但需要核对实现类是否落地。",
+                        "evidence": [
+                            "public interface OrderEventPort { void publishCreated(Order order); }",
+                            "public class DefaultOrderEventPort implements OrderEventPort {",
+                            "@Override public void publishCreated(Order order) { eventPublisher.publish(new OrderCreatedEvent(order.id())); }",
+                        ],
+                        "related_symbols": ["OrderEventPort", "publishCreated"],
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+        }
+    ]
+
+    runner._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
+
+    assert runner.finding_repo.list(review.review_id) == []
+    assert finding_payloads == []
 
 
 def test_review_runner_normalizes_single_merged_query_issue_family(storage_root: Path):

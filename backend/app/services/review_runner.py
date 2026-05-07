@@ -2298,6 +2298,8 @@ class ReviewRunner(
             profile = profiles.get(kind)
             if not profile:
                 continue
+            if kind == "declared_intent_without_implementation" and self._observation_has_implemented_interface_contract(observation):
+                continue
             file_path = str(observation.get("file_path") or "").strip()
             line_start = int(self._normalize_optional_line_value(observation.get("line_start")) or 1)
             normalized_issue_type = str(profile.get("normalized_issue_type") or "").strip()
@@ -2531,7 +2533,7 @@ class ReviewRunner(
                     **payload,
                 },
             )
-        )
+            )
         self.event_repo.append(
             ReviewEvent(
                 review_id=review.review_id,
@@ -2541,6 +2543,7 @@ class ReviewRunner(
                 payload=payload,
             )
         )
+
         logger.exception(
             "expert execution failed review_id=%s expert_id=%s file_path=%s line_start=%s error=%s",
             review.review_id,
@@ -2591,6 +2594,55 @@ class ReviewRunner(
                 )
             )
         return payload
+
+    def _observation_has_implemented_interface_contract(self, observation: dict[str, object]) -> bool:
+        """Avoid forcing comment-contract findings when implementation evidence already exists."""
+
+        evidence_blob = "\n".join(
+            str(item).strip()
+            for item in [
+                observation.get("summary"),
+                *list(observation.get("evidence") or []),
+                *list(observation.get("related_symbols") or []),
+            ]
+            if str(item).strip()
+        )
+        lowered = evidence_blob.lower()
+        if "interface" not in lowered or "implements" not in lowered:
+            return False
+        interface_names = {
+            match.group(1)
+            for match in re.finditer(r"\binterface\s+([A-Za-z_][A-Za-z0-9_]*)\b", evidence_blob)
+        }
+        implemented_interfaces: set[str] = set()
+        for match in re.finditer(r"\bimplements\s+([A-Za-z0-9_<>,\s.]+)", evidence_blob):
+            implemented_interfaces.update(
+                token.rsplit(".", 1)[-1]
+                for token in re.split(r"[,<>\s]+", match.group(1))
+                if token and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", token)
+            )
+        if interface_names and implemented_interfaces and not (interface_names & implemented_interfaces):
+            return False
+        interface_methods = {
+            match.group(1)
+            for match in re.finditer(
+                r"(?:public\s+)?(?:[\w.$<>\[\], ?]+\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*;",
+                evidence_blob,
+            )
+        }
+        implemented_methods = {
+            match.group(1)
+            for match in re.finditer(
+                r"@Override\s+(?:public|protected|private)?\s*(?:[\w.$<>\[\], ?]+\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{",
+                evidence_blob,
+                flags=re.IGNORECASE,
+            )
+        }
+        if interface_methods and implemented_methods and not (interface_methods & implemented_methods):
+            return False
+        if "@override" not in lowered and not implemented_methods:
+            return False
+        return bool(re.search(r"\{[^{}]*(?:;|\breturn\b|\bthrow\b|=|\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\()", evidence_blob, flags=re.DOTALL))
 
     def _build_failed_expert_fallback_finding(
         self,

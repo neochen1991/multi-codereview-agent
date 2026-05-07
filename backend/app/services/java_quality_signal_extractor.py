@@ -37,9 +37,10 @@ class JavaQualitySignalExtractor:
         diff_excerpt = str(target_hunk.get("excerpt") or "").strip()
         current_snippet = str(current_class.get("snippet") or "").strip()
         primary_snippet = str(primary_context.get("snippet") or "").strip()
+        related_snippets = self._collect_repository_context_snippets(repository_context)
         combined = "\n".join(
             part
-            for part in [diff_excerpt, full_diff, current_snippet, primary_snippet]
+            for part in [diff_excerpt, full_diff, current_snippet, primary_snippet, *related_snippets]
             if str(part).strip()
         )
         diff_lower = diff_excerpt.lower()
@@ -977,6 +978,7 @@ class JavaQualitySignalExtractor:
         if not comment_lines:
             return []
         code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
+        implementation_blob = self._implementation_only_blob(context_lines, comment_lines)
         contract_pairs = [
             (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
             (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),
@@ -990,14 +992,119 @@ class JavaQualitySignalExtractor:
             lowered_comment = comment.lower()
             for source_tokens, impl_tokens in contract_pairs:
                 if any(token in comment or token in lowered_comment for token in source_tokens):
-                    if not any(token in code_blob for token in impl_tokens):
+                    if not any(token in implementation_blob for token in impl_tokens):
                         return [comment[:48].strip()]
             if "todo" in lowered_comment:
+                if self._todo_has_matching_implementation(lowered_comment, implementation_blob):
+                    continue
                 return [comment[:48].strip()]
         stub_terms = self._detect_stubbed_implementation(normalized_context)
         if stub_terms:
             return stub_terms
         return []
+
+    def _collect_repository_context_snippets(self, repository_context: dict[str, Any]) -> list[str]:
+        snippets: list[str] = []
+
+        def append_snippet(value: object) -> None:
+            if len(snippets) >= 12:
+                return
+            if not isinstance(value, dict):
+                return
+            for key in ("snippet", "excerpt", "content", "current_code"):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    snippets.append(text[:1600])
+                    return
+
+        for key in (
+            "related_contexts",
+            "related_source_snippets",
+            "parent_contract_contexts",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "persistence_contexts",
+            "code_graph_related_contexts",
+        ):
+            for item in list(repository_context.get(key) or []):
+                append_snippet(item)
+
+        for symbol_context in list(repository_context.get("symbol_contexts") or []):
+            if not isinstance(symbol_context, dict):
+                continue
+            append_snippet(symbol_context)
+            for nested_key in ("definitions", "references"):
+                for item in list(symbol_context.get(nested_key) or [])[:4]:
+                    append_snippet(item)
+
+        minimal_context = repository_context.get("code_graph_minimal_context")
+        if isinstance(minimal_context, dict):
+            for key in ("changed_nodes", "review_priority", "impacted_flows", "static_observations"):
+                for item in list(minimal_context.get(key) or [])[:4]:
+                    append_snippet(item)
+
+        return self._dedupe(snippets)
+
+    def _implementation_only_blob(self, context_lines: list[str], comment_lines: list[str]) -> str:
+        implementation_lines: list[str] = []
+        comment_set = {line.strip() for line in comment_lines}
+        for raw_line in context_lines:
+            line = raw_line.strip()
+            if not line or line in comment_set:
+                continue
+            lowered = line.lower()
+            if lowered.startswith(("//", "/*", "*")):
+                continue
+            if re.search(r"\binterface\s+[A-Za-z_][A-Za-z0-9_]*\b", line):
+                continue
+            if re.match(
+                r"^(?:@\w+(?:\([^)]*\))?\s*)?(?:public|protected|private)?\s*(?:abstract\s+)?"
+                r"(?:[\w.$<>\[\], ?]+\s+)+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*;?$",
+                line,
+            ):
+                continue
+            implementation_lines.append(line)
+        return "\n".join(implementation_lines).lower()
+
+    def _todo_has_matching_implementation(self, lowered_comment: str, implementation_blob: str) -> bool:
+        if not implementation_blob.strip():
+            return False
+        intent_to_impl_patterns = [
+            (
+                ("发送事件", "事件", "publish event", "domain event"),
+                (r"\.\s*publish\s*\(", r"\beventbus\s*\.", r"\boutbox\b", r"domain\s*event", r"\beventpublisher\b"),
+            ),
+            (
+                ("发送通知", "notify", "通知"),
+                (r"\.\s*notify\s*\(", r"\.\s*send\s*\(", r"\bmessage\b", r"\bnotification\b", r"\bpublish\b"),
+            ),
+            (
+                ("扣减库存", "库存", "deduct inventory", "reserve"),
+                (r"\.\s*(deduct|reserve|lock|decrease|reduce)\s*\(", r"\binventory\b", r"库存"),
+            ),
+            (
+                ("调用接口", "调用下游", "调用远程", "远程接口", "remote", "invoke"),
+                (r"\.\s*(call|invoke|request|send|exchange|execute)\s*\(", r"\b(client|gateway|facade|proxy|feign|resttemplate|webclient)\b"),
+            ),
+            (
+                ("重试", "retry"),
+                (r"\bretry\b", r"\bbackoff\b", r"\battempt\b"),
+            ),
+            (
+                ("校验", "validate"),
+                (r"\.\s*(validate|check|assert)\s*\(", r"\bvalidator\b", r"\brequire\b"),
+            ),
+            (
+                ("缓存", "cache"),
+                (r"\bcache\b", r"\bredis\b", r"\.\s*(set|put|expire)\s*\("),
+            ),
+        ]
+        for intent_tokens, implementation_patterns in intent_to_impl_patterns:
+            if not any(token in lowered_comment for token in intent_tokens):
+                continue
+            return any(re.search(pattern, implementation_blob, flags=re.IGNORECASE) for pattern in implementation_patterns)
+        return False
 
     def _detect_stubbed_implementation(self, normalized_context: str) -> list[str]:
         context = str(normalized_context or "")
