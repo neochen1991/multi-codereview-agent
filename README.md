@@ -383,6 +383,7 @@ Windows 下 HTTPS 证书校验失败时，优先检查 `config.json`：
 
 ## 说明文档
 
+- [开发同学使用培训 Wiki](docs/wiki/developer-training-guide.md)
 - [系统能力说明](docs/architecture/2026-05-01-system-capabilities.md)
 - [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)
 - [借鉴 code-review-graph 的关联上下文优化方案](docs/plans/2026-05-05-code-review-graph-context-optimization.md)

@@ -53,7 +53,6 @@ type Props = {
   expertSelectionSummary?: ReviewOverviewExpertSelectionSummary | null;
   onChange: (patch: Partial<ReviewFormState>) => void;
   onStart: () => void;
-  onCreateOnly: () => void;
 };
 
 const buildExpertSummary = (expert?: ExpertProfile): string => {
@@ -82,7 +81,6 @@ const ReviewOverviewPanel: React.FC<Props> = ({
   expertSelectionSummary,
   onChange,
   onStart,
-  onCreateOnly,
 }) => {
   // 概览页只负责“审核输入 + 启动前状态提示”，
   // 不承担过程流和结果渲染逻辑。
@@ -530,17 +528,14 @@ const ReviewOverviewPanel: React.FC<Props> = ({
           status === "pending" ? (
             <Space>
               <Button type="primary" loading={loading || running} disabled={!hasExperts} onClick={onStart}>
-                启动审核
+                开始检视
               </Button>
             </Space>
           ) : null
         ) : (
           <Space>
             <Button type="primary" loading={loading || running} disabled={disableActions} onClick={onStart}>
-              创建并启动审核
-            </Button>
-            <Button loading={loading} disabled={disableActions} onClick={onCreateOnly}>
-              仅创建审核
+              开始检视
             </Button>
           </Space>
         )}

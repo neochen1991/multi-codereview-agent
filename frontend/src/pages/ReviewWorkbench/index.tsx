@@ -1269,8 +1269,8 @@ const ReviewWorkbenchPage: React.FC = () => {
     design_docs: form.design_docs,
   });
 
-  const createReview = async (autoStart: boolean) => {
-    // 概览页主入口：先创建任务，再决定是否自动启动并跳转到过程页。
+  const createReview = async () => {
+    // 概览页主入口：创建任务后立即启动并跳转到过程页。
     if (!form.mr_url.trim() && !form.source_ref.trim()) {
       message.warning("请至少输入 Git MR 链接或源分支信息");
       return;
@@ -1279,13 +1279,11 @@ const ReviewWorkbenchPage: React.FC = () => {
     try {
       const created = await reviewApi.create(createPayload());
       const search = new URLSearchParams();
-      search.set("tab", autoStart ? "process" : "overview");
-      if (autoStart) {
-        search.set("auto_start", "1");
-      }
+      search.set("tab", "process");
+      search.set("auto_start", "1");
       navigate(`/review/${created.review_id}?${search.toString()}`);
-      setActiveStep(autoStart ? "process" : "overview");
-      message.success(autoStart ? `审核已创建，正在启动：${created.review_id}` : `审核已创建：${created.review_id}`);
+      setActiveStep("process");
+      message.success(`审核已创建，正在启动：${created.review_id}`);
     } catch (error: any) {
       message.error(error?.message || "创建审核失败");
     } finally {
@@ -1336,7 +1334,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   const startExistingReview = async () => {
     // 历史记录里还处于 pending 的任务，可以从这里继续启动。
     if (!reviewId) {
-      await createReview(true);
+      await createReview();
       return;
     }
     openWorkspaceTab("process");
@@ -1530,8 +1528,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                 experts={experts}
                 expertSelectionSummary={overviewExpertSelectionSummary}
                 onChange={handleFormChange}
-                onStart={() => void (reviewId ? startExistingReview() : createReview(true))}
-                onCreateOnly={() => void createReview(false)}
+                onStart={() => void (reviewId ? startExistingReview() : createReview())}
               />
             </Col>
             <Col xs={24} xl={9}>
