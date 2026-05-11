@@ -5101,6 +5101,387 @@ def test_review_runner_accepts_finding_that_matches_added_code(storage_root: Pat
     assert "validate" in result["added_token_overlap"]
 
 
+def test_review_runner_keeps_general_rule_attribution_without_custom_rules(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "订单总价计算错误",
+        "claim": "price.add(quantity) 会把单价和数量相加，导致订单金额错误。",
+        "finding_type": "direct_defect",
+        "matched_rules": ["正确性专家通用规范：金额计算必须保持业务语义"],
+        "evidence": ["diff 显示 multiply 被替换为 add", "price、quantity、total 表明这是订单金额计算"],
+    }
+
+    attribution = runner._normalize_finding_rule_attribution(
+        parsed,
+        rule_screening={"matched_rules_for_llm": []},
+        expert_id="correctness_business",
+    )
+
+    assert attribution["sources"] == ["expert_general"]
+    assert attribution["normalized_matched_rules"] == ["正确性专家通用规范：金额计算必须保持业务语义"]
+    assert attribution["valid_custom_rule_ids"] == []
+    assert attribution["invalid_custom_rule_ids"] == []
+
+
+def test_review_runner_tracks_valid_additive_custom_rule_ids(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "订单导出明文输出手机号",
+        "claim": "新增导出字段直接写入 user.getPhone()，违反订单导出脱敏要求。",
+        "finding_type": "direct_defect",
+        "matched_rules": ["ORDER-SEC-001"],
+        "evidence": ["新增 row.put(\"phone\", user.getPhone())", "该路径属于订单导出"],
+    }
+    rule_screening = {
+        "matched_rules_for_llm": [
+            {
+                "rule_id": "ORDER-SEC-001",
+                "title": "订单导出敏感字段必须脱敏",
+                "priority": "P1",
+                "scene_path": "订单 / 导出 / 安全",
+                "reason": "命中 phone 导出字段",
+            }
+        ]
+    }
+
+    attribution = runner._normalize_finding_rule_attribution(
+        parsed,
+        rule_screening=rule_screening,
+        expert_id="security_compliance",
+    )
+
+    assert attribution["sources"] == ["product_or_repo_custom"]
+    assert attribution["valid_custom_rule_ids"] == ["ORDER-SEC-001"]
+    assert attribution["custom_rule_details"][0]["title"] == "订单导出敏感字段必须脱敏"
+    assert runner._apply_additive_rule_priority_to_severity(
+        "medium",
+        finding_type="direct_defect",
+        rule_attribution=attribution,
+    ) == "high"
+
+
+def test_review_runner_keeps_general_text_when_valid_custom_rule_is_embedded(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "订单导出明文输出手机号",
+        "claim": "新增导出字段直接写入 user.getPhone()，违反订单导出脱敏要求。",
+        "finding_type": "direct_defect",
+        "matched_rules": ["ORDER-SEC-001 安全专家通用规范：敏感信息输出必须脱敏"],
+        "evidence": ["新增 row.put(\"phone\", user.getPhone())", "该路径属于订单导出"],
+    }
+    rule_screening = {
+        "matched_rules_for_llm": [
+            {"rule_id": "ORDER-SEC-001", "title": "订单导出敏感字段必须脱敏", "priority": "P1"}
+        ]
+    }
+
+    attribution = runner._normalize_finding_rule_attribution(
+        parsed,
+        rule_screening=rule_screening,
+        expert_id="security_compliance",
+    )
+
+    assert attribution["valid_custom_rule_ids"] == ["ORDER-SEC-001"]
+    assert attribution["general_rules"] == ["安全专家通用规范：敏感信息输出必须脱敏"]
+    assert attribution["sources"] == ["expert_general", "product_or_repo_custom"]
+
+
+def test_review_runner_removes_fabricated_custom_rule_id_but_keeps_general_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "订单导出明文输出手机号",
+        "claim": "新增导出字段直接写入 user.getPhone()，违反安全专家通用敏感信息保护要求。",
+        "finding_type": "direct_defect",
+        "matched_rules": ["ORDER-SEC-999", "安全专家通用规范：敏感信息输出必须脱敏"],
+        "evidence": ["新增 row.put(\"phone\", user.getPhone())", "phone 属于敏感联系方式"],
+    }
+    rule_screening = {
+        "matched_rules_for_llm": [
+            {"rule_id": "ORDER-SEC-001", "title": "订单导出敏感字段必须脱敏", "priority": "P1"}
+        ]
+    }
+
+    attribution = runner._normalize_finding_rule_attribution(
+        parsed,
+        rule_screening=rule_screening,
+        expert_id="security_compliance",
+    )
+
+    assert attribution["valid_custom_rule_ids"] == []
+    assert attribution["invalid_custom_rule_ids"] == ["ORDER-SEC-999"]
+    assert attribution["normalized_matched_rules"] == ["安全专家通用规范：敏感信息输出必须脱敏"]
+    assert attribution["sources"] == ["expert_general"]
+    assert attribution["assumptions"]
+
+
+def test_review_runner_removes_fabricated_custom_rule_id_even_without_available_rules(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "订单导出明文输出手机号",
+        "claim": "新增导出字段直接写入 user.getPhone()，违反安全专家通用敏感信息保护要求。",
+        "finding_type": "direct_defect",
+        "matched_rules": ["ORDER-SEC-999", "安全专家通用规范：敏感信息输出必须脱敏"],
+        "evidence": ["新增 row.put(\"phone\", user.getPhone())", "phone 属于敏感联系方式"],
+    }
+
+    attribution = runner._normalize_finding_rule_attribution(
+        parsed,
+        rule_screening={"matched_rules_for_llm": []},
+        expert_id="security_compliance",
+    )
+
+    assert attribution["valid_custom_rule_ids"] == []
+    assert attribution["invalid_custom_rule_ids"] == ["ORDER-SEC-999"]
+    assert attribution["normalized_matched_rules"] == ["安全专家通用规范：敏感信息输出必须脱敏"]
+    assert attribution["sources"] == ["expert_general"]
+
+
+def test_review_runner_full_flow_with_additive_product_rule_document(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["敏感信息保护", "导出接口安全"],
+        system_prompt="你是安全与合规专家",
+        review_spec="安全专家通用规范：敏感信息输出必须脱敏，访问令牌不得写入日志。",
+    )
+    product_rule_doc = (
+        "# 订单导出附加产品规则\n\n"
+        "## RULE: ORDER-SEC-001 订单导出敏感字段必须脱敏\n\n"
+        "### 元数据\n"
+        "- 触发关键词: order export, phone, address, getPhone, getAddress\n"
+        "- 风险类型: sensitive_export\n\n"
+        "### 一级场景\n订单\n\n"
+        "### 二级场景\n导出\n\n"
+        "### 三级场景\n敏感字段明文输出\n\n"
+        "### 描述\n"
+        "订单导出接口新增手机号、身份证号、收货地址等字段时，必须使用脱敏工具输出，不能直接写入原始字段。\n\n"
+        "### 问题代码示例\n"
+        "```java\n"
+        "row.put(\"phone\", user.getPhone());\n"
+        "row.put(\"address\", order.getAddress());\n"
+        "```\n\n"
+        "### 问题代码行\n"
+        "row.put(\"phone\", user.getPhone());\n\n"
+        "### 误报代码\n"
+        "```java\n"
+        "row.put(\"phone\", Masking.maskPhone(user.getPhone()));\n"
+        "```\n\n"
+        "### 语言\njava\n\n"
+        "### 问题级别\nP1\n"
+    )
+    runner.knowledge_service.create_document(
+        {
+            "title": "订单导出附加产品规则",
+            "expert_id": expert.expert_id,
+            "doc_type": "review_rule",
+            "source_filename": "order-export-security-rules.md",
+            "content": product_rule_doc,
+        }
+    )
+    file_path = "src/main/java/com/acme/order/OrderExportController.java"
+    unified_diff = (
+        f"diff --git a/{file_path} b/{file_path}\n"
+        f"--- a/{file_path}\n"
+        f"+++ b/{file_path}\n"
+        "@@ -18,2 +18,5 @@\n"
+        " public Map<String, Object> export(Order order, User user, String token) {\n"
+        "+    Map<String, Object> row = new LinkedHashMap<>();\n"
+        "+    row.put(\"phone\", user.getPhone());\n"
+        "+    row.put(\"address\", order.getAddress());\n"
+        "+    log.info(\"export token={}\", token);\n"
+        "     return row;\n"
+        " }\n"
+    )
+    target_hunk = {
+        "file_path": file_path,
+        "hunk_header": "@@ -18,2 +18,5 @@",
+        "start_line": 18,
+        "end_line": 24,
+        "changed_lines": [19, 20, 21, 22],
+        "excerpt": (
+            f"# {file_path}\n"
+            "  18 |  public Map<String, Object> export(Order order, User user, String token) {\n"
+            "  19 | +    Map<String, Object> row = new LinkedHashMap<>();\n"
+            "  20 | +    row.put(\"phone\", user.getPhone());\n"
+            "  21 | +    row.put(\"address\", order.getAddress());\n"
+            "  22 | +    log.info(\"export token={}\", token);\n"
+            "  23 |      return row;\n"
+            "  24 |  }"
+        ),
+    }
+    review = ReviewTask(
+        review_id="rev_additive_rule_full_flow",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_additive_rule",
+            project_id="proj",
+            source_ref="feature/order-export",
+            target_ref="main",
+            title="订单导出新增字段",
+            changed_files=[file_path],
+            unified_diff=unified_diff,
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+    repository_context = {"routing_reason": "订单导出新增手机号、地址和 token 日志输出", "target_hunk": target_hunk}
+    knowledge_context = runner._build_knowledge_review_context(
+        review.subject,
+        expert,
+        file_path,
+        20,
+        repository_context,
+        target_hunk,
+    )
+    bound_documents = runner.knowledge_service.retrieve_for_expert(expert.expert_id, knowledge_context)
+    rule_screening = runner.knowledge_service.screen_rules_for_expert(expert.expert_id, knowledge_context)
+
+    assert any(item.title == "订单导出附加产品规则" for item in bound_documents)
+    assert rule_screening["total_rules"] >= 1
+    matched_rule_ids = [str(item.get("rule_id") or "") for item in list(rule_screening["matched_rules_for_llm"])]
+    assert "ORDER-SEC-001" in matched_rule_ids
+    assert rule_screening["must_review_count"] >= 1
+    system_prompt = runner._build_expert_system_prompt(
+        expert,
+        bound_documents,
+        active_skills=[],
+        rule_screening=rule_screening,
+        analysis_mode="standard",
+    )
+    user_prompt = runner._build_expert_prompt(
+        review.subject,
+        expert,
+        file_path,
+        20,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context=repository_context,
+        target_hunk=target_hunk,
+        target_hunks=[target_hunk],
+        bound_documents=bound_documents,
+        disallowed_inference=[],
+        expected_checks=["订单导出敏感字段脱敏"],
+        active_skills=[],
+        rule_screening=rule_screening,
+        analysis_mode="standard",
+    )
+    assert "附加产品/仓库规则" in system_prompt
+    assert "ORDER-SEC-001" in system_prompt
+    assert "附加产品/仓库规则遍历结果" in user_prompt
+
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "complete_text",
+        lambda **_kwargs: LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"ack":"收到","file_path":"%s","title":"订单导出明文输出手机号和地址",'
+                '"finding_type":"direct_defect","normalized_issue_type":"sensitive_export_plaintext",'
+                '"claim":"订单导出新增手机号和地址字段时直接输出原始值，违反附加产品规则和安全通用规范。",'
+                '"severity":"medium","line_start":20,"line_end":21,'
+                '"matched_rules":["ORDER-SEC-001 安全专家通用规范：敏感信息输出必须脱敏"],'
+                '"violated_guidelines":["订单导出接口必须对手机号和地址做脱敏"],'
+                '"rule_based_reasoning":"ORDER-SEC-001 要求订单导出敏感字段必须脱敏，当前 diff 直接写入 user.getPhone() 和 order.getAddress()。",'
+                '"evidence":["新增 row.put(\\"phone\\", user.getPhone())","新增 row.put(\\"address\\", order.getAddress())"],'
+                '"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"why_it_matters":"导出文件会暴露用户联系方式和地址","fix_strategy":"导出前统一调用脱敏工具",'
+                '"suggested_fix":"使用 Masking.maskPhone 和 Masking.maskAddress 包装导出字段",'
+                '"change_steps":["手机号脱敏","地址脱敏","补充导出断言"],'
+                '"suggested_code":"row.put(\\"phone\\", Masking.maskPhone(user.getPhone()));\\nrow.put(\\"address\\", Masking.maskAddress(order.getAddress()));",'
+                '"confidence":0.93,"verification_needed":false,"verification_plan":""},'
+                '{"ack":"收到","file_path":"%s","title":"导出日志明文输出访问令牌",'
+                '"finding_type":"direct_defect","normalized_issue_type":"sensitive_token_logged",'
+                '"claim":"新增日志直接打印 token，违反安全专家通用规范。",'
+                '"severity":"high","line_start":22,"line_end":22,'
+                '"matched_rules":["SEC-FAKE-999","安全专家通用规范：访问令牌不得写入日志"],'
+                '"violated_guidelines":["访问令牌不得进入应用日志"],'
+                '"rule_based_reasoning":"安全通用规范要求 token 不得写入日志，当前 diff 新增 log.info 输出 token。",'
+                '"evidence":["新增 log.info(\\"export token={}\\", token)","token 是访问令牌形态的敏感凭证"],'
+                '"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"why_it_matters":"日志可能被更多运维和系统读取，导致凭证泄露","fix_strategy":"删除 token 日志或只记录请求 ID",'
+                '"suggested_fix":"不要打印 token，改为记录 requestId",'
+                '"change_steps":["删除 token 日志","补充日志脱敏测试"],'
+                '"suggested_code":"log.info(\\"export requestId={}\\", requestId);",'
+                '"confidence":0.91,"verification_needed":false,"verification_plan":""}'
+                ']}'
+            )
+            % (file_path, file_path),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请检查订单导出新增字段的安全风险",
+        metadata={"file_path": file_path, "line_start": 20, "target_hunk": target_hunk},
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path=file_path,
+        line_start=20,
+        repository_context=repository_context,
+        target_hunk=target_hunk,
+        target_hunks=[target_hunk],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=bound_documents,
+        knowledge_context=knowledge_context,
+        rule_screening=rule_screening,
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 2
+    export_finding = next(item for item in findings if "手机号" in item.title)
+    token_finding = next(item for item in findings if "访问令牌" in item.title)
+    export_attr = export_finding.code_context["rule_attribution"]
+    token_attr = token_finding.code_context["rule_attribution"]
+
+    assert export_finding.severity == "high"
+    assert export_attr["valid_custom_rule_ids"] == ["ORDER-SEC-001"]
+    assert export_attr["general_rules"] == ["安全专家通用规范：敏感信息输出必须脱敏"]
+    assert export_attr["sources"] == ["expert_general", "product_or_repo_custom"]
+    assert "ORDER-SEC-001" in export_finding.matched_rules
+    assert "安全专家通用规范：敏感信息输出必须脱敏" in export_finding.matched_rules
+
+    assert token_attr["valid_custom_rule_ids"] == []
+    assert token_attr["invalid_custom_rule_ids"] == ["SEC-FAKE-999"]
+    assert token_attr["normalized_matched_rules"] == ["安全专家通用规范：访问令牌不得写入日志"]
+    assert token_finding.matched_rules == ["安全专家通用规范：访问令牌不得写入日志"]
+    assert token_finding.assumptions
+
+    messages = runner.message_repo.list(review.review_id)
+    analysis_messages = [item for item in messages if item.message_type == "expert_analysis"]
+    assert len(analysis_messages) == 2
+    assert analysis_messages[0].metadata["rule_attribution"]
+    assert analysis_messages[0].metadata["rule_screening"]["matched_rules_for_llm"][0]["rule_id"] == "ORDER-SEC-001"
+    correction_events = [
+        item for item in runner.event_repo.list(review.review_id)
+        if item.event_type == "finding_rule_attribution_corrected"
+    ]
+    assert correction_events and correction_events[0].payload["invalid_custom_rule_ids"] == ["SEC-FAKE-999"]
+
+
 def test_review_runner_semantic_line_candidates_parse_formatted_target_hunk(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     target_hunk = {

@@ -4726,7 +4726,6 @@ class ReviewRunner(
                     target_hunk=matched_target_hunk,
                 )
                 parsed["suggested_code"] = suggested_code
-            severity = self._normalize_severity(parsed.get("severity"), base_severity)
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
             parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
             parsed_line_start = self._refine_line_start_within_hunk(parsed, matched_target_hunk, parsed_line_start)
@@ -4779,6 +4778,40 @@ class ReviewRunner(
                     )
                 )
                 continue
+            rule_attribution = self._normalize_finding_rule_attribution(
+                parsed,
+                rule_screening=rule_screening,
+                expert_id=expert.expert_id,
+            )
+            parsed["matched_rules"] = list(rule_attribution.get("normalized_matched_rules") or [])
+            parsed["assumptions"] = self._dedupe_texts(
+                [
+                    *[str(item).strip() for item in list(parsed.get("assumptions") or []) if str(item).strip()],
+                    *[str(item).strip() for item in list(rule_attribution.get("assumptions") or []) if str(item).strip()],
+                ]
+            )
+            if list(rule_attribution.get("invalid_custom_rule_ids") or []):
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="finding_rule_attribution_corrected",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 返回的 finding 引用了本轮未提供的附加规则，系统已清理该规则引用。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "file_path": finding_file_path,
+                            "line_start": parsed_line_start,
+                            "title": str(parsed.get("title") or "").strip(),
+                            "invalid_custom_rule_ids": list(rule_attribution.get("invalid_custom_rule_ids") or [])[:8],
+                        },
+                    )
+                )
+            severity = self._apply_additive_rule_priority_to_severity(
+                self._normalize_severity(parsed.get("severity"), base_severity),
+                finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
+                rule_attribution=rule_attribution,
+            )
             dedupe_key = (
                 str(parsed.get("title") or "").strip().lower(),
                 parsed_line_start,
@@ -4901,6 +4934,10 @@ class ReviewRunner(
                 code_context = dict(finding.code_context or {})
                 code_context["observation_ids"] = observation_ids
                 finding.code_context = code_context
+            if rule_attribution:
+                code_context = dict(finding.code_context or {})
+                code_context["rule_attribution"] = rule_attribution
+                finding.code_context = code_context
             finding.context_source = self._finding_context_source(finding.code_context)
             finding.evidence_chain = self._build_finding_evidence_chain(finding)
             if not finding.category_label:
@@ -4970,6 +5007,7 @@ class ReviewRunner(
                         "bound_documents": self._build_bound_document_metadata(bound_documents),
                         "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                         "rule_screening": self._build_rule_screening_metadata(rule_screening),
+                        "rule_attribution": finding.code_context.get("rule_attribution", {}),
                         "finding_type": finding.finding_type,
                         "context_files": finding.context_files,
                         "assumptions": finding.assumptions,
@@ -7039,6 +7077,146 @@ class ReviewRunner(
             return normalized_line in set(hunk_changed_lines)
         changed_lines = set(self.diff_excerpt_service.changed_line_numbers(subject.unified_diff, normalized_file))
         return normalized_line in changed_lines
+
+    def _normalize_finding_rule_attribution(
+        self,
+        parsed: dict[str, object],
+        *,
+        rule_screening: dict[str, object],
+        expert_id: str,
+    ) -> dict[str, object]:
+        """Separate general expert norms from additive product/repo rule cards.
+
+        Product/repo rules enrich the review, but they are not a gate for formal
+        findings. We only police fabricated rule-card IDs so the UI can show
+        reliable attribution without suppressing valid general expert issues.
+        """
+
+        available_rules: dict[str, dict[str, object]] = {}
+        available_titles: dict[str, dict[str, object]] = {}
+        for item in list((rule_screening or {}).get("matched_rules_for_llm") or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if rule_id:
+                available_rules[rule_id.upper()] = dict(item)
+            if title:
+                available_titles[title.lower()] = dict(item)
+
+        raw_rules = self._normalize_text_list(parsed.get("matched_rules"), [])
+        general_rules: list[str] = []
+        valid_custom_rule_ids: list[str] = []
+        invalid_custom_rule_ids: list[str] = []
+        custom_rule_details: list[dict[str, object]] = []
+
+        for rule in raw_rules:
+            rule_text = str(rule or "").strip()
+            if not rule_text:
+                continue
+            extracted_ids = self._extract_additive_rule_ids(rule_text)
+            matched_known_ids = [rule_id for rule_id in extracted_ids if rule_id.upper() in available_rules]
+            if matched_known_ids:
+                for rule_id in matched_known_ids:
+                    canonical = str(available_rules[rule_id.upper()].get("rule_id") or rule_id).strip()
+                    if canonical and canonical not in valid_custom_rule_ids:
+                        valid_custom_rule_ids.append(canonical)
+                        custom_rule_details.append(self._compact_rule_detail(available_rules[rule_id.upper()]))
+                residual = rule_text
+                for rule_id in matched_known_ids:
+                    residual = residual.replace(rule_id, "").strip(" :：,，;；-")
+                if residual:
+                    general_rules.append(residual)
+                continue
+            if extracted_ids:
+                invalid_custom_rule_ids.extend(
+                    rule_id
+                    for rule_id in extracted_ids
+                    if rule_id.upper() not in available_rules
+                )
+                # Keep any non-ID explanatory text as a general guideline if present.
+                residual = rule_text
+                for rule_id in extracted_ids:
+                    residual = residual.replace(rule_id, "").strip(" :：,，;；-")
+                if residual:
+                    general_rules.append(residual)
+                continue
+            title_match = available_titles.get(rule_text.lower())
+            if title_match:
+                canonical = str(title_match.get("rule_id") or rule_text).strip()
+                if canonical and canonical not in valid_custom_rule_ids:
+                    valid_custom_rule_ids.append(canonical)
+                    custom_rule_details.append(self._compact_rule_detail(title_match))
+                continue
+            general_rules.append(rule_text)
+
+        normalized_matched_rules = self._dedupe_texts([*general_rules, *valid_custom_rule_ids])
+        assumptions: list[str] = []
+        if invalid_custom_rule_ids:
+            assumptions.append(
+                "专家引用了本轮规则遍历结果中不存在的附加规则 ID，系统已移除该附加规则引用；该问题仍按专家通用规范和代码证据独立判断。"
+            )
+
+        sources: list[str] = []
+        if general_rules or (not normalized_matched_rules and (parsed.get("evidence") or parsed.get("cross_file_evidence"))):
+            sources.append("expert_general")
+        if valid_custom_rule_ids:
+            sources.append("product_or_repo_custom")
+        if not sources:
+            sources.append("unattributed")
+
+        return {
+            "expert_id": str(expert_id or "").strip(),
+            "sources": sources,
+            "general_rules": self._dedupe_texts(general_rules),
+            "valid_custom_rule_ids": valid_custom_rule_ids,
+            "invalid_custom_rule_ids": self._dedupe_texts(invalid_custom_rule_ids),
+            "custom_rule_details": custom_rule_details,
+            "available_custom_rule_ids": [
+                str(item.get("rule_id") or "").strip()
+                for item in list((rule_screening or {}).get("matched_rules_for_llm") or [])[:12]
+                if isinstance(item, dict) and str(item.get("rule_id") or "").strip()
+            ],
+            "normalized_matched_rules": normalized_matched_rules,
+            "custom_rules_are_additive": True,
+            "assumptions": assumptions,
+        }
+
+    def _extract_additive_rule_ids(self, text: str) -> list[str]:
+        raw = str(text or "")
+        if not raw:
+            return []
+        # Rule-card IDs in this project are normally uppercase, hyphenated and
+        # contain a numeric suffix, e.g. SEC-JAVA-001 or ORDER-AUTH-002.
+        candidates = re.findall(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{2,}\b", raw)
+        return self._dedupe_texts(candidates)
+
+    def _compact_rule_detail(self, rule: dict[str, object]) -> dict[str, object]:
+        return {
+            "rule_id": str(rule.get("rule_id") or "").strip(),
+            "title": str(rule.get("title") or "").strip(),
+            "priority": str(rule.get("priority") or "").strip(),
+            "scene_path": str(rule.get("scene_path") or "").strip(),
+            "reason": str(rule.get("reason") or "").strip(),
+        }
+
+    def _apply_additive_rule_priority_to_severity(
+        self,
+        severity: str,
+        *,
+        finding_type: str,
+        rule_attribution: dict[str, object],
+    ) -> str:
+        if str(finding_type or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+            return severity
+        details = [dict(item) for item in list(rule_attribution.get("custom_rule_details") or []) if isinstance(item, dict)]
+        priorities = {str(item.get("priority") or "").strip().upper() for item in details}
+        current = str(severity or "medium").strip().lower()
+        if priorities & {"P0", "BLOCKER"} and current not in {"blocker", "critical", "high"}:
+            return "high"
+        if priorities & {"P1", "HIGH"} and current in {"low", "medium"}:
+            return "high"
+        return severity
 
     def _finding_matches_current_diff_code(
         self,

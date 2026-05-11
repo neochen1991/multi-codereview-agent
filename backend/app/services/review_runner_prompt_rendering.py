@@ -121,10 +121,11 @@ def build_bound_documents_fulltext(bound_documents: list[object]) -> str:
 def build_rule_screening_summary(rule_screening: dict[str, object]) -> str:
     total_rules = int(rule_screening.get("total_rules") or 0)
     if total_rules <= 0:
-        return "当前未绑定可执行规则卡。"
+        return "当前未绑定可执行附加规则卡；仍需按专家通用规范和语言/框架通用规范审查。"
     must_review_count = int(rule_screening.get("must_review_count") or 0)
     possible_hit_count = int(rule_screening.get("possible_hit_count") or 0)
     lines = [
+        "- 规则定位: 以下为产品/仓库附加规则，用于补充产品特有约束、优先级和误报保护；不是正式问题的唯一准入条件。",
         f"- 已遍历规则: {total_rules}",
         f"- 强命中规则: {must_review_count}",
         f"- 候选规则: {possible_hit_count}",
@@ -148,9 +149,11 @@ def build_rule_screening_summary(rule_screening: dict[str, object]) -> str:
 def build_rule_screening_fulltext(rule_screening: dict[str, object]) -> str:
     total_rules = int(rule_screening.get("total_rules") or 0)
     if total_rules <= 0:
-        return "《规则遍历结果》开始\n当前未绑定可执行规则卡。\n《规则遍历结果》结束"
+        return "《附加产品/仓库规则遍历结果》开始\n当前未绑定可执行附加规则卡；仍需按专家通用规范和语言/框架通用规范审查。\n《附加产品/仓库规则遍历结果》结束"
     sections = [
-        "《规则遍历结果》开始",
+        "《附加产品/仓库规则遍历结果》开始",
+        "- 规则定位: 本区规则是产品/仓库附加规则，用于补充产品特有约束、优先级和误报保护；不是正式问题的唯一准入条件。",
+        "- 引用要求: 若 finding 引用附加规则，matched_rules 只能填写本区出现的真实 rule_id；不要编造规则编号。",
         f"- 已遍历规则总数: {total_rules}",
         f"- 强命中规则数: {int(rule_screening.get('must_review_count') or 0)}",
         f"- 候选规则数: {int(rule_screening.get('possible_hit_count') or 0)}",
@@ -189,5 +192,5 @@ def build_rule_screening_fulltext(rule_screening: dict[str, object]) -> str:
             if false_positive_code:
                 sections.append("误报代码参考:")
                 sections.append(false_positive_code[:800])
-    sections.append("《规则遍历结果》结束")
+    sections.append("《附加产品/仓库规则遍历结果》结束")
     return "\n".join(sections)

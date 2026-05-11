@@ -190,7 +190,7 @@ class ReviewRunnerPromptingMixin:
             f"规范提要:\n{review_spec_summary}\n"
             f"已激活技能:\n{active_skill_summary}\n"
             f"已绑定参考文档:\n{bound_documents_summary}\n"
-            f"规则遍历结果:\n{rule_screening_summary}\n"
+            f"附加产品/仓库规则遍历结果:\n{rule_screening_summary}\n"
             f"审查阶段说明:\n{self._build_analysis_stage_summary(prompt_repository_context)}\n"
             f"输入完整性校验:\n{input_completeness_summary}\n"
             f"语言通用规范提示:\n{language_general_guidance or '当前目标文件未命中已配置的语言通用规范提示，请仅依据专家规范、规则和代码证据审查。'}\n"
@@ -211,6 +211,8 @@ class ReviewRunnerPromptingMixin:
             f"{java_ddd_focus}"
             f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
+            f"规则分层说明：专家通用规范和语言/框架通用规范是基础审查依据；“附加产品/仓库规则”用于补充产品特有约束、优先级和误报保护，不是唯一准入条件。\n"
+            f"无附加规则命中时，仍必须按专家通用规范审查真实缺陷；有附加规则命中时，必须逐条核对并只引用本轮提供的真实规则 ID，不要编造产品规则编号。\n"
             f"{'请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。' if include_target_file_full_diff else '本轮为多文件批量模式，请优先基于“本轮批量文件清单”和每个文件的 hunk 说明逐文件审查，再回到代码仓上下文交叉验证，不要遗漏任何文件。'}\n"
             f"{design_instruction}"
             f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”这类推断，"
@@ -222,7 +224,7 @@ class ReviewRunnerPromptingMixin:
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的规范条款"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _extract_review_learning_issue_types(
@@ -1201,6 +1203,8 @@ class ReviewRunnerPromptingMixin:
             f"7. 输出必须遵守 JSON contract。\n"
             f"8. 每条 finding 必须填写 matched_rules 和 normalized_issue_type；不确定时也要给出稳定英文短语，便于后续去重和阈值过滤。\n"
             f"9. 除 normalized_issue_type、代码标识、文件路径、接口名、类名和方法名外，面向用户的说明字段必须使用中文。\n\n"
+            f"规则分层：专家通用规范是基础审查依据；附加产品/仓库规则只增强产品特有约束、优先级和误报保护。"
+            f"没有附加规则命中时，仍要按专家通用规范报告证据充分的真实问题；引用附加规则时只能引用本轮规则遍历结果里的真实 rule_id。\n\n"
             f"结构化审查步骤：\n"
             f"1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 findings，不要顺手评论其他专家负责的问题。\n"
             f"2. 对每个候选问题先找代码锚点：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"

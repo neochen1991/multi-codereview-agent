@@ -171,6 +171,26 @@ export interface FindingCodeContextReviewInputs {
   context_files?: string[];
 }
 
+export interface FindingRuleAttributionDetail {
+  rule_id?: string;
+  title?: string;
+  priority?: string;
+  scene_path?: string;
+  reason?: string;
+}
+
+export interface FindingRuleAttribution {
+  expert_id?: string;
+  sources?: string[];
+  general_rules?: string[];
+  valid_custom_rule_ids?: string[];
+  invalid_custom_rule_ids?: string[];
+  custom_rule_details?: FindingRuleAttributionDetail[];
+  available_custom_rule_ids?: string[];
+  normalized_matched_rules?: string[];
+  custom_rules_are_additive?: boolean;
+}
+
 export interface FindingCodeContext {
   target_file_full_diff?: string;
   related_diff_summary?: string;
@@ -199,6 +219,7 @@ export interface FindingCodeContext {
   code_graph_evidence_chain?: EvidenceChainStep[];
   input_completeness?: FindingCodeContextInputCompleteness;
   review_inputs?: FindingCodeContextReviewInputs;
+  rule_attribution?: FindingRuleAttribution;
 }
 
 export interface DebateIssue {

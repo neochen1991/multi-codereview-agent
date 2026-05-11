@@ -1,7 +1,7 @@
 import React from "react";
 import { Alert, Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
-import type { DebateIssue, EvidenceChainStep, ReviewFinding } from "@/services/api";
+import type { DebateIssue, EvidenceChainStep, FindingRuleAttributionDetail, ReviewFinding } from "@/services/api";
 import {
   humanizeExpertId,
   humanizeReviewStatus,
@@ -71,6 +71,13 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const contextFiles = codeContext?.context_files || finding?.context_files || [];
   const inputCompleteness = codeContext?.input_completeness;
   const reviewInputs = codeContext?.review_inputs;
+  const ruleAttribution = codeContext?.rule_attribution || {};
+  const generalRules = uniqueList(ruleAttribution.general_rules || []);
+  const validCustomRuleIds = uniqueList(ruleAttribution.valid_custom_rule_ids || []);
+  const invalidCustomRuleIds = uniqueList(ruleAttribution.invalid_custom_rule_ids || []);
+  const customRuleDetails: FindingRuleAttributionDetail[] = Array.isArray(ruleAttribution.custom_rule_details)
+    ? ruleAttribution.custom_rule_details
+    : [];
   const aggregatedTitles = uniqueList(issue?.aggregated_titles);
   const aggregatedSummaries = uniqueList(issue?.aggregated_summaries);
   const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
@@ -389,6 +396,55 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       <Tag color="gold">{inputCompleteness.missing_sections.join(" / ")}</Tag>
                     </Descriptions.Item>
                   ) : null}
+                </Descriptions>
+              </div>
+            ) : null}
+            {finding && (generalRules.length || validCustomRuleIds.length || invalidCustomRuleIds.length) ? (
+              <div style={{ marginTop: 16 }}>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>规范与规则依据</Paragraph>
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="通用检视依据">
+                    {generalRules.length ? (
+                      <Space wrap>
+                        {generalRules.slice(0, 4).map((rule) => (
+                          <Tag key={rule} color="blue">
+                            {rule}
+                          </Tag>
+                        ))}
+                      </Space>
+                    ) : (
+                      <Tag>专家通用规范</Tag>
+                    )}
+                  </Descriptions.Item>
+                  {validCustomRuleIds.length ? (
+                    <Descriptions.Item label="附加产品/仓库规则">
+                      <Space wrap>
+                        {validCustomRuleIds.slice(0, 6).map((ruleId) => {
+                          const detail = customRuleDetails.find((item: FindingRuleAttributionDetail) => String(item?.rule_id || "") === ruleId) || {};
+                          const label = [ruleId, detail?.title].filter(Boolean).join(" · ");
+                          return (
+                            <Tag key={ruleId} color="purple">
+                              {label}
+                            </Tag>
+                          );
+                        })}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  {invalidCustomRuleIds.length ? (
+                    <Descriptions.Item label="已清理规则引用">
+                      <Space wrap>
+                        {invalidCustomRuleIds.slice(0, 4).map((ruleId) => (
+                          <Tag key={ruleId} color="gold">
+                            {ruleId}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  <Descriptions.Item label="规则定位">
+                    <Tag color="default">附加规则用于增强产品约束，不作为正式问题唯一准入条件</Tag>
+                  </Descriptions.Item>
                 </Descriptions>
               </div>
             ) : null}
