@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, Literal
 
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.context_block import ContextBlock
 from app.services.context_priority_policy import priority_for_block_type
+from app.services.model_prompt_profiles import resolve_model_prompt_profile
 from app.services.prompt_budget_planner import PromptBudgetPlanner
 
 if TYPE_CHECKING:
@@ -38,12 +40,35 @@ class ReviewRunnerPromptingMixin:
         analysis_mode: Literal["standard", "light"] = "standard",
         include_target_file_full_diff: bool = True,
         include_related_diff_summary: bool = True,
+        model_name: str | None = None,
+        prompt_profile_name: str | None = "auto",
     ) -> str:
         """构造专家最终输入给 LLM 的用户提示词。
 
         这里强制把 diff、代码仓上下文、运行时工具结果、规范文档和禁止推断规则合并，
         目的是把专家的审查边界和证据来源约束得足够明确。
         """
+        prompt_profile = resolve_model_prompt_profile(model_name or expert.model, profile_name=prompt_profile_name)
+        if prompt_profile.avoid_long_system_prompt:
+            return self._build_rule_guided_expert_prompt(
+                subject=subject,
+                expert=expert,
+                file_path=file_path,
+                line_start=line_start,
+                runtime_tool_results=runtime_tool_results,
+                repository_context=repository_context,
+                target_hunk=target_hunk,
+                target_hunks=target_hunks or [],
+                bound_documents=bound_documents,
+                disallowed_inference=disallowed_inference,
+                expected_checks=expected_checks,
+                active_skills=active_skills,
+                rule_screening=rule_screening or {},
+                include_target_file_full_diff=include_target_file_full_diff,
+                include_related_diff_summary=include_related_diff_summary,
+                max_context_chars=prompt_profile.max_context_chars,
+                max_rules_per_prompt=prompt_profile.max_rules_per_prompt,
+            )
         capability_summary = self.capability_service.build_capability_summary(expert, tool_evidence)
         code_excerpt = self._build_code_excerpt(subject, file_path, line_start, expert.expert_id)
         target_file_full_diff = (
@@ -226,6 +251,222 @@ class ReviewRunnerPromptingMixin:
             f"每条 finding 的 JSON 字段要求:\n"
             f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
+
+    def _build_rule_guided_expert_prompt(
+        self,
+        *,
+        subject: ReviewSubject,
+        expert: ExpertProfile,
+        file_path: str,
+        line_start: int,
+        runtime_tool_results: list[dict[str, object]],
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]],
+        bound_documents: list[object],
+        disallowed_inference: list[str],
+        expected_checks: list[str],
+        active_skills: list[object],
+        rule_screening: dict[str, object],
+        include_target_file_full_diff: bool,
+        include_related_diff_summary: bool,
+        max_context_chars: int,
+        max_rules_per_prompt: int,
+    ) -> str:
+        language = self._infer_code_language(file_path)
+        expert_scope_summary = self._compact_prompt_block(
+            str(expert.system_prompt or f"你是{expert.name_zh}，职责是{expert.role}。"),
+            1200,
+        )
+        expert_review_spec_summary = self._compact_prompt_block(
+            self._build_review_spec_summary(str(expert.review_spec or "")),
+            1800,
+        )
+        language_general_guidance = self._compact_prompt_block(
+            self._build_language_general_guidance(language),
+            1200,
+        )
+        java_ddd_focus = self._compact_prompt_block(
+            self._build_java_ddd_review_focus(language, expert.expert_id, repository_context),
+            1200,
+        )
+        target_file_full_diff = (
+            self._build_target_file_full_diff(subject, file_path)
+            if include_target_file_full_diff
+            else "多文件批量模式：目标文件完整 diff 在批次附录中展开。"
+        )
+        related_diff_summary = (
+            self._build_related_diff_summary(subject, file_path)
+            if include_related_diff_summary
+            else "多文件批量模式：其他变更文件摘要由批次附录提供。"
+        )
+        context_packet = {
+            "target_file": file_path,
+            "target_line": line_start,
+            "expert_scope": expert_scope_summary,
+            "expert_review_spec": expert_review_spec_summary,
+            "language_general_guidance": language_general_guidance,
+            "java_ddd_focus": java_ddd_focus,
+            "target_hunk": self._build_hunk_summary(target_hunk),
+            "same_file_hunks": self._build_hunk_batch_summary(target_hunks),
+            "target_file_full_diff": target_file_full_diff,
+            "related_diff_summary": related_diff_summary,
+            "repository_context": self._build_repository_context_summary(repository_context, runtime_tool_results),
+            "runtime_tools": self._build_runtime_tool_summary(runtime_tool_results),
+            "code_excerpt": self._build_code_excerpt(subject, file_path, line_start, expert.expert_id),
+            "active_skills": self._build_active_skill_summary(active_skills),
+            "bound_documents": self._build_bound_documents_summary(bound_documents),
+        }
+        output_contract = {
+            "rule_check_results": [
+                {
+                    "rule_id": "string",
+                    "status": "violated|passed|not_applicable|insufficient_context",
+                    "evidence": ["string"],
+                    "missing_context": ["string"],
+                    "reason": "string",
+                }
+            ],
+            "candidate_findings": [
+                {
+                    "rule_id": "string",
+                    "title": "string",
+                    "file_path": file_path,
+                    "line": line_start,
+                    "evidence": "string",
+                    "confidence": "high|medium|low",
+                }
+            ],
+            "context_requests": [
+                {
+                    "rule_id": "string",
+                    "missing_context": "string",
+                    "why_needed": "string",
+                }
+            ],
+            "self_check": {
+                "checked_all_rules": True,
+                "used_context_files": ["string"],
+                "unverified_assumptions": ["string"],
+            },
+        }
+        lines = [
+            "[SYSTEM RULES]",
+            "你是代码审查专家。只能基于 EXPERT_PROFILE、DIFF、CONTEXT_PACKET、RULE_CARDS 判断，不要编造缺失上下文。",
+            "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；不能只按其中一种来源审查。",
+            "必须逐条检查 RULE_CARDS。每条适用规则都要输出 rule_check_results。",
+            "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
+            "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
+            "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
+            "如果缺少上下文但存在可疑代码证据，必须同时输出 candidate_findings 和 context_requests，不要静默省略。",
+            "禁止输出 legacy {\"findings\":[...]}；缺少 rule_check_results 或 candidate_findings 会被系统拒收。",
+            "所有面向用户的说明使用中文；normalized_issue_type、代码标识、路径可保留英文。",
+            "",
+            "[TASK]",
+            f"审核对象: {subject.title or subject.mr_url or subject.source_ref}",
+            f"专家: {expert.expert_id} / {expert.name_zh}",
+            f"目标文件: {file_path}",
+            f"目标行号: {line_start}",
+            f"主Agent派工理由: {str(repository_context.get('routing_reason') or '').strip() or '未提供'}",
+            f"必查项: {' / '.join(expected_checks[:5]) or expert.role}",
+            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}",
+            "",
+            "[EXPERT_PROFILE]",
+            f"专家职责说明:\n{expert_scope_summary}",
+            f"专家审视规范摘要:\n{expert_review_spec_summary}",
+            f"语言通用规范:\n{language_general_guidance}",
+            f"Java/DDD 增强提示:\n{java_ddd_focus or '未命中 Java/DDD 增强提示。'}",
+            "",
+            "[RULE_CARDS]",
+            self._build_rule_guided_rule_cards(rule_screening, expected_checks, max_rules_per_prompt=max_rules_per_prompt),
+            "",
+            "[QUALITY_INPUTS]",
+            f"已激活技能:\n{context_packet['active_skills']}",
+            f"运行时工具调用结果:\n{context_packet['runtime_tools']}",
+            f"本次审核绑定的详细设计文档:\n{self._build_design_doc_summary(subject)}",
+            f"目标文件完整 diff:\n{target_file_full_diff}",
+            f"其他变更文件摘要:\n{related_diff_summary}",
+            "",
+            "[CONTEXT_PACKET]",
+            self._compact_prompt_block(
+                json.dumps(context_packet, ensure_ascii=False, indent=2),
+                max_context_chars,
+            ),
+            "",
+            "[OUTPUT_JSON]",
+            json.dumps(output_contract, ensure_ascii=False, indent=2),
+            "只输出一个 JSON 对象，不要输出 Markdown，不要添加额外解释。",
+        ]
+        return "\n".join(lines)
+
+    def _build_rule_guided_rule_cards(
+        self,
+        rule_screening: dict[str, object],
+        expected_checks: list[str],
+        *,
+        max_rules_per_prompt: int,
+    ) -> str:
+        matched_rules = [
+            item
+            for item in list(rule_screening.get("matched_rules_for_llm") or [])
+            if isinstance(item, dict)
+        ][: max(1, max_rules_per_prompt)]
+        cards: list[dict[str, object]] = []
+        for item in matched_rules:
+            rule_id = str(item.get("rule_id") or item.get("id") or "").strip()
+            if not rule_id:
+                continue
+            cards.append(
+                {
+                    "rule_id": rule_id,
+                    "title": str(item.get("title") or "").strip(),
+                    "severity": str(item.get("priority") or item.get("severity") or "P2").strip(),
+                    "must_check": self._extract_rule_guided_rule_list(item, "must_check_items", "must_check", fallback=[]),
+                    "required_context": self._extract_rule_guided_rule_list(
+                        item,
+                        "required_context",
+                        fallback=["changed_file_full_content", "repository_context"],
+                    ),
+                    "evidence_required": self._extract_rule_guided_rule_list(
+                        item,
+                        "evidence_required",
+                        fallback=["明确代码行", "违反规则的原因"],
+                    ),
+                    "false_positive_guards": self._extract_rule_guided_rule_list(item, "false_positive_guards", fallback=[]),
+                    "normalized_issue_type": str(item.get("normalized_issue_type") or "").strip(),
+                }
+            )
+        if not cards:
+            cards.append(
+                {
+                    "rule_id": "GENERAL-EXPERT-CHECKS",
+                    "title": "专家通用必查项",
+                    "severity": "P2",
+                    "must_check": [str(item).strip() for item in expected_checks if str(item).strip()],
+                    "required_context": ["changed_file_full_content", "repository_context"],
+                    "evidence_required": ["具体代码行", "违反专家职责或通用规范的原因"],
+                    "false_positive_guards": ["缺少直接代码证据时不要输出候选"],
+                    "normalized_issue_type": "general_expert_rule_violation",
+                }
+            )
+        return json.dumps(cards, ensure_ascii=False, indent=2)
+
+    def _extract_rule_guided_rule_list(
+        self,
+        source: dict[str, object],
+        *keys: str,
+        fallback: list[str],
+    ) -> list[str]:
+        values: list[str] = []
+        for key in keys:
+            raw = source.get(key)
+            if isinstance(raw, list):
+                values.extend(str(item).strip() for item in raw if str(item).strip())
+            elif str(raw or "").strip():
+                values.append(str(raw).strip())
+        if not values:
+            values = list(fallback)
+        return list(dict.fromkeys(values))
 
     def _extract_review_learning_issue_types(
         self,
@@ -1173,7 +1414,17 @@ class ReviewRunnerPromptingMixin:
         rule_screening: dict[str, object] | None = None,
         *,
         analysis_mode: Literal["standard", "light"] = "standard",
+        model_name: str | None = None,
+        prompt_profile_name: str | None = "auto",
     ) -> str:
+        prompt_profile = resolve_model_prompt_profile(model_name or expert.model, profile_name=prompt_profile_name)
+        if prompt_profile.avoid_long_system_prompt:
+            return (
+                f"你是{expert.name_zh}，职责是{expert.role}。\n"
+                "严格遵守用户提示中的 [SYSTEM RULES]、[RULE_CARDS]、[CONTEXT_PACKET] 和 [OUTPUT_JSON]。\n"
+                "必须输出 rule_check_results、candidate_findings、context_requests、self_check。\n"
+                "禁止输出 legacy findings 根结构；只输出 JSON，不输出 Markdown 或额外解释。"
+            )
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
         if analysis_mode == "light":
             review_spec_text = self._build_review_spec_summary(str(expert.review_spec or "").strip())

@@ -63,6 +63,44 @@ def test_detect_conflicts_keeps_high_risk_runtime_findings_as_findings_when_veri
     assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
+def test_detect_conflicts_upgrades_empty_catch_with_direct_code_evidence():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_swallowed_exception",
+                "expert_id": "correctness_business",
+                "title": "领域事件消费者反射异常被静默吞掉",
+                "summary": "catch 块删除 printStackTrace 后变为空 catch，NoSuchMethodException 等反射异常没有日志、失败标记或补偿。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.8,
+                "verification_needed": True,
+                "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+                "line_start": 29,
+                "evidence": [
+                    "catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | InstantiationException e) { }",
+                    "diff 删除了 e.printStackTrace();",
+                    "目标文件完整内容已加载。",
+                ],
+                "cross_file_evidence": [],
+                "context_files": [
+                    "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+                ],
+                "matched_rules": ["CORR-JDDD-002"],
+                "violated_guidelines": ["异常不能被静默吞掉"],
+                "normalized_issue_type": "exception_swallowed",
+            }
+        ]
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_swallowed_exception"
+    assert result["conflicts"][0]["direct_evidence"] is True
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_keeps_comment_contract_mismatch_even_if_text_contains_comment_tokens():
     state = {
         "findings": [

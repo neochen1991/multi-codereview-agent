@@ -59,6 +59,53 @@ def test_knowledge_rule_index_service_parses_rule_cards() -> None:
     assert "executor.setMaxPoolSize(32)" in rule.false_positive_code
 
 
+def test_knowledge_rule_index_service_parses_expert_bound_standard_template() -> None:
+    service = KnowledgeRuleIndexService()
+    document = KnowledgeDocument(
+        title="DDD 专家规则",
+        expert_id="ddd_architecture",
+        doc_type="review_rule",
+        source_filename="ddd.md",
+        content=(
+            "## RULE: ARCH-JDDD-002\n\n"
+            "### Title\n应用服务不得绕过聚合工厂直接构造聚合根\n\n"
+            "### Scope\n"
+            "- language: java\n"
+            "- expert: ddd_architecture\n"
+            "- layer: application-service\n\n"
+            "### Trigger Signals\n"
+            "- `new Course(`\n"
+            "- changed file path contains `/application/`\n\n"
+            "### Must Check\n"
+            "- 检查应用服务是否直接 new 聚合根。\n"
+            "- 检查是否绕过聚合工厂方法。\n\n"
+            "### Required Context\n"
+            "- changed_file_full_content\n"
+            "- aggregate_factory_method\n\n"
+            "### Evidence Required\n"
+            "- 直接构造聚合根的代码行。\n"
+            "- 应该调用的工厂方法。\n\n"
+            "### False Positive Guards\n"
+            "- 构造函数本身是唯一合法工厂时不要报。\n\n"
+            "### Severity\nmajor\n\n"
+            "### Normalized Issue Type\naggregate_factory_bypassed\n"
+        ),
+    )
+
+    rules = service.build_rules(document)
+
+    assert len(rules) == 1
+    rule = rules[0]
+    assert rule.rule_id == "ARCH-JDDD-002"
+    assert rule.title == "应用服务不得绕过聚合工厂直接构造聚合根"
+    assert rule.applicable_languages == ["java"]
+    assert "application-service" in rule.applicable_layers
+    assert "new Course(" in rule.trigger_keywords
+    assert "检查是否绕过聚合工厂方法。" in rule.must_check_items
+    assert rule.false_positive_guards == ["构造函数本身是唯一合法工厂时不要报。"]
+    assert rule.risk_types == ["aggregate_factory_bypassed"]
+
+
 def test_knowledge_ingestion_persists_review_rules(storage_root: Path) -> None:
     ingestion = KnowledgeIngestionService(storage_root)
     document = ingestion.ingest(

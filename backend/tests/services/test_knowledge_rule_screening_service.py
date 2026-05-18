@@ -74,6 +74,32 @@ def test_knowledge_service_bootstraps_builtin_java_ddd_rules(storage_root: Path)
     assert any(item["rule_id"] in {"DDD-JDDD-001", "ARCH-JDDD-002"} for item in ddd["matched_rules_for_llm"])
 
 
+def test_knowledge_service_bootstraps_exception_swallow_rules(storage_root: Path) -> None:
+    service = KnowledgeService(storage_root)
+    service.bootstrap_builtin_documents()
+    context = {
+        "changed_files": ["src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"],
+        "query_terms": [
+            "java_mode:general",
+            "java_quality:exception_swallowed",
+            "catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | InstantiationException e) {",
+            "- e.printStackTrace();",
+            "+ }",
+            "NoSuchMethodException",
+            "静默吞掉异常",
+        ],
+        "focus_file": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+    }
+
+    correctness = service.screen_rules_for_expert("correctness_business", context)
+    reliability = service.screen_rules_for_expert("performance_reliability", context)
+
+    correctness_ids = {item["rule_id"] for item in correctness["matched_rules_for_llm"]}
+    reliability_ids = {item["rule_id"] for item in reliability["matched_rules_for_llm"]}
+    assert "CORR-JDDD-002" in correctness_ids
+    assert "REL-JDDD-001" in reliability_ids
+
+
 def test_knowledge_rule_screening_service_keeps_coding_rules_for_general_java(storage_root: Path) -> None:
     service = KnowledgeService(storage_root)
     service.bootstrap_builtin_documents()
@@ -95,6 +121,66 @@ def test_knowledge_rule_screening_service_keeps_coding_rules_for_general_java(st
 
     matched_rule_ids = {item["rule_id"] for item in architecture["matched_rules_for_llm"]}
     assert "CODE-JAVA-001" in matched_rule_ids or "CODE-JAVA-002" in matched_rule_ids
+
+
+def test_knowledge_rule_screening_falls_back_to_bound_rules_when_no_signal_matches(storage_root: Path) -> None:
+    service = KnowledgeService(storage_root)
+    service.bootstrap_builtin_documents()
+
+    result = service.screen_rules_for_expert(
+        "performance_reliability",
+        {
+            "changed_files": ["src/main/java/com/acme/UnclearChange.java"],
+            "query_terms": ["unrelated", "misc"],
+            "focus_file": "src/main/java/com/acme/UnclearChange.java",
+        },
+    )
+
+    assert result["matched_rules_for_llm"]
+    assert result["possible_hit_count"] >= 1
+    assert all(item["decision"] == "possible_hit" for item in result["matched_rules_for_llm"])
+    assert "召回优先" in result["matched_rules_for_llm"][0]["reason"]
+
+
+def test_knowledge_rule_screening_passes_structured_rule_fields_to_llm(storage_root: Path) -> None:
+    ingestion = KnowledgeIngestionService(storage_root)
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="DDD 标准模板规则",
+            expert_id="ddd_architecture",
+            doc_type="review_rule",
+            source_filename="ddd.md",
+            content=(
+                "## RULE: ARCH-JDDD-002\n\n"
+                "### Title\n应用服务不得绕过聚合工厂\n\n"
+                "### Scope\n- language: java\n- expert: ddd_architecture\n\n"
+                "### Trigger Signals\n- `new Course(`\n\n"
+                "### Must Check\n- 检查是否直接 new 聚合根。\n\n"
+                "### Required Context\n- changed_file_full_content\n- aggregate_factory_method\n\n"
+                "### Evidence Required\n- 直接构造代码行。\n\n"
+                "### False Positive Guards\n- 构造函数是唯一合法工厂时不要报。\n\n"
+                "### Severity\nmajor\n\n"
+                "### Normalized Issue Type\naggregate_factory_bypassed\n"
+            ),
+        )
+    )
+    screening = KnowledgeRuleScreeningService(storage_root)
+
+    result = screening.screen(
+        "ddd_architecture",
+        {
+            "changed_files": ["src/main/java/app/CourseCreator.java"],
+            "query_terms": ["new Course(", "Aggregate"],
+            "focus_file": "src/main/java/app/CourseCreator.java",
+        },
+        runtime_settings=RuntimeSettings(rule_screening_mode="heuristic"),
+    )
+
+    matched = result["matched_rules_for_llm"][0]
+    assert matched["rule_id"] == "ARCH-JDDD-002"
+    assert matched["must_check_items"] == ["检查是否直接 new 聚合根。"]
+    assert matched["false_positive_guards"] == ["构造函数是唯一合法工厂时不要报。"]
+    assert matched["normalized_issue_type"] == "aggregate_factory_bypassed"
 
 
 def test_knowledge_rule_screening_service_traverses_all_rules(storage_root: Path) -> None:

@@ -9,6 +9,11 @@ type ReplayConsolePanelProps = {
   replay: ReviewReplayBundle | null;
 };
 
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
 // 回放面板按时间轴重播审核事件，帮助开发者定位收敛路径。
 const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
   const [cursor, setCursor] = useState(0);
@@ -30,6 +35,23 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
         return messageTime <= new Date(lastVisibleEvent.created_at).getTime();
       }),
     [replay?.messages, visibleEvents],
+  );
+  const diagnosticMessages = useMemo(
+    () =>
+      visibleMessages.filter((message) => {
+        const metadata = asRecord(message.metadata);
+        return Boolean(
+          metadata.prompt_snapshot_summary ||
+            metadata.prompt_snapshot_full ||
+            metadata.model_raw_response_excerpt ||
+            metadata.model_raw_response_full ||
+            metadata.rule_check_results ||
+            metadata.candidate_findings ||
+            metadata.context_gaps ||
+            metadata.environment_status,
+        );
+      }),
+    [visibleMessages],
   );
 
   return (
@@ -78,6 +100,70 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
               )}
             />
           </div>
+          {diagnosticMessages.length ? (
+            <List
+              size="small"
+              header={<Text strong>模型与规则诊断</Text>}
+              dataSource={diagnosticMessages.slice(-6)}
+              renderItem={(message) => {
+                const metadata = asRecord(message.metadata);
+                const promptSummary = asRecord(metadata.prompt_snapshot_summary);
+                const ruleCoverage = asRecord(metadata.rule_coverage);
+                const ruleChecks = asArray(metadata.rule_check_results);
+                const candidates = asArray(metadata.candidate_findings);
+                const contextGaps = asArray(metadata.context_gaps).map(String).filter(Boolean);
+                const promptFull = String(metadata.prompt_snapshot_full || "");
+                const rawExcerpt = String(metadata.model_raw_response_excerpt || "");
+                const rawFull = String(metadata.model_raw_response_full || rawExcerpt);
+                return (
+                  <List.Item>
+                    <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                      <Space wrap>
+                        <Tag color="geekblue">{message.expert_id}</Tag>
+                        <Tag>{message.message_type}</Tag>
+                        {metadata.mode ? <Tag color="blue">{String(metadata.mode)}</Tag> : null}
+                        {metadata.model ? <Tag color="processing">{String(metadata.model)}</Tag> : null}
+                        {metadata.prompt_profile ? <Tag color="purple">{String(metadata.prompt_profile)}</Tag> : null}
+                        {metadata.environment_status ? (
+                          <Tag color={metadata.environment_status === "passed" ? "success" : "warning"}>
+                            env {String(metadata.environment_status)}
+                          </Tag>
+                        ) : null}
+                      </Space>
+                      {Object.keys(promptSummary).length ? (
+                        <Text type="secondary">
+                          prompt {String(promptSummary.prompt_chars || 0)} chars · rules{" "}
+                          {String(ruleCoverage.checked_rule_count || ruleChecks.length)} · candidates{" "}
+                          {String(ruleCoverage.candidate_count || candidates.length)}
+                        </Text>
+                      ) : null}
+                      {promptFull ? (
+                        <Paragraph
+                          ellipsis={{ rows: 4, expandable: true, symbol: "展开 prompt" }}
+                        >
+                          {promptFull}
+                        </Paragraph>
+                      ) : null}
+                      {contextGaps.length ? (
+                        <Space wrap>
+                          {contextGaps.slice(0, 6).map((item) => (
+                            <Tag key={item} color="warning">
+                              {item}
+                            </Tag>
+                          ))}
+                        </Space>
+                      ) : null}
+                      {rawFull ? (
+                        <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}>
+                          {rawFull}
+                        </Paragraph>
+                      ) : null}
+                    </Space>
+                  </List.Item>
+                );
+              }}
+            />
+          ) : null}
           <Paragraph className="replay-note">
             回放面板按事件时间顺序重放审查轨迹，便于查看从检视发现、复核、工具核验到
             人工确认的收敛过程。

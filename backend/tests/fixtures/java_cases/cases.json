@@ -13,7 +13,7 @@
       "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
       "default_branch": "main",
       "review_mode": "ddd_enhanced",
-      "preferred_local_path": "/tmp/java-ddd-example-review-repo"
+      "preferred_local_path": "/tmp/github-java-ddd-example-review-repo"
     }
   ],
   "cases": [
@@ -145,6 +145,35 @@
       }
     },
     {
+      "case_id": "java-ddd-domain-event-order-regression",
+      "repo_key": "java-ddd-example",
+      "category": "architecture",
+      "scenario": "Course creation publishes domain events before the aggregate is persisted",
+      "business_context": "课程创建流程调整事务顺序时，把领域事件发布移动到 repository.save 之前，导致事件消费者可能看到尚未持久化的聚合状态。",
+      "tags": ["ddd", "domain-event", "ordering", "transaction"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Publish domain events before persistence.",
+          "search": "        repository.save(course);\n        eventBus.publish(course.pullDomainEvents());",
+          "replace": "        eventBus.publish(course.pullDomainEvents());\n        repository.save(course);"
+        }
+      ],
+      "expected": {
+        "required_experts": ["ddd_architecture", "correctness_business"],
+        "rule_ids_any_of": ["DDD-JDDD-001", "ARCH-JDDD-002"],
+        "finding_keywords": ["domain event", "repository.save", "publish", "顺序"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "keywords": ["domain event", "repository.save"]
+          }
+        ],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
       "case_id": "java-ddd-domain-events-consumer-unbounded-batch",
       "repo_key": "java-ddd-example",
       "category": "performance",
@@ -168,6 +197,35 @@
       }
     },
     {
+      "case_id": "java-ddd-domain-events-consumer-swallows-reflection-errors",
+      "repo_key": "java-ddd-example",
+      "category": "correctness",
+      "scenario": "Domain events consumer silently swallows reflection failures",
+      "business_context": "事件消费端为避免日志噪声，移除了反射异常处理中的输出和补偿动作，导致事件反序列化失败后没有任何可观测信号。",
+      "tags": ["ddd", "event-consumer", "exception", "observability"],
+      "patch_operations": [
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+          "description": "Swallow the reflection errors silently.",
+          "search": "\t\t\t} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |\n\t\t\t\t\t InstantiationException e) {\n\t\t\t\te.printStackTrace();\n\t\t\t}\n",
+          "replace": "\t\t\t} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |\n\t\t\t\t\t InstantiationException e) {\n\t\t\t}\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["correctness_business", "performance_reliability"],
+        "rule_ids_any_of": ["CORR-JDDD-002", "REL-JDDD-001"],
+        "finding_keywords": ["catch", "异常", "吞", "NoSuchMethodException"],
+        "problem_markers": [
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "keywords": ["catch"]
+          }
+        ],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
       "case_id": "java-ddd-criteria-equals-becomes-contains",
       "repo_key": "java-ddd-example",
       "category": "security",
@@ -186,6 +244,35 @@
         "required_experts": ["security_compliance", "database_analysis", "correctness_business"],
         "rule_ids_any_of": ["SEC-JDDD-002", "PERF-SQL-001"],
         "finding_keywords": ["equal", "like", "contains", "criteria"],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-course-creator-compile-error",
+      "repo_key": "java-ddd-example",
+      "category": "compile",
+      "scenario": "Course creator introduces a Java compile error in the persistence call",
+      "business_context": "课程创建流程在处理保存调用时误删了语句结束符，MR 应该被基础可编译性检查拦截。",
+      "tags": ["java", "compile", "syntax"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+          "description": "Remove semicolon from repository save call.",
+          "search": "        repository.save(course);",
+          "replace": "        repository.save(course)"
+        }
+      ],
+      "expected": {
+        "required_experts": ["correctness_business", "maintainability_code_health"],
+        "rule_ids_any_of": ["JAVA-COMPILE-001", "CORR-JDDD-001"],
+        "finding_keywords": ["compile", "编译", "semicolon", "repository.save"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "keywords": ["repository.save", "compile"]
+          }
+        ],
         "min_findings": 1,
         "min_issues": 0
       }

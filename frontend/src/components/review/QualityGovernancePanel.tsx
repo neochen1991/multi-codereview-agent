@@ -32,6 +32,10 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
     const metadata = asRecord(review?.subject?.metadata);
     return asRecord(metadata.review_policy);
   }, [review]);
+  const environmentPreflight = useMemo(() => {
+    const metadata = asRecord(review?.subject?.metadata);
+    return asRecord(metadata.review_environment_preflight);
+  }, [review]);
 
   const summary = report?.confidence_summary;
   const fallbackEvidenceChainCount = issues.filter((issue) => (issue.evidence_chain || []).length > 0).length;
@@ -55,6 +59,27 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
   const reviewableFileCount = asNumber(summary?.review_policy_reviewable_file_count, reviewableFiles.length);
   const pathRuleCount = asNumber(summary?.review_policy_path_rule_count, pathRules.length);
   const visibleDecisions = issueFilterDecisions.slice(0, 6);
+  const ruleIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const finding of report?.findings || []) {
+      for (const ruleId of finding.matched_rules || []) {
+        if (ruleId) ids.add(ruleId);
+      }
+    }
+    return Array.from(ids);
+  }, [report?.findings]);
+  const verificationStatusCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const finding of report?.findings || []) {
+      const verification = asRecord(finding.code_context?.candidate_verification);
+      const status = String(verification.status || "unknown");
+      counts[status] = (counts[status] || 0) + 1;
+    }
+    return counts;
+  }, [report?.findings]);
+  const environmentStatus = String(environmentPreflight.status || "");
+  const degradedContextReasons = asStringList(environmentPreflight.degraded_context_reasons);
+  const pathResolutionFailures = asStringList(environmentPreflight.path_resolution_failures);
 
   return (
     <Card className="module-card" title="质量治理与仓库策略">
@@ -80,6 +105,12 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
             <Tag color={excludedFileCount ? "warning" : "default"}>{`排除文件 ${excludedFileCount}`}</Tag>
             <Tag color={reviewableFileCount ? "processing" : "default"}>{`参与检视文件 ${reviewableFileCount}`}</Tag>
             <Tag color={pathRuleCount ? "blue" : "default"}>{`路径规则 ${pathRuleCount}`}</Tag>
+            {environmentStatus ? (
+              <Tag color={environmentStatus === "passed" ? "success" : "warning"}>
+                {`环境预检 ${environmentStatus}`}
+              </Tag>
+            ) : null}
+            {ruleIds.length ? <Tag color="purple">{`命中规则 ${ruleIds.length}`}</Tag> : null}
             {requiredExperts.map((expertId) => (
               <Tag key={expertId} color="geekblue">
                 {expertId}
@@ -91,6 +122,30 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
               已按仓库策略排除：{excludedFiles.slice(0, 6).join("、")}
               {excludedFiles.length > 6 ? ` 等 ${excludedFiles.length} 个文件` : ""}
             </Text>
+          ) : null}
+          {ruleIds.length || Object.keys(verificationStatusCounts).length ? (
+            <Space wrap>
+              {ruleIds.slice(0, 8).map((ruleId) => (
+                <Tag key={ruleId} color="purple">
+                  {ruleId}
+                </Tag>
+              ))}
+              {Object.entries(verificationStatusCounts).map(([status, count]) => (
+                <Tag key={status} color={status === "accepted" ? "success" : "warning"}>
+                  {`verification ${status}: ${count}`}
+                </Tag>
+              ))}
+            </Space>
+          ) : null}
+          {degradedContextReasons.length || pathResolutionFailures.length ? (
+            <Space direction="vertical" size={4}>
+              {degradedContextReasons.length ? (
+                <Text type="secondary">上下文降级：{degradedContextReasons.slice(0, 6).join("、")}</Text>
+              ) : null}
+              {pathResolutionFailures.length ? (
+                <Text type="secondary">路径未解析：{pathResolutionFailures.slice(0, 4).join("、")}</Text>
+              ) : null}
+            </Space>
           ) : null}
           {visibleDecisions.length ? (
             <List

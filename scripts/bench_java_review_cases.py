@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -17,6 +20,8 @@ DEFAULT_MANIFEST_PATH = REPO_ROOT / "backend" / "tests" / "fixtures" / "java_cas
 DEFAULT_CACHE_ROOT = Path("/tmp/java-review-eval-cache")
 DEFAULT_WORKSPACE_ROOT = Path("/tmp/java-review-eval-workspaces")
 DEFAULT_API_BASE = "http://127.0.0.1:8011/api"
+FIXTURE_MARKER_FILE = ".codereview-fixture.json"
+FIXTURE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -65,8 +70,21 @@ class MaterializedCase:
     workspace_repo: Path
     changed_files: tuple[str, ...]
     unified_diff: str
+    graph_metadata: dict[str, object] | None = None
 
     def to_review_payload(self, analysis_mode: str = "light") -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "trigger_source": "manual_real_case_test",
+            "java_eval_case_id": self.case.case_id,
+            "java_eval_category": self.case.category,
+            "java_review_mode_hint": self.repository.review_mode,
+            "business_context": self.case.business_context,
+            "workspace_repo_path": str(self.workspace_repo),
+            "expected_rule_ids_any_of": list(self.case.expected.rule_ids_any_of),
+            "expected_finding_keywords": list(self.case.expected.finding_keywords),
+        }
+        if self.graph_metadata:
+            metadata.update(self.graph_metadata)
         return {
             "subject_type": "mr",
             "analysis_mode": analysis_mode,
@@ -79,16 +97,7 @@ class MaterializedCase:
             "selected_experts": list(self.case.expected.required_experts),
             "changed_files": list(self.changed_files),
             "unified_diff": self.unified_diff,
-            "metadata": {
-                "trigger_source": "manual_real_case_test",
-                "java_eval_case_id": self.case.case_id,
-                "java_eval_category": self.case.category,
-                "java_review_mode_hint": self.repository.review_mode,
-                "business_context": self.case.business_context,
-                "workspace_repo_path": str(self.workspace_repo),
-                "expected_rule_ids_any_of": list(self.case.expected.rule_ids_any_of),
-                "expected_finding_keywords": list(self.case.expected.finding_keywords),
-            },
+            "metadata": metadata,
         }
 
 
@@ -107,6 +116,10 @@ class BenchmarkScore:
     missing_keywords: tuple[str, ...]
     missing_problem_markers: tuple[str, ...]
     missing_input_sections: tuple[str, ...]
+    schema_valid_rate: float = 1.0
+    rule_coverage_rate: float = 1.0
+    context_hit_rate: float = 1.0
+    timeout_rate: float = 0.0
     incomplete: bool = False
     review_status: str = ""
     review_phase: str = ""
@@ -117,6 +130,15 @@ KEYWORD_ALIASES: dict[str, tuple[str, ...]] = {
     "factory": ("factory", "工厂", "工厂方法", "create 工厂", "course.create"),
     "domain event": ("domain event", "domain events", "领域事件", "事件发布", "pulldomainevents"),
     "catch": ("catch", "异常处理", "吞异常", "静默吞", "空 catch", "printstacktrace"),
+}
+
+REQUIRED_BENCHMARK_PROBLEM_COVERAGE: dict[str, tuple[str, ...]] = {
+    "ddd_aggregate_factory_bypass": ("aggregate", "factory"),
+    "domain_event_order": ("domain event", "repository.save", "publish"),
+    "exception_swallowed": ("catch", "异常"),
+    "criteria_query_semantics": ("equal", "like", "criteria"),
+    "batch_limit_removed": ("LIMIT", "全表"),
+    "compile_error": ("compile", "编译", "semicolon"),
 }
 
 
@@ -132,6 +154,10 @@ def _build_score_summary(score: BenchmarkScore) -> str:
     parts.append(f"markers={score.problem_marker_coverage:.2f}")
     parts.append(f"inputs={score.input_quality_coverage:.2f}")
     parts.append(f"invalid={score.invalid_finding_rate:.2f}")
+    parts.append(f"schema={score.schema_valid_rate:.2f}")
+    parts.append(f"rulecov={score.rule_coverage_rate:.2f}")
+    parts.append(f"context={score.context_hit_rate:.2f}")
+    parts.append(f"timeouts={score.timeout_rate:.2f}")
     if score.missing_experts:
         parts.append(f"missing_experts={','.join(score.missing_experts)}")
     if score.missing_keywords:
@@ -220,6 +246,40 @@ def select_cases(cases: list[JavaReviewCase], case_ids: list[str] | None = None)
     return selected
 
 
+def validate_benchmark_problem_coverage(cases: list[JavaReviewCase]) -> dict[str, object]:
+    coverage: dict[str, bool] = {}
+    for problem_id, keywords in REQUIRED_BENCHMARK_PROBLEM_COVERAGE.items():
+        required = {item.lower() for item in keywords}
+        covered = False
+        for case in cases:
+            searchable = " ".join(
+                [
+                    case.case_id,
+                    case.category,
+                    case.scenario,
+                    case.business_context,
+                    " ".join(case.tags),
+                    " ".join(case.expected.finding_keywords),
+                    " ".join(
+                        " ".join(str(keyword) for keyword in marker.get("keywords", ()))
+                        for marker in case.expected.problem_markers
+                    ),
+                ]
+            ).lower()
+            if all(keyword.lower() in searchable for keyword in required):
+                covered = True
+                break
+        coverage[problem_id] = covered
+    missing = [problem_id for problem_id, covered in coverage.items() if not covered]
+    return {
+        "passed": not missing,
+        "coverage": coverage,
+        "missing": missing,
+        "required_problem_count": len(REQUIRED_BENCHMARK_PROBLEM_COVERAGE),
+        "case_count": len(cases),
+    }
+
+
 def _run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
 
@@ -239,17 +299,513 @@ def _is_valid_git_repo(path: Path) -> bool:
     return True
 
 
+def _is_current_fixture_repo(path: Path) -> bool:
+    if not _is_valid_git_repo(path):
+        return False
+    marker_path = path / FIXTURE_MARKER_FILE
+    if not marker_path.exists():
+        return False
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return str(marker.get("repo_key") or "") == "java-ddd-example" and int(marker.get("version") or 0) >= FIXTURE_VERSION
+
+
+def _write_fixture_file(repo_path: Path, relative_path: str, content: str) -> None:
+    target = repo_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def _create_java_ddd_example_fixture_repo(repo_path: Path) -> None:
+    """Create a small local Java repo that covers the DDD benchmark snippets.
+
+    The real Windows/intranet deployment reviews actual business repositories.
+    This fixture only prevents local benchmark/smoke runs from degrading because
+    the historical `/tmp/java-ddd-example-review-repo` seed is absent.
+    """
+
+    if repo_path.exists() or repo_path.is_symlink():
+        if repo_path.is_dir() and not repo_path.is_symlink():
+            shutil.rmtree(repo_path)
+        else:
+            repo_path.unlink()
+    repo_path.mkdir(parents=True, exist_ok=True)
+
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+        """package tv.codely.mooc.courses.application.create;
+
+import tv.codely.mooc.courses.domain.Course;
+import tv.codely.mooc.courses.domain.CourseDuration;
+import tv.codely.mooc.courses.domain.CourseId;
+import tv.codely.mooc.courses.domain.CourseName;
+import tv.codely.mooc.courses.domain.CourseRepository;
+import tv.codely.shared.domain.bus.event.EventBus;
+
+public final class CourseCreator {
+    private final CourseRepository repository;
+    private final EventBus eventBus;
+
+    public CourseCreator(CourseRepository repository, EventBus eventBus) {
+        this.repository = repository;
+        this.eventBus = eventBus;
+    }
+
+    public void create(CourseId id, CourseName name, CourseDuration duration) {
+        Course course = Course.create(id, name, duration);
+
+        repository.save(course);
+        eventBus.publish(course.pullDomainEvents());
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/Course.java",
+        """package tv.codely.mooc.courses.domain;
+
+import java.util.ArrayList;
+import java.util.List;
+import tv.codely.shared.domain.bus.event.DomainEvent;
+
+public class Course {
+    private final CourseId id;
+    private final CourseName name;
+    private final CourseDuration duration;
+    private final List<DomainEvent> domainEvents = new ArrayList<>();
+
+    public Course(CourseId id, CourseName name, CourseDuration duration) {
+        this.id = id;
+        this.name = name;
+        this.duration = duration;
+    }
+
+    public static Course create(CourseId id, CourseName name, CourseDuration duration) {
+        Course course = new Course(id, name, duration);
+        course.record(new CourseCreatedDomainEvent(id.value(), name.value(), duration.value()));
+        return course;
+    }
+
+    private void record(DomainEvent event) {
+        domainEvents.add(event);
+    }
+
+    public List<DomainEvent> pullDomainEvents() {
+        List<DomainEvent> events = new ArrayList<>(domainEvents);
+        domainEvents.clear();
+        return events;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseRepository.java",
+        """package tv.codely.mooc.courses.domain;
+
+public interface CourseRepository {
+    void save(Course course);
+}
+""",
+    )
+    for class_name, value_type in (
+        ("CourseId", "String"),
+        ("CourseName", "String"),
+        ("CourseDuration", "String"),
+    ):
+        _write_fixture_file(
+            repo_path,
+            f"src/mooc/main/tv/codely/mooc/courses/domain/{class_name}.java",
+            f"""package tv.codely.mooc.courses.domain;
+
+public final class {class_name} {{
+    private final {value_type} value;
+
+    public {class_name}({value_type} value) {{
+        this.value = value;
+    }}
+
+    public {value_type} value() {{
+        return value;
+    }}
+}}
+""",
+        )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseCreatedDomainEvent.java",
+        """package tv.codely.mooc.courses.domain;
+
+import tv.codely.shared.domain.bus.event.DomainEvent;
+
+public final class CourseCreatedDomainEvent implements DomainEvent {
+    private final String id;
+    private final String name;
+    private final String duration;
+
+    public CourseCreatedDomainEvent(String id, String name, String duration) {
+        this.id = id;
+        this.name = name;
+        this.duration = duration;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/domain/bus/event/DomainEvent.java",
+        """package tv.codely.shared.domain.bus.event;
+
+public interface DomainEvent {
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/domain/bus/event/EventBus.java",
+        """package tv.codely.shared.domain.bus.event;
+
+import java.util.List;
+
+public interface EventBus {
+    void publish(List<DomainEvent> events);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/domain/criteria/Filter.java",
+        """package tv.codely.shared.domain.criteria;
+
+public final class Filter {
+    private final FilterField field;
+    private final FilterValue value;
+
+    public Filter(FilterField field, FilterValue value) {
+        this.field = field;
+        this.value = value;
+    }
+
+    public FilterField field() {
+        return field;
+    }
+
+    public FilterValue value() {
+        return value;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/domain/criteria/FilterField.java",
+        """package tv.codely.shared.domain.criteria;
+
+public final class FilterField {
+    private final String value;
+
+    public FilterField(String value) {
+        this.value = value;
+    }
+
+    public String value() {
+        return value;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/domain/criteria/FilterValue.java",
+        """package tv.codely.shared.domain.criteria;
+
+public final class FilterValue {
+    private final String value;
+
+    public FilterValue(String value) {
+        this.value = value;
+    }
+
+    public String value() {
+        return value;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        """package tv.codely.shared.infrastructure.hibernate;
+
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
+import tv.codely.shared.domain.criteria.Filter;
+
+public final class HibernateCriteriaConverter<T> {
+    private final CriteriaBuilder builder;
+
+    public HibernateCriteriaConverter(CriteriaBuilder builder) {
+        this.builder = builder;
+    }
+
+    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {
+        return builder.equal(root.get(filter.field().value()), filter.value().value());
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        """package tv.codely.shared.infrastructure.bus.event.mysql;
+
+import java.lang.reflect.InvocationTargetException;
+import org.hibernate.SessionFactory;
+import org.hibernate.query.NativeQuery;
+import tv.codely.shared.domain.bus.event.DomainEvent;
+
+public final class MySqlDomainEventsConsumer {
+	private final Integer CHUNKS = 200;
+	private final SessionFactory sessionFactory;
+
+	public MySqlDomainEventsConsumer(SessionFactory sessionFactory) {
+		this.sessionFactory = sessionFactory;
+	}
+
+	public void consume() {
+		while (true) {
+			NativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(
+				"SELECT * FROM domain_events ORDER BY occurred_on ASC LIMIT :chunk"
+			);
+
+			query.setParameter("chunk", CHUNKS);
+			try {
+				for (Object row : query.list()) {
+					Class<?> eventClass = Class.forName(row.toString());
+					DomainEvent event = (DomainEvent) eventClass.getConstructor().newInstance();
+					dispatch(event);
+				}
+			} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |
+					 InstantiationException e) {
+				e.printStackTrace();
+			}
+			break;
+		}
+	}
+
+	private void dispatch(DomainEvent event) {
+	}
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        FIXTURE_MARKER_FILE,
+        json.dumps(
+            {
+                "repo_key": "java-ddd-example",
+                "purpose": "local benchmark fixture for review quality smoke tests",
+                "version": FIXTURE_VERSION,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    _run_git(["git", "init"], cwd=repo_path)
+    _run_git(["git", "checkout", "-B", "main"], cwd=repo_path)
+    _run_git(["git", "add", "."], cwd=repo_path)
+    _run_git(
+        [
+            "git",
+            "-c",
+            "user.name=Codex",
+            "-c",
+            "user.email=codex@example.com",
+            "commit",
+            "-m",
+            "init java ddd fixture",
+        ],
+        cwd=repo_path,
+    )
+
+
 def ensure_repo_cache(repository: RepoDefinition, cache_root: Path = DEFAULT_CACHE_ROOT) -> Path:
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_path = cache_root / repository.repo_key
-    if _is_valid_git_repo(cache_path):
+    seed = Path(repository.preferred_local_path) if repository.preferred_local_path else None
+    fixture_enabled = str(os.getenv("JAVA_REVIEW_BENCH_USE_FIXTURE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if (
+        fixture_enabled
+        and
+        repository.repo_key == "java-ddd-example"
+        and seed
+        and (not _is_valid_git_repo(seed) or not _is_current_fixture_repo(seed))
+    ):
+        _create_java_ddd_example_fixture_repo(seed)
+    fixture_seed_ready = (
+        repository.repo_key == "java-ddd-example"
+        and seed is not None
+        and _is_valid_git_repo(seed)
+        and _is_current_fixture_repo(seed)
+    )
+    fixture_cache_ready = _is_current_fixture_repo(cache_path)
+    real_seed_ready = bool(
+        repository.repo_key == "java-ddd-example"
+        and seed is not None
+        and _is_valid_git_repo(seed)
+        and not _is_current_fixture_repo(seed)
+    )
+    if _is_valid_git_repo(cache_path) and not (
+        (fixture_seed_ready and not fixture_cache_ready)
+        or (real_seed_ready and fixture_cache_ready)
+    ):
         return cache_path
     if cache_path.exists():
         shutil.rmtree(cache_path)
-    seed = Path(repository.preferred_local_path) if repository.preferred_local_path else None
+    if fixture_enabled and repository.repo_key == "java-ddd-example" and not (seed and _is_valid_git_repo(seed)):
+        _create_java_ddd_example_fixture_repo(cache_path)
+        return cache_path
     source = str(seed) if seed and _is_valid_git_repo(seed) else repository.clone_url
-    _run_git(["git", "clone", "--quiet", source, str(cache_path)])
+    try:
+        _run_git(["git", "clone", "--quiet", source, str(cache_path)])
+    except subprocess.CalledProcessError:
+        if repository.repo_key != "java-ddd-example":
+            raise
+        _create_java_ddd_example_fixture_repo(cache_path)
     return cache_path
+
+
+def _ensure_backend_import_path() -> None:
+    backend_path = str(REPO_ROOT / "backend")
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+
+
+def build_tree_sitter_graph(repo_path: Path, repository_id: str) -> dict[str, object]:
+    graph_db_path = repo_path / ".code-review-graph" / "graph.db"
+    try:
+        _ensure_backend_import_path()
+        from app.services.code_graph.index_service import CodeGraphIndexService
+        from app.services.code_graph.java_tree_sitter_parser import JavaTreeSitterParser
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "message": f"Tree-sitter 建图依赖不可用：{error}",
+            "graph_db_path": str(graph_db_path),
+            "error_type": error.__class__.__name__,
+        }
+    try:
+        result = CodeGraphIndexService(repo_root=repo_path, parser=JavaTreeSitterParser()).full_build(
+            repository_id=repository_id,
+            languages=["java"],
+        )
+        return {"status": "ready", **dict(result), "graph_db_path": str(graph_db_path)}
+    except Exception as error:
+        return {
+            "status": "failed",
+            "message": f"Tree-sitter 建图失败：{error}",
+            "graph_db_path": str(graph_db_path),
+            "error_type": error.__class__.__name__,
+        }
+
+
+def _gitnexus_analyze_command() -> list[str]:
+    raw = str(os.getenv("GITNEXUS_ANALYZE_COMMAND") or "").strip()
+    if raw:
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list) and all(str(item).strip() for item in parsed):
+                return [str(item) for item in parsed]
+        parsed = shlex.split(raw)
+        if parsed:
+            return parsed
+    command = shutil.which("gitnexus")
+    return [command, "analyze"] if command else []
+
+
+def build_gitnexus_graph(repo_path: Path, repository_id: str) -> dict[str, object]:
+    graph_dir = repo_path / ".gitnexus"
+    build_mode = str(os.getenv("JAVA_REVIEW_BENCH_BUILD_GITNEXUS") or "auto").strip().lower()
+    if build_mode in {"0", "false", "no", "off"}:
+        return {
+            "status": "skipped",
+            "message": "JAVA_REVIEW_BENCH_BUILD_GITNEXUS 已关闭，跳过 GitNexus 预建图。",
+            "graph_dir": str(graph_dir),
+        }
+    if build_mode == "auto" and repository_id != "java-ddd-example":
+        return {
+            "status": "skipped",
+            "message": "auto 模式仅为 java-ddd-example 本地模拟仓预建 GitNexus 图谱。",
+            "graph_dir": str(graph_dir),
+        }
+    command = _gitnexus_analyze_command()
+    if not command:
+        return {
+            "status": "skipped",
+            "message": "GitNexus 命令不可用，跳过本地模拟仓预建图。",
+            "graph_dir": str(graph_dir),
+        }
+    timeout_seconds = int(os.getenv("JAVA_REVIEW_BENCH_GITNEXUS_TIMEOUT_SECONDS", "180") or 180)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception as error:
+        return {
+            "status": "failed",
+            "message": f"GitNexus 建图异常：{error}",
+            "graph_dir": str(graph_dir),
+            "command": " ".join(command),
+            "timeout_seconds": timeout_seconds,
+            "error_type": error.__class__.__name__,
+        }
+    graph_ready = (graph_dir / "meta.json").exists() or (graph_dir / "index_status.json").exists()
+    return {
+        "status": "ready" if completed.returncode == 0 and graph_ready else "failed",
+        "message": "GitNexus 本地模拟仓图谱已创建。" if completed.returncode == 0 and graph_ready else "GitNexus 建图未生成图谱文件。",
+        "graph_dir": str(graph_dir),
+        "command": " ".join(command),
+        "return_code": completed.returncode,
+        "timeout_seconds": timeout_seconds,
+        "stdout_tail": (completed.stdout or "")[-1200:],
+        "stderr_tail": (completed.stderr or "")[-1200:],
+    }
+
+
+def build_local_graph_metadata(repo_path: Path, repository_id: str) -> dict[str, object]:
+    tree_sitter_result = build_tree_sitter_graph(repo_path, repository_id)
+    gitnexus_result = build_gitnexus_graph(repo_path, repository_id)
+    metadata: dict[str, object] = {
+        "local_graph_build": {
+            "tree_sitter": tree_sitter_result,
+            "gitnexus": gitnexus_result,
+        },
+        "tree_sitter_graph_result": tree_sitter_result,
+        "gitnexus_graph_result": gitnexus_result,
+    }
+    graph_db_path = str(tree_sitter_result.get("graph_db_path") or "").strip()
+    if graph_db_path:
+        metadata["code_graph_db_path"] = graph_db_path
+    graph_dir = str(gitnexus_result.get("graph_dir") or "").strip()
+    if graph_dir:
+        metadata["gitnexus_graph_dir"] = graph_dir
+    return metadata
 
 
 def _apply_patch_operations(repo_dir: Path, operations: tuple[PatchOperation, ...]) -> tuple[str, ...]:
@@ -293,12 +849,14 @@ def materialize_case(
     _run_git(["git", "clone", "--quiet", str(source_repo), str(target_repo)])
     changed_files = _apply_patch_operations(target_repo, case.patch_operations)
     unified_diff = build_git_diff(target_repo, changed_files)
+    graph_metadata = build_local_graph_metadata(target_repo, repository.repo_key)
     return MaterializedCase(
         case=case,
         repository=repository,
         workspace_repo=target_repo,
         changed_files=changed_files,
         unified_diff=unified_diff,
+        graph_metadata=graph_metadata,
     )
 
 
@@ -396,6 +954,10 @@ def submit_case(
             "input_quality_coverage": score.input_quality_coverage,
             "problem_marker_coverage": score.problem_marker_coverage,
             "invalid_finding_rate": score.invalid_finding_rate,
+            "schema_valid_rate": score.schema_valid_rate,
+            "rule_coverage_rate": score.rule_coverage_rate,
+            "context_hit_rate": score.context_hit_rate,
+            "timeout_rate": score.timeout_rate,
             "missing_experts": list(score.missing_experts),
             "matched_rule_ids": list(score.matched_rule_ids),
             "missing_keywords": list(score.missing_keywords),
@@ -424,6 +986,13 @@ def _collect_matched_rule_ids(findings: list[dict[str, object]], replay_messages
             rule_id = str(rule or "").strip()
             if rule_id and rule_id not in matched_rule_ids:
                 matched_rule_ids.append(rule_id)
+        for key in ("rule_check_results", "candidate_findings"):
+            for item in list(metadata.get(key) or []):
+                if not isinstance(item, dict):
+                    continue
+                rule_id = str(item.get("rule_id") or "").strip()
+                if rule_id and rule_id not in matched_rule_ids:
+                    matched_rule_ids.append(rule_id)
         rule_screening = metadata.get("rule_screening")
         if not isinstance(rule_screening, dict):
             continue
@@ -591,6 +1160,62 @@ def _collect_problem_marker_coverage(
     return coverage, tuple(missing_markers)
 
 
+def _collect_quality_gate_metrics(replay_messages: list[dict[str, object]]) -> dict[str, float]:
+    schema_checks = 0
+    schema_valid = 0
+    rule_coverage_values: list[float] = []
+    context_hit_values: list[float] = []
+    timeout_checks = 0
+    timeout_count = 0
+    for message in replay_messages:
+        if not isinstance(message, dict):
+            continue
+        message_type = str(message.get("message_type") or "")
+        content = str(message.get("content") or "")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if message_type in {"expert_analysis", "expert_final"} or metadata.get("prompt_snapshot_summary"):
+            schema_checks += 1
+            schema_errors = list(metadata.get("schema_errors") or [])
+            schema_contract = metadata.get("schema_contract") if isinstance(metadata.get("schema_contract"), dict) else {}
+            repair = schema_contract.get("context_followup") if isinstance(schema_contract.get("context_followup"), dict) else {}
+            if not schema_errors and not (
+                schema_contract
+                and schema_contract.get("initial_valid") is False
+                and schema_contract.get("repair_success") is False
+            ) and not (repair and repair.get("success") is False):
+                schema_valid += 1
+        rule_coverage = metadata.get("rule_coverage")
+        if isinstance(rule_coverage, dict):
+            matched = int(rule_coverage.get("matched_rule_count") or 0)
+            checked = int(rule_coverage.get("checked_rule_count") or 0)
+            if matched > 0:
+                rule_coverage_values.append(min(1.0, checked / matched))
+        input_completeness = metadata.get("input_completeness")
+        if isinstance(input_completeness, dict):
+            context_hit_values.append(
+                (
+                    (1.0 if bool(input_completeness.get("source_context_present")) else 0.0)
+                    + (1.0 if int(input_completeness.get("related_context_count") or 0) > 0 else 0.0)
+                )
+                / 2.0
+            )
+        if message_type.startswith("expert") or metadata.get("llm_error"):
+            timeout_checks += 1
+            blob = f"{content}\n{metadata.get('llm_error') or metadata.get('error') or ''}".lower()
+            if "timeout" in blob or "timed out" in blob:
+                timeout_count += 1
+    return {
+        "schema_valid_rate": round(schema_valid / schema_checks, 3) if schema_checks else 1.0,
+        "rule_coverage_rate": round(sum(rule_coverage_values) / len(rule_coverage_values), 3)
+        if rule_coverage_values
+        else 1.0,
+        "context_hit_rate": round(sum(context_hit_values) / len(context_hit_values), 3)
+        if context_hit_values
+        else 1.0,
+        "timeout_rate": round(timeout_count / timeout_checks, 3) if timeout_checks else 0.0,
+    }
+
+
 def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay: dict[str, object]) -> BenchmarkScore:
     findings = [item for item in list(report.get("findings") or []) if isinstance(item, dict)]
     issues = [item for item in list(report.get("issues") or []) if isinstance(item, dict)]
@@ -600,6 +1225,7 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
     matched_rule_ids = _collect_matched_rule_ids(findings, replay_messages)
     input_quality_coverage, missing_input_sections = _collect_input_quality(findings, replay_messages)
     invalid_finding_rate = _collect_invalid_finding_rate(findings, issues)
+    quality_metrics = _collect_quality_gate_metrics(replay_messages)
     problem_marker_coverage, missing_problem_markers = _collect_problem_marker_coverage(
         case.expected.problem_markers,
         findings,
@@ -645,6 +1271,10 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
         and problem_marker_coverage >= 0.7
         and input_quality_coverage >= 0.8
         and invalid_finding_rate <= 0.05
+        and quality_metrics["schema_valid_rate"] >= 0.95
+        and quality_metrics["rule_coverage_rate"] >= 0.8
+        and quality_metrics["context_hit_rate"] >= 0.8
+        and quality_metrics["timeout_rate"] <= 0.1
     )
     score = round(
         (
@@ -671,6 +1301,10 @@ def evaluate_case_result(case: JavaReviewCase, report: dict[str, object], replay
         missing_keywords=missing_keywords,
         missing_problem_markers=missing_problem_markers,
         missing_input_sections=missing_input_sections,
+        schema_valid_rate=quality_metrics["schema_valid_rate"],
+        rule_coverage_rate=quality_metrics["rule_coverage_rate"],
+        context_hit_rate=quality_metrics["context_hit_rate"],
+        timeout_rate=quality_metrics["timeout_rate"],
     )
 
 
@@ -705,6 +1339,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST_PATH))
     parser.add_argument("--case", dest="case_ids", action="append", help="Run one or more case ids.")
     parser.add_argument("--list", action="store_true", help="List available case ids and exit.")
+    parser.add_argument("--validate-coverage", action="store_true", help="Validate benchmark inventory covers required Java defect classes.")
     parser.add_argument("--prepare-only", action="store_true", help="Only materialize repo workspaces and unified diffs.")
     parser.add_argument("--submit", action="store_true", help="Create and start reviews through the local API.")
     parser.add_argument("--analysis-mode", default="light", choices=["light", "standard"])
@@ -721,6 +1356,11 @@ def main() -> int:
     manifest_path = Path(args.manifest)
     repositories = load_repositories(manifest_path)
     cases = select_cases(load_cases(manifest_path), args.case_ids)
+
+    if args.validate_coverage:
+        result = validate_benchmark_problem_coverage(cases)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["passed"] else 2
 
     if args.list:
         print(json.dumps([_serialise_case(item) for item in cases], ensure_ascii=False, indent=2))

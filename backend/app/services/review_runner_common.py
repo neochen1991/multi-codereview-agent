@@ -247,6 +247,7 @@ class ReviewRunnerCommonMixin:
             f"代码片段:\n{code_excerpt}\n"
             f"请输出一段中文聊天式辩论消息，必须围绕 {file_path}:{line_start} 这段真实变更展开，"
             f"先点名回应对象，再说明你同意或反驳什么，指出具体代码证据，并说明还缺什么验证。"
+            f"不要输出 JSON，不要提出新的 context_requests；上下文不足时只在消息末尾用一句话说明缺口。"
         )
 
     def _build_debate_fallback(
@@ -314,6 +315,14 @@ class ReviewRunnerCommonMixin:
         return fallback
 
     def _normalize_confidence(self, value: object, fallback: float) -> float:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"high", "高", "高置信", "高置信度"}:
+                return 0.86
+            if normalized in {"medium", "mid", "中", "中等", "中置信", "中置信度"}:
+                return 0.68
+            if normalized in {"low", "低", "低置信", "低置信度"}:
+                return 0.38
         try:
             parsed = float(value)
         except Exception:

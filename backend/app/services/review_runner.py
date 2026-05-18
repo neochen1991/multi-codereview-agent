@@ -20,6 +20,7 @@ from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
+from app.domain.models.review_rule import CandidateFinding, ReviewRuleCard, ReviewRuleCheckResult
 from app.repositories.storage_factory import StorageRepositoryFactory
 from app.services.artifact_service import ArtifactService, build_report_summary
 from app.services.diff_excerpt_service import DiffExcerptService
@@ -39,11 +40,15 @@ from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.llm_chat_service import LLMChatService
 from app.services.main_agent_service import MainAgentService
 from app.services.memory_probe import MemoryProbe
+from app.services.model_prompt_profiles import resolve_model_prompt_profile
 from app.services.orchestrator.graph import build_review_graph
 from app.services.prompt_budget_planner import PromptBudgetPlanner
 from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.repository_context_service import RepositoryContextService
 from app.services.repo_review_policy_service import RepoReviewPolicyService
+from app.services.review_candidate_verification_service import verify_candidate_finding
+from app.services.review_environment_preflight_service import run_review_environment_preflight
+from app.services.review_prompt_context_compaction import build_prompt_graph_facts
 from app.services.review_workspace_service import ReviewWorkspaceService
 from app.services.review_skill_activation_service import ReviewSkillActivationService
 from app.services.review_skill_registry import ReviewSkillRegistry
@@ -213,6 +218,7 @@ class ReviewRunner(
         analysis_mode = self._resolve_analysis_mode(review, runtime_settings)
         effective_runtime_settings = self._effective_runtime_settings(runtime_settings, analysis_mode)
         llm_request_options = self._build_llm_request_options(effective_runtime_settings, analysis_mode)
+        review = self._attach_environment_preflight(review, effective_runtime_settings)
         subject_metadata = dict(review.subject.metadata or {})
         if (
             not list(review.subject.changed_files or [])
@@ -1274,6 +1280,8 @@ class ReviewRunner(
                 issues,
                 effective_runtime_settings,
                 partial_failure_count=len(expert_failures),
+                finding_count=len(finding_payloads),
+                filtered_finding_count=len(filtered_finding_ids),
                 timeout_seconds=float(llm_request_options["timeout_seconds"]),
                 max_attempts=int(llm_request_options["max_attempts"]),
             )
@@ -1566,7 +1574,14 @@ class ReviewRunner(
         metadata["review_workspace_status"] = "skipped"
         metadata["review_workspace_message"] = str(payload["message"])
         metadata["configured_workspace_repo_path"] = configured_repo_path
-        if configured_repo_path:
+        incoming_workspace_repo_path = str(metadata.get("workspace_repo_path") or "").strip()
+        has_explicit_review_workspace = bool(
+            incoming_workspace_repo_path
+            or str(metadata.get("repo_context_workspace_path") or "").strip()
+            or str(metadata.get("code_graph_db_path") or "").strip()
+            or isinstance(metadata.get("local_graph_build"), dict)
+        )
+        if configured_repo_path and not has_explicit_review_workspace:
             metadata["workspace_repo_path"] = configured_repo_path
             metadata["repo_context_workspace_path"] = configured_repo_path
         for key in (
@@ -1575,7 +1590,6 @@ class ReviewRunner(
             "review_workspace_diff_hash",
             "review_workspace_code_graph",
             "review_workspace_gitnexus_graph",
-            "code_graph_db_path",
         ):
             metadata.pop(key, None)
         review.subject.metadata = metadata
@@ -2673,6 +2687,127 @@ class ReviewRunner(
             )
         return payload
 
+    def _persist_deterministic_rule_signal_finding(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        command_message: ConversationMessage,
+        file_path: str,
+        line_start: int,
+        repository_context: dict[str, object],
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]],
+        bound_documents: list[object],
+        rule_screening: dict[str, object],
+        finding_payloads: list[dict[str, object]],
+        reason: str,
+    ) -> bool:
+        finding = self._build_failed_expert_fallback_finding(
+            {
+                "review": review,
+                "expert": expert,
+                "command_message": command_message,
+                "file_path": file_path,
+                "line_start": line_start,
+                "repository_context": repository_context,
+                "target_hunk": target_hunk,
+                "target_hunks": target_hunks,
+                "bound_documents": bound_documents,
+                "rule_screening": rule_screening,
+            },
+            reason,
+        )
+        if finding is None:
+            return False
+        if "执行失败后保守保留" in finding.title or "执行失败后" in finding.title:
+            finding.title = f"{expert.name_zh} 规则预检命中：事件消费异常被静默吞掉"
+        if "专家执行失败" in finding.summary:
+            finding.summary = (
+                "结构化规则预检和静态上下文均显示，事件消费链路的 catch 块删除了异常处理语句，"
+                "NoSuchMethodException 等反射异常会被静默吞掉。"
+            )
+        finding.evidence = [
+            item.replace("专家执行失败:", "确定性规则证据:")
+            for item in finding.evidence
+        ]
+        self.finding_repo.save(review.review_id, finding)
+        finding_payloads.append(finding.model_dump(mode="json"))
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id=finding.finding_id,
+                expert_id=expert.expert_id,
+                message_type="expert_analysis",
+                content="规则预检已命中，系统基于结构化规则、代码上下文和静态观察生成确定性 finding。",
+                metadata={
+                    "phase": "expert_review",
+                    "severity": finding.severity,
+                    "confidence": finding.confidence,
+                    "file_path": finding.file_path,
+                    "line_start": finding.line_start,
+                    "finding_type": finding.finding_type,
+                    "normalized_issue_type": finding.normalized_issue_type,
+                    "assumptions": finding.assumptions,
+                    "matched_rules": finding.matched_rules,
+                    "violated_guidelines": finding.violated_guidelines,
+                    "rule_based_reasoning": finding.rule_based_reasoning,
+                    "context_files": finding.context_files,
+                    "input_completeness": finding.code_context.get("input_completeness", {}),
+                    "review_inputs": finding.code_context.get("review_inputs", {}),
+                    "deterministic_rule_signal_finding": True,
+                    "deterministic_reason": reason,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="finding_created",
+                phase="expert_review",
+                message=f"{expert.name_zh} 基于规则预检和静态证据生成确定性发现",
+                payload={
+                    "finding_id": finding.finding_id,
+                    "expert_id": expert.expert_id,
+                    "deterministic_rule_signal_finding": True,
+                },
+            )
+        )
+        return True
+
+    def _should_short_circuit_rule_prepass_with_static_finding(
+        self,
+        *,
+        rule_prepass_text: str,
+        required_rule_ids: list[str],
+        expert_id: str,
+        file_path: str,
+        target_hunk: dict[str, object],
+        repository_context: dict[str, object],
+    ) -> bool:
+        required = {str(item).strip().upper() for item in required_rule_ids if str(item).strip()}
+        if not required.intersection({"CORR-JDDD-002", "REL-JDDD-001"}):
+            return False
+        payload = self._parse_json_payload(rule_prepass_text)
+        if not isinstance(payload, dict):
+            return False
+        rule_results = [dict(item) for item in list(payload.get("rule_check_results") or []) if isinstance(item, dict)]
+        if not any(
+            str(item.get("rule_id") or "").strip().upper() in required
+            and self._normalize_rule_check_status(str(item.get("status") or "")).strip()
+            in {"violated", "insufficient_context"}
+            for item in rule_results
+        ):
+            return False
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=str(target_hunk.get("excerpt") or ""),
+        )
+        signals = {str(item).strip() for item in list(java_quality.get("signals") or []) if str(item).strip()}
+        return expert_id in {"correctness_business", "performance_reliability"} and "exception_swallowed" in signals
+
     def _observation_has_implemented_interface_contract(self, observation: dict[str, object]) -> bool:
         """Avoid forcing comment-contract findings when implementation evidence already exists."""
 
@@ -2823,7 +2958,11 @@ class ReviewRunner(
                     f"专家执行失败: {error_text}",
                     f"规则命中: {rule_title}",
                     *( [rule_reason] if rule_reason else [] ),
+                    *( [str(target_hunk.get("excerpt") or "").strip()] if str(target_hunk.get("excerpt") or "").strip() else [] ),
                 ],
+                "matched_rules": matched_rules,
+                "violated_guidelines": matched_rules,
+                "context_files": self._merge_context_files([], repository_context, []),
             },
             expert.expert_id,
             file_path,
@@ -2835,9 +2974,10 @@ class ReviewRunner(
             expert_id=expert.expert_id,
             title=str(fallback_payload.get("title") or f"{expert.name_zh} 执行失败后保守保留的待验证风险"),
             summary=str(fallback_payload.get("summary") or summary),
-            finding_type="risk_hypothesis",
-            severity="medium",
-            confidence=confidence,
+            finding_type=str(fallback_payload.get("finding_type") or "risk_hypothesis"),
+            severity=self._normalize_severity(fallback_payload.get("severity"), "medium"),
+            confidence=self._normalize_confidence(fallback_payload.get("confidence"), confidence),
+            normalized_issue_type=str(fallback_payload.get("normalized_issue_type") or "").strip(),
             file_path=file_path,
             line_start=line_start,
             evidence=[str(item).strip() for item in list(fallback_payload.get("evidence") or []) if str(item).strip()],
@@ -2848,8 +2988,11 @@ class ReviewRunner(
             matched_rules=matched_rules,
             violated_guidelines=matched_rules,
             rule_based_reasoning=rule_reason or f"命中规则 {rule_title}，需要补跑专家以确认具体违例证据。",
-            verification_needed=True,
-            verification_plan="系统会优先自动重试失败专家；若仍失败，再补齐关联源码与命中规则后自动复核是否升级为 issue。",
+            verification_needed=bool(fallback_payload.get("verification_needed", True)),
+            verification_plan=str(
+                fallback_payload.get("verification_plan")
+                or "系统会优先自动重试失败专家；若仍失败，再补齐关联源码与命中规则后自动复核是否升级为 issue。"
+            ),
             remediation_strategy=self._build_remediation_strategy(review.subject, expert.expert_id, file_path),
             remediation_suggestion=self._build_remediation_suggestion(review.subject, expert.expert_id, file_path),
             remediation_steps=self._build_remediation_steps(review.subject, expert.expert_id, file_path),
@@ -4547,6 +4690,12 @@ class ReviewRunner(
                     },
                 )
             )
+        llm_resolution = self.llm_chat_service.resolve_expert(expert, runtime_settings)
+        prompt_profile = resolve_model_prompt_profile(
+            llm_resolution.model,
+            profile_name=runtime_settings.review_prompt_profile,
+        )
+        effective_prompt_profile_name = prompt_profile.name
         user_prompt = self._build_expert_prompt(
             review.subject,
             expert,
@@ -4565,47 +4714,264 @@ class ReviewRunner(
             analysis_mode=analysis_mode,
             include_target_file_full_diff=not multi_file_batch,
             include_related_diff_summary=not multi_file_batch,
+            model_name=llm_resolution.model,
+            prompt_profile_name=effective_prompt_profile_name,
         )
         batch_hunk_count = self._count_batch_hunks(normalized_batch_items, fallback_target_hunks=target_hunks)
         max_findings_cap = min(80, max(8, len(normalized_batch_items) * 6, batch_hunk_count * 2))
         if multi_file_batch:
+            if prompt_profile.require_rule_check_results:
+                output_requirements = (
+                    "输出补充要求：\n"
+                    f"1. 本次允许输出最多 {max_findings_cap} 条 candidate_findings；\n"
+                    "2. 输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check；\n"
+                    "3. 不允许输出 legacy {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
+                    "4. 每条 candidate_finding 必须包含 rule_id、title、file_path、line、evidence、confidence；\n"
+                    "5. file_path 只能从“本轮批量文件清单”里选择；\n"
+                    "6. 每条适用 RULE_CARDS 都必须在 rule_check_results 中给出 status、evidence、missing_context、reason；\n"
+                    "7. self_check.checked_all_rules 必须反映是否已经逐条检查 RULE_CARDS。\n"
+                )
+            else:
+                output_requirements = (
+                    "输出补充要求：\n"
+                    f"1. 本次允许输出最多 {max_findings_cap} 条 findings；\n"
+                    "2. 输出根结构必须是 {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
+                    "3. 每条 finding 都必须同时包含 file_path、line_start、line_end、title、claim、suggested_code；\n"
+                    "4. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
+                    "5. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条；\n"
+                    "6. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
+                )
             user_prompt = (
                 f"{user_prompt}\n\n"
                 f"{self._build_multi_file_prompt_appendix(review.subject, expert, normalized_batch_items, analysis_mode=analysis_mode)}\n"
-                "输出补充要求：\n"
-                f"1. 本次允许输出最多 {max_findings_cap} 条 findings；\n"
-                "2. 输出根结构必须是 {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
-                "3. 每条 finding 都必须同时包含 file_path、line_start、line_end、title、claim、suggested_code；\n"
-                "2. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
-                "4. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条；\n"
-                "5. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
+                f"{output_requirements}"
             )
-        llm_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(
-                expert,
-                bound_documents,
-                active_skills,
-                rule_screening,
-                analysis_mode=analysis_mode,
-            ),
-            user_prompt=user_prompt,
-            resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
-            runtime_settings=runtime_settings,
-            fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
-            allow_fallback=self._allow_llm_fallback(runtime_settings),
-            timeout_seconds=float(llm_request_options["timeout_seconds"]),
-            max_attempts=int(llm_request_options["max_attempts"]),
-            log_context={
-                "review_id": review.review_id,
-                "issue_id": "review_orchestration",
-                "expert_id": expert.expert_id,
-                "phase": "expert_review",
-                "analysis_mode": analysis_mode,
-                "file_path": file_path,
-                "line_start": line_start,
-                "prompt_budget": prompt_budget_metadata,
-            },
+        required_rule_ids = self._rule_guided_required_rule_ids(
+            rule_screening or {},
+            max_rules_per_prompt=prompt_profile.max_rules_per_prompt,
         )
+        rule_prepass_text = ""
+        rule_prepass_metadata: dict[str, object] = {}
+        if prompt_profile.use_two_pass_review and prompt_profile.require_rule_check_results:
+            rule_prepass_text, rule_prepass_metadata = self._run_rule_guided_rule_check_prepass(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                base_user_prompt=user_prompt,
+                required_rule_ids=required_rule_ids,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if rule_prepass_text:
+                user_prompt = (
+                    f"{user_prompt}\n\n"
+                    "[RULE_CHECK_PREPASS]\n"
+                    f"{rule_prepass_text}\n\n"
+                    "第二阶段任务：基于上述 rule_check_results 进行高召回 candidate_findings 发现；"
+                    "仍必须在最终 JSON 中原样或修正后包含完整 rule_check_results。"
+                )
+                if self._should_short_circuit_rule_prepass_with_static_finding(
+                    rule_prepass_text=rule_prepass_text,
+                    required_rule_ids=required_rule_ids,
+                    expert_id=expert.expert_id,
+                    file_path=file_path,
+                    target_hunk=target_hunk,
+                    repository_context=repository_context,
+                ):
+                    self.message_repo.append(
+                        ConversationMessage(
+                            review_id=review.review_id,
+                            issue_id="review_orchestration",
+                            expert_id=expert.expert_id,
+                            message_type="expert_rule_prepass_deterministic_finding",
+                            content=(
+                                f"{expert.name_zh} 第一阶段已命中结构化规则且静态证据充分，"
+                                "系统跳过耗时主审查调用并直接生成确定性 finding。"
+                            ),
+                            metadata={
+                                "phase": "expert_review",
+                                "file_path": file_path,
+                                "line_start": line_start,
+                                "required_rule_ids": required_rule_ids,
+                                "prompt_profile": effective_prompt_profile_name,
+                                "rule_check_prepass": rule_prepass_metadata,
+                                "target_hunk": target_hunk,
+                                "repository_context": self._build_repository_context_metadata(repository_context),
+                                **self._expert_llm_metadata(expert, runtime_settings),
+                            },
+                        )
+                    )
+                    if self._persist_deterministic_rule_signal_finding(
+                        review=review,
+                        expert=expert,
+                        command_message=command_message,
+                        file_path=file_path,
+                        line_start=line_start,
+                        repository_context=repository_context,
+                        target_hunk=target_hunk,
+                        target_hunks=target_hunks,
+                        bound_documents=bound_documents,
+                        rule_screening=rule_screening,
+                        finding_payloads=finding_payloads,
+                        reason="规则预检命中异常吞掉规则，且 diff/上下文包含 catch 删除 printStackTrace 的直接静态证据。",
+                    ):
+                        return
+        expert_system_prompt = self._build_expert_system_prompt(
+            expert,
+            bound_documents,
+            active_skills,
+            rule_screening,
+            analysis_mode=analysis_mode,
+            model_name=llm_resolution.model,
+            prompt_profile_name=effective_prompt_profile_name,
+        )
+        try:
+            llm_result = self.llm_chat_service.complete_text(
+                system_prompt=expert_system_prompt,
+                user_prompt=user_prompt,
+                resolution=llm_resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
+                allow_fallback=self._allow_llm_fallback(runtime_settings),
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                max_attempts=int(llm_request_options["max_attempts"]),
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_review",
+                    "analysis_mode": analysis_mode,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "prompt_budget": prompt_budget_metadata,
+                },
+            )
+        except Exception as exc:
+            if not prompt_profile.require_rule_check_results:
+                raise
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_timeout_deterministic_fallback",
+                    content=(
+                        f"{expert.name_zh} 主审查调用失败，系统将基于已命中规则、上下文包和静态观察"
+                        "生成确定性兜底 finding，避免弱模型或网络超时阻塞整轮检视。"
+                    ),
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "prompt_profile": effective_prompt_profile_name,
+                        "timeout_error": str(exc),
+                        "required_rule_ids": required_rule_ids,
+                        "rule_screening": self._build_rule_screening_metadata(rule_screening),
+                        "input_completeness": input_completeness,
+                        "repository_context": self._build_repository_context_metadata(repository_context),
+                        "target_hunk": target_hunk,
+                        **self._expert_llm_metadata(expert, runtime_settings),
+                    },
+                )
+            )
+            self._record_expert_job_failure(
+                {
+                    "review": review,
+                    "expert": expert,
+                    "command_message": command_message,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "repository_context": repository_context,
+                    "target_hunk": target_hunk,
+                    "target_hunks": target_hunks,
+                    "bound_documents": bound_documents,
+                    "rule_screening": rule_screening,
+                    "finding_payloads": finding_payloads,
+                },
+                exc,
+            )
+            return
+        llm_text_for_parse = llm_result.text
+        schema_contract_metadata: dict[str, object] = {}
+        if prompt_profile.require_rule_check_results:
+            contract_valid, contract_errors = self._validate_rule_guided_llm_response_contract(
+                llm_text_for_parse,
+                required_rule_ids=required_rule_ids,
+            )
+            if not contract_valid:
+                repair_text, repair_metadata = self._repair_rule_guided_llm_response_schema(
+                    review=review,
+                    expert=expert,
+                    runtime_settings=runtime_settings,
+                    resolution=llm_resolution,
+                    original_user_prompt=user_prompt,
+                    original_response=llm_text_for_parse,
+                    rule_screening=rule_screening or {},
+                    required_rule_ids=required_rule_ids,
+                    file_path=file_path,
+                    line_start=line_start,
+                    max_findings=max_findings_cap,
+                    timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                )
+                schema_contract_metadata = {
+                    "initial_valid": False,
+                    "initial_errors": contract_errors,
+                    **repair_metadata,
+                }
+                repair_valid, repair_errors = self._validate_rule_guided_llm_response_contract(
+                    repair_text,
+                    required_rule_ids=required_rule_ids,
+                )
+                if repair_valid:
+                    llm_text_for_parse = repair_text
+                    contract_valid = True
+                    contract_errors = []
+                else:
+                    contract_errors = repair_errors or contract_errors
+            if contract_valid:
+                followup_text, followup_metadata = self._maybe_run_context_request_followup(
+                    review=review,
+                    expert=expert,
+                    runtime_settings=runtime_settings,
+                    resolution=llm_resolution,
+                    original_user_prompt=user_prompt,
+                    current_response=llm_text_for_parse,
+                    required_rule_ids=required_rule_ids,
+                    file_path=file_path,
+                    line_start=line_start,
+                    timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                )
+                if followup_metadata:
+                    schema_contract_metadata = {
+                        **schema_contract_metadata,
+                        "context_followup": followup_metadata,
+                    }
+                if followup_text:
+                    llm_text_for_parse = followup_text
+            if not contract_valid:
+                self.message_repo.append(
+                    ConversationMessage(
+                        review_id=review.review_id,
+                        issue_id="review_orchestration",
+                        expert_id=expert.expert_id,
+                        message_type="expert_schema_contract_failed",
+                        content=(
+                            f"{expert.name_zh} 未按规则驱动结构输出，系统已拒绝 legacy 专家结果并保留诊断。"
+                        ),
+                        metadata={
+                            "phase": "expert_review",
+                            "file_path": file_path,
+                            "line_start": line_start,
+                            "prompt_profile": effective_prompt_profile_name,
+                            "schema_errors": contract_errors,
+                            "schema_repair": schema_contract_metadata,
+                            "raw_response_excerpt": self._clip_diagnostic_text(str(llm_result.text or ""), 1600),
+                            **self._expert_llm_metadata(expert, runtime_settings),
+                        },
+                    )
+                )
         MemoryProbe.log(
             "expert.after_llm",
             review_id=review.review_id,
@@ -4616,13 +4982,25 @@ class ReviewRunner(
             prompt_budget_used=prompt_request_budget.get("used_budget"),
         )
         self._abort_if_closed(review.review_id)
+        expert_llm_diagnostics = self._build_expert_llm_diagnostics(
+            user_prompt=user_prompt,
+            llm_text=llm_text_for_parse,
+            rule_screening=rule_screening,
+            input_completeness=input_completeness,
+            prompt_profile_name=effective_prompt_profile_name,
+        )
+        if schema_contract_metadata:
+            expert_llm_diagnostics["schema_contract"] = schema_contract_metadata
+        if rule_prepass_metadata:
+            expert_llm_diagnostics["rule_check_prepass"] = rule_prepass_metadata
         parsed_candidates = self._parse_expert_analyses(
-            llm_result.text,
+            llm_text_for_parse,
             review.subject,
             expert,
             file_path,
             line_start,
             max_findings=max_findings_cap,
+            require_rule_guided=not prompt_profile.allow_legacy_expert_output,
         )
         parsed_candidates = self._append_observation_followup_candidates(
             review=review,
@@ -4807,6 +5185,54 @@ class ReviewRunner(
                         },
                     )
                 )
+            candidate_verification = self._verify_rule_guided_candidate_before_persist(
+                parsed=parsed,
+                finding_file_path=finding_file_path,
+                parsed_line_start=parsed_line_start,
+                rule_screening=rule_screening,
+                repository_context=per_file_repository_context,
+                input_completeness=input_completeness,
+            )
+            if candidate_verification and candidate_verification.get("status") == "rejected":
+                self.event_repo.append(
+                    ReviewEvent(
+                        review_id=review.review_id,
+                        event_type="rule_guided_candidate_rejected",
+                        phase="expert_review",
+                        message=f"{expert.name_zh} 的规则驱动候选未通过落库前校验，已丢弃。",
+                        payload={
+                            "expert_id": expert.expert_id,
+                            "candidate_index": index,
+                            "file_path": finding_file_path,
+                            "line_start": parsed_line_start,
+                            "title": str(parsed.get("title") or "").strip(),
+                            "verification": candidate_verification,
+                        },
+                    )
+                )
+                continue
+            if candidate_verification and candidate_verification.get("status") == "needs_context":
+                parsed["verification_needed"] = True
+                missing_context_values = [
+                    str(item).strip()
+                    for item in list(candidate_verification.get("missing_context") or [])
+                    if str(item).strip()
+                ]
+                if missing_context_values:
+                    parsed["verification_plan"] = (
+                        str(parsed.get("verification_plan") or "").strip()
+                        or "需要补充缺失上下文后复核候选是否具备完整规则证据。"
+                    )
+                    parsed["assumptions"] = self._dedupe_texts(
+                        [
+                            *[
+                                str(item).strip()
+                                for item in list(parsed.get("assumptions") or [])
+                                if str(item).strip()
+                            ],
+                            *[f"缺失上下文: {item}" for item in missing_context_values],
+                        ]
+                    )
             severity = self._apply_additive_rule_priority_to_severity(
                 self._normalize_severity(parsed.get("severity"), base_severity),
                 finding_type=str(parsed.get("finding_type") or "risk_hypothesis"),
@@ -4938,6 +5364,10 @@ class ReviewRunner(
                 code_context = dict(finding.code_context or {})
                 code_context["rule_attribution"] = rule_attribution
                 finding.code_context = code_context
+            if candidate_verification:
+                code_context = dict(finding.code_context or {})
+                code_context["candidate_verification"] = candidate_verification
+                finding.code_context = code_context
             finding.context_source = self._finding_context_source(finding.code_context)
             finding.evidence_chain = self._build_finding_evidence_chain(finding)
             if not finding.category_label:
@@ -5008,6 +5438,9 @@ class ReviewRunner(
                         "knowledge_context": self._build_knowledge_context_metadata(knowledge_context),
                         "rule_screening": self._build_rule_screening_metadata(rule_screening),
                         "rule_attribution": finding.code_context.get("rule_attribution", {}),
+                        "candidate_verification": finding.code_context.get("candidate_verification", {}),
+                        "prompt_profile": effective_prompt_profile_name,
+                        **expert_llm_diagnostics,
                         "finding_type": finding.finding_type,
                         "context_files": finding.context_files,
                         "assumptions": finding.assumptions,
@@ -5034,6 +5467,43 @@ class ReviewRunner(
             finding_payloads.append(finding.model_dump(mode="json"))
             saved_count += 1
         if saved_count <= 0:
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_final",
+                    content=llm_result.text.strip() or f"{expert.name_zh} 未形成可落库 finding。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "reply_to_expert_id": self.main_agent_service.agent_id,
+                        "reply_to_message_id": command_message.message_id,
+                        "target_expert_id": expert.expert_id,
+                        "rule_screening": self._build_rule_screening_metadata(rule_screening),
+                        "input_completeness": input_completeness,
+                        "prompt_profile": effective_prompt_profile_name,
+                        **expert_llm_diagnostics,
+                        **self._llm_message_metadata(llm_result),
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_no_persisted_findings",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 完成模型分析，但本轮未形成可落库 finding。",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "candidate_count": candidate_count,
+                        "context_gaps": list(expert_llm_diagnostics.get("context_gaps") or []),
+                    },
+                )
+            )
             return
         self.finding_repo.save_many(review.review_id, pending_findings)
         for item in pending_findings:
@@ -5235,6 +5705,776 @@ class ReviewRunner(
             "total_tokens": llm_result.total_tokens,
         }
 
+    def _attach_environment_preflight(self, review: ReviewTask, runtime_settings) -> ReviewTask:
+        preflight = run_review_environment_preflight(review.subject, runtime_settings)
+        metadata = dict(review.subject.metadata or {})
+        metadata["review_environment_preflight"] = preflight
+        updated = review.model_copy(update={"subject": review.subject.model_copy(update={"metadata": metadata})})
+        updated.updated_at = datetime.now(UTC)
+        self.review_repo.save(updated)
+        status = str(preflight.get("status") or "").strip()
+        degraded_context_reasons = [
+            str(item).strip()
+            for item in list(preflight.get("degraded_context_reasons") or [])
+            if str(item).strip()
+        ]
+        if status and status != "passed":
+            message = "检视环境预检发现降级项：" + " / ".join(degraded_context_reasons or ["unknown"])
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=updated.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type="review_environment_preflight",
+                    content=message,
+                    metadata={
+                        "phase": "intake",
+                        "environment_status": status,
+                        "degraded_context_reasons": degraded_context_reasons,
+                        "path_resolution_failures": list(preflight.get("path_resolution_failures") or []),
+                        "normalized_changed_files": list(preflight.get("normalized_changed_files") or []),
+                        "code_graph_db_path": preflight.get("code_graph_db_path"),
+                        "code_graph_db_exists": preflight.get("code_graph_db_exists"),
+                        "tree_sitter_graph_result": preflight.get("tree_sitter_graph_result"),
+                        "gitnexus_graph_result": preflight.get("gitnexus_graph_result"),
+                    },
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=updated.review_id,
+                    event_type="review_environment_preflight_warning",
+                    phase="intake",
+                    message=message,
+                    payload=preflight,
+                )
+            )
+        return updated
+
+    def _build_expert_llm_diagnostics(
+        self,
+        *,
+        user_prompt: str,
+        llm_text: str,
+        rule_screening: dict[str, object],
+        input_completeness: dict[str, object],
+        prompt_profile_name: str,
+    ) -> dict[str, object]:
+        payload = self._parse_json_payload(llm_text)
+        rule_check_results: list[dict[str, object]] = []
+        candidate_findings: list[dict[str, object]] = []
+        context_requests: list[dict[str, object]] = []
+        self_check: dict[str, object] = {}
+        if isinstance(payload, dict):
+            rule_check_results = [
+                dict(item)
+                for item in list(payload.get("rule_check_results") or [])
+                if isinstance(item, dict)
+            ][:30]
+            candidate_findings = [
+                dict(item)
+                for item in list(payload.get("candidate_findings") or [])
+                if isinstance(item, dict)
+            ][:30]
+            context_requests = [
+                dict(item)
+                for item in list(payload.get("context_requests") or [])
+                if isinstance(item, dict)
+            ][:30]
+            if isinstance(payload.get("self_check"), dict):
+                self_check = dict(payload.get("self_check") or {})
+        context_gaps = self._dedupe_texts(
+            [
+                *self._extract_missing_required_context_sections(input_completeness),
+                *[
+                    str(item).strip()
+                    for result in rule_check_results
+                    for item in list(result.get("missing_context") or [])
+                    if str(item).strip()
+                ],
+                *[
+                    str(request.get("missing_context") or "").strip()
+                    for request in context_requests
+                    if str(request.get("missing_context") or "").strip()
+                ],
+            ]
+        )
+        return {
+            "prompt_snapshot_summary": {
+                "profile": str(prompt_profile_name or "auto"),
+                "prompt_chars": len(str(user_prompt or "")),
+                "contains_system_rules": "[SYSTEM RULES]" in str(user_prompt or ""),
+                "contains_rule_cards": "[RULE_CARDS]" in str(user_prompt or ""),
+                "contains_context_packet": "[CONTEXT_PACKET]" in str(user_prompt or ""),
+                "contains_output_json": "[OUTPUT_JSON]" in str(user_prompt or ""),
+            },
+            "prompt_snapshot_full": self._clip_diagnostic_text(str(user_prompt or ""), 180000),
+            "model_raw_response_excerpt": self._clip_diagnostic_text(str(llm_text or ""), 4000),
+            "model_raw_response_full": self._clip_diagnostic_text(str(llm_text or ""), 180000),
+            "rule_check_results": rule_check_results,
+            "candidate_findings": candidate_findings,
+            "context_requests": context_requests,
+            "self_check": self_check,
+            "context_gaps": context_gaps,
+            "rule_coverage": {
+                "matched_rule_count": int((rule_screening or {}).get("matched_rule_count") or 0),
+                "checked_rule_count": len(rule_check_results),
+                "candidate_count": len(candidate_findings),
+                "insufficient_context_count": sum(
+                    1
+                    for item in rule_check_results
+                    if str(item.get("status") or "").strip().lower() == "insufficient_context"
+                ),
+            },
+        }
+
+    def _build_rule_guided_timeout_recovery_prompt(
+        self,
+        *,
+        base_user_prompt: str,
+        rule_screening: dict[str, object],
+        required_rule_ids: list[str],
+        normalized_batch_items: list[dict[str, object]],
+        repository_context: dict[str, object],
+        file_path: str,
+        line_start: int,
+        timeout_error: str,
+    ) -> str:
+        rules = [
+            dict(item)
+            for item in list((rule_screening or {}).get("matched_rules_for_llm") or [])
+            if isinstance(item, dict)
+        ]
+        targets: list[dict[str, object]] = []
+        for item in list(normalized_batch_items or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            target_hunk = dict(item.get("target_hunk") or {})
+            item_repository_context = (
+                dict(item.get("repository_context") or {})
+                if isinstance(item.get("repository_context"), dict)
+                else {}
+            )
+            targets.append(
+                {
+                    "file_path": str(item.get("file_path") or target_hunk.get("file_path") or "").strip(),
+                    "line_start": int(item.get("line_start") or target_hunk.get("line_start") or 1),
+                    "target_hunk": self._clip_diagnostic_text(str(target_hunk.get("content") or item.get("hunk") or ""), 1800),
+                    "context_summary": self._clip_diagnostic_text(
+                        str(self._build_repository_context_metadata(item_repository_context) or ""),
+                        1800,
+                    ),
+                }
+            )
+        if not targets:
+            targets.append({"file_path": file_path, "line_start": line_start})
+        compact_context = self._build_repository_context_metadata(repository_context or {})
+        return "\n".join(
+            [
+                "[TIMEOUT_RECOVERY_RULE_GUIDED_REVIEW]",
+                "上一次专家主审查 LLM 调用超时。请用更短流程完成高召回审查，禁止输出 Markdown。",
+                "只基于下方 RULE_CARDS、TARGETS、COMPACT_CONTEXT、ORIGINAL_PROMPT_EXCERPT 输出 JSON。",
+                "如果证据不足但存在可疑代码证据，candidate_findings 仍保留，同时 context_requests 写明缺什么。",
+                f"timeout_error: {self._clip_diagnostic_text(str(timeout_error or ''), 500)}",
+                f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids or ['GENERAL-EXPERT-CHECKS'], ensure_ascii=False)}",
+                "",
+                "[RULE_CARDS]",
+                json.dumps(rules or [{"rule_id": "GENERAL-EXPERT-CHECKS", "title": "专家通用必查项"}], ensure_ascii=False, indent=2)[:12000],
+                "",
+                "[TARGETS]",
+                json.dumps(targets, ensure_ascii=False, indent=2),
+                "",
+                "[COMPACT_CONTEXT]",
+                self._clip_diagnostic_text(json.dumps(compact_context, ensure_ascii=False, indent=2), 8000),
+                "",
+                "[OUTPUT_JSON]",
+                json.dumps(
+                    {
+                        "rule_check_results": [
+                            {
+                                "rule_id": "string",
+                                "status": "violated|passed|not_applicable|insufficient_context",
+                                "evidence": ["string"],
+                                "missing_context": ["string"],
+                                "reason": "string",
+                            }
+                        ],
+                        "candidate_findings": [
+                            {
+                                "rule_id": "string",
+                                "title": "string",
+                                "file_path": file_path,
+                                "line": line_start,
+                                "evidence": "string",
+                                "confidence": "high|medium|low",
+                            }
+                        ],
+                        "context_requests": [],
+                        "self_check": {
+                            "checked_all_rules": True,
+                            "used_context_files": [],
+                            "unverified_assumptions": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "",
+                "[ORIGINAL_PROMPT_EXCERPT]",
+                self._clip_diagnostic_text(str(base_user_prompt or ""), 9000),
+            ]
+        )
+
+    def _rule_guided_required_rule_ids(
+        self,
+        rule_screening: dict[str, object],
+        *,
+        max_rules_per_prompt: int,
+    ) -> list[str]:
+        ids: list[str] = []
+        for item in list((rule_screening or {}).get("matched_rules_for_llm") or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or item.get("id") or "").strip()
+            if rule_id and rule_id not in ids:
+                ids.append(rule_id)
+            if len(ids) >= max(1, int(max_rules_per_prompt or 1)):
+                break
+        if not ids:
+            ids.append("GENERAL-EXPERT-CHECKS")
+        return ids
+
+    def _run_rule_guided_rule_check_prepass(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        base_user_prompt: str,
+        required_rule_ids: list[str],
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        prepass_prompt = "\n".join(
+            [
+                "第一阶段：只做规则逐条检查，不要输出代码问题结论。",
+                "你必须基于原任务中的 RULE_CARDS、DIFF、CONTEXT_PACKET 判断每条 REQUIRED_RULE_IDS 的状态。",
+                "candidate_findings 必须输出空数组；只允许输出 rule_check_results、context_requests、self_check。",
+                "状态只能是 violated、passed、not_applicable、insufficient_context。",
+                f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
+                "",
+                "[ORIGINAL_REVIEW_TASK]",
+                self._clip_diagnostic_text(str(base_user_prompt or ""), 32000),
+            ]
+        )
+        try:
+            result = self.llm_chat_service.complete_text(
+                system_prompt=(
+                    "你是代码审查规则检查器。只输出 JSON，不输出 Markdown。"
+                    "本阶段禁止输出 candidate finding。"
+                ),
+                user_prompt=prepass_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=(
+                    '{"rule_check_results":[],"candidate_findings":[],"context_requests":[]'
+                    ',"self_check":{"checked_all_rules":false,"used_context_files":[]'
+                    ',"unverified_assumptions":["rule prepass fallback"]}}'
+                ),
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 60.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_rule_check_prepass",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - prepass failure should degrade, not abort.
+            metadata = {"attempted": True, "success": False, "error": str(exc)}
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_rule_check_prepass",
+                    content=f"{expert.name_zh} 第一阶段规则检查失败，后续将继续执行主审查并保留诊断。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "rule_check_prepass": metadata,
+                    },
+                )
+            )
+            return "", metadata
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            result.text,
+            required_rule_ids=required_rule_ids,
+        )
+        metadata = {
+            "attempted": True,
+            "success": valid,
+            "schema_errors": errors,
+            "required_rule_ids": required_rule_ids,
+            "llm_call_id": result.call_id,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(prepass_prompt, 120000),
+            "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+            "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_rule_check_prepass",
+                content=(
+                    f"{expert.name_zh} 已完成第一阶段规则逐条检查。"
+                    if valid
+                    else f"{expert.name_zh} 第一阶段规则检查输出未满足结构合同，主审查会继续并保留诊断。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "rule_check_prepass": metadata,
+                    "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                    "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                    "model_raw_response_full": metadata["raw_response_full"],
+                    "schema_errors": errors,
+                    **self._llm_message_metadata(result),
+                },
+            )
+        )
+        return (result.text if valid else ""), metadata
+
+    def _validate_rule_guided_llm_response_contract(
+        self,
+        text: str,
+        *,
+        required_rule_ids: list[str] | None = None,
+    ) -> tuple[bool, list[str]]:
+        payload = self._parse_json_payload(text)
+        errors: list[str] = []
+        if not isinstance(payload, dict):
+            return False, ["response_not_json_object"]
+        rule_results = payload.get("rule_check_results")
+        candidates = payload.get("candidate_findings")
+        context_requests = payload.get("context_requests")
+        self_check = payload.get("self_check")
+        if not isinstance(rule_results, list):
+            errors.append("rule_check_results_missing_or_not_list")
+        if not isinstance(candidates, list):
+            errors.append("candidate_findings_missing_or_not_list")
+        if not isinstance(context_requests, list):
+            errors.append("context_requests_missing_or_not_list")
+        if not isinstance(self_check, dict):
+            errors.append("self_check_missing_or_not_object")
+        if "findings" in payload:
+            errors.append("legacy_findings_key_not_allowed")
+        checked_rule_ids: set[str] = set()
+        for index, item in enumerate(rule_results if isinstance(rule_results, list) else [], start=1):
+            if not isinstance(item, dict):
+                errors.append(f"rule_check_results_{index}_not_object")
+                continue
+            rule_id = str(item.get("rule_id") or "").strip()
+            if not rule_id:
+                errors.append(f"rule_check_results_{index}_rule_id_missing")
+            else:
+                checked_rule_ids.add(rule_id)
+            status = self._normalize_rule_check_status(item.get("status"))
+            if status not in {"violated", "passed", "not_applicable", "insufficient_context"}:
+                errors.append(f"rule_check_results_{index}_status_invalid")
+        for rule_id in list(required_rule_ids or []):
+            if rule_id and rule_id not in checked_rule_ids:
+                errors.append(f"rule_coverage_missing:{rule_id}")
+        for index, item in enumerate(candidates if isinstance(candidates, list) else [], start=1):
+            if not isinstance(item, dict):
+                errors.append(f"candidate_findings_{index}_not_object")
+                continue
+            for key in ("rule_id", "title", "file_path", "evidence"):
+                if not str(item.get(key) or "").strip():
+                    errors.append(f"candidate_findings_{index}_{key}_missing")
+            if not (item.get("line") or item.get("line_start")):
+                errors.append(f"candidate_findings_{index}_line_missing")
+        return not errors, errors
+
+    def _normalize_rule_check_status(self, value: object) -> str:
+        status = str(value or "").strip().lower()
+        aliases = {
+            "fail": "violated",
+            "failed": "violated",
+            "failure": "violated",
+            "violation": "violated",
+            "违规": "violated",
+            "违反": "violated",
+            "不通过": "violated",
+            "confirmed": "violated",
+            "confirmed_issue": "violated",
+            "pass": "passed",
+            "ok": "passed",
+            "通过": "passed",
+            "not applicable": "not_applicable",
+            "not-applicable": "not_applicable",
+            "n/a": "not_applicable",
+            "na": "not_applicable",
+            "不适用": "not_applicable",
+            "needs_context": "insufficient_context",
+            "need_context": "insufficient_context",
+            "missing_context": "insufficient_context",
+            "insufficient context": "insufficient_context",
+            "context_missing": "insufficient_context",
+            "上下文不足": "insufficient_context",
+            "证据不足": "insufficient_context",
+        }
+        return aliases.get(status, status)
+
+    def _extract_rule_guided_context_requests(self, text: str) -> list[dict[str, object]]:
+        payload = self._parse_json_payload(text)
+        if not isinstance(payload, dict):
+            return []
+        requests: list[dict[str, object]] = []
+        for item in list(payload.get("context_requests") or []):
+            if not isinstance(item, dict):
+                continue
+            missing_context = str(item.get("missing_context") or "").strip()
+            why_needed = str(item.get("why_needed") or "").strip()
+            rule_id = str(item.get("rule_id") or "").strip()
+            if not (missing_context or why_needed):
+                continue
+            requests.append(
+                {
+                    "rule_id": rule_id,
+                    "missing_context": missing_context,
+                    "why_needed": why_needed,
+                }
+            )
+            if len(requests) >= 8:
+                break
+        return requests
+
+    def _maybe_run_context_request_followup(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        original_user_prompt: str,
+        current_response: str,
+        required_rule_ids: list[str],
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        context_requests = self._extract_rule_guided_context_requests(current_response)
+        if not context_requests:
+            return "", {}
+        supplement = self._build_context_request_supplement(
+            review.subject,
+            runtime_settings,
+            context_requests,
+            file_path=file_path,
+            line_start=line_start,
+        )
+        if not supplement.get("has_context"):
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_context_request_unresolved",
+                    content=f"{expert.name_zh} 请求了补充上下文，但本地仓检索未命中可用片段。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "context_requests": context_requests,
+                        "context_supplement": supplement,
+                    },
+                )
+            )
+            return "", {"attempted": True, "resolved": False, "context_requests": context_requests}
+        followup_prompt = "\n".join(
+            [
+                "你是代码审查专家。下面是你刚才请求的补充上下文，请基于原任务、原响应和补充上下文重新输出完整规则驱动 JSON。",
+                "必须逐条覆盖 REQUIRED_RULE_IDS；禁止输出 legacy findings 根结构；只输出 JSON。",
+                f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
+                "",
+                "[CONTEXT_REQUEST_SUPPLEMENT]",
+                json.dumps(supplement, ensure_ascii=False, indent=2),
+                "",
+                "[PREVIOUS_RESPONSE]",
+                self._clip_diagnostic_text(str(current_response or ""), 12000),
+                "",
+                "[ORIGINAL_PROMPT_SUMMARY]",
+                self._clip_diagnostic_text(str(original_user_prompt or ""), 12000),
+            ]
+        )
+        try:
+            followup_result = self.llm_chat_service.complete_text(
+                system_prompt="根据补充上下文重新输出规则驱动 JSON。禁止 Markdown，禁止解释。",
+                user_prompt=followup_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=current_response,
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_context_request_followup",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - follow-up failure must not abort the review.
+            return "", {
+                "attempted": True,
+                "resolved": True,
+                "success": False,
+                "error": str(exc),
+                "context_requests": context_requests,
+            }
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            followup_result.text,
+            required_rule_ids=required_rule_ids,
+        )
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_context_request_followup",
+                content=(
+                    f"{expert.name_zh} 已基于 context_requests 补充上下文进行二次规则驱动审查。"
+                    if valid
+                    else f"{expert.name_zh} 的 context_requests 二次审查输出仍未满足结构合同。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "context_requests": context_requests,
+                    "context_supplement": supplement,
+                    "schema_valid": valid,
+                    "schema_errors": errors,
+                    "prompt_snapshot_full": self._clip_diagnostic_text(followup_prompt, 120000),
+                    "model_raw_response_excerpt": self._clip_diagnostic_text(str(followup_result.text or ""), 1600),
+                    "model_raw_response_full": self._clip_diagnostic_text(str(followup_result.text or ""), 120000),
+                    **self._llm_message_metadata(followup_result),
+                },
+            )
+        )
+        metadata = {
+            "attempted": True,
+            "resolved": True,
+            "success": valid,
+            "schema_errors": errors,
+            "context_requests": context_requests,
+            "llm_call_id": followup_result.call_id,
+            "prompt_tokens": followup_result.prompt_tokens,
+            "completion_tokens": followup_result.completion_tokens,
+            "total_tokens": followup_result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(followup_prompt, 120000),
+            "model_raw_response_full": self._clip_diagnostic_text(str(followup_result.text or ""), 120000),
+        }
+        return (followup_result.text if valid else ""), metadata
+
+    def _build_context_request_supplement(
+        self,
+        subject: ReviewSubject,
+        runtime_settings,
+        context_requests: list[dict[str, object]],
+        *,
+        file_path: str,
+        line_start: int,
+    ) -> dict[str, object]:
+        service = self.repository_resolver.build_context_service(runtime_settings, subject)
+        queries = self._context_request_queries(context_requests)
+        primary_context: dict[str, object] = {}
+        search_result: dict[str, object] = {"queries": queries, "matches": []}
+        if service.is_ready():
+            primary_context = service.load_file_context(file_path, line_start, radius=28)
+            search_result = service.search_many(queries, limit_per_query=4, total_limit=16)
+        matches = [dict(item) for item in list(search_result.get("matches") or []) if isinstance(item, dict)]
+        related_contexts: list[dict[str, object]] = []
+        seen_paths: set[str] = set()
+        for match in matches:
+            path = str(match.get("path") or "").strip()
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            related_contexts.append(
+                service.load_file_context(path, int(match.get("line_number") or 1), radius=18)
+                if service.is_ready()
+                else {"path": path, "snippet": "", "line_start": int(match.get("line_number") or 1)}
+            )
+            if len(related_contexts) >= 6:
+                break
+        has_context = bool(str(primary_context.get("snippet") or "").strip() or matches or related_contexts)
+        return {
+            "has_context": has_context,
+            "repository_ready": service.is_ready(),
+            "repository_path": str(getattr(service, "local_path", "") or ""),
+            "context_requests": context_requests,
+            "queries": queries,
+            "primary_context": primary_context,
+            "matches": matches[:12],
+            "related_contexts": related_contexts,
+        }
+
+    def _context_request_queries(self, context_requests: list[dict[str, object]]) -> list[str]:
+        queries: list[str] = []
+        stop_words = {
+            "changed_file_full_content",
+            "repository_context",
+            "current_file",
+            "target_hunk",
+            "source_context",
+        }
+        for request in context_requests:
+            for value in (
+                request.get("missing_context"),
+                request.get("why_needed"),
+                request.get("rule_id"),
+            ):
+                raw = str(value or "").strip()
+                if not raw:
+                    continue
+                for token in re.split(r"[^A-Za-z0-9_.$#]+", raw):
+                    normalized = token.strip("._-$#")
+                    if len(normalized) < 3 or normalized in stop_words:
+                        continue
+                    if normalized not in queries:
+                        queries.append(normalized)
+                    if len(queries) >= 10:
+                        return queries
+        return queries[:10]
+
+    def _repair_rule_guided_llm_response_schema(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        original_user_prompt: str,
+        original_response: str,
+        rule_screening: dict[str, object],
+        required_rule_ids: list[str],
+        file_path: str,
+        line_start: int,
+        max_findings: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        rule_ids = list(required_rule_ids or []) or self._rule_guided_required_rule_ids(
+            rule_screening,
+            max_rules_per_prompt=20,
+        )
+        repair_prompt = "\n".join(
+            [
+                "你是代码审查结果结构化修复器。只允许把原始专家输出转换为规则驱动 JSON，不要新增原始输出中没有的代码问题。",
+                "如果原始输出已有问题但没有 rule_id，请优先从 RULE_IDS 中选择最贴近的规则；仍无法判断时使用 GENERAL-EXPERT-CHECKS。",
+                "如果原始输出表示无问题，candidate_findings 输出空数组，但仍要输出 rule_check_results。",
+                "",
+                f"目标文件: {file_path}",
+                f"目标行号: {line_start}",
+                f"最大候选数: {max(1, int(max_findings or 1))}",
+                f"RULE_IDS: {json.dumps(rule_ids or ['GENERAL-EXPERT-CHECKS'], ensure_ascii=False)}",
+                "",
+                "必须只输出一个 JSON 对象，结构如下：",
+                json.dumps(
+                    {
+                        "rule_check_results": [
+                            {
+                                "rule_id": "string",
+                                "status": "violated|passed|not_applicable|insufficient_context",
+                                "evidence": ["string"],
+                                "missing_context": ["string"],
+                                "reason": "string",
+                            }
+                        ],
+                        "candidate_findings": [
+                            {
+                                "rule_id": "string",
+                                "title": "string",
+                                "file_path": file_path,
+                                "line": line_start,
+                                "evidence": "string",
+                                "confidence": "high|medium|low",
+                            }
+                        ],
+                        "context_requests": [],
+                        "self_check": {
+                            "checked_all_rules": False,
+                            "used_context_files": [],
+                            "unverified_assumptions": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "",
+                "[原始专家输出]",
+                self._clip_diagnostic_text(str(original_response or ""), 12000),
+                "",
+                "[原始任务提示摘要]",
+                self._clip_diagnostic_text(str(original_user_prompt or ""), 8000),
+            ]
+        )
+        try:
+            repair_result = self.llm_chat_service.complete_text(
+                system_prompt="只做 JSON 结构化修复。禁止 Markdown，禁止解释，禁止新增代码问题。",
+                user_prompt=repair_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text='{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["schema repair fallback"]}}',
+                allow_fallback=False,
+                timeout_seconds=max(15.0, min(float(timeout_seconds or 60), 60.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_schema_repair",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must survive repair failures.
+            return "", {"repair_attempted": True, "repair_success": False, "repair_error": str(exc)}
+        repair_valid, repair_errors = self._validate_rule_guided_llm_response_contract(repair_result.text)
+        return repair_result.text, {
+            "repair_attempted": True,
+            "repair_success": repair_valid,
+            "repair_errors": repair_errors,
+            "repair_llm_call_id": repair_result.call_id,
+            "repair_prompt_tokens": repair_result.prompt_tokens,
+            "repair_completion_tokens": repair_result.completion_tokens,
+            "repair_total_tokens": repair_result.total_tokens,
+            "repair_error": repair_result.error,
+            "repair_prompt_snapshot_full": self._clip_diagnostic_text(repair_prompt, 120000),
+            "repair_raw_response_full": self._clip_diagnostic_text(str(repair_result.text or ""), 120000),
+        }
+
+    def _clip_diagnostic_text(self, text: str, max_chars: int) -> str:
+        safe_max = max(200, int(max_chars or 200))
+        value = str(text or "")
+        if len(value) <= safe_max:
+            return value
+        return value[:safe_max].rstrip() + "\n...[truncated]"
+
     def _has_live_llm_call(self, review_id: str) -> bool:
         for message in self.message_repo.list(review_id):
             metadata = dict(message.metadata or {})
@@ -5373,6 +6613,129 @@ class ReviewRunner(
             if item and item not in deduped:
                 deduped.append(item)
         return deduped
+
+    def _verify_rule_guided_candidate_before_persist(
+        self,
+        *,
+        parsed: dict[str, object],
+        finding_file_path: str,
+        parsed_line_start: int,
+        rule_screening: dict[str, object],
+        repository_context: dict[str, object],
+        input_completeness: dict[str, object],
+    ) -> dict[str, object]:
+        if not bool(parsed.get("rule_guided_candidate")):
+            return {}
+        rule_id = next((str(item).strip() for item in list(parsed.get("matched_rules") or []) if str(item).strip()), "")
+        if not rule_id:
+            return {
+                "status": "rejected",
+                "reasons": ["missing_rule_id"],
+                "missing_context": [],
+                "matched_false_positive_guards": [],
+            }
+        evidence = " / ".join(str(item).strip() for item in list(parsed.get("evidence") or []) if str(item).strip())
+        try:
+            candidate = CandidateFinding(
+                rule_id=rule_id,
+                title=str(parsed.get("title") or "").strip(),
+                file_path=finding_file_path,
+                line=int(parsed_line_start or 1),
+                evidence=evidence,
+                confidence="high" if float(parsed.get("confidence") or 0.0) >= 0.8 else "medium",
+            )
+        except Exception as exc:  # pydantic validation should reject malformed candidates.
+            return {
+                "status": "rejected",
+                "reasons": [f"candidate_invalid:{exc.__class__.__name__}"],
+                "missing_context": [],
+                "matched_false_positive_guards": [],
+            }
+        rules_by_id = self._build_review_rule_cards_from_screening(rule_screening)
+        rule_results_by_id = {
+            rule_id: ReviewRuleCheckResult(
+                rule_id=rule_id,
+                status=str(parsed.get("rule_check_status") or "violated"),
+                evidence=list(parsed.get("evidence") or []),
+                missing_context=list(parsed.get("missing_context") or []),
+                reason=str(parsed.get("rule_based_reasoning") or "").strip(),
+            )
+        }
+        verification = verify_candidate_finding(
+            candidate,
+            rules_by_id=rules_by_id,
+            rule_results_by_id=rule_results_by_id,
+            loaded_context=self._loaded_context_keys_for_verification(repository_context, input_completeness),
+        )
+        return {
+            "status": verification.status,
+            "reasons": list(verification.reasons),
+            "missing_context": list(verification.missing_context),
+            "matched_false_positive_guards": list(verification.matched_false_positive_guards),
+            "rule_id": candidate.rule_id,
+        }
+
+    def _build_review_rule_cards_from_screening(self, rule_screening: dict[str, object]) -> dict[str, ReviewRuleCard]:
+        cards: dict[str, ReviewRuleCard] = {}
+        for item in list((rule_screening or {}).get("matched_rules_for_llm") or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or "").strip()
+            if not rule_id:
+                continue
+            cards[rule_id] = ReviewRuleCard(
+                rule_id=rule_id,
+                title=str(item.get("title") or rule_id).strip(),
+                scope=["review"],
+                must_check=self._normalize_text_list(item.get("must_check_items") or item.get("must_check"), ["按规则检查当前变更"]),
+                required_context=self._normalize_text_list(
+                    item.get("required_context"),
+                    ["changed_file_full_content", "repository_context"],
+                ),
+                evidence_required=self._normalize_text_list(
+                    item.get("evidence_required"),
+                    ["代码证据", "规则违反原因"],
+                ),
+                false_positive_guards=self._normalize_text_list(item.get("false_positive_guards"), []),
+                severity_default=str(item.get("priority") or "medium").strip() or "medium",
+                normalized_issue_type=str(item.get("normalized_issue_type") or "rule_guided_candidate").strip(),
+            )
+        return cards
+
+    def _loaded_context_keys_for_verification(
+        self,
+        repository_context: dict[str, object],
+        input_completeness: dict[str, object],
+    ) -> set[str]:
+        loaded: set[str] = set()
+        if bool(input_completeness.get("target_file_diff_present")):
+            loaded.add("changed_file_full_content")
+        if repository_context:
+            loaded.add("repository_context")
+        if bool(input_completeness.get("source_context_present")):
+            loaded.add("source_context")
+            loaded.add("current_class_context")
+        if int(input_completeness.get("related_context_count") or 0) > 0:
+            loaded.add("related_context")
+            loaded.add("caller_context")
+            loaded.add("callee_context")
+        for key in (
+            "current_class_context",
+            "caller_contexts",
+            "callee_contexts",
+            "domain_model_contexts",
+            "persistence_contexts",
+            "transaction_context",
+            "related_contexts",
+        ):
+            value = repository_context.get(key)
+            if value:
+                loaded.add(key)
+        if repository_context.get("domain_model_contexts") or repository_context.get("related_contexts"):
+            loaded.add("aggregate_root_definition")
+            loaded.add("aggregate_factory_method")
+            loaded.add("domain_event_publication")
+        return loaded
 
     def _match_sast_prescan_findings(
         self,
@@ -6737,6 +8100,7 @@ class ReviewRunner(
                 file_path=str((repository_context.get("primary_context") or {}).get("path") or ""),
                 repository_context=repository_context,
             ),
+            "prompt_graph_facts": build_prompt_graph_facts(repository_context),
         }
 
         def _compact_entries(key: str, *, symbol_key: str = "symbol") -> list[dict[str, object]]:

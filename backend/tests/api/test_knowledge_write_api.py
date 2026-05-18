@@ -118,3 +118,32 @@ def test_delete_knowledge_doc_unbinds_and_removes_document(client):
     assert grouped.status_code == 200
     docs = grouped.json().get("redis_analysis", [])
     assert all(item["doc_id"] != doc_id for item in docs)
+
+
+def test_preview_expert_rule_markdown_returns_structured_rules(client):
+    response = client.post(
+        "/api/knowledge/rules/preview",
+        json={
+            "title": "DDD 标准模板规则",
+            "expert_id": "ddd_architecture",
+            "doc_type": "review_rule",
+            "source_filename": "ddd.md",
+            "content": (
+                "## RULE: ARCH-JDDD-002\n\n"
+                "### Title\n应用服务不得绕过聚合工厂\n\n"
+                "### Scope\n- language: java\n- expert: ddd_architecture\n\n"
+                "### Must Check\n- 检查是否直接 new 聚合根。\n\n"
+                "### Required Context\n- changed_file_full_content\n- aggregate_factory_method\n\n"
+                "### Evidence Required\n- 直接构造代码行。\n\n"
+                "### False Positive Guards\n- 测试 fixture 不报。\n\n"
+                "### Severity\nmajor\n\n"
+                "### Normalized Issue Type\naggregate_factory_bypassed\n"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rule_count"] == 1
+    assert payload["rules"][0]["rule_id"] == "ARCH-JDDD-002"
+    assert payload["rules"][0]["required_context"] == ["changed_file_full_content", "aggregate_factory_method"]

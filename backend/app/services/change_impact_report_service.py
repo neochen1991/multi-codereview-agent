@@ -67,8 +67,8 @@ class ChangeImpactReportService:
                 runtime_settings=runtime_settings,
                 fallback_text=json.dumps(fallback, ensure_ascii=False),
                 allow_fallback=bool(runtime_settings.allow_llm_fallback),
-                timeout_seconds=120.0,
-                max_attempts=2,
+                timeout_seconds=45.0,
+                max_attempts=1,
                 log_context={
                     "review_id": review_id,
                     "issue_id": "impact_report",
@@ -196,9 +196,9 @@ class ChangeImpactReportService:
             "impact_paths": [item.model_dump(mode="json") for item in report.impact_paths[:24]],
             "recommended_test_scope": [item.model_dump(mode="json") for item in report.recommended_test_scope[:16]],
             "manual_verification": report.manual_verification[:12],
-            "detect_changes": self._compact_fact_value(trace.get("detect_changes") or {}, max_depth=3),
-            "context_results": [self._compact_fact_value(item, max_depth=3) for item in list(trace.get("context_results") or [])[:8]],
-            "impact_results": [self._compact_fact_value(item, max_depth=3) for item in list(trace.get("impact_results") or [])[:8]],
+            "detect_changes": self._compact_fact_value(trace.get("detect_changes") or {}, max_depth=2),
+            "context_results": [self._compact_fact_value(item, max_depth=2) for item in list(trace.get("context_results") or [])[:4]],
+            "impact_results": [self._compact_fact_value(item, max_depth=2) for item in list(trace.get("impact_results") or [])[:4]],
         }
         schema = {
             "summary": "一句话总结本次 MR 的核心影响范围和最优先测试项",
@@ -241,6 +241,17 @@ class ChangeImpactReportService:
                 return self._clip_string(value)
             return self._clip_string(json.dumps(value, ensure_ascii=False, default=str))
         if isinstance(value, dict):
+            noisy_keys = {
+                "byDepth",
+                "affected_processes",
+                "affectedProcesses",
+                "raw",
+                "raw_result",
+                "rawResults",
+                "nodes",
+                "edges",
+                "graph",
+            }
             priority_keys = [
                 "name",
                 "repo",
@@ -263,13 +274,13 @@ class ChangeImpactReportService:
                 "description",
             ]
             ordered_keys = [key for key in priority_keys if key in value]
-            ordered_keys.extend(key for key in value.keys() if key not in ordered_keys)
+            ordered_keys.extend(key for key in value.keys() if key not in ordered_keys and key not in noisy_keys)
             return {
                 str(key): self._compact_fact_value(value.get(key), max_depth=max_depth - 1)
-                for key in ordered_keys[:18]
+                for key in ordered_keys[:12]
             }
         if isinstance(value, list):
-            return [self._compact_fact_value(item, max_depth=max_depth - 1) for item in value[:12]]
+            return [self._compact_fact_value(item, max_depth=max_depth - 1) for item in value[:6]]
         return self._clip_string(value)
 
     def _clip_string(self, value: Any, *, max_chars: int = 700) -> Any:

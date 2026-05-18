@@ -279,6 +279,43 @@ def test_review_runner_skips_worktree_when_realtime_workspace_graph_is_disabled(
     assert any(message.message_type == "review_workspace" and "未创建 MR worktree" in message.content for message in runner.message_repo.list(review_id))
 
 
+def test_review_runner_preserves_explicit_mr_workspace_when_realtime_graph_is_disabled(
+    storage_root: Path, tmp_path: Path, monkeypatch
+):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    assert review is not None
+    review.subject.subject_type = "mr"
+    review.subject.unified_diff = "diff --git a/src/App.java b/src/App.java\n@@ -0,0 +1 @@\n+class App {}\n"
+    explicit_workspace = tmp_path / "mr-workspace"
+    configured_repo = tmp_path / "configured-repo"
+    graph_db_path = explicit_workspace / ".code-review-graph" / "graph.db"
+    explicit_workspace.mkdir()
+    configured_repo.mkdir()
+    review.subject.metadata = {
+        **dict(review.subject.metadata or {}),
+        "workspace_repo_path": str(explicit_workspace),
+        "repo_context_workspace_path": str(explicit_workspace),
+        "code_graph_db_path": str(graph_db_path),
+    }
+    runtime = RuntimeSettings(code_repo_local_path=str(configured_repo), enable_review_workspace_realtime_graph=False)
+
+    def fail_prepare(**_kwargs):
+        raise AssertionError("worktree prepare should not be called when realtime workspace graph is disabled")
+
+    monkeypatch.setattr(runner.review_workspace_service, "prepare", fail_prepare)
+
+    updated = runner._prepare_review_workspace(review, runtime)
+
+    metadata = dict(updated.subject.metadata or {})
+    assert metadata["review_workspace_status"] == "skipped"
+    assert metadata["workspace_repo_path"] == str(explicit_workspace)
+    assert metadata["repo_context_workspace_path"] == str(explicit_workspace)
+    assert metadata["configured_workspace_repo_path"] == str(configured_repo)
+    assert metadata["code_graph_db_path"] == str(graph_db_path)
+
+
 def test_review_runner_preheats_gitnexus_graph_even_when_runtime_tool_allowlist_is_missing_binding(storage_root: Path, tmp_path: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     repo = tmp_path / "repo"
@@ -2075,6 +2112,37 @@ def test_review_runner_observation_followup_keeps_multiple_distinct_findings(sto
     assert {item["title"] for item in merged} == {"循环内逐条远程调用", "注释承诺未落地"}
 
 
+def test_review_runner_observation_merge_accepts_label_confidence(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    merged = runner._merge_expert_analysis_candidates(
+        base_candidates=[
+            {
+                "file_path": "src/main/java/com/acme/CourseCreator.java",
+                "title": "聚合工厂绕过",
+                "claim": "直接 new 聚合根绕过工厂方法。",
+                "finding_type": "direct_defect",
+                "line_start": 20,
+                "confidence": "high",
+            }
+        ],
+        extra_candidates=[
+            {
+                "file_path": "src/main/java/com/acme/CourseCreator.java",
+                "title": "领域事件丢失",
+                "claim": "直接构造后没有记录领域事件。",
+                "finding_type": "direct_defect",
+                "line_start": 21,
+                "confidence": "medium",
+            }
+        ],
+        max_findings=8,
+    )
+
+    assert len(merged) == 2
+    assert {item["title"] for item in merged} == {"聚合工厂绕过", "领域事件丢失"}
+
+
 def test_review_runner_reanchors_semantically_distinct_findings_to_different_hunks(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(
@@ -3544,6 +3612,138 @@ def test_review_runner_builds_signal_aware_fallback_finding_when_expert_fails(st
     assert any("equal" in item.lower() and "like" in item.lower() for item in finding.evidence)
 
 
+def test_review_runner_persists_deterministic_fallback_when_rule_guided_llm_times_out(
+    storage_root: Path,
+    monkeypatch,
+):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_timeout_fallback",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/swallow",
+            target_ref="main",
+            title="swallowed reflection exception",
+            changed_files=["src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"],
+            unified_diff=(
+                "diff --git a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java "
+                "b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+                "--- a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+                "+++ b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+                "@@ -29,7 +29,6 @@ public final class MySqlDomainEventsConsumer {\n"
+                "         } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {\n"
+                "-            e.printStackTrace();\n"
+                "         }\n"
+            ),
+        ),
+        selected_experts=["performance_reliability"],
+    )
+    runner.review_repo.save(review)
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能与可靠性专家",
+        role="performance",
+        enabled=True,
+        focus_areas=["可靠性"],
+        system_prompt="prompt",
+        runtime_tool_bindings=[],
+        tool_bindings=[],
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="command",
+        metadata={},
+    )
+
+    def _timeout_on_main_review(_self, **kwargs):
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        if phase == "expert_review":
+            raise TimeoutError("request_timeout:The read operation timed out")
+        return LLMTextResult(
+            text=(
+                '{"rule_check_results":[{"rule_id":"REL-JDDD-001","status":"violated",'
+                '"evidence":["catch 删除 printStackTrace"],"missing_context":[],"reason":"异常被吞掉"}],'
+                '"candidate_findings":[],"context_requests":[],'
+                '"self_check":{"checked_all_rules":true,"used_context_files":[],"unverified_assumptions":[]}}'
+            ),
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.llm_chat_service.LLMChatService.complete_text",
+        _timeout_on_main_review,
+    )
+    finding_payloads: list[dict[str, object]] = []
+
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        line_start=29,
+        repository_context={},
+        target_hunk={
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+            "hunk_header": "@@ -29,7 +29,6 @@ public final class MySqlDomainEventsConsumer {",
+            "start_line": 29,
+            "end_line": 31,
+            "changed_lines": [30],
+            "excerpt": (
+                "29 |         } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {\n"
+                "-30 |             e.printStackTrace();\n"
+                "31 |         }"
+            ),
+        },
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="light",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={
+            "enabled_rules": 1,
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "REL-JDDD-001",
+                    "title": "关键链路 fallback 不得掩盖真实异常",
+                    "priority": "P1",
+                    "decision": "must_review",
+                    "reason": "catch 删除唯一异常处理语句，反射异常会被静默吞掉。",
+                }
+            ],
+            "must_review_count": 1,
+            "possible_hit_count": 0,
+        },
+        finding_payloads=finding_payloads,
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    messages = runner.message_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].finding_type == "direct_defect"
+    assert findings[0].normalized_issue_type == "exception_swallowed"
+    assert findings[0].verification_needed is False
+    assert "REL-JDDD-001" in findings[0].matched_rules
+    assert any("NoSuchMethodException" in item for item in findings[0].evidence)
+    assert len(finding_payloads) == 1
+    assert any(
+        message.message_type
+        in {"expert_timeout_deterministic_fallback", "expert_rule_prepass_deterministic_finding"}
+        for message in messages
+    )
+
+
 def test_review_runner_enriches_ddd_finding_with_canonical_terms(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -4069,6 +4269,48 @@ def test_review_runner_keeps_exception_swallowed_as_risk_hypothesis(storage_root
     assert float(result["confidence"]) <= 0.8
     assert "静默吞掉异常" in str(result["title"])
     assert any("静默吞掉异常" in item for item in list(result["evidence"]))
+
+
+def test_review_runner_promotes_rule_backed_empty_catch_to_direct_defect(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    result = runner._stabilize_expert_analysis(
+        {
+            "title": "事件消费链路的反射异常处理被删除",
+            "claim": "catch 删除 printStackTrace 后没有替代日志、失败标记或补偿。",
+            "summary": "NoSuchMethodException 等反射异常会被静默吞掉。",
+            "evidence": [
+                "@@ -28,7 +28,6 @@\n} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | InstantiationException e) {\n-    e.printStackTrace();\n}",
+                "目标文件完整内容已加载。",
+            ],
+            "matched_rules": ["CORR-JDDD-002"],
+            "violated_guidelines": ["CORR-JDDD-002"],
+            "context_files": [
+                "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+            ],
+            "confidence": 0.72,
+            "severity": "medium",
+            "finding_type": "risk_hypothesis",
+            "verification_needed": True,
+        },
+        "correctness_business",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        29,
+        {
+            "excerpt": (
+                "-\t\t\t\te.printStackTrace();\n"
+                "+\t\t\t}\n"
+            )
+        },
+        repository_context={},
+        input_completeness={},
+    )
+
+    assert result["finding_type"] == "direct_defect"
+    assert result["verification_needed"] is False
+    assert result["direct_evidence"] is True
+    assert result["severity"] == "high"
+    assert result["normalized_issue_type"] == "exception_swallowed"
+    assert float(result["confidence"]) >= 0.86
 
 
 def test_review_runner_keeps_exception_semantics_weakened_as_risk_hypothesis(storage_root: Path):

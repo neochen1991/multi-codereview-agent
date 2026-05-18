@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.review_prompt_context_compaction import build_prompt_graph_facts
+
 
 def build_bound_document_metadata(bound_documents: list[object]) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
@@ -109,6 +111,7 @@ def build_repository_context_metadata(repository_context: dict[str, object]) -> 
         )
         if isinstance(repository_context.get("repo_review_instructions"), dict)
         else 0,
+        "prompt_graph_facts": build_prompt_graph_facts(repository_context),
     }
 
     def _compact_entries(key: str, *, symbol_key: str = "symbol") -> list[dict[str, object]]:

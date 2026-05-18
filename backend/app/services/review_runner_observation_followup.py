@@ -6,6 +6,22 @@ from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
 
 
+def normalize_confidence_value(value: object, fallback: float = 0.0) -> float:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"high", "高", "高置信", "高置信度"}:
+            return 0.86
+        if normalized in {"medium", "mid", "中", "中等", "中置信", "中置信度"}:
+            return 0.68
+        if normalized in {"low", "低", "低置信", "低置信度"}:
+            return 0.38
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = fallback
+    return min(0.99, max(0.0, parsed))
+
+
 def collect_batch_review_observations(
     repository_context: dict[str, object],
     batch_items: list[dict[str, object]],
@@ -78,7 +94,7 @@ def candidate_strength_score(
     finding_type = str(candidate.get("finding_type") or "").strip().lower()
     severity = str(candidate.get("severity") or "").strip().lower()
     observation_count = len(normalize_text_list(candidate.get("observation_ids"), []))
-    confidence = float(candidate.get("confidence") or 0.0)
+    confidence = normalize_confidence_value(candidate.get("confidence"), 0.0)
     score = confidence
     if finding_type == "direct_defect":
         score += 1.0
@@ -159,10 +175,10 @@ def build_observation_followup_prompt(
         "要求：",
         "1. 下面给出的 observation 是首轮结果尚未明确覆盖的可疑代码现象；",
         "2. 你必须逐条判断 observation 是否构成真实问题；",
-        "3. 只有确认成立且不是首轮已输出重复问题时，才输出新的 finding；",
-        "4. 每条新增 finding 必须带 file_path、line_start、line_end、claim、suggested_code、observation_ids；",
-        '5. 如果没有新增问题，返回 {"findings":[]}。',
-        f"6. 最多新增 {max(1, int(max_findings or 1))} 条 findings。",
+        "3. 只有确认成立且不是首轮已输出重复问题时，才输出新的 candidate_finding；",
+        "4. 每条新增 candidate_finding 必须带 rule_id、file_path、line、title、evidence、confidence、observation_ids；",
+        "5. 如果没有新增问题，candidate_findings 返回空数组，但仍要输出 rule_check_results、context_requests、self_check。",
+        f"6. 最多新增 {max(1, int(max_findings or 1))} 条 candidate_findings。",
         "",
         f"仓库: {subject.repo_id}",
         f"目标分支: {subject.target_ref}",
@@ -204,8 +220,9 @@ def build_observation_followup_prompt(
         [
             "",
             "输出格式要求：",
-            '仅输出 JSON：{"findings":[{...}]}',
-            'finding 字段至少包含: file_path, line_start, line_end, title, finding_type, claim, evidence, fix_strategy, suggested_fix, change_steps, suggested_code, confidence, observation_ids',
+            '仅输出 JSON：{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,"used_context_files":[],"unverified_assumptions":[]}}',
+            "rule_check_results 每条至少包含: rule_id, status, evidence, missing_context, reason；rule_id 可使用 observation_id 或真实命中规则 ID。",
+            "candidate_findings 每条至少包含: rule_id, file_path, line, title, evidence, confidence, observation_ids；line 必须落在真实变更行或 observation 行。",
         ]
     )
     return "\n".join(lines)
@@ -254,7 +271,7 @@ def build_forced_observation_candidates(
                     "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
                     "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
                     "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
-                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "confidence": min(max(normalize_confidence_value(item.get("confidence"), 0.0), 0.65), 0.78),
                     "verification_needed": True,
                     "verification_plan": "该问题来自结构化观察信号，需要结合调用频率、批量规模和外部依赖成本复核后再升级为确定缺陷。",
                     "direct_evidence": False,
@@ -284,7 +301,7 @@ def build_forced_observation_candidates(
                     "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
                     "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
                     "suggested_code": "// TODO: 对比原创建入口与新构造路径，保留不变量校验和领域事件语义",
-                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "confidence": min(max(normalize_confidence_value(item.get("confidence"), 0.0), 0.65), 0.78),
                     "verification_needed": True,
                     "verification_plan": "该问题来自结构化观察信号，需要确认原创建入口是否确实承载不变量校验、领域事件记录或其他副作用。",
                     "direct_evidence": False,
@@ -313,7 +330,7 @@ def build_forced_observation_candidates(
                     "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
                     "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
                     "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
-                    "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                    "confidence": min(max(normalize_confidence_value(item.get("confidence"), 0.0), 0.65), 0.78),
                     "verification_needed": True,
                     "verification_plan": "该问题来自结构化观察信号，需要确认注释、TODO 或命名表达是否仍是当前有效业务契约。",
                     "direct_evidence": False,

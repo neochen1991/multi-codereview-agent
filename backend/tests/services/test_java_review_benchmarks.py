@@ -123,6 +123,24 @@ def test_java_benchmark_manifest_covers_multiple_business_categories() -> None:
     assert {"spring-petclinic", "java-ddd-example"}.issubset(repo_keys)
 
 
+def test_java_benchmark_manifest_covers_required_quality_regressions() -> None:
+    module = _load_benchmark_module()
+    cases = module.load_cases(module.DEFAULT_MANIFEST_PATH)
+
+    result = module.validate_benchmark_problem_coverage(cases)
+
+    assert result["passed"] is True
+    assert result["missing"] == []
+    assert set(result["coverage"]) >= {
+        "ddd_aggregate_factory_bypass",
+        "domain_event_order",
+        "exception_swallowed",
+        "criteria_query_semantics",
+        "batch_limit_removed",
+        "compile_error",
+    }
+
+
 def test_materialize_case_builds_real_git_diff_from_local_repo(tmp_path: Path) -> None:
     module = _load_benchmark_module()
     repo_path = tmp_path / "repo"
@@ -143,6 +161,91 @@ def test_materialize_case_builds_real_git_diff_from_local_repo(tmp_path: Path) -
     assert "@@ " in materialized.unified_diff
     assert "-    public String create(@Valid Owner owner, BindingResult result) {" in materialized.unified_diff
     assert "+    public String create(Owner owner, BindingResult result) {" in materialized.unified_diff
+    payload = materialized.to_review_payload()
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert str(metadata.get("code_graph_db_path") or "").endswith(".code-review-graph/graph.db")
+    assert "tree_sitter_graph_result" in metadata
+
+
+def test_java_ddd_fixture_repo_is_created_when_fixture_mode_enabled(tmp_path: Path, monkeypatch) -> None:
+    module = _load_benchmark_module()
+    monkeypatch.setenv("JAVA_REVIEW_BENCH_USE_FIXTURE", "true")
+    repository = module.RepoDefinition(
+        repo_key="java-ddd-example",
+        clone_url="https://example.invalid/java-ddd-example.git",
+        default_branch="main",
+        review_mode="ddd_enhanced",
+        preferred_local_path=str(tmp_path / "missing-seed"),
+    )
+
+    cache_path = module.ensure_repo_cache(repository, cache_root=tmp_path / "cache")
+
+    assert (cache_path / ".git").exists()
+    assert (tmp_path / "missing-seed" / ".git").exists()
+    course_creator = cache_path / "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"
+    consumer = cache_path / "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+    criteria = cache_path / "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"
+    assert "Course course = Course.create(id, name, duration);" in course_creator.read_text(encoding="utf-8")
+    assert "LIMIT :chunk" in consumer.read_text(encoding="utf-8")
+    assert "builder.equal" in criteria.read_text(encoding="utf-8")
+
+
+def test_materialize_java_ddd_case_uses_local_fixture_and_graph_metadata(tmp_path: Path, monkeypatch) -> None:
+    module = _load_benchmark_module()
+    monkeypatch.setenv("JAVA_REVIEW_BENCH_BUILD_GITNEXUS", "false")
+    manifest = {
+        "version": 1,
+        "repos": [
+            {
+                "repo_key": "java-ddd-example",
+                "clone_url": "https://example.invalid/java-ddd-example.git",
+                "default_branch": "main",
+                "review_mode": "ddd_enhanced",
+                "preferred_local_path": str(tmp_path / "missing-seed"),
+            }
+        ],
+        "cases": [
+            {
+                "case_id": "java-ddd-local-fixture",
+                "repo_key": "java-ddd-example",
+                "category": "architecture",
+                "scenario": "factory bypass",
+                "business_context": "ddd",
+                "tags": ["ddd"],
+                "patch_operations": [
+                    {
+                        "path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+                        "search": "        Course course = Course.create(id, name, duration);",
+                        "replace": "        Course course = new Course(id, name, duration);",
+                    }
+                ],
+                "expected": {
+                    "required_experts": ["ddd_architecture"],
+                    "rule_ids_any_of": ["DDD-JDDD-001"],
+                    "finding_keywords": ["factory"],
+                },
+            }
+        ],
+    }
+    manifest_path = tmp_path / "cases.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    materialized = module.materialize_case(
+        module.load_cases(manifest_path)[0],
+        module.load_repositories(manifest_path),
+        workspace_root=tmp_path / "workspaces",
+        cache_root=tmp_path / "cache",
+    )
+    payload = materialized.to_review_payload()
+    metadata = payload["metadata"]
+
+    assert "-        Course course = Course.create(id, name, duration);" in materialized.unified_diff
+    assert "+        Course course = new Course(id, name, duration);" in materialized.unified_diff
+    assert isinstance(metadata, dict)
+    assert metadata["workspace_repo_path"] == str(materialized.workspace_repo)
+    assert str(metadata.get("code_graph_db_path") or "").endswith(".code-review-graph/graph.db")
+    assert isinstance(metadata.get("local_graph_build"), dict)
 
 
 def test_evaluate_case_result_scores_expected_hits() -> None:
@@ -395,3 +498,114 @@ def test_evaluate_case_result_ignores_stale_missing_sections_when_checks_pass() 
     assert score.input_quality_coverage == 1.0
     assert score.problem_marker_coverage == 1.0
     assert score.missing_input_sections == ()
+
+
+def test_evaluate_case_result_uses_rule_guided_replay_diagnostics_for_rule_hit() -> None:
+    module = _load_benchmark_module()
+    case = module.JavaReviewCase(
+        case_id="rule-diagnostics",
+        repo_key="repo",
+        category="architecture",
+        scenario="Rule diagnostics only",
+        business_context="ddd",
+        tags=("java",),
+        patch_operations=(),
+        expected=module.ExpectedOutcome(
+            required_experts=("ddd_architecture",),
+            rule_ids_any_of=("ARCH-JDDD-002",),
+            finding_keywords=(),
+            problem_markers=(),
+            min_findings=0,
+            min_issues=0,
+        ),
+    )
+    report = {"findings": [], "issues": []}
+    replay = {
+        "messages": [
+            {
+                "expert_id": "ddd_architecture",
+                "message_type": "expert_final",
+                "metadata": {
+                    "rule_check_results": [{"rule_id": "ARCH-JDDD-002", "status": "insufficient_context"}],
+                    "candidate_findings": [{"rule_id": "ARCH-JDDD-002", "title": "factory bypass"}],
+                    "input_completeness": {
+                        "review_spec_present": True,
+                        "language_guidance_present": True,
+                        "target_file_diff_present": True,
+                        "source_context_present": True,
+                        "related_context_count": 1,
+                    },
+                },
+            }
+        ]
+    }
+
+    score = module.evaluate_case_result(case, report, replay)
+
+    assert score.required_rule_hit is True
+    assert score.matched_rule_ids == ("ARCH-JDDD-002",)
+
+
+def test_evaluate_case_result_tracks_schema_rule_context_and_timeout_metrics() -> None:
+    module = _load_benchmark_module()
+    case = module.JavaReviewCase(
+        case_id="quality-metrics",
+        repo_key="repo",
+        category="architecture",
+        scenario="Quality metrics",
+        business_context="ddd",
+        tags=("java",),
+        patch_operations=(),
+        expected=module.ExpectedOutcome(
+            required_experts=("ddd_architecture",),
+            rule_ids_any_of=("ARCH-JDDD-002",),
+            finding_keywords=("factory",),
+            min_findings=1,
+            min_issues=0,
+        ),
+    )
+    report = {
+        "findings": [
+            {
+                "expert_id": "ddd_architecture",
+                "title": "factory bypass",
+                "summary": "aggregate factory bypass",
+                "matched_rules": ["ARCH-JDDD-002"],
+            }
+        ],
+        "issues": [],
+    }
+    replay = {
+        "messages": [
+            {
+                "expert_id": "ddd_architecture",
+                "message_type": "expert_analysis",
+                "content": "ok",
+                "metadata": {
+                    "prompt_snapshot_summary": {"contains_rule_cards": True},
+                    "rule_coverage": {"matched_rule_count": 4, "checked_rule_count": 2},
+                    "input_completeness": {
+                        "review_spec_present": True,
+                        "language_guidance_present": True,
+                        "target_file_diff_present": True,
+                        "source_context_present": True,
+                        "related_context_count": 0,
+                    },
+                },
+            },
+            {
+                "expert_id": "performance_reliability",
+                "message_type": "expert_failed",
+                "content": "request_timeout:The read operation timed out",
+                "metadata": {"llm_error": "request_timeout"},
+            },
+        ]
+    }
+
+    score = module.evaluate_case_result(case, report, replay)
+
+    assert score.schema_valid_rate == 1.0
+    assert score.rule_coverage_rate == 0.5
+    assert score.context_hit_rate == 0.5
+    assert score.timeout_rate > 0
+    assert score.passed is False

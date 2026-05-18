@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.cross_file_impact import build_cross_file_impact_hints
+from app.services.review_prompt_context_compaction import build_prompt_graph_facts, render_prompt_graph_facts
 
 
 class ReviewRunnerRenderingMixin:
@@ -118,6 +119,9 @@ class ReviewRunnerRenderingMixin:
             summary = str(repository_context.get("summary") or "").strip()
             if summary:
                 lines.append(f"- 主Agent上下文: {summary}")
+            graph_fact_lines = render_prompt_graph_facts(build_prompt_graph_facts(repository_context))
+            if graph_fact_lines:
+                lines.extend(graph_fact_lines)
             code_graph_minimal = repository_context.get("code_graph_minimal_context")
             if isinstance(code_graph_minimal, dict) and code_graph_minimal:
                 graph_summary = str(code_graph_minimal.get("summary") or "").strip()

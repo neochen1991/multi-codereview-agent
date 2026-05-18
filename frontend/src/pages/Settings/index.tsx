@@ -1338,6 +1338,7 @@ const SettingsPage: React.FC = () => {
                 light_llm_max_input_tokens: Number(values.light_llm_max_input_tokens || 110000),
                 llm_log_truncate_enabled: Boolean(values.llm_log_truncate_enabled),
                 llm_log_preview_limit: Number(values.llm_log_preview_limit || 1600),
+                review_prompt_profile: values.review_prompt_profile || "rule-guided-standard",
                 default_llm_provider: values.default_llm_provider || "dashscope-openai-compatible",
                 default_llm_base_url: values.default_llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
                 default_llm_model: values.default_llm_model || "kimi-k2.5",
@@ -1973,6 +1974,24 @@ const SettingsPage: React.FC = () => {
                           extra="仅影响日志预览，不影响实际发送给模型的内容。"
                         >
                           <InputNumber min={200} max={20000} step={200} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="review_prompt_profile"
+                          label="检视 Prompt Profile"
+                          extra="默认使用规则驱动标准；紧凑模式适合 minimax 等更偏短上下文的模型。旧版兼容仅用于问题定位。"
+                        >
+                          <Select
+                            options={[
+                              { label: "规则驱动标准", value: "rule-guided-standard" },
+                              { label: "严格 JSON 小上下文", value: "strict-json-small-context" },
+                              { label: "规则驱动紧凑", value: "rule-guided-compact" },
+                              { label: "长上下文模型", value: "long-context-capable" },
+                              { label: "自动选择", value: "auto" },
+                              { label: "旧版兼容", value: "legacy" },
+                            ]}
+                          />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>

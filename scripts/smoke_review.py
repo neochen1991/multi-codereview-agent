@@ -102,6 +102,16 @@ def main() -> int:
     assert any(
         isinstance(item, dict)
         and item.get("expert_id") == "ddd_architecture"
+        and item.get("message_type") in {"expert_analysis", "expert_final"}
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("prompt_snapshot_summary")
+        and item["metadata"].get("rule_check_results")
+        and item["metadata"].get("candidate_findings") is not None
+        for item in messages
+    ), "smoke review must expose expert prompt and rule diagnostics"
+    assert any(
+        isinstance(item, dict)
+        and item.get("expert_id") == "ddd_architecture"
         and item.get("message_type") in {"expert_ack", "expert_analysis", "expert_final", "expert_failed"}
         for item in messages
     )

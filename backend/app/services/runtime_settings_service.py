@@ -87,6 +87,7 @@ class RuntimeSettingsService:
             "light_llm_max_input_tokens",
             "llm_log_truncate_enabled",
             "llm_log_preview_limit",
+            "review_prompt_profile",
             "allow_llm_fallback",
         }
     )

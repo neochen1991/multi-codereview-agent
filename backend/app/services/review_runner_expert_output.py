@@ -72,21 +72,36 @@ class ReviewRunnerExpertOutputMixin:
         line_start: int,
         *,
         max_findings: int = 5,
+        require_rule_guided: bool = False,
     ) -> list[dict[str, object]]:
         payload = self._parse_json_payload(text)
         candidates: list[dict[str, object]] = []
         explicit_empty_findings = False
         if isinstance(payload, list):
+            if require_rule_guided:
+                return []
             candidates = [item for item in payload if isinstance(item, dict)]
         elif isinstance(payload, dict):
             has_findings_key = "findings" in payload
+            has_candidate_findings_key = "candidate_findings" in payload
+            has_rule_check_results_key = "rule_check_results" in payload
+            if require_rule_guided and not (has_candidate_findings_key and has_rule_check_results_key):
+                return []
             nested = payload.get("findings")
-            if isinstance(nested, list):
+            if isinstance(nested, list) and not require_rule_guided:
                 candidates = [item for item in nested if isinstance(item, dict)]
                 explicit_empty_findings = has_findings_key and not candidates
-            if not candidates and not has_findings_key:
+            rule_guided_candidates = payload.get("candidate_findings")
+            if not candidates and isinstance(rule_guided_candidates, list):
+                candidates = self._parse_rule_guided_candidate_findings(
+                    payload,
+                    file_path=file_path,
+                    line_start=line_start,
+                )
+                explicit_empty_findings = True
+            if not candidates and not require_rule_guided and not has_findings_key and not has_candidate_findings_key:
                 candidates = [payload]
-        if not candidates and not explicit_empty_findings:
+        if not candidates and not explicit_empty_findings and not require_rule_guided:
             candidates = [
                 self._parse_expert_analysis(
                     text,
@@ -112,6 +127,102 @@ class ReviewRunnerExpertOutputMixin:
             if len(normalized) >= max(1, int(max_findings or 1)):
                 break
         return normalized
+
+    def _parse_rule_guided_candidate_findings(
+        self,
+        payload: dict[str, object],
+        *,
+        file_path: str,
+        line_start: int,
+    ) -> list[dict[str, object]]:
+        rule_results = self._rule_guided_rule_results_by_id(payload.get("rule_check_results"))
+        parsed: list[dict[str, object]] = []
+        for item in list(payload.get("candidate_findings") or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or "").strip()
+            evidence_text = str(item.get("evidence") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if not rule_id or not evidence_text or not title:
+                continue
+            rule_result = rule_results.get(rule_id, {})
+            status = str(rule_result.get("status") or "").strip().lower()
+            if status in {"passed", "not_applicable"}:
+                continue
+            candidate_line = self._normalize_line_start(item.get("line") or item.get("line_start"), line_start)
+            reason = str(rule_result.get("reason") or "").strip()
+            rule_evidence = [
+                str(value).strip()
+                for value in list(rule_result.get("evidence") or [])
+                if str(value).strip()
+            ]
+            missing_context = [
+                str(value).strip()
+                for value in list(rule_result.get("missing_context") or [])
+                if str(value).strip()
+            ]
+            verification_needed = status != "violated"
+            parsed.append(
+                {
+                    "title": title,
+                    "claim": reason or title,
+                    "finding_type": "direct_defect" if status == "violated" else "risk_hypothesis",
+                    "normalized_issue_type": str(item.get("normalized_issue_type") or "").strip(),
+                    "severity": str(item.get("severity") or "medium").strip() or "medium",
+                    "line_start": candidate_line,
+                    "line_end": candidate_line,
+                    "matched_rules": [rule_id],
+                    "violated_guidelines": [rule_id],
+                    "rule_based_reasoning": reason or f"命中规则 {rule_id}，候选证据需要进入后续校验。",
+                    "evidence": [evidence_text, *rule_evidence],
+                    "cross_file_evidence": [],
+                    "assumptions": [f"缺失上下文: {item}" for item in missing_context],
+                    "context_files": [],
+                    "why_it_matters": reason or title,
+                    "fix_strategy": str(item.get("fix_strategy") or "按命中的规则修正当前代码。").strip(),
+                    "suggested_fix": str(item.get("suggested_fix") or "请根据规则要求补齐正确实现，并保留必要测试。").strip(),
+                    "change_steps": [
+                        "定位候选代码行",
+                        "按命中规则修正实现",
+                        "补充或更新覆盖该规则的测试",
+                    ],
+                    "suggested_code": str(item.get("suggested_code") or evidence_text).strip(),
+                    "confidence": self._rule_guided_candidate_confidence(item.get("confidence")),
+                    "verification_needed": verification_needed,
+                    "verification_plan": ""
+                    if not verification_needed
+                    else "需要补充缺失上下文后复核候选是否具备完整规则证据。",
+                    "file_path": str(item.get("file_path") or file_path).strip().replace("\\", "/"),
+                    "observation_ids": self._normalize_text_list(item.get("observation_ids"), []),
+                    "rule_guided_candidate": True,
+                    "rule_check_status": status or "violated",
+                    "missing_context": missing_context,
+                }
+            )
+        return parsed
+
+    def _rule_guided_rule_results_by_id(self, value: object) -> dict[str, dict[str, object]]:
+        results: dict[str, dict[str, object]] = {}
+        for item in list(value or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or "").strip()
+            if rule_id:
+                results[rule_id] = dict(item)
+        return results
+
+    def _rule_guided_candidate_confidence(self, value: object) -> float:
+        normalized = str(value or "").strip().lower()
+        if normalized == "high":
+            return 0.86
+        if normalized == "low":
+            return 0.55
+        if normalized == "medium":
+            return 0.72
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.72
 
     def _append_observation_followup_candidates(
         self,
@@ -188,39 +299,59 @@ class ReviewRunnerExpertOutputMixin:
             existing_candidates=initial_candidates,
             max_findings=max_findings,
         )
-        followup_result = self.llm_chat_service.complete_text(
-            system_prompt=self._build_expert_system_prompt(
+        try:
+            followup_result = self.llm_chat_service.complete_text(
+                system_prompt=self._build_expert_system_prompt(
+                    expert,
+                    bound_documents,
+                    active_skills,
+                    rule_screening,
+                    analysis_mode=analysis_mode,
+                ),
+                user_prompt=followup_prompt,
+                resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
+                runtime_settings=runtime_settings,
+                fallback_text=(
+                    '{"rule_check_results":[],"candidate_findings":[],"context_requests":[],'
+                    '"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["observation followup fallback"]}}'
+                ),
+                allow_fallback=self._allow_llm_fallback(runtime_settings),
+                timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.75),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_observation_followup",
+                    "analysis_mode": analysis_mode,
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+            followup_candidates = self._parse_expert_analyses(
+                followup_result.text,
+                subject,
                 expert,
-                bound_documents,
-                active_skills,
-                rule_screening,
-                analysis_mode=analysis_mode,
-            ),
-            user_prompt=followup_prompt,
-            resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
-            runtime_settings=runtime_settings,
-            fallback_text='{"findings":[]}',
-            allow_fallback=self._allow_llm_fallback(runtime_settings),
-            timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.75),
-            max_attempts=1,
-            log_context={
-                "review_id": review.review_id,
-                "issue_id": "review_orchestration",
-                "expert_id": expert.expert_id,
-                "phase": "expert_observation_followup",
-                "analysis_mode": analysis_mode,
-                "file_path": file_path,
-                "line_start": line_start,
-            },
-        )
-        followup_candidates = self._parse_expert_analyses(
-            followup_result.text,
-            subject,
-            expert,
-            file_path,
-            line_start,
-            max_findings=max(1, int(max_findings or 1)),
-        )
+                file_path,
+                line_start,
+                max_findings=max(1, int(max_findings or 1)),
+            )
+        except Exception as exc:
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_observation_followup_degraded",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} observation 增量复核失败，保留首轮候选并生成待验证观察 finding",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:800],
+                        "uncovered_observation_count": len(uncovered_observations),
+                    },
+                )
+            )
+            followup_candidates = []
         if not followup_candidates:
             merged_candidates = list(initial_candidates)
         else:
@@ -349,7 +480,7 @@ class ReviewRunnerExpertOutputMixin:
         finding_type = str(candidate.get("finding_type") or "").strip().lower()
         severity = str(candidate.get("severity") or "").strip().lower()
         observation_count = len(self._normalize_text_list(candidate.get("observation_ids"), []))
-        confidence = float(candidate.get("confidence") or 0.0)
+        confidence = self._normalize_confidence(candidate.get("confidence"), 0.0)
         score = confidence
         if finding_type == "direct_defect":
             score += 1.0
@@ -381,10 +512,10 @@ class ReviewRunnerExpertOutputMixin:
             "要求：",
             "1. 下面给出的 observation 是首轮结果尚未明确覆盖的可疑代码现象；",
             "2. 你必须逐条判断 observation 是否构成真实问题；",
-            "3. 只有确认成立且不是首轮已输出重复问题时，才输出新的 finding；",
-            "4. 每条新增 finding 必须带 file_path、line_start、line_end、claim、suggested_code、observation_ids；",
-            "5. 如果没有新增问题，返回 {\"findings\":[]}。",
-            f"6. 最多新增 {max(1, int(max_findings or 1))} 条 findings。",
+            "3. 只有确认成立且不是首轮已输出重复问题时，才输出新的 candidate_finding；",
+            "4. 每条新增 candidate_finding 必须带 rule_id、file_path、line、title、evidence、confidence、observation_ids；",
+            "5. 如果没有新增问题，candidate_findings 返回空数组，但仍要输出 rule_check_results、context_requests、self_check。",
+            f"6. 最多新增 {max(1, int(max_findings or 1))} 条 candidate_findings。",
             "",
             f"仓库: {subject.repo_id}",
             f"目标分支: {subject.target_ref}",
@@ -428,10 +559,10 @@ class ReviewRunnerExpertOutputMixin:
             [
                 "",
                 "输出格式要求：",
-                '仅输出 JSON：{"findings":[{...}]}',
-                'finding 字段至少包含: file_path, line_start, line_end, title, finding_type, claim, evidence, '
-                'fix_strategy, suggested_fix, change_steps, suggested_code, confidence, verification_needed, observation_ids',
-                "observation 只能作为候选风险线索，默认 finding_type=risk_hypothesis、verification_needed=true、direct_evidence=false。",
+                '仅输出 JSON：{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,"used_context_files":[],"unverified_assumptions":[]}}',
+                "rule_check_results 每条至少包含: rule_id, status, evidence, missing_context, reason；rule_id 可使用 observation_id 或真实命中规则 ID。",
+                "candidate_findings 每条至少包含: rule_id, file_path, line, title, evidence, confidence, observation_ids；line 必须落在真实变更行或 observation 行。",
+                "observation 只能作为候选风险线索，默认 status=insufficient_context、confidence=low/medium。",
                 "只有当你能从源码上下文独立证明缺陷成立，并且证据链不依赖 observation 本身时，才允许升级为 direct_defect。",
             ]
         )
@@ -480,7 +611,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
                         "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
                         "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要结合调用频率、批量规模和外部依赖成本复核后再升级为确定缺陷。",
                         "direct_evidence": False,
@@ -510,7 +641,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
                         "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
                         "suggested_code": "// TODO: 对比原创建入口与新构造路径，保留不变量校验和领域事件语义",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认原创建入口是否确实承载不变量校验、领域事件记录或其他副作用。",
                         "direct_evidence": False,
@@ -539,7 +670,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
                         "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
                         "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认注释、TODO 或命名表达是否仍是当前有效业务契约。",
                         "direct_evidence": False,
@@ -569,7 +700,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "为该查询补回分页/limit 约束，并确认索引能覆盖过滤和排序字段。",
                         "change_steps": ["恢复查询边界", "补充或确认索引", "增加大数据量场景测试"],
                         "suggested_code": "// TODO: 恢复分页/LIMIT 或批量边界，避免无界查询",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认查询入口是否确实可能返回无界结果集或触发不可接受的查询计划。",
                         "direct_evidence": False,
@@ -599,7 +730,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "为批处理增加分片、限流、超时和失败补偿；事务内不要直接做远程调用或消息发送。",
                         "change_steps": ["识别批量输入规模", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
                         "suggested_code": "// TODO: 为批量/事务副作用路径补充边界、超时和幂等保护",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.65), 0.78),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认批量规模、事务边界和外部副作用是否会在生产数据量下放大。",
                         "direct_evidence": False,
@@ -629,7 +760,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。",
                         "change_steps": ["定位原入口保护职责", "确认新路径是否存在等价保护", "补充非法输入或越权路径测试"],
                         "suggested_code": "// TODO: 确认入口保护是否仍由等价路径覆盖；缺失时恢复校验或权限判断",
-                        "confidence": min(max(float(item.get("confidence") or 0.0), 0.68), 0.8),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.68), 0.8),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认被删除的校验是否属于当前接口的有效安全边界。",
                         "direct_evidence": False,
@@ -799,7 +930,7 @@ class ReviewRunnerExpertOutputMixin:
                 )
             else:
                 result["direct_evidence"] = False
-                result["confidence"] = min(float(result.get("confidence") or 0.0), 0.4)
+                result["confidence"] = min(self._normalize_confidence(result.get("confidence"), 0.0), 0.4)
                 if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
                     result["severity"] = "medium"
             assumptions = [str(item).strip() for item in list(result.get("assumptions") or []) if str(item).strip()]
@@ -829,7 +960,7 @@ class ReviewRunnerExpertOutputMixin:
             if assumption not in assumptions:
                 assumptions.append(assumption)
             result["assumptions"] = assumptions
-            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.45)
+            result["confidence"] = min(self._normalize_confidence(result.get("confidence"), 0.0), 0.45)
             if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
                 result["severity"] = "medium"
         if expert_id == "performance_reliability":
@@ -871,7 +1002,7 @@ class ReviewRunnerExpertOutputMixin:
             if not has_perf_signal:
                 result["finding_type"] = "design_concern"
                 result["severity"] = "low"
-                result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
+                result["confidence"] = min(self._normalize_confidence(result.get("confidence"), 0.0), 0.35)
                 result["verification_needed"] = True
 
         explicit_line_start = self._extract_explicit_line_start_from_analysis(result, target_hunk)
@@ -1093,7 +1224,7 @@ class ReviewRunnerExpertOutputMixin:
             result["finding_type"] = "risk_hypothesis"
             result["verification_needed"] = True
             result["direct_evidence"] = False
-            result["confidence"] = min(float(result.get("confidence") or 0.0), 0.35)
+            result["confidence"] = min(self._normalize_confidence(result.get("confidence"), 0.0), 0.35)
             if str(result.get("severity") or "").lower() in {"blocker", "critical", "high"}:
                 result["severity"] = "medium"
         else:
@@ -1109,7 +1240,7 @@ class ReviewRunnerExpertOutputMixin:
             result["finding_type"] = finding_type
             result["verification_needed"] = bool(result.get("verification_needed", False)) and not clear_verification
             result["direct_evidence"] = original_direct_evidence or bool(has_evidence and not result["verification_needed"])
-            result["confidence"] = float(result.get("confidence") or 0.0)
+            result["confidence"] = self._normalize_confidence(result.get("confidence"), 0.0)
             if (not has_evidence) and str(result.get("severity") or "").lower() in {"blocker", "critical"}:
                 result["severity"] = "high"
 
@@ -1319,22 +1450,50 @@ class ReviewRunnerExpertOutputMixin:
             if evidence_phrase not in evidence:
                 evidence.append(evidence_phrase)
 
-        if "exception_swallowed" in signal_set and "静默吞掉" not in claim_blob and "空 catch" not in claim_blob:
-            swallow_phrase = "当前变更还让 catch 块静默吞掉异常"
-            swallow_summary = "异常处理被弱化为静默吞掉异常，后续排障、补偿和审计都会变难。"
-            claim = f"{claim.rstrip('。')}；{swallow_phrase}。".strip("；")
+        if "exception_swallowed" in signal_set:
+            exception_text_blob = "\n".join(
+                [
+                    claim_blob,
+                    str(target_hunk.get("excerpt") or ""),
+                    *evidence,
+                ]
+            ).lower()
+            exception_names = []
+            for display, token in (
+                ("NoSuchMethodException", "nosuchmethodexception"),
+                ("IllegalAccessException", "illegalaccessexception"),
+                ("InvocationTargetException", "invocationtargetexception"),
+                ("InstantiationException", "instantiationexception"),
+            ):
+                if token in exception_text_blob:
+                    exception_names.append(display)
+            exception_display = "、".join(exception_names[:2]) if exception_names else "反射异常"
+            swallow_summary = f"{exception_display} 等异常处理被弱化为静默吞掉异常，后续排障、补偿和审计都会变难。"
             if swallow_summary not in summary_parts:
                 summary_parts.append(swallow_summary)
-            if swallow_phrase not in evidence:
-                evidence.append(swallow_phrase)
+            if "静默吞掉" not in claim_blob and "空 catch" not in claim_blob:
+                swallow_phrase = "当前变更还让 catch 块静默吞掉异常"
+                claim = f"{claim.rstrip('。')}；{swallow_phrase}。".strip("；")
+                if swallow_phrase not in evidence:
+                    evidence.append(swallow_phrase)
             if expert_id in {"correctness_business", "performance_reliability"}:
                 if "静默吞掉异常" not in title:
                     title = f"{title}（静默吞掉异常）" if title else "静默吞掉异常"
-                if str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
+                if self._is_rule_backed_exception_swallow(
+                    result,
+                    evidence=evidence,
+                    target_hunk=target_hunk,
+                ):
+                    result["finding_type"] = "direct_defect"
+                    result["verification_needed"] = False
+                    result["direct_evidence"] = True
+                    result["normalized_issue_type"] = "exception_swallowed"
+                    result["confidence"] = max(self._normalize_confidence(result.get("confidence"), 0.0), 0.86)
+                elif str(result.get("finding_type") or "").strip().lower() not in {"direct_defect", "direct_code_issue"}:
                     result["finding_type"] = "risk_hypothesis"
                     result["verification_needed"] = True
                     result["direct_evidence"] = False
-                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.68), 0.8)
+                    result["confidence"] = min(max(self._normalize_confidence(result.get("confidence"), 0.0), 0.68), 0.8)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
@@ -1360,7 +1519,7 @@ class ReviewRunnerExpertOutputMixin:
                     result["finding_type"] = "risk_hypothesis"
                     result["verification_needed"] = True
                     result["direct_evidence"] = False
-                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.68), 0.8)
+                    result["confidence"] = min(max(self._normalize_confidence(result.get("confidence"), 0.0), 0.68), 0.8)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
@@ -1385,7 +1544,7 @@ class ReviewRunnerExpertOutputMixin:
                     result["finding_type"] = "risk_hypothesis"
                     result["verification_needed"] = True
                     result["direct_evidence"] = False
-                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.65), 0.78)
+                    result["confidence"] = min(max(self._normalize_confidence(result.get("confidence"), 0.0), 0.65), 0.78)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
@@ -1410,7 +1569,7 @@ class ReviewRunnerExpertOutputMixin:
                     result["finding_type"] = "risk_hypothesis"
                     result["verification_needed"] = True
                     result["direct_evidence"] = False
-                    result["confidence"] = min(max(float(result.get("confidence") or 0.0), 0.65), 0.78)
+                    result["confidence"] = min(max(self._normalize_confidence(result.get("confidence"), 0.0), 0.65), 0.78)
                 result["severity"] = (
                     "high"
                     if str(result.get("severity") or "").lower() not in {"blocker", "critical", "high"}
@@ -1423,6 +1582,50 @@ class ReviewRunnerExpertOutputMixin:
         result["claim"] = claim
         result["evidence"] = evidence
         return result
+
+    def _is_rule_backed_exception_swallow(
+        self,
+        parsed: dict[str, object],
+        *,
+        evidence: list[str],
+        target_hunk: dict[str, object],
+    ) -> bool:
+        matched_rules = {
+            str(item).strip().upper()
+            for item in [*list(parsed.get("matched_rules") or []), *list(parsed.get("violated_guidelines") or [])]
+            if str(item).strip()
+        }
+        if not matched_rules.intersection({"CORR-JDDD-002", "REL-JDDD-001", "CODE-JAVA-002", "GENERAL-EXPERT-CHECKS"}):
+            return False
+        text = "\n".join(
+            [
+                str(parsed.get("title") or ""),
+                str(parsed.get("claim") or ""),
+                str(parsed.get("summary") or ""),
+                str(target_hunk.get("excerpt") or ""),
+                *evidence,
+            ]
+        ).lower()
+        if "catch" not in text and "异常" not in text and "exception" not in text:
+            return False
+        if not any(
+            token in text
+            for token in (
+                "printstacktrace",
+                "空 catch",
+                "空catch",
+                "静默吞",
+                "吞掉",
+                "nosuchmethodexception",
+                "invocationtargetexception",
+                "instantiationexception",
+                "{ }",
+            )
+        ):
+            return False
+        has_context = bool([item for item in list(parsed.get("context_files") or []) if str(item).strip()])
+        has_diff_anchor = "@@" in text or "-    e.printstacktrace" in text or "-\t\t\t\te.printstacktrace" in text
+        return has_context or has_diff_anchor
 
     def _stabilize_line_start(self, value: object, fallback: int, target_hunk: dict[str, object]) -> int:
         normalized = self._normalize_line_start(value, fallback)

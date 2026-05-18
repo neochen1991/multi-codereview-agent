@@ -365,18 +365,28 @@ class MainAgentService(MainAgentPromptingMixin):
         runtime_settings: RuntimeSettings,
         *,
         partial_failure_count: int = 0,
+        finding_count: int = 0,
+        filtered_finding_count: int = 0,
         timeout_seconds: float = 60.0,
         max_attempts: int = 3,
     ) -> tuple[str, dict[str, object]]:
         """让主 Agent 在 issue 收敛后输出控制台播报式总结。"""
         blocker_count = len([issue for issue in issues if issue.severity in {"blocker", "critical"}])
         pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
+        finding_note = ""
+        if not issues and finding_count > 0:
+            finding_note = (
+                f"本轮形成 {finding_count} 条 findings，其中 {filtered_finding_count} 条未升级为 issues；"
+                "这表示候选风险被保留或过滤，不等同于“无问题”。"
+            )
         if partial_failure_count > 0:
             fallback_text = (
                 f"主Agent收敛完成：本轮共有 {len(issues)} 个议题，blocker/critical {blocker_count} 个，"
                 f"待人工裁决 {pending_count} 个。另有 {partial_failure_count} 个专家任务执行失败，"
                 "当前结果应视为部分完成，请优先重试失败专家后再做最终放行判断。"
             )
+        elif finding_note:
+            fallback_text = f"主Agent收敛完成：{finding_note} 请在报告 findings 与过滤原因中继续核验。"
         else:
             fallback_text = (
                 f"主Agent收敛完成：本次共形成 {len(issues)} 个议题，其中 blocker/critical {blocker_count} 个，"
@@ -387,9 +397,13 @@ class MainAgentService(MainAgentPromptingMixin):
             f"审核状态: {review.status}\n"
             f"审核阶段: {review.phase}\n"
             f"议题总数: {len(issues)}\n"
+            f"专家 finding 总数: {finding_count}\n"
+            f"未升级为 issue 的 finding 数: {filtered_finding_count}\n"
             f"高风险议题数: {blocker_count}\n"
             f"待人工裁决数: {pending_count}\n"
             f"专家执行失败数: {partial_failure_count}\n"
+            f"候选风险说明: {finding_note or '无'}\n"
+            "如果 issue 为 0 但 finding 或过滤候选大于 0，必须明确说明“不是无问题”，而是候选未升级或需继续核验。\n"
             f"请输出一段中文总结，风格像主Agent对控制台的收敛播报。"
         )
         try:
@@ -1202,7 +1216,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

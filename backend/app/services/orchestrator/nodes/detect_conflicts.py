@@ -632,7 +632,7 @@ def _is_location_compatible(candidate: dict[str, object], grouped_items: list[di
 def _select_primary_item(items: list[dict[str, object]], preferred_expert_id: str = "") -> dict[str, object]:
     def _score(item: dict[str, object]) -> tuple[int, int, float]:
         severity = str(item.get("severity") or "medium").strip().lower()
-        direct_evidence = 1 if str(item.get("finding_type") or "").strip() == "direct_defect" else 0
+        direct_evidence = 1 if _has_direct_code_evidence([item]) else 0
         preferred = 1 if preferred_expert_id and str(item.get("expert_id") or "").strip() == preferred_expert_id else 0
         return (-preferred, -PRIORITY_ORDER.get(severity, 2), -direct_evidence, -float(item.get("confidence") or 0.0))
 
@@ -817,7 +817,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "cross_file_evidence": [e for item in eligible_items for e in item.get("cross_file_evidence", [])],
                 "assumptions": [e for item in eligible_items for e in item.get("assumptions", [])],
                 "context_files": [e for item in eligible_items for e in item.get("context_files", [])],
-                "direct_evidence": any(str(item.get("finding_type")) == "direct_defect" for item in eligible_items),
+                "direct_evidence": _has_direct_code_evidence(eligible_items),
                 "sast_cross_validated": bool(sast_prescan_matches),
                 "sast_prescan_matches": sast_prescan_matches,
                 "tool_name": "sast_prescan" if sast_prescan_matches else "",
@@ -905,7 +905,7 @@ def _classify_issue_candidate(
         }
 
     finding_types = {str(item.get("finding_type") or "risk_hypothesis") for item in items}
-    direct_evidence = any(str(item.get("finding_type") or "") == "direct_defect" for item in items)
+    direct_evidence = _has_direct_code_evidence(items)
     participant_count = len({str(item.get("expert_id") or "").strip() for item in items if str(item.get("expert_id") or "").strip()})
     evidence_strength = sum(
         len([value for value in list(item.get("evidence") or []) if str(value).strip()])
@@ -1122,7 +1122,7 @@ def _score_issue_confidence(
         consensus_bonus = min(0.08, round(0.03 + 0.02 * (participant_count - 2), 2))
 
     evidence_signal_count = len(_collect_issue_evidence_signals(items))
-    direct_evidence = any(str(item.get("finding_type") or "").strip() == "direct_defect" for item in items)
+    direct_evidence = _has_direct_code_evidence(items)
     evidence_bonus = min(0.06, round(min(evidence_signal_count, 4) * 0.01 + (0.02 if direct_evidence else 0.0), 2))
 
     all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
@@ -1324,6 +1324,61 @@ def _has_observation_signal(items: list[dict[str, object]]) -> bool:
         if isinstance(code_context, dict) and str(code_context.get("evidence_source") or "").strip() == "observation_signal":
             return True
     return False
+
+
+def _has_direct_code_evidence(items: list[dict[str, object]]) -> bool:
+    for item in items:
+        if str(item.get("finding_type") or "").strip() == "direct_defect":
+            return True
+        if bool(item.get("direct_evidence")):
+            return True
+        if _has_swallowed_exception_code_evidence(item):
+            return True
+    return False
+
+
+def _has_swallowed_exception_code_evidence(item: dict[str, object]) -> bool:
+    text_parts: list[str] = [
+        str(item.get("title") or ""),
+        str(item.get("summary") or ""),
+        str(item.get("normalized_issue_type") or ""),
+    ]
+    text_parts.extend(str(value or "") for value in list(item.get("evidence") or []))
+    text_parts.extend(str(value or "") for value in list(item.get("matched_rules") or []))
+    text_parts.extend(str(value or "") for value in list(item.get("violated_guidelines") or []))
+    text = "\n".join(text_parts).lower()
+    if "catch" not in text and "exception" not in text and "异常" not in text:
+        return False
+    if not any(
+        token in text
+        for token in (
+            "空 catch",
+            "空catch",
+            "静默吞",
+            "吞掉",
+            "swallow",
+            "printstacktrace",
+            "nosuchmethodexception",
+            "invocationtargetexception",
+            "instantiationexception",
+            "corr-jddd-002",
+            "rel-jddd-001",
+        )
+    ):
+        return False
+    has_code_anchor = int(item.get("line_start") or 0) > 0 and bool(str(item.get("file_path") or "").strip())
+    has_context = bool([value for value in list(item.get("context_files") or []) if str(value).strip()])
+    has_direct_diff = any(
+        token in text
+        for token in (
+            "diff 删除",
+            "- e.printstacktrace",
+            "catch (",
+            "} catch",
+            "{ }",
+        )
+    )
+    return has_code_anchor and (has_context or has_direct_diff)
 
 
 def _format_sast_evidence(match: dict[str, object]) -> str:

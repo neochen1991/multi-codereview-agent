@@ -97,6 +97,9 @@ class KnowledgeRuleScreeningService:
                 "problem_code_example": rule.problem_code_example or rule.good_example,
                 "problem_code_line": rule.problem_code_line or rule.fix_guidance,
                 "false_positive_code": rule.false_positive_code or rule.bad_example,
+                "must_check_items": list(rule.must_check_items or []),
+                "false_positive_guards": list(rule.false_positive_guards or []),
+                "normalized_issue_type": self._rule_normalized_issue_type(rule),
                 "decision": decision["decision"],
                 "score": decision["score"],
                 "matched_terms": decision["matched_terms"],
@@ -113,6 +116,11 @@ class KnowledgeRuleScreeningService:
                 possible_hit_rules.append(entry)
             else:
                 no_hit_rules.append(entry)
+
+        if not must_review_rules and not possible_hit_rules and no_hit_rules:
+            possible_hit_rules.extend(
+                self._fallback_possible_rules(no_hit_rules, reason="召回优先：规则筛选未命中，保留专家绑定规则供模型扫描")
+            )
 
         matched_for_llm = (must_review_rules[:8] + possible_hit_rules[:8])[:12]
         enabled_rules = [item for item in rules if item.enabled]
@@ -331,6 +339,9 @@ class KnowledgeRuleScreeningService:
                 "problem_code_example": rule.problem_code_example or rule.good_example,
                 "problem_code_line": rule.problem_code_line or rule.fix_guidance,
                 "false_positive_code": rule.false_positive_code or rule.bad_example,
+                "must_check_items": list(rule.must_check_items or []),
+                "false_positive_guards": list(rule.false_positive_guards or []),
+                "normalized_issue_type": self._rule_normalized_issue_type(rule),
                 "decision": decision,
                 "score": 0.0,
                 "matched_terms": matched_terms,
@@ -366,6 +377,9 @@ class KnowledgeRuleScreeningService:
                     "problem_code_example": rule.problem_code_example or rule.good_example,
                     "problem_code_line": rule.problem_code_line or rule.fix_guidance,
                     "false_positive_code": rule.false_positive_code or rule.bad_example,
+                    "must_check_items": list(rule.must_check_items or []),
+                    "false_positive_guards": list(rule.false_positive_guards or []),
+                    "normalized_issue_type": self._rule_normalized_issue_type(rule),
                     "decision": "no_hit",
                     "score": 0.0,
                     "matched_terms": [],
@@ -376,6 +390,11 @@ class KnowledgeRuleScreeningService:
                     "line_end": rule.line_end,
                 }
             )
+        if not must_review_rules and not possible_hit_rules and no_hit_rules:
+            possible_hit_rules.extend(
+                self._fallback_possible_rules(no_hit_rules, reason="召回优先：LLM 规则筛选未命中，保留专家绑定规则供模型扫描")
+            )
+
         matched_for_llm = (must_review_rules[:8] + possible_hit_rules[:8])[:12]
         result = {
             "total_rules": len(rules),
@@ -416,6 +435,16 @@ class KnowledgeRuleScreeningService:
             ],
         )
         return result
+
+    def _fallback_possible_rules(self, no_hit_rules: list[dict[str, object]], *, reason: str) -> list[dict[str, object]]:
+        fallback: list[dict[str, object]] = []
+        for item in no_hit_rules[:6]:
+            next_item = dict(item)
+            next_item["decision"] = "possible_hit"
+            next_item["score"] = max(float(next_item.get("score") or 0.0), 0.2)
+            next_item["reason"] = reason
+            fallback.append(next_item)
+        return fallback
 
     def _build_llm_batch_summary(
         self,
@@ -499,6 +528,13 @@ class KnowledgeRuleScreeningService:
             "possible_hit_count": possible_hit_count,
             "no_hit_count": no_hit_count,
         }
+
+    def _rule_normalized_issue_type(self, rule: KnowledgeReviewRule) -> str:
+        for item in list(rule.risk_types or []):
+            normalized = str(item or "").strip()
+            if normalized:
+                return normalized
+        return ""
 
     def _build_llm_screening_system_prompt(self) -> str:
         return (
@@ -931,6 +967,17 @@ class KnowledgeRuleScreeningService:
                 "matched_signals": (matched_signals + ["java_quality:query_semantics_weakened"])[:10],
                 "reason": "命中查询语义放宽的通用质量信号，需复核索引命中与结果集放大风险",
             }
+        if rule_id in {"CORR-JDDD-002", "REL-JDDD-001"} and "exception_swallowed" in java_quality_signals:
+            if current_decision != "must_review":
+                return {
+                    **item,
+                    "decision": "must_review",
+                    "score": max(float(item.get("score") or 0.0), 8.0),
+                    "matched_terms": (matched_terms + ["catch", "exception", "printStackTrace"])[:10],
+                    "matched_signals": (matched_signals + ["java_quality:exception_swallowed"])[:10],
+                    "reason": "命中静默吞异常强信号，需按专家绑定异常处理规则逐条深审",
+                }
+            return item
         return item
 
     def _is_rule_supported_by_java_mode(self, rule: KnowledgeReviewRule, signal_payload: dict[str, object]) -> bool:

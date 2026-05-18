@@ -252,6 +252,11 @@ class GitNexusMcpImpactClient:
             raise RuntimeError(f"GitNexus list_repos 调用失败: {list_repos_payload.get('__error')}")
         available_repos = self._extract_repo_names(list_repos_payload)
         effective_repo_name = self._resolve_available_repo_name(repo_name, repo_path, list_repos_payload) or repo_name
+        skip_detect_changes_reason = self._duplicate_repo_name_sibling_reason(
+            effective_repo_name,
+            repo_path,
+            list_repos_payload,
+        )
         list_repos_missing_repo = False
         cli_repos = self._dedupe_strings(cli_available_repos or [])
         cli_list_has_repo = bool(cli_repos and effective_repo_name in cli_repos)
@@ -277,23 +282,33 @@ class GitNexusMcpImpactClient:
                 effective_repo_name,
                 repo_path,
             )
-        detect_changes_result = self._call_tools_batch(
-            command,
-            repo_path,
-            [
-                (
-                    "detect_changes",
-                    {
-                        "repo": effective_repo_name,
-                        "scope": "all",
-                    },
-                ),
-            ],
-            runtime_env,
-            raise_on_error=False,
-            mcp_session=mcp_session,
-            include_initialize=mcp_session is None,
-        )[0]
+        detect_changes_result: dict[str, Any] = {}
+        if skip_detect_changes_reason:
+            detect_changes_result = {"__error": skip_detect_changes_reason}
+            logger.warning(
+                "gitnexus detect_changes skipped repo=%s repo_path=%s reason=%s",
+                effective_repo_name,
+                repo_path,
+                skip_detect_changes_reason,
+            )
+        else:
+            detect_changes_result = self._call_tools_batch(
+                command,
+                repo_path,
+                [
+                    (
+                        "detect_changes",
+                        {
+                            "repo": effective_repo_name,
+                            "scope": "all",
+                        },
+                    ),
+                ],
+                runtime_env,
+                raise_on_error=False,
+                mcp_session=mcp_session,
+                include_initialize=mcp_session is None,
+            )[0]
         detect_changes_payload: dict[str, Any] = {}
         detect_changes_error = ""
         skipped_invalid_targets: list[str] = []
@@ -1180,6 +1195,46 @@ class GitNexusMcpImpactClient:
                 if candidate_name == repo_name:
                     return candidate_name
         return repo_name
+
+    def _duplicate_repo_name_sibling_reason(self, repo_name: str, repo_path: str, payload: dict[str, Any]) -> str:
+        """Detect GitNexus list_repos ambiguity where current repo is only listed as a sibling.
+
+        Some GitNexus versions return the first registry entry as the direct repo and put the
+        current working tree under `siblings` with the same repo name. Calling detect_changes by
+        name can then hit the stale direct repo. Context/impact still work from cwd, so we skip
+        detect_changes and continue from explicit changed symbols.
+        """
+
+        repo_path_resolved = _normalize_path_for_compare(repo_path)
+        if not repo_name or not repo_path_resolved:
+            return ""
+        direct_name = str(payload.get("name") or payload.get("repo") or payload.get("repo_name") or "").strip()
+        direct_path = str(payload.get("path") or payload.get("repoPath") or payload.get("repo_path") or "").strip()
+        if direct_name != repo_name or not direct_path:
+            return ""
+        if _normalize_path_for_compare(direct_path) == repo_path_resolved:
+            return ""
+
+        def sibling_matches(items: object) -> bool:
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list):
+                return False
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                candidate_name = str(item.get("name") or item.get("repo") or item.get("repo_name") or "").strip()
+                candidate_path = str(item.get("path") or item.get("repoPath") or item.get("repo_path") or "").strip()
+                if candidate_name == repo_name and candidate_path and _normalize_path_for_compare(candidate_path) == repo_path_resolved:
+                    return True
+            return False
+
+        if sibling_matches(payload.get("siblings")):
+            return (
+                "GitNexus list_repos 将当前 worktree 作为同名 sibling 返回；"
+                "为避免 detect_changes 命中旧 registry 主仓，已跳过 detect_changes，改用显式 changed symbols 查询 context/impact。"
+            )
+        return ""
 
 
 class GitNexusImpactService:

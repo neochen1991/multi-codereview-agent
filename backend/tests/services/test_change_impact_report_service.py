@@ -122,6 +122,55 @@ def test_change_impact_report_service_synthesizes_llm_fields():
     assert updated.analysis_workflow
 
 
+def test_change_impact_report_service_compacts_noisy_graph_facts():
+    service = ChangeImpactReportService()
+    captured: dict[str, str] = {}
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    def _complete_text(**kwargs):
+        captured["user_prompt"] = str(kwargs.get("user_prompt") or "")
+        return LLMTextResult(
+            text='{"summary":"ok","key_impact_points":[],"test_focus":[],"manual_checks":[],"markdown":""}',
+            mode="live",
+            provider="openai",
+            model="fake-model",
+            base_url="https://example.com",
+            api_key_env="FAKE_KEY",
+        )
+
+    service._llm.complete_text = _complete_text  # type: ignore[method-assign]
+
+    service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(),
+        report=_report(),
+        trace={
+            "repo": "repo",
+            "detect_changes": {"affected_processes": [{"name": "raw-process"}], "summary": {"direct": 1}},
+            "context_results": [{"target": {"name": "consume"}, "byDepth": {"1": ["raw"]}, "callers": ["Command"]}],
+            "impact_results": [
+                {
+                    "target": {"name": "consume"},
+                    "affected_processes": [{"name": "raw-process"}],
+                    "byDepth": {"1": ["raw-depth"]},
+                    "summary": {"direct": 1},
+                }
+            ],
+        },
+        review_id="rev_test",
+    )
+
+    prompt = captured["user_prompt"]
+    assert "byDepth" not in prompt
+    assert "affected_processes" not in prompt
+    assert "raw-depth" not in prompt
+
+
 def test_change_impact_report_service_falls_back_when_llm_output_not_json():
     service = ChangeImpactReportService()
     service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]

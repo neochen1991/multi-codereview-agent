@@ -234,6 +234,7 @@ export interface FindingCodeContext {
   input_completeness?: FindingCodeContextInputCompleteness;
   review_inputs?: FindingCodeContextReviewInputs;
   rule_attribution?: FindingRuleAttribution;
+  candidate_verification?: Record<string, unknown>;
 }
 
 export interface DebateIssue {
@@ -683,6 +684,13 @@ export interface RuntimeSettings {
   light_llm_max_input_tokens: number;
   llm_log_truncate_enabled: boolean;
   llm_log_preview_limit: number;
+  review_prompt_profile:
+    | "auto"
+    | "strict-json-small-context"
+    | "rule-guided-standard"
+    | "rule-guided-compact"
+    | "long-context-capable"
+    | "legacy";
   default_llm_provider: string;
   default_llm_base_url: string;
   default_llm_model: string;

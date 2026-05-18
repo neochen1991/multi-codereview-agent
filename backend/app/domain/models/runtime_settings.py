@@ -129,6 +129,14 @@ class RuntimeSettings(BaseModel):
     light_llm_max_input_tokens: int = 110000
     llm_log_truncate_enabled: bool = True
     llm_log_preview_limit: int = 1600
+    review_prompt_profile: Literal[
+        "auto",
+        "strict-json-small-context",
+        "rule-guided-standard",
+        "rule-guided-compact",
+        "long-context-capable",
+        "legacy",
+    ] = "rule-guided-standard"
     default_llm_provider: str = settings.DEFAULT_LLM_PROVIDER
     default_llm_base_url: str = settings.DEFAULT_LLM_BASE_URL
     default_llm_model: str = settings.DEFAULT_LLM_MODEL

@@ -77,6 +77,44 @@ class CaptureGitNexusImpactClient:
         }
 
 
+def test_gitnexus_detect_changes_skips_duplicate_repo_name_sibling(tmp_path: Path):
+    service = GitNexusMcpImpactClient()
+    current = tmp_path / "worktree"
+    stale = tmp_path / "stale"
+    current.mkdir()
+    stale.mkdir()
+    payload = {
+        "name": "java-ddd-example",
+        "path": str(stale),
+        "siblings": [
+            {
+                "name": "java-ddd-example",
+                "path": str(current),
+            }
+        ],
+    }
+
+    reason = service._duplicate_repo_name_sibling_reason("java-ddd-example", str(current), payload)
+
+    assert "同名 sibling" in reason
+    assert "跳过 detect_changes" in reason
+
+
+def test_gitnexus_detect_changes_not_skipped_when_direct_path_matches(tmp_path: Path):
+    service = GitNexusMcpImpactClient()
+    current = tmp_path / "worktree"
+    current.mkdir()
+    payload = {
+        "name": "java-ddd-example",
+        "path": str(current),
+        "siblings": [],
+    }
+
+    reason = service._duplicate_repo_name_sibling_reason("java-ddd-example", str(current), payload)
+
+    assert reason == ""
+
+
 class FailingGitNexusImpactClient:
     def analyze_mr(self, *, repo_name, repo_path, subject, changed_symbols, runtime_env=None, **kwargs):
         raise RuntimeError("mcp unavailable")

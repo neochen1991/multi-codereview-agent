@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 
 from app.domain.models.knowledge import KnowledgeDocument, KnowledgeReviewRule
+from app.domain.models.review_rule import ReviewRuleCard
+from app.services.review_rule_compiler import compile_review_rules_from_markdown
 
 
 @dataclass
@@ -24,6 +26,15 @@ class KnowledgeRuleIndexService:
     BULLET_PATTERN = re.compile(r"^\s*-\s*([^:：]+)\s*[:：]\s*(.+?)\s*$")
 
     def build_rules(self, document: KnowledgeDocument) -> list[KnowledgeReviewRule]:
+        standard_rule_cards = compile_review_rules_from_markdown(
+            document.content,
+            source_doc_id=document.doc_id,
+            expert_id=document.expert_id,
+            source_path=document.source_filename,
+        )
+        if standard_rule_cards:
+            return [self._build_knowledge_rule_from_card(document, card) for card in standard_rule_cards]
+
         drafts = self._parse_rule_drafts(document.content.splitlines())
         rules: list[KnowledgeReviewRule] = []
         for draft in drafts:
@@ -101,6 +112,41 @@ class KnowledgeRuleIndexService:
                 )
             )
         return rules
+
+    def _build_knowledge_rule_from_card(
+        self,
+        document: KnowledgeDocument,
+        card: ReviewRuleCard,
+    ) -> KnowledgeReviewRule:
+        scope = list(card.scope or [])
+        applicable_languages = self._extract_scope_values(scope, "language")
+        applicable_layers = self._extract_scope_values(scope, "layer")
+        if not applicable_layers:
+            applicable_layers = [
+                item
+                for item in scope
+                if not str(item).strip().lower().startswith(("language:", "expert:"))
+            ]
+        return KnowledgeReviewRule(
+            rule_id=card.rule_id,
+            doc_id=document.doc_id,
+            expert_id=document.expert_id,
+            title=card.title,
+            priority=card.severity_default,
+            description="\n".join(card.must_check),
+            applicable_languages=applicable_languages,
+            applicable_layers=applicable_layers,
+            trigger_keywords=[self._clean_trigger_keyword(item) for item in card.trigger_patterns],
+            risk_types=[card.normalized_issue_type],
+            objective="\n".join(card.must_check),
+            must_check_items=list(card.must_check),
+            false_positive_guards=list(card.false_positive_guards),
+            fix_guidance="\n".join(card.evidence_required),
+            source_path=card.source.source_path or document.source_filename or card.source.section_title,
+            line_start=card.source.line_start,
+            line_end=card.source.line_end,
+            enabled=card.status != "disabled",
+        )
 
     def _parse_rule_drafts(self, lines: list[str]) -> list[_RuleDraft]:
         drafts: list[_RuleDraft] = []
@@ -193,3 +239,20 @@ class KnowledgeRuleIndexService:
             if normalized and normalized not in items:
                 items.append(normalized)
         return items
+
+    def _extract_scope_values(self, scope: list[str], key: str) -> list[str]:
+        values: list[str] = []
+        prefix = f"{key}:"
+        for item in scope:
+            raw = str(item or "").strip()
+            if raw.lower().startswith(prefix):
+                value = raw.split(":", 1)[1].strip()
+                if value and value not in values:
+                    values.append(value)
+        return values
+
+    def _clean_trigger_keyword(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        if normalized.startswith("`") and normalized.endswith("`") and len(normalized) >= 2:
+            normalized = normalized[1:-1].strip()
+        return normalized

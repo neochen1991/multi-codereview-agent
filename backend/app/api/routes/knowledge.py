@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 import app.services.review_service as review_service_module
+from app.services.review_rule_compiler import compile_review_rules_from_markdown
 
 router = APIRouter()
 
@@ -68,6 +69,22 @@ def upload_knowledge_doc(payload: CreateKnowledgeDocumentRequest) -> dict[str, o
 
     document = review_service_module.review_service.create_knowledge_document(payload.model_dump())
     return document.model_dump(mode="json")
+
+
+@router.post("/knowledge/rules/preview")
+def preview_knowledge_rules(payload: CreateKnowledgeDocumentRequest) -> dict[str, object]:
+    """Preview structured rule cards compiled from an expert Markdown document."""
+
+    rules = compile_review_rules_from_markdown(
+        payload.content,
+        source_doc_id="preview",
+        expert_id=payload.expert_id,
+        source_path=payload.source_filename,
+    )
+    return {
+        "rule_count": len(rules),
+        "rules": [rule.model_dump(mode="json") for rule in rules],
+    }
 
 
 @router.delete("/knowledge/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
