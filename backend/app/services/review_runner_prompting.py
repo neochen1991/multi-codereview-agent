@@ -321,8 +321,6 @@ class ReviewRunnerPromptingMixin:
             "rule_check_results": [
                 {
                     "rule_id": "string",
-                    "review_part": "general_code_review|custom_rule_review",
-                    "rule_source": "expert_general|language_general|custom_bound_rule",
                     "status": "violated|passed|not_applicable|insufficient_context",
                     "evidence": ["string"],
                     "missing_context": ["string"],
@@ -332,8 +330,6 @@ class ReviewRunnerPromptingMixin:
             "candidate_findings": [
                 {
                     "rule_id": "string",
-                    "review_part": "general_code_review|custom_rule_review",
-                    "rule_source": "expert_general|language_general|custom_bound_rule",
                     "title": "string",
                     "file_path": file_path,
                     "line": line_start,
@@ -358,13 +354,9 @@ class ReviewRunnerPromptingMixin:
             "[SYSTEM RULES]",
             "你是代码审查专家。只能基于 EXPERT_PROFILE、DIFF、CONTEXT_PACKET、RULE_CARDS 判断，不要编造缺失上下文。",
             "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；不能只按其中一种来源审查。",
-            "本轮审查分两部分，结果取并集：A. 通用代码规范扫描；B. 自定义绑定规范校验。",
-            "A. 通用代码规范扫描必须基于专家职责、专家审视规范和语言通用规范，全量扫描本轮提供的所有 hunk；即使没有任何自定义 RULE_CARDS 命中，也必须执行 A。",
-            "B. 自定义绑定规范校验必须逐条检查 RULE_CARDS；RULE_CARDS 只用于产品/仓库/专家绑定文档规则，不得替代 A。",
-            "每条 rule_check_results 必须标明 review_part 和 rule_source。",
+            "必须逐条检查 RULE_CARDS。每条适用规则都要输出 rule_check_results。",
             "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
-            "candidate_findings 是候选发现层：只要有明确变更代码锚点和规范依据，即使仍需补上下文，也要保留候选并写 context_requests。",
-            "正式问题确认由系统后续校验完成；你不要因为还缺少部分上下文而静默省略有代码证据的候选。",
+            "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
             "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
             "如果缺少上下文但存在可疑代码证据，必须同时输出 candidate_findings 和 context_requests，不要静默省略。",
             "禁止输出 legacy {\"findings\":[...]}；缺少 rule_check_results 或 candidate_findings 会被系统拒收。",
@@ -387,10 +379,6 @@ class ReviewRunnerPromptingMixin:
             "",
             "[RULE_CARDS]",
             self._build_rule_guided_rule_cards(rule_screening, expected_checks, max_rules_per_prompt=max_rules_per_prompt),
-            "",
-            "[REVIEW_PARTS]",
-            "general_code_review: 按专家职责、专家审视规范、语言通用规范扫描所有 hunk；通用候选 rule_id 使用 GENERAL-EXPERT-CHECKS。",
-            "custom_rule_review: 按 RULE_CARDS 中的自定义/绑定规则逐条校验；只能引用真实 rule_id。",
             "",
             "[QUALITY_INPUTS]",
             f"已激活技能:\n{context_packet['active_skills']}",
@@ -431,8 +419,6 @@ class ReviewRunnerPromptingMixin:
             cards.append(
                 {
                     "rule_id": rule_id,
-                    "review_part": "custom_rule_review",
-                    "rule_source": "custom_bound_rule",
                     "title": str(item.get("title") or "").strip(),
                     "severity": str(item.get("priority") or item.get("severity") or "P2").strip(),
                     "must_check": self._extract_rule_guided_rule_list(item, "must_check_items", "must_check", fallback=[]),
@@ -454,8 +440,6 @@ class ReviewRunnerPromptingMixin:
             cards.append(
                 {
                     "rule_id": "GENERAL-EXPERT-CHECKS",
-                    "review_part": "general_code_review",
-                    "rule_source": "expert_general",
                     "title": "专家通用必查项",
                     "severity": "P2",
                     "must_check": [str(item).strip() for item in expected_checks if str(item).strip()],
