@@ -142,6 +142,57 @@ def test_non_minimax_model_also_uses_rule_guided_quality_contract(storage_root: 
     assert "非 minimax 模型也不能绕过规则驱动质量框架" in prompt
 
 
+def test_legacy_expert_prompt_keeps_evidenced_uncertain_findings_instead_of_silent_drop(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/security",
+        target_ref="main",
+        title="Legacy prompt",
+        changed_files=["src/main/java/demo/UserController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/demo/UserController.java b/src/main/java/demo/UserController.java\n"
+            "--- a/src/main/java/demo/UserController.java\n"
+            "+++ b/src/main/java/demo/UserController.java\n"
+            "@@ -1,1 +1,1 @@\n"
+            "+ log.info(\"phone={}\", user.getPhone());\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="legacy-compatible-model",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/demo/UserController.java",
+        1,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={"summary": "新增手机号日志输出。"},
+        target_hunk={"hunk_header": "@@ -1,1 +1,1 @@", "excerpt": "+ log.info(\"phone={}\", user.getPhone());"},
+        target_hunks=[],
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=["敏感信息输出"],
+        active_skills=[],
+        rule_screening={"matched_rules_for_llm": []},
+        model_name="legacy-compatible-model",
+        prompt_profile_name="legacy",
+    )
+
+    assert "证据不足时不要输出 finding" not in prompt
+    assert "请直接不输出该条 finding" not in prompt
+    assert "有当前代码锚点但缺上下文" in prompt
+    assert "verification_needed" in prompt
+
+
 def test_empty_rule_guided_response_retries_and_preserves_candidate(storage_root: Path, monkeypatch) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
@@ -253,6 +304,228 @@ def test_empty_rule_guided_response_retries_and_preserves_candidate(storage_root
     assert len(findings) == 1
     assert "日志明文输出手机号" in findings[0].title
     assert "GENERAL-EXPERT-CHECKS" in findings[0].matched_rules
+
+
+def test_bound_custom_rules_are_scanned_in_batches_after_empty_main_review(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_custom_rule_batches",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/security-batch",
+            target_ref="main",
+            title="Security custom rule batch",
+            changed_files=["src/main/java/demo/SyncService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/demo/SyncService.java b/src/main/java/demo/SyncService.java\n"
+                "--- a/src/main/java/demo/SyncService.java\n"
+                "+++ b/src/main/java/demo/SyncService.java\n"
+                "@@ -10,1 +10,1 @@\n"
+                "+ for (User user : users) { externalRiskClient.check(user.getId()); }\n"
+            ),
+        ),
+    )
+    runner.review_repo.save(review)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+        review_spec="必须按绑定安全规范检查 Java 和 SQL 安全风险。",
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请检查安全问题",
+        metadata={},
+    )
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+
+    empty_structured = (
+        '{"rule_check_results":[{"rule_id":"SEC-JAVA-LOOP-IO-001","status":"passed",'
+        '"evidence":[],"missing_context":[],"reason":"未发现问题"}],'
+        '"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,'
+        '"used_context_files":["src/main/java/demo/SyncService.java"],"unverified_assumptions":[]}}'
+    )
+    custom_rule_candidate = (
+        '{"rule_check_results":[{"rule_id":"SEC-JAVA-LOOP-IO-001","status":"violated",'
+        '"evidence":["for 循环中调用 externalRiskClient.check"],"missing_context":[],'
+        '"reason":"绑定安全规范禁止在循环中逐条调用外部接口，容易造成级联放大和限流绕过"}],'
+        '"candidate_findings":[{"rule_id":"SEC-JAVA-LOOP-IO-001","title":"循环中逐条调用外部风控接口",'
+        '"file_path":"src/main/java/demo/SyncService.java","line":10,'
+        '"evidence":"for (User user : users) { externalRiskClient.check(user.getId()); }",'
+        '"confidence":"high"}],"context_requests":[],"self_check":{"checked_all_rules":true,'
+        '"used_context_files":["src/main/java/demo/SyncService.java"],"unverified_assumptions":[]}}'
+    )
+    phases: list[str] = []
+    prompts: dict[str, str] = {}
+
+    def fake_complete_text(**kwargs):
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        phases.append(phase)
+        prompts[phase] = str(kwargs.get("user_prompt") or "")
+        text = custom_rule_candidate if phase == "expert_custom_rule_batch_scan" else empty_structured
+        return LLMTextResult(
+            text=text,
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id=f"call-{phase or 'main'}",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/demo/SyncService.java",
+        line_start=10,
+        repository_context={"summary": "新增循环内外部风控接口调用。"},
+        target_hunk={
+            "hunk_header": "@@ -10,1 +10,1 @@",
+            "start_line": 10,
+            "end_line": 10,
+            "changed_lines": [10],
+            "excerpt": "+ for (User user : users) { externalRiskClient.check(user.getId()); }",
+        },
+        target_hunks=[],
+        related_files=[],
+        expected_checks=["安全专家应检查接口滥用和资源放大风险"],
+        disallowed_inference=[],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "SEC-JAVA-LOOP-IO-001",
+                    "title": "禁止在循环中逐条调用外部接口或数据库",
+                    "priority": "P1",
+                    "must_check_items": ["检查新增循环体是否调用外部 HTTP/RPC/DB 操作"],
+                    "required_context": ["changed_file_full_content", "repository_context"],
+                    "evidence_required": ["循环代码行", "外部接口或数据库调用代码行"],
+                    "false_positive_guards": ["已显式批量化、限流、短路和超时保护时不要误报"],
+                    "normalized_issue_type": "loop_external_io_amplification",
+                }
+            ]
+        },
+        finding_payloads=[],
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert "expert_custom_rule_batch_scan" in phases
+    assert "[CUSTOM_BOUND_RULE_REVIEW_ONLY]" in prompts["expert_custom_rule_batch_scan"]
+    assert "[CUSTOM_RULE_BATCH]" in prompts["expert_custom_rule_batch_scan"]
+    assert "SEC-JAVA-LOOP-IO-001" in prompts["expert_custom_rule_batch_scan"]
+    assert len(findings) == 1
+    assert "循环中逐条调用外部风控接口" in findings[0].title
+    assert "SEC-JAVA-LOOP-IO-001" in findings[0].matched_rules
+
+
+def test_rule_check_prepass_uses_dedicated_inputs_without_nested_main_prompt(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_prepass_prompt",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/prepass",
+            target_ref="main",
+            title="Prepass prompt",
+            changed_files=["src/main/java/demo/UserController.java"],
+            unified_diff="diff --git a/src/main/java/demo/UserController.java b/src/main/java/demo/UserController.java\n@@ -1 +1 @@\n+ log.info(user.getPhone());\n",
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+    )
+    captured: dict[str, str] = {}
+
+    def fake_complete_text(**kwargs):
+        captured["user_prompt"] = str(kwargs.get("user_prompt") or "")
+        return LLMTextResult(
+            text=(
+                '{"rule_check_results":[{"rule_id":"SEC-JAVA-001","status":"violated",'
+                '"evidence":["log.info(user.getPhone())"],"missing_context":[],"reason":"敏感信息输出"}],'
+                '"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,'
+                '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
+            ),
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id="call-prepass",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    text, metadata = runner._run_rule_guided_rule_check_prepass(
+        review=review,
+        expert=expert,
+        runtime_settings=runner.runtime_settings_service.get(),
+        resolution=runner.llm_chat_service.resolve_expert(expert, runner.runtime_settings_service.get()),
+        base_user_prompt="[SYSTEM RULES]\n第二阶段任务：基于上述 rule_check_results 进行高召回 candidate_findings 发现",
+        required_rule_ids=["SEC-JAVA-001"],
+        rule_screening={
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "SEC-JAVA-001",
+                    "title": "禁止输出敏感信息",
+                    "must_check_items": ["检查日志是否输出手机号"],
+                }
+            ]
+        },
+        normalized_batch_items=[
+            {
+                "file_path": "src/main/java/demo/UserController.java",
+                "line_start": 1,
+                "target_hunk": {
+                    "hunk_header": "@@ -1 +1 @@",
+                    "start_line": 1,
+                    "changed_lines": [1],
+                    "excerpt": "+ log.info(user.getPhone());",
+                },
+            }
+        ],
+        repository_context={"summary": "新增手机号日志。"},
+        file_path="src/main/java/demo/UserController.java",
+        line_start=1,
+        timeout_seconds=60,
+    )
+
+    assert text
+    assert metadata["success"] is True
+    assert "[RULE_CARDS]" in captured["user_prompt"]
+    assert "[TARGET_HUNKS]" in captured["user_prompt"]
+    assert "[COMPACT_CONTEXT]" in captured["user_prompt"]
+    assert "[ORIGINAL_REVIEW_TASK]" not in captured["user_prompt"]
+    assert "第二阶段任务" not in captured["user_prompt"]
 
 
 def test_rule_guided_prompt_compacts_graph_impact_noise(storage_root: Path) -> None:

@@ -542,7 +542,8 @@ class KnowledgeRuleScreeningService:
             "你的唯一任务是判断：当前 MR 是否需要把某条规则带入后续深审。"
             "不要输出任何解释性段落，不要输出 markdown，只能输出 JSON。"
             "decision 只能是 must_review、possible_hit、no_hit 三种。"
-            "必须尽量保守，只有与当前变更语义相关时才选中规则。"
+            "执行召回优先策略：明确相关输出 must_review，可能相关或缺上下文但值得专家复核输出 possible_hit，"
+            "只有确认与当前变更语言、文件、语义和风险信号都无关时才输出 no_hit。"
         )
 
     def _build_llm_screening_user_prompt(

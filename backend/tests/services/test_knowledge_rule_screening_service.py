@@ -7,6 +7,7 @@ from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.llm_chat_service import LLMTextResult
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_rule_index_service import KnowledgeRuleIndexService
+from app.services.knowledge_rule_screening_prompting import build_llm_screening_system_prompt
 from app.services.knowledge_rule_screening_service import KnowledgeRuleScreeningService
 from app.services.knowledge_service import KnowledgeService
 
@@ -837,6 +838,19 @@ def test_knowledge_rule_screening_compacts_prompt_in_light_mode() -> None:
     assert "...<truncated>" in prompt
     assert prompt.count(long_excerpt[:200]) <= 1
     assert "level_three_scene=数据访问" not in prompt
+
+
+def test_knowledge_rule_screening_system_prompt_is_recall_first() -> None:
+    service = KnowledgeRuleScreeningService(Path("/tmp"))
+
+    prompt = service._build_llm_screening_system_prompt()
+    helper_prompt = build_llm_screening_system_prompt()
+
+    assert "召回优先" in prompt
+    assert "可能相关" in prompt
+    assert "必须尽量保守" not in prompt
+    assert "召回优先" in helper_prompt
+    assert "必须尽量保守" not in helper_prompt
 
 
 def test_knowledge_rule_screening_uses_java_quality_signals_for_unbounded_query(storage_root: Path) -> None:

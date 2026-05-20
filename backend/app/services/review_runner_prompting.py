@@ -155,6 +155,16 @@ class ReviewRunnerPromptingMixin:
             if has_design_docs
             else "本次未绑定详细设计文档，不要执行设计一致性检查，也不要输出任何 design_* / 设计一致性字段。\n"
         )
+        disallowed_text = " / ".join(disallowed_inference[:5]).strip()
+        disallowed_text = disallowed_text.replace(
+            "证据不足时不要输出 finding",
+            "没有当前代码锚点时不要输出候选；有当前代码证据但缺上下文时保留 finding 并标记 verification_needed",
+        )
+        if not disallowed_text:
+            disallowed_text = (
+                "不要把没有当前代码锚点的猜测输出为 finding；"
+                "有当前代码锚点但缺上下文时，保留 finding，设置 verification_needed=true 并写清 verification_plan。"
+            )
         if analysis_mode == "light":
             light_sections, light_budget = self._apply_light_prompt_request_budget(
                 expert_id=expert.expert_id,
@@ -234,14 +244,14 @@ class ReviewRunnerPromptingMixin:
             f"历史反馈边界:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工反馈案例。'}\n"
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}\n"
             f"{java_ddd_focus}"
-            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}\n"
+            f"候选边界: {disallowed_text}\n"
             f"你必须完整阅读并严格遵守系统提供的《审视规范文档》，再结合真实 diff、代码仓上下文和技能结果做审查。\n"
             f"规则分层说明：专家通用规范和语言/框架通用规范是基础审查依据；“附加产品/仓库规则”用于补充产品特有约束、优先级和误报保护，不是唯一准入条件。\n"
             f"无附加规则命中时，仍必须按专家通用规范审查真实缺陷；有附加规则命中时，必须逐条核对并只引用本轮提供的真实规则 ID，不要编造产品规则编号。\n"
             f"{'请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。' if include_target_file_full_diff else '本轮为多文件批量模式，请优先基于“本轮批量文件清单”和每个文件的 hunk 说明逐文件审查，再回到代码仓上下文交叉验证，不要遗漏任何文件。'}\n"
             f"{design_instruction}"
-            f"如果你的结论依赖“当前 diff 没显示某段代码”“可能存在未注入/未调用/未校验”这类推断，"
-            f"请直接不输出该条 finding；严禁把“需要用户再去核对上下文”的不确定意见输出为审查结果。\n"
+            f"如果你的结论已有当前代码锚点但缺少关联上下文，请保留该 finding，并设置 verification_needed=true、写清 verification_plan；"
+            f"只有完全没有当前代码锚点、纯靠猜测的结论才不要输出。\n"
             f"对“结构化观察点”要逐条复核：它们只是主Agent提炼的可疑代码现象，不等于已经确认的问题。你可以否定观察点；若确认其成立并输出 finding，必须把对应 observation_id 写入 observation_ids。\n"
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
