@@ -5048,6 +5048,46 @@ class ReviewRunner(
                         retry_candidates,
                         max_findings=max_findings_cap,
                     )
+        general_scan_metadata: dict[str, object] = {}
+        if (
+            prompt_profile.require_rule_check_results
+            and not parsed_candidates
+            and self._should_retry_empty_rule_guided_candidate_response(
+                target_hunk=target_hunk,
+                target_hunks=target_hunks,
+                repository_context=repository_context,
+                rule_screening=rule_screening or {},
+            )
+        ):
+            general_scan_text, general_scan_metadata = self._run_rule_guided_general_expert_profile_scan(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                normalized_batch_items=normalized_batch_items,
+                repository_context=repository_context,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if general_scan_metadata:
+                expert_llm_diagnostics["general_expert_profile_scan"] = general_scan_metadata
+            if general_scan_text:
+                general_candidates = self._parse_expert_analyses(
+                    general_scan_text,
+                    review.subject,
+                    expert,
+                    file_path,
+                    line_start,
+                    max_findings=max_findings_cap,
+                    require_rule_guided=True,
+                )
+                if general_candidates:
+                    parsed_candidates = self._merge_expert_analysis_candidates(
+                        parsed_candidates,
+                        general_candidates,
+                        max_findings=max_findings_cap,
+                    )
         custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
             review=review,
             expert=expert,
@@ -6404,6 +6444,174 @@ class ReviewRunner(
         if not targets:
             targets.append({"file_path": fallback_file_path, "line_start": int(fallback_line_start or 1)})
         return targets
+
+    def _run_rule_guided_general_expert_profile_scan(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        normalized_batch_items: list[dict[str, object]],
+        repository_context: dict[str, object],
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        targets = self._build_empty_candidate_retry_targets(
+            normalized_batch_items=normalized_batch_items,
+            fallback_file_path=file_path,
+            fallback_line_start=line_start,
+        )
+        language = self._infer_code_language(file_path)
+        prompt = "\n".join(
+            [
+                "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]",
+                "本阶段只按专家画像、专家职责、专家审视规范和代码语言通用规范做通用检视。",
+                "它不依赖专家绑定规范是否命中；即使 CUSTOM_RULE_BATCH 为空或全部未命中，也必须全量扫描 TARGET_HUNKS。",
+                "如果存在当前代码锚点和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
+                "如果缺少关联上下文但已有当前代码证据，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
+                "不要输出专家绑定规范结论，不要编造产品规则 ID。",
+                f"专家: {expert.expert_id} / {expert.name_zh}",
+                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1800)}",
+                f"专家审视规范:\n{self._compact_prompt_block(self._build_review_spec_summary(str(expert.review_spec or '')), 2200)}",
+                f"代码语言: {language or 'unknown'}",
+                f"语言通用规范:\n{self._compact_prompt_block(self._build_language_general_guidance(language), 1600)}",
+                "REQUIRED_RULE_IDS: [\"GENERAL-EXPERT-CHECKS\"]",
+                "",
+                "[TARGET_HUNKS]",
+                json.dumps(targets, ensure_ascii=False, indent=2),
+                "",
+                "[COMPACT_CONTEXT]",
+                self._clip_diagnostic_text(
+                    self._build_repository_context_summary(repository_context or {}, []),
+                    12000,
+                ),
+                "",
+                "[OUTPUT_JSON]",
+                json.dumps(
+                    {
+                        "rule_check_results": [
+                            {
+                                "rule_id": "GENERAL-EXPERT-CHECKS",
+                                "status": "violated|passed|not_applicable|insufficient_context",
+                                "evidence": ["string"],
+                                "missing_context": ["string"],
+                                "reason": "string",
+                            }
+                        ],
+                        "candidate_findings": [
+                            {
+                                "rule_id": "GENERAL-EXPERT-CHECKS",
+                                "title": "string",
+                                "file_path": file_path,
+                                "line": line_start,
+                                "evidence": "string",
+                                "confidence": "high|medium|low",
+                            }
+                        ],
+                        "context_requests": [],
+                        "self_check": {
+                            "checked_all_rules": True,
+                            "used_context_files": [],
+                            "unverified_assumptions": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "只输出一个 JSON 对象，不要输出 Markdown，不要添加额外解释。",
+            ]
+        )
+        try:
+            result = self.llm_chat_service.complete_text(
+                system_prompt=(
+                    "你是专家画像通用代码检视器。只按专家职责和语言通用规范扫描目标 hunk；"
+                    "绑定规则未命中不是无问题结论。只输出 JSON。"
+                ),
+                user_prompt=prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text='{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["general expert profile scan fallback"]}}',
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_general_profile_scan",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - general scan should degrade, not abort.
+            metadata = {"attempted": True, "success": False, "error": str(exc)}
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_general_profile_scan",
+                    content=f"{expert.name_zh} 专家画像通用扫描失败，系统将继续执行后续流程。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "general_expert_profile_scan": metadata,
+                    },
+                )
+            )
+            return "", metadata
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            result.text,
+            required_rule_ids=["GENERAL-EXPERT-CHECKS"],
+        )
+        payload = self._parse_json_payload(result.text)
+        candidate_count = (
+            len([item for item in list(payload.get("candidate_findings") or []) if isinstance(item, dict)])
+            if isinstance(payload, dict)
+            else 0
+        )
+        metadata = {
+            "attempted": True,
+            "success": valid,
+            "schema_errors": errors,
+            "candidate_count": candidate_count,
+            "required_rule_ids": ["GENERAL-EXPERT-CHECKS"],
+            "llm_call_id": result.call_id,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(prompt, 120000),
+            "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+            "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_general_profile_scan",
+                content=(
+                    f"{expert.name_zh} 已完成专家画像通用扫描，补充 {candidate_count} 条候选。"
+                    if valid
+                    else f"{expert.name_zh} 专家画像通用扫描输出未满足结构合同。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "general_expert_profile_scan": metadata,
+                    "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                    "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                    "model_raw_response_full": metadata["raw_response_full"],
+                    "schema_errors": errors,
+                    **self._llm_message_metadata(result),
+                },
+            )
+        )
+        return (result.text if valid else ""), metadata
 
     def _run_rule_guided_custom_rule_scan_batches(
         self,

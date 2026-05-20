@@ -438,6 +438,124 @@ def test_bound_custom_rules_are_scanned_in_batches_after_empty_main_review(stora
     assert "SEC-JAVA-LOOP-IO-001" in findings[0].matched_rules
 
 
+def test_empty_review_without_bound_rule_hits_runs_general_expert_profile_scan(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_general_profile_scan",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/general-scan",
+            target_ref="main",
+            title="General expert scan",
+            changed_files=["src/main/java/demo/UserController.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/demo/UserController.java b/src/main/java/demo/UserController.java\n"
+                "--- a/src/main/java/demo/UserController.java\n"
+                "+++ b/src/main/java/demo/UserController.java\n"
+                "@@ -20,1 +20,1 @@\n"
+                "+ log.info(\"token={}\", request.getHeader(\"Authorization\"));\n"
+            ),
+        ),
+    )
+    runner.review_repo.save(review)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+        review_spec="必须按照安全专家画像检查敏感信息泄露、权限绕过和输入边界。",
+    )
+    command_message = ConversationMessage(
+        review_id=review.review_id,
+        issue_id="review_orchestration",
+        expert_id="main_agent",
+        message_type="main_agent_command",
+        content="请检查安全问题",
+        metadata={},
+    )
+    monkeypatch.setattr(runner.capability_service, "collect_tool_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_skill_activation_service, "activate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner.review_tool_gateway, "invoke_for_expert", lambda *_args, **_kwargs: [])
+
+    empty_structured = (
+        '{"rule_check_results":[{"rule_id":"GENERAL-EXPERT-CHECKS","status":"passed",'
+        '"evidence":[],"missing_context":[],"reason":"未发现问题"}],'
+        '"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,'
+        '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
+    )
+    general_candidate = (
+        '{"rule_check_results":[{"rule_id":"GENERAL-EXPERT-CHECKS","status":"violated",'
+        '"evidence":["log.info 输出 Authorization header"],"missing_context":[],'
+        '"reason":"安全专家画像要求检查敏感信息泄露，Authorization token 不应写入日志"}],'
+        '"candidate_findings":[{"rule_id":"GENERAL-EXPERT-CHECKS","title":"日志明文输出 Authorization token",'
+        '"file_path":"src/main/java/demo/UserController.java","line":20,'
+        '"evidence":"log.info(\\"token={}\\", request.getHeader(\\"Authorization\\"))",'
+        '"confidence":"high"}],"context_requests":[],"self_check":{"checked_all_rules":true,'
+        '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
+    )
+    phases: list[str] = []
+    prompts: dict[str, str] = {}
+
+    def fake_complete_text(**kwargs):
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        phases.append(phase)
+        prompts[phase] = str(kwargs.get("user_prompt") or "")
+        text = general_candidate if phase == "expert_general_profile_scan" else empty_structured
+        return LLMTextResult(
+            text=text,
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id=f"call-{phase or 'main'}",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    runner._run_expert_from_command(
+        review=review,
+        expert=expert,
+        command_message=command_message,
+        file_path="src/main/java/demo/UserController.java",
+        line_start=20,
+        repository_context={"summary": "新增 Authorization header 日志输出。"},
+        target_hunk={
+            "hunk_header": "@@ -20,1 +20,1 @@",
+            "start_line": 20,
+            "end_line": 20,
+            "changed_lines": [20],
+            "excerpt": "+ log.info(\"token={}\", request.getHeader(\"Authorization\"));",
+        },
+        target_hunks=[],
+        related_files=[],
+        expected_checks=["安全专家画像通用检查"],
+        disallowed_inference=[],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
+        bound_documents=[],
+        knowledge_context={},
+        rule_screening={"matched_rules_for_llm": []},
+        finding_payloads=[],
+    )
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert "expert_general_profile_scan" in phases
+    assert "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]" in prompts["expert_general_profile_scan"]
+    assert "专家画像" in prompts["expert_general_profile_scan"]
+    assert len(findings) == 1
+    assert "Authorization token" in findings[0].title
+    assert "GENERAL-EXPERT-CHECKS" in findings[0].matched_rules
+
+
 def test_rule_check_prepass_uses_dedicated_inputs_without_nested_main_prompt(storage_root: Path, monkeypatch) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
