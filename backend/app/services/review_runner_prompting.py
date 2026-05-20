@@ -350,6 +350,11 @@ class ReviewRunnerPromptingMixin:
                 "unverified_assumptions": ["string"],
             },
         }
+        disallowed_text = " / ".join(disallowed_inference[:5])
+        disallowed_text = disallowed_text.replace(
+            "证据不足时不要输出 finding",
+            "没有当前代码锚点时不要输出候选；有当前代码证据但缺上下文时写 context_requests",
+        )
         lines = [
             "[SYSTEM RULES]",
             "你是代码审查专家。只能基于 EXPERT_PROFILE、DIFF、CONTEXT_PACKET、RULE_CARDS 判断，不要编造缺失上下文。",
@@ -369,7 +374,7 @@ class ReviewRunnerPromptingMixin:
             f"目标行号: {line_start}",
             f"主Agent派工理由: {str(repository_context.get('routing_reason') or '').strip() or '未提供'}",
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}",
-            f"禁止推断: {' / '.join(disallowed_inference[:5]) or '证据不足时不要输出 finding'}",
+            f"候选边界: {disallowed_text or '不要把没有当前代码锚点的猜测输出为候选；有当前代码证据但缺上下文时，保留 candidate_findings 并写 context_requests。'}",
             "",
             "[EXPERT_PROFILE]",
             f"专家职责说明:\n{expert_scope_summary}",

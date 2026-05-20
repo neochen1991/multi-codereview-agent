@@ -5002,6 +5002,49 @@ class ReviewRunner(
             max_findings=max_findings_cap,
             require_rule_guided=not prompt_profile.allow_legacy_expert_output,
         )
+        empty_retry_metadata: dict[str, object] = {}
+        if (
+            prompt_profile.require_rule_check_results
+            and not parsed_candidates
+            and self._should_retry_empty_rule_guided_candidate_response(
+                target_hunk=target_hunk,
+                target_hunks=target_hunks,
+                repository_context=repository_context,
+                rule_screening=rule_screening or {},
+            )
+        ):
+            retry_text, empty_retry_metadata = self._run_rule_guided_empty_candidate_retry(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                previous_response=llm_text_for_parse,
+                rule_screening=rule_screening or {},
+                required_rule_ids=required_rule_ids,
+                normalized_batch_items=normalized_batch_items,
+                repository_context=repository_context,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if empty_retry_metadata:
+                expert_llm_diagnostics["empty_candidate_retry"] = empty_retry_metadata
+            if retry_text:
+                retry_candidates = self._parse_expert_analyses(
+                    retry_text,
+                    review.subject,
+                    expert,
+                    file_path,
+                    line_start,
+                    max_findings=max_findings_cap,
+                    require_rule_guided=True,
+                )
+                if retry_candidates:
+                    parsed_candidates = self._merge_expert_analysis_candidates(
+                        parsed_candidates,
+                        retry_candidates,
+                        max_findings=max_findings_cap,
+                    )
         parsed_candidates = self._append_observation_followup_candidates(
             review=review,
             subject=review.subject,
@@ -6055,6 +6098,253 @@ class ReviewRunner(
             )
         )
         return (result.text if valid else ""), metadata
+
+    def _should_retry_empty_rule_guided_candidate_response(
+        self,
+        *,
+        target_hunk: dict[str, object],
+        target_hunks: list[dict[str, object]],
+        repository_context: dict[str, object],
+        rule_screening: dict[str, object],
+    ) -> bool:
+        if self._has_substantive_changed_code(target_hunk):
+            return True
+        if any(self._has_substantive_changed_code(dict(item)) for item in list(target_hunks or []) if isinstance(item, dict)):
+            return True
+        if list((repository_context or {}).get("review_observations") or []):
+            return True
+        if list((rule_screening or {}).get("matched_rules_for_llm") or []):
+            return True
+        return False
+
+    def _has_substantive_changed_code(self, target_hunk: dict[str, object]) -> bool:
+        excerpt = str((target_hunk or {}).get("excerpt") or "")
+        if not excerpt.strip():
+            return False
+        for raw_line in excerpt.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            code = line[1:].strip()
+            if not code or code in {"{", "}", ");", "};"}:
+                continue
+            if code.startswith(("//", "*", "/*")):
+                continue
+            return True
+        return False
+
+    def _run_rule_guided_empty_candidate_retry(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        previous_response: str,
+        rule_screening: dict[str, object],
+        required_rule_ids: list[str],
+        normalized_batch_items: list[dict[str, object]],
+        repository_context: dict[str, object],
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        targets = self._build_empty_candidate_retry_targets(
+            normalized_batch_items=normalized_batch_items,
+            fallback_file_path=file_path,
+            fallback_line_start=line_start,
+        )
+        retry_prompt = "\n".join(
+            [
+                "[EMPTY_CANDIDATE_RETRY]",
+                "上一轮输出结构合法，但 candidate_findings 为空。当前输入包含实质变更代码，因此必须重新做一次证据聚焦审查。",
+                "本阶段不要复述上一轮结论，不要输出 Markdown。",
+                "如果任一目标 hunk 中存在违反专家职责、专家规范、语言通用规范或 RULE_CARDS 的代码证据，必须输出 candidate_findings。",
+                "如果仍判断无问题，candidate_findings 可以为空，但 self_check.unverified_assumptions 必须写明逐个 hunk 无问题的具体原因。",
+                "有当前代码锚点但还缺上下文时，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
+                f"专家: {expert.expert_id} / {expert.name_zh}",
+                f"职责: {expert.role}",
+                f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids or ['GENERAL-EXPERT-CHECKS'], ensure_ascii=False)}",
+                "",
+                "[RULE_CARDS]",
+                self._build_rule_guided_rule_cards(
+                    rule_screening or {},
+                    [str(item).strip() for item in list(getattr(expert, "focus_areas", []) or []) if str(item).strip()],
+                    max_rules_per_prompt=24,
+                ),
+                "",
+                "[TARGET_HUNKS]",
+                json.dumps(targets, ensure_ascii=False, indent=2),
+                "",
+                "[COMPACT_CONTEXT]",
+                self._clip_diagnostic_text(
+                    self._build_repository_context_summary(repository_context or {}, []),
+                    12000,
+                ),
+                "",
+                "[PREVIOUS_EMPTY_RESPONSE]",
+                self._clip_diagnostic_text(str(previous_response or ""), 6000),
+                "",
+                "[OUTPUT_JSON]",
+                json.dumps(
+                    {
+                        "rule_check_results": [
+                            {
+                                "rule_id": "string",
+                                "status": "violated|passed|not_applicable|insufficient_context",
+                                "evidence": ["string"],
+                                "missing_context": ["string"],
+                                "reason": "string",
+                            }
+                        ],
+                        "candidate_findings": [
+                            {
+                                "rule_id": "string",
+                                "title": "string",
+                                "file_path": file_path,
+                                "line": line_start,
+                                "evidence": "string",
+                                "confidence": "high|medium|low",
+                            }
+                        ],
+                        "context_requests": [],
+                        "self_check": {
+                            "checked_all_rules": True,
+                            "used_context_files": [],
+                            "unverified_assumptions": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            ]
+        )
+        try:
+            result = self.llm_chat_service.complete_text(
+                system_prompt=(
+                    "你是代码审查空结果复核器。上一轮为空不是成功结论；"
+                    "必须重新扫描目标 hunk，有代码证据就输出候选。只输出 JSON。"
+                ),
+                user_prompt=retry_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text='{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["empty candidate retry fallback"]}}',
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_empty_candidate_retry",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - empty retry is diagnostic and should not abort.
+            metadata = {"attempted": True, "success": False, "error": str(exc)}
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_empty_candidate_retry",
+                    content=f"{expert.name_zh} 空候选复核失败，系统将继续执行 observation 兜底。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "empty_candidate_retry": metadata,
+                    },
+                )
+            )
+            return "", metadata
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            result.text,
+            required_rule_ids=required_rule_ids or ["GENERAL-EXPERT-CHECKS"],
+        )
+        payload = self._parse_json_payload(result.text)
+        candidate_count = (
+            len([item for item in list(payload.get("candidate_findings") or []) if isinstance(item, dict)])
+            if isinstance(payload, dict)
+            else 0
+        )
+        metadata = {
+            "attempted": True,
+            "success": valid,
+            "schema_errors": errors,
+            "candidate_count": candidate_count,
+            "required_rule_ids": required_rule_ids,
+            "llm_call_id": result.call_id,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(retry_prompt, 120000),
+            "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+            "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_empty_candidate_retry",
+                content=(
+                    f"{expert.name_zh} 已完成空候选结果复核，补充 {candidate_count} 条候选。"
+                    if candidate_count
+                    else f"{expert.name_zh} 已完成空候选结果复核，仍未补充候选。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "empty_candidate_retry": metadata,
+                    "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                    "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                    "model_raw_response_full": metadata["raw_response_full"],
+                    "schema_errors": errors,
+                    **self._llm_message_metadata(result),
+                },
+            )
+        )
+        return (result.text if valid else ""), metadata
+
+    def _build_empty_candidate_retry_targets(
+        self,
+        *,
+        normalized_batch_items: list[dict[str, object]],
+        fallback_file_path: str,
+        fallback_line_start: int,
+    ) -> list[dict[str, object]]:
+        targets: list[dict[str, object]] = []
+        for item in list(normalized_batch_items or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file_path") or fallback_file_path or "").strip()
+            target_hunks = [
+                dict(hunk)
+                for hunk in list(item.get("target_hunks") or [])
+                if isinstance(hunk, dict)
+            ] or ([dict(item.get("target_hunk") or {})] if isinstance(item.get("target_hunk"), dict) else [])
+            for hunk in target_hunks[:8]:
+                if not hunk:
+                    continue
+                targets.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": int(hunk.get("start_line") or hunk.get("line_start") or item.get("line_start") or fallback_line_start or 1),
+                        "hunk_header": str(hunk.get("hunk_header") or ""),
+                        "changed_lines": [
+                            int(value)
+                            for value in list(hunk.get("changed_lines") or [])
+                            if isinstance(value, int)
+                        ],
+                        "excerpt": self._clip_diagnostic_text(str(hunk.get("excerpt") or ""), 4000),
+                    }
+                )
+        if not targets:
+            targets.append({"file_path": fallback_file_path, "line_start": int(fallback_line_start or 1)})
+        return targets
 
     def _validate_rule_guided_llm_response_contract(
         self,
