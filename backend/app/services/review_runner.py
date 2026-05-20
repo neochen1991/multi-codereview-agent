@@ -4993,6 +4993,65 @@ class ReviewRunner(
             expert_llm_diagnostics["schema_contract"] = schema_contract_metadata
         if rule_prepass_metadata:
             expert_llm_diagnostics["rule_check_prepass"] = rule_prepass_metadata
+        supplemental_scan_metadata: dict[str, object] = {}
+        supplemental_candidates: list[dict[str, object]] = []
+        if prompt_profile.require_rule_check_results:
+            general_scan_text, general_scan_metadata = self._run_rule_guided_general_code_scan(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                base_user_prompt=user_prompt,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if general_scan_metadata:
+                supplemental_scan_metadata["general_code_scan"] = general_scan_metadata
+            if general_scan_text:
+                supplemental_candidates = self._merge_expert_analysis_candidates(
+                    supplemental_candidates,
+                    self._parse_expert_analyses(
+                        general_scan_text,
+                        review.subject,
+                        expert,
+                        file_path,
+                        line_start,
+                        max_findings=max_findings_cap,
+                        require_rule_guided=True,
+                    ),
+                    max_findings=max_findings_cap,
+                )
+            custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                base_user_prompt=user_prompt,
+                rule_screening=rule_screening or {},
+                max_rules_per_batch=prompt_profile.max_rules_per_prompt,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if custom_scan_metadata:
+                supplemental_scan_metadata["custom_rule_batch_scan"] = custom_scan_metadata
+            for custom_scan_text in custom_scan_texts:
+                supplemental_candidates = self._merge_expert_analysis_candidates(
+                    supplemental_candidates,
+                    self._parse_expert_analyses(
+                        custom_scan_text,
+                        review.subject,
+                        expert,
+                        file_path,
+                        line_start,
+                        max_findings=max_findings_cap,
+                        require_rule_guided=True,
+                    ),
+                    max_findings=max_findings_cap,
+                )
+        if supplemental_scan_metadata:
+            expert_llm_diagnostics["supplemental_rule_guided_scans"] = supplemental_scan_metadata
         parsed_candidates = self._parse_expert_analyses(
             llm_text_for_parse,
             review.subject,
@@ -5002,6 +5061,12 @@ class ReviewRunner(
             max_findings=max_findings_cap,
             require_rule_guided=not prompt_profile.allow_legacy_expert_output,
         )
+        if supplemental_candidates:
+            parsed_candidates = self._merge_expert_analysis_candidates(
+                parsed_candidates,
+                supplemental_candidates,
+                max_findings=max_findings_cap,
+            )
         parsed_candidates = self._append_observation_followup_candidates(
             review=review,
             subject=review.subject,
@@ -6055,6 +6120,304 @@ class ReviewRunner(
             )
         )
         return (result.text if valid else ""), metadata
+
+    def _run_rule_guided_general_code_scan(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        base_user_prompt: str,
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        """Run a separate general-code scan so custom rule miss does not suppress expert review."""
+
+        required_rule_ids = ["GENERAL-EXPERT-CHECKS"]
+        general_prompt = "\n".join(
+            [
+                "[GENERAL_CODE_REVIEW_ONLY]",
+                "本阶段只做通用代码规范扫描，不做自定义绑定规范逐条校验。",
+                "必须基于专家职责说明、专家审视规范、语言通用规范、DIFF 和 CONTEXT_PACKET，全量扫描所有目标 hunk。",
+                "即使 RULE_CARDS 没有产品/仓库规则命中，也必须检查真实代码缺陷、明显安全问题、正确性问题、性能问题和测试缺口中属于该专家职责的部分。",
+                "有明确代码锚点但还缺少上下文时，candidate_findings 仍要保留，review_part 写 general_code_review，rule_source 写 expert_general 或 language_general，并在 context_requests 写明缺什么。",
+                "不要引用不存在的产品规则 ID；通用扫描候选 rule_id 使用 GENERAL-EXPERT-CHECKS。",
+                "输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check。",
+                f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
+                "",
+                "[ORIGINAL_REVIEW_TASK]",
+                self._clip_diagnostic_text(str(base_user_prompt or ""), 42000),
+            ]
+        )
+        try:
+            result = self.llm_chat_service.complete_text(
+                system_prompt=(
+                    "你是通用代码审查专家。只执行通用代码规范扫描。"
+                    "不要因为自定义规则未命中而返回空结果。只输出 JSON。"
+                ),
+                user_prompt=general_prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=(
+                    '{"rule_check_results":[{"rule_id":"GENERAL-EXPERT-CHECKS","review_part":"general_code_review",'
+                    '"rule_source":"expert_general","status":"insufficient_context","evidence":[],"missing_context":["general scan fallback"],'
+                    '"reason":"通用扫描调用失败或超时"}],"candidate_findings":[],"context_requests":[]'
+                    ',"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["general scan fallback"]}}'
+                ),
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_general_code_scan",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - supplemental scan must not abort the main review.
+            metadata = {"attempted": True, "success": False, "error": str(exc)}
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_general_code_scan",
+                    content=f"{expert.name_zh} 通用代码规范独立扫描失败，主审查结果将继续保留。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "general_code_scan": metadata,
+                    },
+                )
+            )
+            return "", metadata
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            result.text,
+            required_rule_ids=required_rule_ids,
+        )
+        metadata = {
+            "attempted": True,
+            "success": valid,
+            "schema_errors": errors,
+            "required_rule_ids": required_rule_ids,
+            "llm_call_id": result.call_id,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(general_prompt, 120000),
+            "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+            "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_general_code_scan",
+                content=(
+                    f"{expert.name_zh} 已完成通用代码规范独立扫描。"
+                    if valid
+                    else f"{expert.name_zh} 通用代码规范独立扫描输出未满足结构合同。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "general_code_scan": metadata,
+                    "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                    "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                    "model_raw_response_full": metadata["raw_response_full"],
+                    "schema_errors": errors,
+                    **self._llm_message_metadata(result),
+                },
+            )
+        )
+        return (result.text if valid else ""), metadata
+
+    def _run_rule_guided_custom_rule_scan_batches(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        base_user_prompt: str,
+        rule_screening: dict[str, object],
+        max_rules_per_batch: int,
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[list[str], dict[str, object]]:
+        """Run bound custom/product rules in batches independent from the general scan."""
+
+        rule_batches = self._split_custom_rule_scan_batches(
+            rule_screening,
+            max_rules_per_batch=max_rules_per_batch,
+        )
+        if not rule_batches:
+            return [], {"attempted": False, "reason": "no_custom_rules"}
+        valid_texts: list[str] = []
+        batch_metadata: list[dict[str, object]] = []
+        for batch_index, rules in enumerate(rule_batches, start=1):
+            required_rule_ids = [
+                str(item.get("rule_id") or item.get("id") or "").strip()
+                for item in rules
+                if str(item.get("rule_id") or item.get("id") or "").strip()
+            ]
+            if not required_rule_ids:
+                continue
+            custom_prompt = "\n".join(
+                [
+                    "[CUSTOM_BOUND_RULE_REVIEW_ONLY]",
+                    "本阶段只做专家绑定/产品/仓库自定义规范校验，不做通用规范扫描。",
+                    "必须严格逐条检查 CUSTOM_RULE_BATCH 中的规则，并全量扫描原任务中的所有目标 hunk。",
+                    "如果某条自定义规则不适用，输出 not_applicable；缺上下文输出 insufficient_context；不能因为没有强命中就跳过规则检查。",
+                    "若发现候选，candidate_findings 的 review_part 必须是 custom_rule_review，rule_source 必须是 custom_bound_rule，rule_id 必须来自 CUSTOM_RULE_BATCH。",
+                    "输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check。",
+                    f"BATCH_INDEX: {batch_index}/{len(rule_batches)}",
+                    f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
+                    "",
+                    "[CUSTOM_RULE_BATCH]",
+                    json.dumps(rules, ensure_ascii=False, indent=2),
+                    "",
+                    "[ORIGINAL_REVIEW_TASK]",
+                    self._clip_diagnostic_text(str(base_user_prompt or ""), 36000),
+                ]
+            )
+            try:
+                result = self.llm_chat_service.complete_text(
+                    system_prompt=(
+                        "你是自定义规范校验器。只按本批绑定规范逐条审查。"
+                        "不得输出通用规则结论，不得编造规则 ID。只输出 JSON。"
+                    ),
+                    user_prompt=custom_prompt,
+                    resolution=resolution,
+                    runtime_settings=runtime_settings,
+                    fallback_text=(
+                        '{"rule_check_results":[],"candidate_findings":[],"context_requests":[]'
+                        ',"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["custom rule batch fallback"]}}'
+                    ),
+                    allow_fallback=False,
+                    timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                    max_attempts=1,
+                    log_context={
+                        "review_id": review.review_id,
+                        "issue_id": "review_orchestration",
+                        "expert_id": expert.expert_id,
+                        "phase": "expert_custom_rule_batch_scan",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "batch_index": batch_index,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - one custom batch must not abort others.
+                batch_metadata.append(
+                    {
+                        "batch_index": batch_index,
+                        "success": False,
+                        "error": str(exc),
+                        "required_rule_ids": required_rule_ids,
+                    }
+                )
+                continue
+            valid, errors = self._validate_rule_guided_llm_response_contract(
+                result.text,
+                required_rule_ids=required_rule_ids,
+            )
+            metadata = {
+                "batch_index": batch_index,
+                "success": valid,
+                "schema_errors": errors,
+                "required_rule_ids": required_rule_ids,
+                "llm_call_id": result.call_id,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "total_tokens": result.total_tokens,
+                "prompt_snapshot_full": self._clip_diagnostic_text(custom_prompt, 120000),
+                "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+                "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+            }
+            batch_metadata.append(metadata)
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_custom_rule_batch_scan",
+                    content=(
+                        f"{expert.name_zh} 已完成第 {batch_index}/{len(rule_batches)} 批自定义绑定规范校验。"
+                        if valid
+                        else f"{expert.name_zh} 第 {batch_index}/{len(rule_batches)} 批自定义绑定规范校验输出未满足结构合同。"
+                    ),
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "custom_rule_batch_scan": metadata,
+                        "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                        "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                        "model_raw_response_full": metadata["raw_response_full"],
+                        "schema_errors": errors,
+                        **self._llm_message_metadata(result),
+                    },
+                )
+            )
+            if valid:
+                valid_texts.append(result.text)
+        return valid_texts, {
+            "attempted": True,
+            "batch_count": len(rule_batches),
+            "success_count": len(valid_texts),
+            "batches": batch_metadata,
+        }
+
+    def _split_custom_rule_scan_batches(
+        self,
+        rule_screening: dict[str, object],
+        *,
+        max_rules_per_batch: int,
+    ) -> list[list[dict[str, object]]]:
+        seen: set[str] = set()
+        rules: list[dict[str, object]] = []
+        for item in list((rule_screening or {}).get("matched_rules_for_llm") or []):
+            if not isinstance(item, dict):
+                continue
+            rule_id = str(item.get("rule_id") or item.get("id") or "").strip()
+            if not rule_id or rule_id == "GENERAL-EXPERT-CHECKS" or rule_id in seen:
+                continue
+            seen.add(rule_id)
+            rules.append(
+                {
+                    "rule_id": rule_id,
+                    "review_part": "custom_rule_review",
+                    "rule_source": "custom_bound_rule",
+                    "title": str(item.get("title") or "").strip(),
+                    "severity": str(item.get("priority") or item.get("severity") or "P2").strip(),
+                    "must_check": self._extract_rule_guided_rule_list(item, "must_check_items", "must_check", fallback=[]),
+                    "required_context": self._extract_rule_guided_rule_list(
+                        item,
+                        "required_context",
+                        fallback=["changed_file_full_content", "repository_context"],
+                    ),
+                    "evidence_required": self._extract_rule_guided_rule_list(
+                        item,
+                        "evidence_required",
+                        fallback=["明确代码行", "违反规则的原因"],
+                    ),
+                    "false_positive_guards": self._extract_rule_guided_rule_list(item, "false_positive_guards", fallback=[]),
+                    "normalized_issue_type": str(item.get("normalized_issue_type") or "").strip(),
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+            if len(rules) >= 48:
+                break
+        batch_size = max(1, min(max(1, int(max_rules_per_batch or 1)), 12))
+        return [rules[index : index + batch_size] for index in range(0, len(rules), batch_size)]
 
     def _validate_rule_guided_llm_response_contract(
         self,

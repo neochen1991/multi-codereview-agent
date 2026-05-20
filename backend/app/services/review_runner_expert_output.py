@@ -194,6 +194,8 @@ class ReviewRunnerExpertOutputMixin:
                     else "需要补充缺失上下文后复核候选是否具备完整规则证据。",
                     "file_path": str(item.get("file_path") or file_path).strip().replace("\\", "/"),
                     "observation_ids": self._normalize_text_list(item.get("observation_ids"), []),
+                    "review_part": str(item.get("review_part") or rule_result.get("review_part") or "").strip(),
+                    "rule_source": str(item.get("rule_source") or rule_result.get("rule_source") or "").strip(),
                     "rule_guided_candidate": True,
                     "rule_check_status": status or "violated",
                     "missing_context": missing_context,
