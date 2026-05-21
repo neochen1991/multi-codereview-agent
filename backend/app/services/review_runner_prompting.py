@@ -310,6 +310,52 @@ class ReviewRunnerPromptingMixin:
             if include_related_diff_summary
             else "多文件批量模式：其他变更文件摘要由批次附录提供。"
         )
+        java_quality = self.java_quality_signal_extractor.extract(
+            file_path=file_path,
+            target_hunk=target_hunk,
+            repository_context=repository_context,
+            full_diff=target_file_full_diff,
+        )
+        prompt_repository_context = dict(repository_context or {})
+        if list(java_quality.get("signals") or []):
+            prompt_repository_context["java_quality_signals"] = list(java_quality.get("signals") or [])
+        if str(java_quality.get("summary") or "").strip():
+            prompt_repository_context["java_quality_signal_summary"] = str(java_quality.get("summary") or "").strip()
+        if list(java_quality.get("observations") or []):
+            prompt_repository_context["review_observations"] = self._normalize_review_observations(
+                java_quality.get("observations")
+            )
+        if dict(java_quality.get("analysis_stages") or {}):
+            prompt_repository_context["analysis_stages"] = dict(java_quality.get("analysis_stages") or {})
+        prompt_repository_context = self._prepare_prompt_repository_context(
+            expert=expert,
+            repository_context=prompt_repository_context,
+            rule_screening=rule_screening or {},
+            analysis_mode="light",
+        )
+        input_completeness_summary = self._build_review_input_completeness_summary(
+            subject,
+            file_path,
+            line_start,
+            prompt_repository_context,
+            expert=expert,
+            bound_documents=bound_documents,
+            rule_screening=rule_screening or {},
+            language=language,
+        )
+        observation_review_summary = self._build_observation_review_summary(prompt_repository_context)
+        review_learning_hints = ""
+        if hasattr(self, "review_learning_service"):
+            review_learning_hints = self.review_learning_service.build_prompt_hints(
+                repo_id=str(subject.repo_id or ""),
+                issue_types=self._extract_review_learning_issue_types(java_quality, rule_screening or {}),
+                file_paths=[file_path, *[str(item) for item in subject.changed_files or []]],
+                max_items=3,
+                max_chars=600,
+            )
+        source_context_note = ""
+        if not include_target_file_full_diff:
+            source_context_note = "本轮为多文件批量模式，详细源码片段已在“多文件联合审查补充”逐文件提供，此处不重复展开。"
         context_packet = {
             "target_file": file_path,
             "target_line": line_start,
@@ -317,11 +363,15 @@ class ReviewRunnerPromptingMixin:
             "expert_review_spec": expert_review_spec_summary,
             "language_general_guidance": language_general_guidance,
             "java_ddd_focus": java_ddd_focus,
+            "input_completeness": input_completeness_summary,
+            "review_observations": observation_review_summary,
+            "review_learning_hints": review_learning_hints or "当前目标文件未命中可复用的历史人工反馈案例。",
+            "source_context_note": source_context_note,
             "target_hunk": self._build_hunk_summary(target_hunk),
             "same_file_hunks": self._build_hunk_batch_summary(target_hunks),
             "target_file_full_diff": target_file_full_diff,
             "related_diff_summary": related_diff_summary,
-            "repository_context": self._build_repository_context_summary(repository_context, runtime_tool_results),
+            "repository_context": self._build_repository_context_summary(prompt_repository_context, runtime_tool_results),
             "runtime_tools": self._build_runtime_tool_summary(runtime_tool_results),
             "code_excerpt": self._build_code_excerpt(subject, file_path, line_start, expert.expert_id),
             "active_skills": self._build_active_skill_summary(active_skills),
@@ -345,6 +395,7 @@ class ReviewRunnerPromptingMixin:
                     "line": line_start,
                     "evidence": "string",
                     "confidence": "high|medium|low",
+                    "observation_ids": ["string"],
                 }
             ],
             "context_requests": [
@@ -373,6 +424,8 @@ class ReviewRunnerPromptingMixin:
             "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
             "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
             "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
+            "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；不要把多个文件、多个风险点或多个修复方向合并成一条。",
+            "如果同一 hunk 存在多个问题，请拆成多条 candidate_findings；每条的 title、evidence、reason、suggested_code 必须互相指向同一问题。",
             "如果缺少上下文但存在可疑代码证据，必须同时输出 candidate_findings 和 context_requests，不要静默省略。",
             "禁止输出 legacy {\"findings\":[...]}；缺少 rule_check_results 或 candidate_findings 会被系统拒收。",
             "所有面向用户的说明使用中文；normalized_issue_type、代码标识、路径可保留英文。",
@@ -399,6 +452,12 @@ class ReviewRunnerPromptingMixin:
             f"已激活技能:\n{context_packet['active_skills']}",
             f"运行时工具调用结果:\n{context_packet['runtime_tools']}",
             f"本次审核绑定的详细设计文档:\n{self._build_design_doc_summary(subject)}",
+            f"输入完整性校验:\n{input_completeness_summary}",
+            f"结构化观察点:\n{observation_review_summary}",
+            f"历史人工反馈:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工反馈案例。'}",
+            f"附加产品/仓库规则遍历结果:\n{self._build_rule_screening_summary(rule_screening or {})}",
+            "审查阶段说明:\n规则阶段：逐条检查 RULE_CARDS；通用阶段：按专家画像、专家通用规范和语言通用规范全量扫描目标 hunk；两部分候选取并集。",
+            source_context_note,
             f"目标文件完整 diff:\n{target_file_full_diff}",
             f"其他变更文件摘要:\n{related_diff_summary}",
             "",
@@ -1434,11 +1493,55 @@ class ReviewRunnerPromptingMixin:
     ) -> str:
         prompt_profile = resolve_model_prompt_profile(model_name or expert.model, profile_name=prompt_profile_name)
         if prompt_profile.avoid_long_system_prompt:
+            review_spec_text = self._compact_prompt_block(
+                self._build_review_spec_summary(str(expert.review_spec or "").strip()),
+                1200,
+            )
+            bound_documents_text = self._compact_prompt_block(
+                (
+                    self._build_bound_documents_summary(bound_documents)
+                    if analysis_mode == "light"
+                    else self._build_bound_documents_fulltext(bound_documents)
+                ),
+                1800 if analysis_mode == "light" else 2600,
+            )
+            active_skill_text = self._compact_prompt_block(
+                self._build_active_skill_summary(active_skills or []),
+                1000,
+            )
+            rule_screening_text = self._compact_prompt_block(
+                self._build_rule_screening_summary(rule_screening or {}),
+                1400,
+            )
             return (
                 f"你是{expert.name_zh}，职责是{expert.role}。\n"
                 "严格遵守用户提示中的 [SYSTEM RULES]、[RULE_CARDS]、[CONTEXT_PACKET] 和 [OUTPUT_JSON]。\n"
                 "必须输出 rule_check_results、candidate_findings、context_requests、self_check。\n"
-                "禁止输出 legacy findings 根结构；只输出 JSON，不输出 Markdown 或额外解释。"
+                "禁止输出 legacy findings 根结构；只输出 JSON，不输出 Markdown 或额外解释。\n"
+                "规则分层：专家通用规范是基础审查依据；附加产品/仓库规则只增强产品特有约束、优先级和误报保护。"
+                "没有附加规则命中时，仍要按专家通用规范报告证据充分的真实问题。\n\n"
+                "《审视规范文档》开始\n"
+                f"{review_spec_text or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
+                "《审视规范文档》结束\n\n"
+                "《已激活 Skills 摘要》开始\n"
+                f"{active_skill_text}\n"
+                "《已激活 Skills 摘要》结束\n\n"
+                "《专家绑定参考文档》开始\n"
+                "《专家绑定参考文档摘要》开始\n"
+                f"{bound_documents_text}\n"
+                "《专家绑定参考文档摘要》结束\n"
+                "《专家绑定参考文档》结束\n\n"
+                "《规则遍历结果摘要》开始\n"
+                f"{rule_screening_text}\n"
+                "《规则遍历结果摘要》结束\n\n"
+                "结构化审查步骤：\n"
+                "1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 candidate_findings。\n"
+                "2. 对每个候选问题先找代码锚点：file_path、line、当前代码片段、相关调用链或配置证据。\n"
+                "3. 目标 hunk 中 `| +` 是修改后的当前代码，`| -` 是旧代码，只能作为对比证据。\n"
+                "4. 如果旧代码里的问题已经被新代码修复，必须返回空 candidate_findings；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
+                "5. 缺少关联上下文但已有当前代码证据时，保留 candidate_findings 并写 context_requests。\n\n"
+                "置信度口径：0.90-1.00 表示直接代码证据充分；0.75-0.89 表示需要少量上下文补充；"
+                "0.50-0.74 是风险假设；低于 0.50 不要输出。normalized_issue_type 必须稳定。"
             )
         base_prompt = expert.system_prompt or f"你是{expert.name_zh}，你的职责是{expert.role}。"
         if analysis_mode == "light":

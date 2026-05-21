@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 class ReviewRunnerIssueValidationMixin:
     """Coalesce, normalize and judge-validate final review issues."""
 
+    def _should_coalesce_final_issues(self, runtime_settings) -> bool:
+        """深度检视模式保留一条 finding/issue 的锚点独立性，避免详情和修复代码串线。"""
+
+        mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        return mode != "thorough_review"
+
     def _coalesce_duplicate_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
         """真实落库前按研发可理解的根因合并重复 issue。"""
 
@@ -710,6 +716,26 @@ class ReviewRunnerIssueValidationMixin:
         next_issue.consistency_check_status = status
         next_issue.consistency_conflicts = self._normalize_text_list(payload.get("consistency_conflicts"), [])
         next_issue.consistency_check_summary = str(payload.get("reason") or "").strip()
+        payload_current_code = str(payload.get("current_code") or "").strip()
+        payload_suggested_code = str(payload.get("suggested_code") or "").strip()
+        payload_anchor_conflicts: list[str] = []
+        if payload_current_code or payload_suggested_code:
+            payload_anchor_issue = next_issue.model_copy(
+                update={
+                    "current_code": payload_current_code or next_issue.current_code,
+                    "suggested_code": payload_suggested_code or next_issue.suggested_code,
+                },
+                deep=True,
+            )
+            payload_anchor_conflicts = self._detect_issue_anchor_conflicts(payload_anchor_issue)
+            next_issue.consistency_conflicts = list(
+                dict.fromkeys(
+                    [
+                        *next_issue.consistency_conflicts,
+                        *payload_anchor_conflicts,
+                    ]
+                )
+            )
         if not next_issue.consistency_check_summary:
             if status == "passed":
                 next_issue.consistency_check_summary = "Judge 校验通过，issue 四段内容一致。"
@@ -726,14 +752,15 @@ class ReviewRunnerIssueValidationMixin:
             next_issue.verified = False
         remediation_alignment = self._filter_issue_remediation_scope(next_issue)
         anchor_conflicts = self._detect_issue_anchor_conflicts(next_issue)
-        if anchor_conflicts and status != "downgraded":
+        combined_anchor_conflicts = list(dict.fromkeys([*payload_anchor_conflicts, *anchor_conflicts]))
+        if combined_anchor_conflicts and status != "downgraded":
             next_issue.status = "needs_human"
             next_issue.needs_human = True
             next_issue.resolution = "consistency_validation_failed"
             next_issue.verified = False
             next_issue.consistency_check_status = "downgraded"
             next_issue.consistency_conflicts = list(
-                dict.fromkeys([*next_issue.consistency_conflicts, *anchor_conflicts])
+                dict.fromkeys([*next_issue.consistency_conflicts, *combined_anchor_conflicts])
             )
         next_issue.updated_at = datetime.now(UTC)
         updated_fields = [

@@ -1431,3 +1431,93 @@ def test_detect_conflicts_does_not_merge_when_severity_gap_is_large():
     result = detect_conflicts(state)
 
     assert len(result["conflicts"]) == 2
+
+
+def test_detect_conflicts_keeps_each_finding_as_separate_issue_in_thorough_review_mode():
+    state = {
+        "runtime_settings": {"review_quality_mode": "thorough_review"},
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_limit",
+                "expert_id": "performance_reliability",
+                "title": "查询删除 LIMIT 导致无界读取",
+                "summary": "SELECT 删除 LIMIT :chunk 后可能一次性读取全部事件。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.91,
+                "verification_needed": False,
+                "file_path": "src/EventConsumer.java",
+                "line_start": 19,
+                "evidence": ["SELECT * FROM domain_events ORDER BY occurred_on ASC"],
+                "cross_file_evidence": [],
+                "context_files": ["src/EventConsumer.java"],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["查询必须保留分页或 LIMIT"],
+                "normalized_issue_type": "query_bound_removed",
+            },
+            {
+                "finding_id": "fdg_catch",
+                "expert_id": "correctness_business",
+                "title": "catch 块静默吞掉异常",
+                "summary": "catch 块删除日志后为空，异常无法被感知。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/EventConsumer.java",
+                "line_start": 19,
+                "evidence": ["catch (Exception e) { }"],
+                "cross_file_evidence": [],
+                "context_files": ["src/EventConsumer.java"],
+                "matched_rules": ["REL-ERR-001"],
+                "violated_guidelines": ["异常不能被静默吞掉"],
+                "normalized_issue_type": "exception_swallowed",
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 2
+    assert {item["issue_id"] for item in result["conflicts"]} == {"fdg_limit", "fdg_catch"}
+    assert all("同一代码行存在" not in item["title"] for item in result["conflicts"])
+    limit_issue = next(item for item in result["conflicts"] if item["issue_id"] == "fdg_limit")
+    assert limit_issue["summary"] == "SELECT 删除 LIMIT :chunk 后可能一次性读取全部事件。"
+
+
+def test_detect_conflicts_does_not_upgrade_expert_failure_placeholder_even_when_filter_disabled():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_failure_placeholder",
+                "expert_id": "security_compliance",
+                "title": "安全与合规专家 执行失败后保守保留的待验证风险",
+                "summary": "",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.28,
+                "verification_needed": True,
+                "file_path": "src/CourseCreator.java",
+                "line_start": 20,
+                "evidence": [
+                    "专家执行失败: 1 validation error for ReviewRuleCheckResult",
+                    "规则命中: Repository、Mapper 与 Query 组装必须避免动态拼接与越权查询",
+                ],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": [],
+                "violated_guidelines": [],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "expert_failure_placeholder"

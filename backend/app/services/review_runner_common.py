@@ -343,19 +343,23 @@ class ReviewRunnerCommonMixin:
             ]
         ).lower()
         keyword_types: list[tuple[str, tuple[str, ...]]] = [
+            (
+                "query_semantics_weakened",
+                ("查询语义", "精确匹配", "模糊匹配", "builder.like", "builder.equal", "equalspredicatetransformer", "predicate"),
+            ),
+            ("query_boundary_missing", ("limit", "分页", "全量扫描", "无上限", "大结果集", "select *")),
+            ("naming_violation", ("命名", "naming", "变量名", "方法名")),
+            ("magic_value", ("魔法值", "magic", "硬编码", "常量")),
+            ("aggregate_factory_bypass", ("聚合工厂", "factory bypass", "直接构造聚合", "new course", "course.create")),
+            ("domain_event_missing", ("领域事件", "domain event", "domain_event", "事件丢失", "未发布事件", "事件未发布", "事件缺失")),
+            ("exception_swallowed", ("吞异常", "catch", "except", "printstacktrace", "只记录日志")),
             ("comment_contract_unimplemented", ("注释", "todo", "fixme", "comment", "未实现", "没有实现", "contract")),
             ("loop_call_amplification", ("循环", "for ", "foreach", "while ", "stream", "批量", "逐条", "n+1", "n + 1")),
             ("lock_contention_risk", ("锁", "synchronized", "lock", "deadlock", "竞态", "并发")),
-            ("aggregate_factory_bypass", ("聚合工厂", "factory bypass", "直接构造聚合", "new course", "course.create")),
-            ("domain_event_missing", ("领域事件", "domain event", "event", "事件丢失", "未发布事件")),
-            ("query_boundary_missing", ("limit", "分页", "全量扫描", "无上限", "大结果集", "select *")),
-            ("exception_swallowed", ("吞异常", "catch", "except", "printstacktrace", "只记录日志")),
             ("missing_auth_check", ("鉴权", "权限", "auth", "permission", "role", "token")),
             ("cache_consistency_risk", ("redis", "cache", "缓存", "ttl", "expire")),
             ("message_idempotency_risk", ("mq", "kafka", "consumer", "producer", "消息", "幂等", "重复消费")),
             ("missing_test", ("测试", "test", "spec", "覆盖")),
-            ("naming_violation", ("命名", "naming", "变量名", "方法名")),
-            ("magic_value", ("魔法值", "magic", "硬编码", "常量")),
         ]
         for issue_type, keywords in keyword_types:
             if any(keyword in text_blob for keyword in keywords):
@@ -489,7 +493,14 @@ class ReviewRunnerCommonMixin:
             configured_timeout = int(getattr(runtime_settings, "light_llm_timeout_seconds", 90) or 90)
             timeout_cap = max(30, int(os.getenv("REVIEW_LIGHT_LLM_TIMEOUT_CAP_SECONDS", "90") or 90))
             configured_attempts = int(getattr(runtime_settings, "light_llm_retry_count", 1) or 1)
-            attempt_cap = max(1, int(os.getenv("REVIEW_LIGHT_LLM_RETRY_CAP", "1") or 1))
+            if str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower() == "thorough_review":
+                configured_attempts = max(
+                    configured_attempts,
+                    int(os.getenv("REVIEW_THOROUGH_LIGHT_LLM_MIN_ATTEMPTS", "2") or 2),
+                )
+                attempt_cap = max(1, int(os.getenv("REVIEW_THOROUGH_LIGHT_LLM_RETRY_CAP", "2") or 2))
+            else:
+                attempt_cap = max(1, int(os.getenv("REVIEW_LIGHT_LLM_RETRY_CAP", "1") or 1))
             return {
                 "timeout_seconds": min(max(30, configured_timeout), timeout_cap),
                 "max_attempts": min(max(1, configured_attempts), attempt_cap),
@@ -505,5 +516,10 @@ class ReviewRunnerCommonMixin:
         analysis_mode: Literal["standard", "light"],
     ) -> int:
         if analysis_mode == "light":
-            return max(1, int(getattr(runtime_settings, "light_max_parallel_experts", 1) or 1))
+            configured = max(1, int(getattr(runtime_settings, "light_max_parallel_experts", 1) or 1))
+            if str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower() == "thorough_review":
+                cap = max(1, int(os.getenv("REVIEW_THOROUGH_LIGHT_MAX_PARALLEL_EXPERTS", "2") or 2))
+                floor = max(1, int(os.getenv("REVIEW_THOROUGH_LIGHT_MIN_PARALLEL_EXPERTS", "2") or 2))
+                return min(max(configured, floor), cap)
+            return configured
         return max(1, int(getattr(runtime_settings, "standard_max_parallel_experts", 4) or 4))

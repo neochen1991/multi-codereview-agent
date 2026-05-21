@@ -2,12 +2,13 @@ from pathlib import Path
 
 import logging
 
-from app.domain.models.knowledge import KnowledgeDocument
+from app.domain.models.knowledge import KnowledgeDocument, KnowledgeReviewRule
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.llm_chat_service import LLMTextResult
 from app.services.knowledge_ingestion_service import KnowledgeIngestionService
 from app.services.knowledge_rule_index_service import KnowledgeRuleIndexService
 from app.services.knowledge_rule_screening_prompting import build_llm_screening_system_prompt
+from app.services.knowledge_rule_index_service import KnowledgeRuleIndexService
 from app.services.knowledge_rule_screening_service import KnowledgeRuleScreeningService
 from app.services.knowledge_service import KnowledgeService
 
@@ -18,6 +19,73 @@ REAL_PERF_RULES_PATH = (
     / "performance_reliability"
     / "performance-reliability-real-rules.md"
 )
+
+
+def test_standard_rule_card_needs_review_is_not_enabled_for_expert_binding() -> None:
+    document = KnowledgeDocument(
+        doc_id="doc_needs_review_rule",
+        title="Incomplete security rule",
+        expert_id="security_compliance",
+        source_filename="security.md",
+        content=(
+            "## RULE: SEC-JAVA-INCOMPLETE\n\n"
+            "### Title\n禁止拼接 SQL\n\n"
+            "### Scope\n- language:java\n\n"
+            "### Trigger Signals\n- Statement.execute\n\n"
+            "### Must Check\n- 检查 SQL 是否拼接用户输入\n\n"
+            "### Required Context\n- changed_file_full_content\n\n"
+            "### Evidence Required\n- SQL 拼接代码行\n\n"
+            "### Severity\nP0\n\n"
+            "### Normalized Issue Type\nsql_injection\n"
+        ),
+    )
+
+    rules = KnowledgeRuleIndexService().build_rules(document)
+
+    assert len(rules) == 1
+    assert rules[0].rule_id == "SEC-JAVA-INCOMPLETE"
+    assert rules[0].enabled is False
+
+
+def test_llm_rule_screening_batch_summary_keeps_prompt_trace(storage_root: Path) -> None:
+    service = KnowledgeRuleScreeningService(storage_root)
+    summary = service._build_llm_batch_summary(
+        batch=[
+            KnowledgeReviewRule(
+                rule_id="SEC-JAVA-001",
+                doc_id="doc",
+                expert_id="security_compliance",
+                title="禁止明文输出 token",
+                priority="P1",
+            )
+        ],
+        parsed=[
+            {
+                "rule_id": "SEC-JAVA-001",
+                "decision": "must_review",
+                "reason": "命中 token 日志",
+            }
+        ],
+        batch_index=1,
+        batch_count=1,
+        llm_result=LLMTextResult(
+            text='{"rules":[{"rule_id":"SEC-JAVA-001","decision":"must_review"}]}',
+            mode="live",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id="llm_trace_demo",
+            system_prompt_snapshot_full="screening system",
+            prompt_snapshot_full="screening user",
+            model_raw_response_full='{"rules":[]}',
+        ),
+        elapsed_ms=12.3,
+    )
+
+    assert summary["llm"]["llm_trace"]["system_prompt_snapshot_full"] == "screening system"
+    assert summary["llm"]["llm_trace"]["prompt_snapshot_full"] == "screening user"
+    assert summary["llm"]["llm_trace"]["model_raw_response_full"] == '{"rules":[]}'
 
 
 def test_knowledge_service_bootstraps_builtin_java_ddd_rules(storage_root: Path) -> None:
@@ -364,7 +432,11 @@ def test_knowledge_rule_screening_service_can_use_llm(storage_root: Path, monkey
             "query_terms": ["hikari", "maximumPoolSize", "datasource"],
             "focus_file": "src/main/java/com/acme/HikariConfig.java",
         },
-        runtime_settings=RuntimeSettings(rule_screening_mode="llm", rule_screening_batch_size=8),
+        runtime_settings=RuntimeSettings(
+            rule_screening_mode="llm",
+            rule_screening_batch_size=8,
+            review_quality_mode="standard",
+        ),
         analysis_mode="standard",
         review_id="rev_llm_screen",
     )
@@ -378,6 +450,53 @@ def test_knowledge_rule_screening_service_can_use_llm(storage_root: Path, monkey
     assert result["batch_summaries"][0]["input_rule_count"] == 2
     assert result["total_elapsed_ms"] >= 0
     assert result["batch_summaries"][0]["llm"]["elapsed_ms"] >= 0
+
+
+def test_thorough_review_rule_screening_uses_recall_heuristic_without_llm_blocking(storage_root: Path, monkeypatch) -> None:
+    ingestion = KnowledgeIngestionService(storage_root)
+    ingestion.ingest(
+        KnowledgeDocument(
+            title="性能规则",
+            expert_id="performance_reliability",
+            doc_type="review_rule",
+            source_filename="perf-rules.md",
+            content=(
+                "## RULE: PERF-SQL-001 大结果集查询必须显式分页或限流\n\n"
+                "### 一级场景\n数据库访问\n\n"
+                "### 描述\n检查查询是否缺少 LIMIT、Pageable 或 setMaxResults。\n\n"
+                "### Must Check\n- SQL 查询必须有分页或 LIMIT 边界\n\n"
+                "### Required Context\n- changed_file_full_content\n\n"
+                "### Evidence Required\n- 查询语句代码行\n\n"
+                "### Severity\nP1\n"
+            ),
+        )
+    )
+    service = KnowledgeRuleScreeningService(storage_root)
+
+    def _fail_if_called(**_kwargs):
+        raise AssertionError("thorough review should not block on LLM rule screening")
+
+    monkeypatch.setattr(service._llm, "complete_text", _fail_if_called)
+
+    result = service.screen(
+        "performance_reliability",
+        {
+            "changed_files": ["src/main/java/com/acme/EventRepository.java"],
+            "query_terms": ["SELECT * FROM domain_events ORDER BY occurred_on ASC", "无 LIMIT"],
+            "focus_file": "src/main/java/com/acme/EventRepository.java",
+        },
+        runtime_settings=RuntimeSettings(
+            rule_screening_mode="llm",
+            review_quality_mode="thorough_review",
+        ),
+        analysis_mode="light",
+        review_id="rev_thorough_screen",
+    )
+
+    assert result["screening_mode"] == "heuristic"
+    assert result["screening_policy"] == "thorough_review_recall_first"
+    assert result["matched_rule_count"] >= 1
+    assert any(item["rule_id"] == "PERF-SQL-001" for item in result["matched_rules_for_llm"])
 
 
 def test_knowledge_rule_screening_service_can_parse_llm_json_wrapped_in_text(storage_root: Path, monkeypatch) -> None:
@@ -427,7 +546,11 @@ def test_knowledge_rule_screening_service_can_parse_llm_json_wrapped_in_text(sto
             "query_terms": ["hikari", "maximumPoolSize", "datasource"],
             "focus_file": "src/main/java/com/acme/HikariConfig.java",
         },
-        runtime_settings=RuntimeSettings(rule_screening_mode="llm", rule_screening_batch_size=8),
+        runtime_settings=RuntimeSettings(
+            rule_screening_mode="llm",
+            rule_screening_batch_size=8,
+            review_quality_mode="standard",
+        ),
         analysis_mode="standard",
         review_id="rev_llm_screen_wrapped",
     )
@@ -538,7 +661,11 @@ def test_knowledge_rule_screening_service_records_llm_batches(storage_root: Path
             "query_terms": ["hikari", "chunk"],
             "focus_file": "src/main/java/com/acme/HikariBatchConsumer.java",
         },
-        runtime_settings=RuntimeSettings(rule_screening_mode="llm", rule_screening_batch_size=1),
+        runtime_settings=RuntimeSettings(
+            rule_screening_mode="llm",
+            rule_screening_batch_size=1,
+            review_quality_mode="standard",
+        ),
         analysis_mode="light",
         review_id="rev_llm_batches",
     )
@@ -600,7 +727,7 @@ def test_knowledge_rule_screening_service_falls_back_when_llm_result_invalid(sto
             "query_terms": ["hikari", "maximumPoolSize", "datasource"],
             "focus_file": "src/main/java/com/acme/HikariConfig.java",
         },
-        runtime_settings=RuntimeSettings(rule_screening_mode="llm"),
+        runtime_settings=RuntimeSettings(rule_screening_mode="llm", review_quality_mode="standard"),
         analysis_mode="standard",
         review_id="rev_llm_fallback",
     )
@@ -655,7 +782,7 @@ def test_knowledge_rule_screening_service_falls_back_when_llm_uses_transport_fal
             "query_terms": ["hikari", "maximumPoolSize", "datasource"],
             "focus_file": "src/main/java/com/acme/HikariConfig.java",
         },
-        runtime_settings=RuntimeSettings(rule_screening_mode="llm"),
+        runtime_settings=RuntimeSettings(rule_screening_mode="llm", review_quality_mode="standard"),
         analysis_mode="standard",
         review_id="rev_llm_transport_fallback",
     )

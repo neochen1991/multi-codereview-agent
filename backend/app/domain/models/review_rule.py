@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 RuleCheckStatus = Literal["violated", "passed", "not_applicable", "insufficient_context"]
@@ -114,6 +114,40 @@ class ReviewRuleCheckResult(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
     reason: str = ""
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {
+            "violated",
+            "violation",
+            "direct_defect",
+            "direct_code_issue",
+            "risk",
+            "risk_hypothesis",
+            "issue",
+            "problem",
+            "hit",
+            "matched",
+            "failed",
+            "fail",
+        }:
+            return "violated"
+        if normalized in {"passed", "pass", "ok", "clean", "no_issue", "no_problem"}:
+            return "passed"
+        if normalized in {"not_applicable", "notapplicable", "n/a", "na", "not_apply"}:
+            return "not_applicable"
+        if normalized in {
+            "insufficient_context",
+            "insufficient",
+            "needs_context",
+            "need_context",
+            "unknown",
+            "uncertain",
+        }:
+            return "insufficient_context"
+        return normalized
 
     @model_validator(mode="after")
     def normalize_result(self) -> "ReviewRuleCheckResult":

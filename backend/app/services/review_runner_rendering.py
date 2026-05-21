@@ -785,12 +785,13 @@ class ReviewRunnerRenderingMixin:
         if matched_rules:
             lines.append("- 本轮优先带入审查的规则:")
             for item in matched_rules[:5]:
+                rule_id = str(item.get("rule_id") or item.get("id") or "").strip()
                 title = str(item.get("title") or item.get("rule_id") or "").strip()
                 priority = str(item.get("priority") or "P2").strip()
                 scene_path = str(item.get("scene_path") or "").strip()
                 reason = str(item.get("reason") or "").strip()
                 if title:
-                    label = f"[{priority}] {title}"
+                    label = f"[{priority}] {rule_id} {title}".strip() if rule_id else f"[{priority}] {title}"
                     if scene_path:
                         label = f"{label}（{scene_path}）"
                     lines.append(f"  - {label} · {reason or '命中规则信号'}")

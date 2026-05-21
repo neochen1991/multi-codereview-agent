@@ -59,31 +59,7 @@ class ChangeImpactReportService:
         resolution = self._llm.resolve_expert(expert, runtime_settings)
         fallback = self._fallback_payload(report)
         llm_failure_reason = ""
-        try:
-            llm_result = self._llm.complete_text(
-                system_prompt=self._system_prompt(expert),
-                user_prompt=self._user_prompt(report, trace),
-                resolution=resolution,
-                runtime_settings=runtime_settings,
-                fallback_text=json.dumps(fallback, ensure_ascii=False),
-                allow_fallback=bool(runtime_settings.allow_llm_fallback),
-                timeout_seconds=45.0,
-                max_attempts=1,
-                log_context={
-                    "review_id": review_id,
-                    "issue_id": "impact_report",
-                    "expert_id": expert.expert_id,
-                    "phase": "impact_analysis_report",
-                },
-            )
-        except Exception as error:
-            llm_failure_reason = str(error)
-            logger.warning(
-                "impact report llm synthesis degraded to fact template review_id=%s expert_id=%s error=%s",
-                review_id,
-                expert.expert_id,
-                error,
-            )
+        if self._should_use_fact_template_only(runtime_settings):
             llm_result = LLMTextResult(
                 text=json.dumps(fallback, ensure_ascii=False),
                 mode="fallback",
@@ -91,8 +67,43 @@ class ChangeImpactReportService:
                 model=resolution.model,
                 base_url=resolution.base_url,
                 api_key_env=resolution.api_key_env,
-                error=llm_failure_reason,
+                error="skipped:fact_template_only_for_thorough_light_review",
             )
+        else:
+            try:
+                llm_result = self._llm.complete_text(
+                    system_prompt=self._system_prompt(expert),
+                    user_prompt=self._user_prompt(report, trace),
+                    resolution=resolution,
+                    runtime_settings=runtime_settings,
+                    fallback_text=json.dumps(fallback, ensure_ascii=False),
+                    allow_fallback=bool(runtime_settings.allow_llm_fallback),
+                    timeout_seconds=45.0,
+                    max_attempts=1,
+                    log_context={
+                        "review_id": review_id,
+                        "issue_id": "impact_report",
+                        "expert_id": expert.expert_id,
+                        "phase": "impact_analysis_report",
+                    },
+                )
+            except Exception as error:
+                llm_failure_reason = str(error)
+                logger.warning(
+                    "impact report llm synthesis degraded to fact template review_id=%s expert_id=%s error=%s",
+                    review_id,
+                    expert.expert_id,
+                    error,
+                )
+                llm_result = LLMTextResult(
+                    text=json.dumps(fallback, ensure_ascii=False),
+                    mode="fallback",
+                    provider=resolution.provider,
+                    model=resolution.model,
+                    base_url=resolution.base_url,
+                    api_key_env=resolution.api_key_env,
+                    error=llm_failure_reason,
+                )
         payload = self._parse_json_payload(llm_result.text) or fallback
         summary = str(payload.get("summary") or fallback["summary"])
         key_impact_points = self._normalize_string_list(payload.get("key_impact_points")) or list(fallback["key_impact_points"])
@@ -159,6 +170,13 @@ class ChangeImpactReportService:
             }
         )
         return updated, llm_result
+
+    def _should_use_fact_template_only(self, runtime_settings: RuntimeSettings) -> bool:
+        quality_mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        analysis_mode = str(getattr(runtime_settings, "default_analysis_mode", "") or "").strip().lower()
+        if quality_mode != "thorough_review" or analysis_mode != "light":
+            return False
+        return str(getattr(runtime_settings, "change_impact_report_mode", "") or "").strip().lower() != "llm"
 
     def _system_prompt(self, expert: ExpertProfile) -> str:
         prompt = str(expert.system_prompt or "").strip()

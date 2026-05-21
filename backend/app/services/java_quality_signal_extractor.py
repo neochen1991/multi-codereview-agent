@@ -764,6 +764,21 @@ class JavaQualitySignalExtractor:
         return suspicious[:4]
 
     def _detect_exception_swallowed(self, diff_lower: str, combined_lower: str) -> bool:
+        diff_mentions_exception_path = any(
+            token in diff_lower
+            for token in [
+                "catch",
+                "exception",
+                "throw ",
+                "throws ",
+                "printstacktrace",
+                "logger.",
+                "log.",
+            ]
+        )
+        if not diff_mentions_exception_path:
+            return False
+
         removed_handling = any(
             token in diff_lower for token in ["printstacktrace", "logger.error", "log.error", "throw new", "throw e"]
         )

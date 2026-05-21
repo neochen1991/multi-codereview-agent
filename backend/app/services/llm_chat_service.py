@@ -41,6 +41,9 @@ class LLMTextResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    system_prompt_snapshot_full: str = ""
+    prompt_snapshot_full: str = ""
+    model_raw_response_full: str = ""
 
 
 class LLMChatService:
@@ -89,6 +92,8 @@ class LLMChatService:
                 fallback_text=fallback_text,
                 error=f"missing_api_key:{resolution.api_key_env}",
                 allow_fallback=allow_fallback,
+                system_prompt_snapshot_full=system_prompt,
+                prompt_snapshot_full=user_prompt,
             )
 
         system_prompt, user_prompt = self._apply_prompt_budget_if_light_mode(
@@ -109,7 +114,7 @@ class LLMChatService:
         endpoint = resolution.base_url.rstrip("/") + "/chat/completions"
         payload = None
         last_error = ""
-        safe_attempts = max(1, int(max_attempts or 1))
+        safe_attempts = self._effective_max_attempts(max_attempts, runtime_settings)
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
         client_timeout = self._build_http_timeout(safe_timeout)
         call_id = f"llm_{uuid4().hex[:12]}"
@@ -239,19 +244,22 @@ class LLMChatService:
             except httpx.HTTPStatusError as exc:  # pragma: no cover - network dependent
                 last_error = f"http_status:{exc.response.status_code}"
                 attempt_elapsed_ms = round((time.perf_counter() - attempt_started_at) * 1000, 2)
+                should_retry_status = self._should_retry_status_code(exc.response.status_code)
+                will_retry = should_retry_status and attempt < safe_attempts
                 logger.warning(
-                    "llm request status failure context=%s attempt=%s/%s provider=%s model=%s status=%s attempt_elapsed_ms=%s body=%s",
+                    "llm request status failure context=%s attempt=%s/%s provider=%s model=%s status=%s will_retry=%s attempt_elapsed_ms=%s body=%s",
                     context_preview,
                     attempt,
                     safe_attempts,
                     resolution.provider,
                     resolution.model,
                     exc.response.status_code,
+                    will_retry,
                     attempt_elapsed_ms,
                     self._truncate(getattr(exc.response, "text", ""), preview_limit),
                 )
-                if 500 <= exc.response.status_code < 600 and attempt < safe_attempts:
-                    time.sleep(min(8.0, 1.5 * (2 ** (attempt - 1))))
+                if will_retry:
+                    time.sleep(self._status_retry_delay_seconds(exc.response, attempt))
                     continue
                 break
             except httpx.RequestError as exc:  # pragma: no cover - network dependent
@@ -333,6 +341,8 @@ class LLMChatService:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                system_prompt_snapshot_full=system_prompt,
+                prompt_snapshot_full=user_prompt,
             )
 
         choices = payload.get("choices") or []
@@ -342,6 +352,12 @@ class LLMChatService:
                 fallback_text=fallback_text,
                 error="empty_choices",
                 allow_fallback=allow_fallback,
+                call_id=call_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                system_prompt_snapshot_full=system_prompt,
+                prompt_snapshot_full=user_prompt,
             )
         content = self._extract_payload_text(payload).strip()
         if not content:
@@ -350,6 +366,12 @@ class LLMChatService:
                 fallback_text=fallback_text,
                 error=f"empty_content:finish_reason={self._extract_finish_reason(payload) or 'unknown'}",
                 allow_fallback=allow_fallback,
+                call_id=call_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                system_prompt_snapshot_full=system_prompt,
+                prompt_snapshot_full=user_prompt,
             )
         total_elapsed_ms = round((time.perf_counter() - total_started_at) * 1000, 2)
         logger.info(
@@ -376,7 +398,34 @@ class LLMChatService:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            system_prompt_snapshot_full=system_prompt,
+            prompt_snapshot_full=user_prompt,
+            model_raw_response_full=content,
         )
+
+    def _effective_max_attempts(
+        self,
+        max_attempts: int,
+        runtime_settings: RuntimeSettings | None,
+    ) -> int:
+        safe_attempts = max(1, int(max_attempts or 1))
+        quality_mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        if quality_mode != "thorough_review":
+            return safe_attempts
+        retry_floor = max(1, int(os.getenv("REVIEW_THOROUGH_LLM_MIN_ATTEMPTS", "2") or 2))
+        return max(safe_attempts, retry_floor)
+
+    def _should_retry_status_code(self, status_code: int) -> bool:
+        return status_code in {408, 409, 425, 429} or 500 <= status_code < 600
+
+    def _status_retry_delay_seconds(self, response: httpx.Response, attempt: int) -> float:
+        retry_after = str((getattr(response, "headers", {}) or {}).get("Retry-After", "")).strip()
+        if retry_after:
+            try:
+                return min(30.0, max(0.5, float(retry_after)))
+            except ValueError:
+                pass
+        return min(8.0, 1.5 * (2 ** (attempt - 1)))
 
     def _extract_payload_text(self, payload: dict[str, object]) -> str:
         text = self._extract_text_from_chunk(payload).strip()
@@ -1139,6 +1188,8 @@ class LLMChatService:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        system_prompt_snapshot_full: str = "",
+        prompt_snapshot_full: str = "",
     ) -> LLMTextResult:
         if allow_fallback:
             return self._fallback(
@@ -1149,6 +1200,8 @@ class LLMChatService:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                system_prompt_snapshot_full=system_prompt_snapshot_full,
+                prompt_snapshot_full=prompt_snapshot_full,
             )
         raise RuntimeError(
             f"LLM live call required but failed for model={resolution.model}, provider={resolution.provider}: {error}"
@@ -1452,6 +1505,8 @@ class LLMChatService:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        system_prompt_snapshot_full: str = "",
+        prompt_snapshot_full: str = "",
     ) -> LLMTextResult:
         return LLMTextResult(
             text=fallback_text,
@@ -1465,4 +1520,7 @@ class LLMChatService:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            system_prompt_snapshot_full=system_prompt_snapshot_full,
+            prompt_snapshot_full=prompt_snapshot_full,
+            model_raw_response_full=fallback_text,
         )

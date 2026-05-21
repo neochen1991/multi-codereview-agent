@@ -117,6 +117,7 @@ class RuntimeSettings(BaseModel):
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150
+    review_quality_mode: Literal["standard", "thorough_review"] = "thorough_review"
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3

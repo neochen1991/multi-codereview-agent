@@ -100,6 +100,24 @@ def test_gitnexus_detect_changes_skips_duplicate_repo_name_sibling(tmp_path: Pat
     assert "跳过 detect_changes" in reason
 
 
+def test_gitnexus_detect_changes_skips_when_same_repo_name_points_to_stale_direct_path(tmp_path: Path):
+    service = GitNexusMcpImpactClient()
+    current = tmp_path / "worktree"
+    stale = tmp_path / "stale"
+    current.mkdir()
+    stale.mkdir()
+    payload = {
+        "name": "java-ddd-example",
+        "path": str(stale),
+        "siblings": [],
+    }
+
+    reason = service._duplicate_repo_name_sibling_reason("java-ddd-example", str(current), payload)
+
+    assert "同名仓库" in reason
+    assert "跳过 detect_changes" in reason
+
+
 def test_gitnexus_detect_changes_not_skipped_when_direct_path_matches(tmp_path: Path):
     service = GitNexusMcpImpactClient()
     current = tmp_path / "worktree"
@@ -1171,7 +1189,10 @@ def test_gitnexus_impact_service_downgrades_when_graph_commit_differs_from_mr_so
         patch.object(service, "_resolve_existing_git_ref", return_value="feature/batch"),
         patch.object(service, "_git_commit", return_value="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
     ):
-        report = service.analyze(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+        report = service.analyze(
+            subject,
+            RuntimeSettings(code_repo_local_path=str(repo_path), enable_review_workspace_realtime_graph=True),
+        )
 
     assert report.graph_status == "degraded"
     assert any("图谱 commit 与 MR source/head commit 不一致" in item for item in report.limitations)

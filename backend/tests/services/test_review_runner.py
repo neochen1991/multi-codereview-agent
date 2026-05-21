@@ -2335,6 +2335,121 @@ def test_review_runner_keeps_selected_security_expert_executable(storage_root: P
     assert not skipped_messages
 
 
+def test_thorough_review_overrides_router_skip_and_scans_all_hunks(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = runner.bootstrap_demo_review()
+    review = runner.review_repo.get(review_id)
+    review.subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/router-skip",
+        target_ref="main",
+        changed_files=[
+            "src/main/java/demo/UserController.java",
+            "src/main/java/demo/UserRepository.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/main/java/demo/UserController.java b/src/main/java/demo/UserController.java\n"
+            "--- a/src/main/java/demo/UserController.java\n"
+            "+++ b/src/main/java/demo/UserController.java\n"
+            "@@ -10,6 +10,7 @@ class UserController {\n"
+            '+        log.info("token={}", token);\n'
+            "diff --git a/src/main/java/demo/UserRepository.java b/src/main/java/demo/UserRepository.java\n"
+            "--- a/src/main/java/demo/UserRepository.java\n"
+            "+++ b/src/main/java/demo/UserRepository.java\n"
+            "@@ -30,6 +30,7 @@ class UserRepository {\n"
+            "+        jdbc.query(sql + name);\n"
+        ),
+    )
+    runner.review_repo.save(review)
+
+    def _fake_select_review_experts(subject, experts, runtime_settings, requested_expert_ids=None):
+        security = next(expert for expert in experts if expert.expert_id == "security_compliance")
+        return {
+            "requested_expert_ids": [],
+            "candidate_expert_ids": [expert.expert_id for expert in experts],
+            "selected_expert_ids": ["security_compliance"],
+            "selected_experts": [
+                {
+                    "expert_id": "security_compliance",
+                    "expert_name": security.name_zh,
+                    "reason": "初始选择安全专家",
+                }
+            ],
+            "skipped_experts": [],
+            "llm": {"provider": "test", "model": "weak-router", "mode": "mock"},
+        }
+
+    def _fake_build_routing_plan(subject, experts, runtime_settings, analysis_mode="standard"):
+        return {
+            "security_compliance": {
+                "expert_id": "security_compliance",
+                "routeable": False,
+                "skip_reason": "路由模型没有命中安全关键词",
+                "file_path": "src/main/java/demo/UserController.java",
+                "line_start": 10,
+                "routing_llm": {"provider": "test", "model": "weak-router", "mode": "mock"},
+            }
+        }
+
+    def _fake_build_command(subject, expert, runtime_settings, route_hint=None):
+        hint = dict(route_hint or {})
+        return {
+            **hint,
+            "summary": "深度模式覆盖路由跳过并执行全量 hunk 审查",
+            "repository_context": {},
+            "target_hunk": dict(hint.get("target_hunk") or {}),
+            "target_hunks": [dict(item) for item in list(hint.get("target_hunks") or []) if isinstance(item, dict)],
+            "related_files": [],
+            "expected_checks": ["安全通用规范"],
+            "disallowed_inference": [],
+            "routing_reason": str(hint.get("routing_reason") or ""),
+            "routing_confidence": float(hint.get("confidence") or 0.0),
+        }
+
+    recorded_jobs: list[dict[str, object]] = []
+
+    def _fake_execute_expert_jobs(expert_jobs, runtime_settings, analysis_mode):
+        recorded_jobs.extend(expert_jobs)
+        return []
+
+    monkeypatch.setattr(runner.main_agent_service, "select_review_experts", _fake_select_review_experts)
+    monkeypatch.setattr(runner.main_agent_service, "build_routing_plan", _fake_build_routing_plan)
+    monkeypatch.setattr(runner.main_agent_service, "build_command", _fake_build_command)
+    monkeypatch.setattr(runner, "_prepare_expert_batch_knowledge_inputs", lambda **_kwargs: ([], {}))
+    monkeypatch.setattr(runner, "_execute_expert_jobs", _fake_execute_expert_jobs)
+    monkeypatch.setattr(runner.graph, "invoke", lambda state: {"issues": [], "issue_filter_decisions": []})
+    monkeypatch.setattr(
+        runner.main_agent_service,
+        "build_final_summary",
+        lambda review, issues, runtime_settings, timeout_seconds, max_attempts, partial_failure_count=0: (
+            "router skip overridden",
+            {"provider": "test", "model": "test", "mode": "mock"},
+        ),
+    )
+
+    runner.run_once(review_id)
+
+    security_jobs = [job for job in recorded_jobs if job["expert"].expert_id == "security_compliance"]
+    assert security_jobs
+    assert sum(len(job.get("target_hunks") or []) for job in security_jobs) == 2
+    messages = runner.message_repo.list(review_id)
+    assert not [
+        message
+        for message in messages
+        if message.message_type == "expert_skipped" and message.expert_id == "security_compliance"
+    ]
+    command_messages = [
+        message
+        for message in messages
+        if message.message_type == "main_agent_command"
+        and message.metadata.get("target_expert_id") == "security_compliance"
+    ]
+    assert command_messages
+    assert command_messages[0].metadata["routing_skip_overridden"] is True
+
+
 def test_review_runner_batches_same_file_candidate_hunks_into_one_job(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
@@ -4737,7 +4852,7 @@ def test_review_runner_repairs_missing_suggested_code(storage_root: Path, monkey
     repaired = runner._repair_missing_suggested_code(
         review=review,
         expert=expert,
-        runtime_settings=runner.runtime_settings_service.get(),
+        runtime_settings=runner.runtime_settings_service.get().model_copy(update={"review_quality_mode": "standard"}),
         llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
         file_path="src/main/java/com/example/OrderService.java",
         line_start=18,
@@ -4752,6 +4867,62 @@ def test_review_runner_repairs_missing_suggested_code(storage_root: Path, monkey
     )
 
     assert "Objects.requireNonNull" in repaired
+
+
+def test_review_runner_skips_suggested_code_llm_repair_in_thorough_review(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="architecture_design",
+        name="Architecture",
+        name_zh="通用编码规范专家",
+        role="architecture",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_skip_repair_suggested_code",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/repair",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/OrderService.java"],
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    calls = {"count": 0}
+
+    def _complete_text(**_kwargs):  # noqa: ANN001
+        calls["count"] += 1
+        return LLMTextResult(
+            text='{"suggested_code":"return true;"}',
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _complete_text)
+
+    repaired = runner._repair_missing_suggested_code(
+        review=review,
+        expert=expert,
+        runtime_settings=runner.runtime_settings_service.get().model_copy(
+            update={"review_quality_mode": "thorough_review"}
+        ),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=18,
+        parsed={"title": "标题", "claim": "问题结论混入了无关描述"},
+        target_hunk={"excerpt": "+ repository.save(request);"},
+    )
+
+    assert repaired == ""
+    assert calls["count"] == 0
 
 
 def test_review_runner_suppresses_no_risk_formatting_findings(storage_root: Path):
@@ -6563,6 +6734,7 @@ def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
             "light_max_debate_rounds": 1,
             "standard_max_parallel_experts": 4,
             "light_max_parallel_experts": 1,
+            "review_quality_mode": "standard",
         }
     )
 
@@ -6573,6 +6745,22 @@ def test_review_runner_uses_light_mode_runtime_strategy(storage_root: Path):
     assert llm_options["timeout_seconds"] <= 90
     assert llm_options["max_attempts"] == 1
     assert runner._max_parallel_experts(runtime, "light") == 1
+
+
+def test_thorough_review_light_mode_prioritizes_stable_llm_calls(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    runtime = runner.runtime_settings_service.get().model_copy(
+        update={
+            "review_quality_mode": "thorough_review",
+            "light_llm_retry_count": 1,
+            "light_max_parallel_experts": 1,
+        }
+    )
+
+    llm_options = runner._build_llm_request_options(runtime, "light")
+
+    assert llm_options["max_attempts"] >= 2
+    assert runner._max_parallel_experts(runtime, "light") == 2
 
 
 def test_review_runner_system_prompt_includes_review_spec(storage_root: Path):
@@ -7731,6 +7919,354 @@ def test_review_runner_coalesces_same_root_cause_issues_before_final_judge(stora
     assert set(merged.participant_expert_ids) == {"correctness_business", "database_analysis"}
     assert merged.confidence == 0.99
     assert merged.severity == "blocker"
+
+
+def test_review_runner_disables_issue_coalescing_in_thorough_review_mode(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    assert runner._should_coalesce_final_issues(SimpleNamespace(review_quality_mode="standard")) is True
+    assert runner._should_coalesce_final_issues(SimpleNamespace(review_quality_mode="thorough_review")) is False
+
+
+def test_review_runner_sanitizes_mixed_issue_candidate_to_current_anchor(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        "changed_lines": [9],
+        "excerpt": "\n".join(
+            [
+                "@@ -9 +9 @@",
+                "-    private static final Integer CHUNKS = 200;",
+                "+    private final Integer chunksTmp = 200;",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "常量命名与使用违规",
+        "claim": "发现多个通用编码规范问题：破坏约定的构造/工厂调用语义、常量命名/使用规范违规、异常处理被完全吞没、查询风险增加。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "naming_misleading",
+        "severity": "medium",
+        "confidence": 0.95,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "violated_guidelines": ["命名必须表达真实语义"],
+        "evidence": [
+            "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java:20 直接使用 new Course 替代 Course.create",
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:9 常量改为非 final 非全大写的弱语义变量 chunksTmp 且未使用",
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:26-28 移除了异常打印且吞掉异常后未做任何处理",
+        ],
+        "fix_strategy": "修复多个业务与正确性问题，包括领域事件、LIMIT 和异常处理。",
+        "suggested_fix": "同时恢复 Course.create、LIMIT、异常处理和常量命名。",
+        "change_steps": ["恢复 Course.create", "恢复 LIMIT", "恢复异常处理", "修正常量命名"],
+        "suggested_code": "private static final Integer CHUNKS = 200;",
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "architecture_design",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        9,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert "发现多个" not in sanitized["claim"]
+    assert "CourseCreator" not in "\n".join(sanitized["evidence"])
+    assert "26-28" not in "\n".join(sanitized["evidence"])
+    assert sanitized["fix_strategy"] == "修正常量命名与使用方式，使当前代码锚点只表达一个具体问题。"
+    assert sanitized["suggested_fix"] == "将当前变更行恢复为符合命名、不可变性和实际使用语义的常量写法。"
+
+
+def test_review_runner_sanitizes_mixed_title_and_evidence_to_anchor_domain(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        "changed_lines": [16],
+        "excerpt": "\n".join(
+            [
+                "@@ -16 +16 @@",
+                "-    return builder.equal(root.get(filter.field().value()), filter.value().value());",
+                '+    return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            ]
+        ),
+    }
+    parsed = {
+        "title": "通用等值查询改为带前后通配符的模糊查询可能导致查询性能退化（查询语义退化）（静默吞掉异常）",
+        "claim": "当前变更把 equalsPredicateTransformer 从 equal 改成 like。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "query_semantics_weakened",
+        "severity": "high",
+        "confidence": 0.72,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "violated_guidelines": ["查询语义不得静默放宽"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:26-29 删除了异常打印逻辑",
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java:16 equalsPredicateTransformer 从 builder.equal 改为 builder.like 并添加前后通配符",
+        ],
+        "suggested_code": 'return builder.equal(root.get(filter.field().value()), filter.value().value());',
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "performance_reliability",
+        "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        16,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert "静默吞掉异常" not in sanitized["title"]
+    assert "MySqlDomainEventsConsumer" not in "\n".join(sanitized["evidence"])
+    assert "builder.like" in "\n".join(sanitized["evidence"])
+
+
+def test_review_runner_sanitizes_single_foreign_domain_claim_to_anchor(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        "changed_lines": [16],
+        "excerpt": "\n".join(
+            [
+                "@@ -16 +16 @@",
+                "-    return builder.equal(root.get(filter.field().value()), filter.value().value());",
+                '+    return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            ]
+        ),
+    }
+    parsed = {
+        "title": "查询语义从精确匹配退化为模糊匹配",
+        "claim": "当前变更还让 catch 块静默吞掉异常。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "query_semantics_weakened",
+        "severity": "high",
+        "confidence": 0.86,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "violated_guidelines": ["查询语义不得静默放宽"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java:16 equalsPredicateTransformer 从 builder.equal 改为 builder.like 并添加前后通配符",
+        ],
+        "suggested_code": 'return builder.equal(root.get(filter.field().value()), filter.value().value());',
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "performance_reliability",
+        "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        16,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert "catch" not in sanitized["claim"].lower()
+    assert "HibernateCriteriaConverter.java:16" in sanitized["claim"]
+
+
+def test_review_runner_trusts_hunk_domain_over_wrong_model_issue_type(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        "changed_lines": [9],
+        "excerpt": "\n".join(
+            [
+                "@@ -9 +9 @@",
+                "-    private final Integer CHUNKS = 200;",
+                "+    private final Integer chunksTmp = 200;",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "常量CHUNKS被重命名为chunksTmp，可能导致批处理逻辑直接引用失效（静默吞掉异常）",
+        "claim": "CHUNKS 常量从清晰批处理边界名变成 chunksTmp，且当前 hunk 没有异常处理代码。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "exception_swallowed",
+        "severity": "high",
+        "confidence": 0.82,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "violated_guidelines": ["常量命名必须表达真实语义"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:9 CHUNKS 改成 chunksTmp",
+        ],
+        "suggested_code": "private final Integer CHUNKS = 200;",
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "correctness_business",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        9,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert "静默吞掉异常" not in sanitized["title"]
+    assert sanitized["normalized_issue_type"] == "naming_misleading"
+
+
+def test_review_runner_rewrites_domain_event_issue_type_for_naming_hunk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        "changed_lines": [9],
+        "excerpt": "\n".join(
+            [
+                "@@ -9 +9 @@",
+                "-    private final Integer CHUNKS = 200;",
+                "+    private final Integer chunksTmp = 200;",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "常量命名语义退化，使用了临时调试风格命名 chunksTmp",
+        "claim": "CHUNKS 常量从清晰批处理边界名变成 chunksTmp。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "domain_event_missing",
+        "severity": "medium",
+        "confidence": 0.82,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "violated_guidelines": ["常量命名必须表达真实语义"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:9 CHUNKS 改成 chunksTmp",
+        ],
+        "suggested_code": "private final Integer CHUNKS = 200;",
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "architecture_design",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        9,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert sanitized["normalized_issue_type"] == "naming_misleading"
+
+
+def test_review_runner_infers_naming_issue_type_before_domain_event_path_noise(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        "changed_lines": [9],
+        "excerpt": "\n".join(
+            [
+                "@@ -9 +9 @@",
+                "-    private final Integer CHUNKS = 200;",
+                "+    private final Integer chunksTmp = 200;",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "常量命名使用了临时变量风格的驼峰式命名",
+        "claim": "常量命名风格不符合规范，违反常量、枚举和变量命名必须表达真实语义的规则",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "",
+        "severity": "medium",
+        "confidence": 0.86,
+        "matched_rules": ["CODE-JAVA-001"],
+        "violated_guidelines": ["CODE-JAVA-001"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:9 将 CHUNKS 改成 chunksTmp",
+        ],
+        "suggested_code": "private final Integer CHUNKS = 200;",
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "architecture_design",
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        9,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert sanitized["normalized_issue_type"] == "naming_misleading"
+
+
+def test_review_runner_infers_naming_issue_type_before_control_flow_context_noise(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "常量被改为临时过渡命名 chunksTmp，命名无清晰语义且不符合常量规范",
+        "claim": "常量命名不符合规范。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "",
+        "severity": "medium",
+        "confidence": 0.82,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "evidence": [
+            "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java:9 chunksTmp",
+            "上下文里还有 while (true) 批处理循环，但当前问题锚点是常量命名。",
+        ],
+    }
+
+    assert runner._normalize_issue_type(parsed, "architecture_design") == "naming_violation"
+
+
+def test_review_runner_infers_query_semantics_before_naming_or_contract_noise(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    parsed = {
+        "title": "equalsPredicateTransformer 查询语义从精确匹配放宽为模糊匹配",
+        "claim": "方法名与实现存在不一致，但核心问题是 builder.equal 改为 builder.like。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "",
+        "severity": "high",
+        "confidence": 0.9,
+        "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+        "evidence": [
+            'HibernateCriteriaConverter.java:16 return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+        ],
+    }
+
+    assert runner._normalize_issue_type(parsed, "correctness_business") == "query_semantics_weakened"
+
+
+def test_review_runner_uses_current_hunk_domain_before_batch_context_noise(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+        "changed_lines": [20, 23],
+        "excerpt": "\n".join(
+            [
+                "@@ -19,5 +19,5 @@",
+                "-        Course course = Course.create(id, name, duration);",
+                "+        Course course = new Course(id, name, duration);",
+                "-        repository.save(course);",
+                "         eventBus.publish(course.pullDomainEvents());",
+                "+        repository.save(course);",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "课程创建未触发CourseCreatedDomainEvent领域事件",
+        "claim": "CourseCreator.java:20 使用 new Course 绕过 Course.create。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "",
+        "severity": "high",
+        "confidence": 0.9,
+        "matched_rules": ["CORR-JDDD-002"],
+        "violated_guidelines": ["CORR-JDDD-002"],
+        "evidence": [
+            "CourseCreator.java:20 使用 new Course",
+            "同批上下文还包含 MySqlDomainEventsConsumer.java:19 移除 LIMIT，但当前候选不是查询边界问题。",
+        ],
+    }
+
+    sanitized = runner._stabilize_expert_analysis(
+        parsed,
+        "correctness_business",
+        "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+        20,
+        target_hunk,
+        repository_context={},
+        input_completeness={"target_file_diff_present": True},
+    )
+
+    assert sanitized["normalized_issue_type"] == "aggregate_factory_bypass"
 
 
 def test_review_runner_auto_confirms_high_confidence_direct_evidence_issue(storage_root: Path):

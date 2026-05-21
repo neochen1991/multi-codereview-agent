@@ -1234,7 +1234,10 @@ class GitNexusMcpImpactClient:
                 "GitNexus list_repos 将当前 worktree 作为同名 sibling 返回；"
                 "为避免 detect_changes 命中旧 registry 主仓，已跳过 detect_changes，改用显式 changed symbols 查询 context/impact。"
             )
-        return ""
+        return (
+            "GitNexus list_repos 返回的同名仓库路径与当前 worktree 不一致；"
+            "为避免 detect_changes 命中旧 registry 主仓，已跳过 detect_changes，改用显式 changed symbols 查询 context/impact。"
+        )
 
 
 class GitNexusImpactService:

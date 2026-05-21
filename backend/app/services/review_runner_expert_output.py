@@ -162,30 +162,41 @@ class ReviewRunnerExpertOutputMixin:
                 if str(value).strip()
             ]
             verification_needed = status != "violated"
+            matched_rules = self._normalize_text_list(item.get("matched_rules"), [])
+            if rule_id not in matched_rules and (rule_id != "GENERAL-EXPERT-CHECKS" or not matched_rules):
+                matched_rules.append(rule_id)
+            violated_guidelines = self._normalize_text_list(item.get("violated_guidelines"), [rule_id])
             parsed.append(
                 {
                     "title": title,
-                    "claim": reason or title,
-                    "finding_type": "direct_defect" if status == "violated" else "risk_hypothesis",
+                    "rule_id": rule_id,
+                    "claim": str(item.get("claim") or "").strip() or reason or title,
+                    "finding_type": str(
+                        item.get("finding_type") or ("direct_defect" if status == "violated" else "risk_hypothesis")
+                    ).strip(),
                     "normalized_issue_type": str(item.get("normalized_issue_type") or "").strip(),
                     "severity": str(item.get("severity") or "medium").strip() or "medium",
                     "line_start": candidate_line,
-                    "line_end": candidate_line,
-                    "matched_rules": [rule_id],
-                    "violated_guidelines": [rule_id],
+                    "line_end": self._normalize_line_start(item.get("line_end"), candidate_line),
+                    "matched_rules": matched_rules,
+                    "violated_guidelines": violated_guidelines,
                     "rule_based_reasoning": reason or f"命中规则 {rule_id}，候选证据需要进入后续校验。",
                     "evidence": [evidence_text, *rule_evidence],
-                    "cross_file_evidence": [],
-                    "assumptions": [f"缺失上下文: {item}" for item in missing_context],
-                    "context_files": [],
+                    "cross_file_evidence": self._normalize_text_list(item.get("cross_file_evidence"), []),
+                    "assumptions": self._normalize_text_list(item.get("assumptions"), [])
+                    + [f"缺失上下文: {item}" for item in missing_context],
+                    "context_files": self._normalize_text_list(item.get("context_files"), []),
                     "why_it_matters": reason or title,
                     "fix_strategy": str(item.get("fix_strategy") or "按命中的规则修正当前代码。").strip(),
                     "suggested_fix": str(item.get("suggested_fix") or "请根据规则要求补齐正确实现，并保留必要测试。").strip(),
-                    "change_steps": [
-                        "定位候选代码行",
-                        "按命中规则修正实现",
-                        "补充或更新覆盖该规则的测试",
-                    ],
+                    "change_steps": self._normalize_text_list(
+                        item.get("change_steps"),
+                        [
+                            "定位候选代码行",
+                            "按命中规则修正实现",
+                            "补充或更新覆盖该规则的测试",
+                        ],
+                    ),
                     "suggested_code": str(item.get("suggested_code") or evidence_text).strip(),
                     "confidence": self._rule_guided_candidate_confidence(item.get("confidence")),
                     "verification_needed": verification_needed,
@@ -812,6 +823,8 @@ class ReviewRunnerExpertOutputMixin:
         parsed: dict[str, object],
         target_hunk: dict[str, object],
     ) -> str:
+        if self._should_skip_suggested_code_llm_repair(runtime_settings):
+            return ""
         current_code = (
             str(target_hunk.get("excerpt") or "").strip()
             or self._load_repository_problem_context(review.subject, file_path, line_start, target_hunk).get("snippet", "")
@@ -858,6 +871,12 @@ class ReviewRunnerExpertOutputMixin:
             if self._looks_like_concrete_suggested_code(candidate, file_path=file_path):
                 return candidate
         return ""
+
+    def _should_skip_suggested_code_llm_repair(self, runtime_settings) -> bool:
+        quality_mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        if quality_mode != "thorough_review":
+            return False
+        return str(getattr(runtime_settings, "suggested_code_repair_mode", "") or "").strip().lower() != "llm"
 
     def _stabilize_expert_analysis(
         self,
@@ -1041,10 +1060,273 @@ class ReviewRunnerExpertOutputMixin:
             target_hunk,
             repository_context or {},
         )
+        result = self._sanitize_candidate_to_current_anchor(result, file_path, effective_line_start, target_hunk)
         result = self._enforce_expert_output_schema(result, expert_id)
         result = self._apply_input_quality_gate(result, input_completeness or {})
         result = self._sanitize_user_confirmation_language(result)
         return result
+
+    def _sanitize_candidate_to_current_anchor(
+        self,
+        parsed: dict[str, object],
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object],
+    ) -> dict[str, object]:
+        """把弱模型混入的其它文件/其它问题证据收回到当前 finding 锚点。"""
+
+        result = dict(parsed)
+        hunk_domains = self._candidate_issue_domains(str((target_hunk or {}).get("excerpt") or ""))
+        metadata_domain_blob = "\n".join(
+            [
+                str(result.get("normalized_issue_type") or ""),
+                " ".join(str(item) for item in list(result.get("violated_guidelines") or [])),
+            ]
+        )
+        issue_domains = hunk_domains if hunk_domains != {"general"} else self._candidate_issue_domains(metadata_domain_blob)
+        if issue_domains == {"general"}:
+            issue_domains = self._candidate_issue_domains(
+                "\n".join(
+                    [
+                        str(result.get("title") or ""),
+                        str(result.get("claim") or result.get("summary") or ""),
+                    ]
+                )
+            )
+        issue_domains = issue_domains or {"general"}
+        title = str(result.get("title") or "").strip()
+        if title and self._candidate_text_mixes_unrelated_domains(title, issue_domains):
+            result["title"] = self._build_anchor_specific_title(title, issue_domains)
+        normalized_issue_type = str(result.get("normalized_issue_type") or "").strip()
+        if not normalized_issue_type and issue_domains != {"general"}:
+            result["normalized_issue_type"] = self._build_anchor_specific_issue_type(issue_domains, "")
+        elif normalized_issue_type and self._candidate_text_mixes_unrelated_domains(normalized_issue_type, issue_domains):
+            result["normalized_issue_type"] = self._build_anchor_specific_issue_type(issue_domains, normalized_issue_type)
+        issue_domains = self._candidate_issue_domains(
+            "\n".join(
+                [
+                    str(result.get("title") or ""),
+                    str(result.get("normalized_issue_type") or ""),
+                    " ".join(str(item) for item in list(result.get("violated_guidelines") or [])),
+                    str((target_hunk or {}).get("excerpt") or ""),
+                ]
+            )
+        )
+        evidence = [str(item).strip() for item in list(result.get("evidence") or []) if str(item).strip()]
+        filtered_evidence = [
+            item
+            for item in evidence
+            if self._candidate_evidence_matches_anchor(
+                item,
+                file_path=file_path,
+                line_start=line_start,
+                target_hunk=target_hunk,
+                issue_domains=issue_domains,
+            )
+        ]
+        if filtered_evidence:
+            result["evidence"] = filtered_evidence
+
+        for text_key in ("claim", "summary"):
+            text = str(result.get(text_key) or "").strip()
+            if text and self._candidate_text_mixes_unrelated_domains(text, issue_domains):
+                result[text_key] = self._build_anchor_specific_claim(result, file_path, line_start)
+
+        for text_key in ("fix_strategy", "suggested_fix"):
+            text = str(result.get(text_key) or "").strip()
+            if text and self._candidate_text_mixes_unrelated_domains(text, issue_domains):
+                result[text_key] = self._build_anchor_specific_remediation(
+                    result,
+                    text_key=text_key,
+                    issue_domains=issue_domains,
+                )
+
+        steps = [str(item).strip() for item in list(result.get("change_steps") or []) if str(item).strip()]
+        if steps:
+            scoped_steps = [
+                step
+                for step in steps
+                if not self._candidate_text_mixes_unrelated_domains(step, issue_domains)
+            ]
+            result["change_steps"] = scoped_steps or self._build_anchor_specific_steps(issue_domains)
+        return result
+
+    def _candidate_issue_domains(self, text: str) -> set[str]:
+        lowered = str(text or "").lower()
+        domains: set[str] = set()
+        domain_terms = {
+            "naming": ("常量", "命名", "chunks", "tmp", "magic", "naming", "constant", "语义变量"),
+            "exception": ("异常", "catch", "printstacktrace", "吞掉", "静默吞", "exception"),
+            "query_bound": ("limit", "分页", "全表", "batch", "批量", "chunk", "unbounded"),
+            "query_semantics": ("like", "equal", "predicate", "精确匹配", "模糊匹配", "查询语义"),
+            "domain_creation": (
+                "course.create",
+                "new course",
+                "领域事件",
+                "聚合",
+                "工厂",
+                "aggregate",
+                "factory",
+                "domain_event",
+                "domain_event_missing",
+            ),
+            "security": ("鉴权", "权限", "越权", "注入", "token", "secret", "security", "auth"),
+            "loop_call": ("循环", "外部接口", "远程调用", "逐条", "n+1", "foreach", "for ("),
+        }
+        for domain, terms in domain_terms.items():
+            if any(term in lowered for term in terms):
+                domains.add(domain)
+        return domains or {"general"}
+
+    def _candidate_evidence_matches_anchor(
+        self,
+        evidence: str,
+        *,
+        file_path: str,
+        line_start: int,
+        target_hunk: dict[str, object],
+        issue_domains: set[str],
+    ) -> bool:
+        text = str(evidence or "").strip()
+        if not text:
+            return False
+        lowered = text.lower().replace("\\", "/")
+        normalized_path = str(file_path or "").strip().replace("\\", "/").lower()
+        basename = normalized_path.rsplit("/", 1)[-1]
+        evidence_domains = self._candidate_issue_domains(text)
+        shares_domain = bool(issue_domains & evidence_domains)
+        mentions_target_file = bool(normalized_path and normalized_path in lowered) or bool(basename and basename in lowered)
+        mentioned_java_paths = [match.group(0).lower().replace("\\", "/") for match in re.finditer(r"[\w./\\-]+\.java(?::\d+(?:-\d+)?)?", text)]
+        mentions_other_file = bool(
+            mentioned_java_paths
+            and not any(normalized_path in item or (basename and basename in item) for item in mentioned_java_paths)
+        )
+        if mentions_other_file and not shares_domain:
+            return False
+
+        line_refs = self._candidate_line_refs(text)
+        if mentions_target_file and line_refs and not any(abs(ref - int(line_start or 1)) <= 2 for ref in line_refs):
+            return shares_domain
+        if mentions_target_file:
+            return True
+
+        hunk_excerpt = str((target_hunk or {}).get("excerpt") or "")
+        hunk_tokens = {
+            token.lower()
+            for token in re.split(r"[^a-zA-Z0-9_\u4e00-\u9fff]+", hunk_excerpt)
+            if len(token.strip()) >= 3
+        }
+        evidence_tokens = {
+            token.lower()
+            for token in re.split(r"[^a-zA-Z0-9_\u4e00-\u9fff]+", text)
+            if len(token.strip()) >= 3
+        }
+        return shares_domain or bool(hunk_tokens & evidence_tokens)
+
+    @staticmethod
+    def _candidate_line_refs(text: str) -> list[int]:
+        refs: list[int] = []
+        for match in re.finditer(r":(\d+)(?:-(\d+))?", str(text or "")):
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            refs.extend([start, end])
+        return refs
+
+    def _candidate_text_mixes_unrelated_domains(self, text: str, issue_domains: set[str]) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        domains = self._candidate_issue_domains(stripped)
+        unrelated = domains - issue_domains
+        if any(marker in stripped for marker in ("发现多个", "多个通用", "多个业务", "同时恢复", "包括领域事件")):
+            return True
+        if domains == {"general"} or issue_domains == {"general"}:
+            return False
+        if unrelated and not (domains & issue_domains):
+            return True
+        return bool(unrelated and len(domains) > max(1, len(issue_domains)))
+
+    def _build_anchor_specific_claim(self, parsed: dict[str, object], file_path: str, line_start: int) -> str:
+        title = str(parsed.get("title") or "当前变更存在代码质量问题").strip()
+        basename = str(file_path or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+        return f"当前变更在 {basename}:{int(line_start or 1)} 存在“{title}”，需要按该代码锚点单独修复。"
+
+    def _build_anchor_specific_title(self, title: str, issue_domains: set[str]) -> str:
+        cleaned = str(title or "").strip()
+        unrelated_markers = {
+            "exception": ("（静默吞掉异常）", "(静默吞掉异常)", "（异常处理）", "(异常处理)"),
+            "query_semantics": ("（查询语义退化）", "(查询语义退化)"),
+            "query_bound": ("（查询边界缺失）", "(查询边界缺失)"),
+            "domain_creation": ("（领域事件缺失）", "(领域事件缺失)"),
+        }
+        for domain, markers in unrelated_markers.items():
+            if domain in issue_domains:
+                continue
+            for marker in markers:
+                cleaned = cleaned.replace(marker, "")
+        if cleaned and not self._candidate_text_mixes_unrelated_domains(cleaned, issue_domains):
+            return cleaned.strip(" ，,;；")
+        if "query_semantics" in issue_domains:
+            return "查询语义从精确匹配退化为模糊匹配"
+        if "exception" in issue_domains:
+            return "异常被静默吞掉，缺少日志或恢复处理"
+        if "query_bound" in issue_domains:
+            return "查询缺少分页或 LIMIT 边界"
+        if "domain_creation" in issue_domains:
+            return "聚合创建绕过领域工厂导致领域事件缺失"
+        if "naming" in issue_domains:
+            return "常量命名与使用语义不一致"
+        return cleaned or "当前变更存在代码质量问题"
+
+    def _build_anchor_specific_issue_type(self, issue_domains: set[str], fallback: str) -> str:
+        if "naming" in issue_domains:
+            return "naming_misleading"
+        if "exception" in issue_domains:
+            return "exception_swallowed"
+        if "query_bound" in issue_domains:
+            return "query_bound_removed"
+        if "query_semantics" in issue_domains:
+            return "query_semantics_weakened"
+        if "domain_creation" in issue_domains:
+            return "aggregate_factory_bypass"
+        if "loop_call" in issue_domains:
+            return "loop_call_amplification"
+        if "security" in issue_domains:
+            return "security_guard_removed"
+        return fallback
+
+    def _build_anchor_specific_remediation(
+        self,
+        parsed: dict[str, object],
+        *,
+        text_key: str,
+        issue_domains: set[str],
+    ) -> str:
+        if "naming" in issue_domains:
+            if text_key == "fix_strategy":
+                return "修正常量命名与使用方式，使当前代码锚点只表达一个具体问题。"
+            return "将当前变更行恢复为符合命名、不可变性和实际使用语义的常量写法。"
+        if "exception" in issue_domains:
+            return "只围绕当前 catch 块补齐日志、异常传播或补偿处理，不混入其它变更点。"
+        if "query_bound" in issue_domains:
+            return "只围绕当前查询恢复分页、LIMIT 或批量边界，不混入其它问题修复。"
+        if "query_semantics" in issue_domains:
+            return "只围绕当前谓词恢复原有查询语义，并用测试覆盖精确匹配行为。"
+        if "domain_creation" in issue_domains:
+            return "只围绕当前聚合创建路径恢复领域工厂和领域事件语义。"
+        title = str(parsed.get("title") or "当前问题").strip()
+        return f"只修复“{title}”对应的当前代码锚点，不混入其它文件或其它问题。"
+
+    def _build_anchor_specific_steps(self, issue_domains: set[str]) -> list[str]:
+        if "naming" in issue_domains:
+            return ["定位当前命名违规行", "恢复符合规范的常量声明", "清理未使用或临时命名"]
+        if "exception" in issue_domains:
+            return ["定位当前 catch 块", "补齐日志或异常传播", "增加异常路径测试"]
+        if "query_bound" in issue_domains:
+            return ["定位当前查询语句", "恢复分页或 LIMIT 边界", "补充批量边界测试"]
+        if "domain_creation" in issue_domains:
+            return ["定位当前聚合创建行", "恢复领域工厂调用", "验证领域事件生成路径"]
+        return ["定位当前问题代码行", "按该问题最小范围修复", "补充对应回归验证"]
 
     def _enforce_expert_output_schema(self, parsed: dict[str, object], expert_id: str) -> dict[str, object]:
         """对专家 JSON 做最低限度的 schema 约束，避免弱结构输出直接升级成 issue。"""
@@ -1709,26 +1991,23 @@ class ReviewRunnerExpertOutputMixin:
 
         hunk_lines = self._parse_target_hunk_diff_lines(target_hunk) if hasattr(self, "_parse_target_hunk_diff_lines") else {}
         added_lines = list(hunk_lines.get("added") or []) if isinstance(hunk_lines, dict) else []
+        line_candidates: dict[int, list[str]] = {}
         if added_lines:
-            line_candidates: dict[int, list[str]] = {}
             for line_no, text in added_lines:
                 if line_no in set(changed_lines) and str(text).strip():
                     line_candidates.setdefault(int(line_no), []).append(str(text).strip())
-            if line_candidates:
-                return line_candidates
 
         excerpt = str(target_hunk.get("excerpt") or "")
         if not excerpt:
-            return {}
+            return line_candidates
         relevant_lines = [
             raw_line
             for raw_line in excerpt.splitlines()
             if raw_line[:1] in {"+", "-"} and not raw_line.startswith("+++") and not raw_line.startswith("---")
         ]
         if not relevant_lines:
-            return {}
+            return line_candidates
 
-        line_candidates: dict[int, list[str]] = {}
         changed_index = 0
         for index, raw_line in enumerate(relevant_lines):
             assigned_line = changed_lines[min(changed_index, len(changed_lines) - 1)]

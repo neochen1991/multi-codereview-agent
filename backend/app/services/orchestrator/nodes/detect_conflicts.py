@@ -718,7 +718,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     findings = list(next_state.get("findings", []))
     issue_filter_decisions: list[dict[str, object]] = []
     conflicts: list[dict[str, object]] = []
-    for grouped_items in _group_findings_by_problem(findings):
+    for grouped_items in _group_findings_for_issue_conversion(next_state, findings):
         eligible_items: list[dict[str, object]] = []
         for finding in grouped_items:
             file_path = str(finding.get("file_path", "")).strip() or "unknown"
@@ -832,6 +832,29 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     return next_state
 
 
+def _group_findings_for_issue_conversion(state: ReviewState, findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    if _review_quality_mode(state) == "thorough_review":
+        return [
+            [finding]
+            for finding in sorted(
+                findings,
+                key=lambda item: (
+                    str(item.get("file_path") or "").strip(),
+                    int(item.get("line_start", 1) or 1),
+                    str(item.get("finding_id") or ""),
+                ),
+            )
+        ]
+    return _group_findings_by_problem(findings)
+
+
+def _review_quality_mode(state: ReviewState) -> str:
+    runtime_settings = state.get("runtime_settings")
+    if isinstance(runtime_settings, dict):
+        return str(runtime_settings.get("review_quality_mode") or "").strip().lower()
+    return str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+
+
 def _build_issue_title(titles: list[str]) -> str:
     if not titles:
         return "待裁决议题"
@@ -841,6 +864,21 @@ def _build_issue_title(titles: list[str]) -> str:
 
 
 def _build_issue_summary(summaries: list[str], remediation_suggestions: list[str]) -> str:
+    if len(summaries) == 1:
+        summary = summaries[0].strip()
+        concrete_suggestions = [
+            item.strip()
+            for item in remediation_suggestions
+            if item.strip()
+            and item.strip()
+            not in {
+                "请根据规则要求补齐正确实现，并保留必要测试。",
+                "按命中的规则修正当前代码。",
+            }
+        ]
+        if concrete_suggestions:
+            return f"{summary}\n修复建议：{concrete_suggestions[0]}"
+        return summary
     parts: list[str] = []
     if summaries:
         parts.append("问题汇总：")
@@ -882,6 +920,13 @@ def _classify_issue_candidate(
             "rule_code": "empty_group",
             "rule_label": "空议题分组",
             "reason": "当前分组没有有效 finding，已跳过 issue 升级。",
+            "severity": "low",
+        }
+    if _is_expert_failure_placeholder(items):
+        return {
+            "rule_code": "expert_failure_placeholder",
+            "rule_label": "专家执行失败诊断不升级为正式问题",
+            "reason": "当前条目是专家执行失败后的保守诊断记录，不是可提交给研发修复的代码问题，已仅保留为 finding。",
             "severity": "low",
         }
     if not bool(config.get("issue_filter_enabled", True)):
@@ -1324,6 +1369,25 @@ def _has_observation_signal(items: list[dict[str, object]]) -> bool:
         if isinstance(code_context, dict) and str(code_context.get("evidence_source") or "").strip() == "observation_signal":
             return True
     return False
+
+
+def _is_expert_failure_placeholder(items: list[dict[str, object]]) -> bool:
+    text_blob = "\n".join(
+        [
+            str(item.get("title") or "")
+            for item in items
+        ]
+        + [
+            str(item.get("summary") or "")
+            for item in items
+        ]
+        + [
+            str(value)
+            for item in items
+            for value in list(item.get("evidence") or [])
+        ]
+    )
+    return "执行失败后保守保留" in text_blob or "专家执行失败:" in text_blob
 
 
 def _has_direct_code_evidence(items: list[dict[str, object]]) -> bool:

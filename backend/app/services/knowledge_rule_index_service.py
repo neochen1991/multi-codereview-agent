@@ -145,7 +145,7 @@ class KnowledgeRuleIndexService:
             source_path=card.source.source_path or document.source_filename or card.source.section_title,
             line_start=card.source.line_start,
             line_end=card.source.line_end,
-            enabled=card.status != "disabled",
+            enabled=card.status == "active",
         )
 
     def _parse_rule_drafts(self, lines: list[str]) -> list[_RuleDraft]:

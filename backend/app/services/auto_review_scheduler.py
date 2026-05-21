@@ -22,6 +22,10 @@ class AutoReviewScheduler:
         """启动后台轮询线程。"""
 
         MemoryProbe.log("scheduler.start.begin")
+        if str(os.getenv("CODE_REVIEW_DISABLE_AUTO_SCHEDULER", "")).strip().lower() in {"1", "true", "on", "yes"}:
+            logger.info("auto review scheduler skipped by CODE_REVIEW_DISABLE_AUTO_SCHEDULER")
+            MemoryProbe.log("scheduler.start.skipped_env")
+            return
         if os.getenv("PYTEST_CURRENT_TEST"):
             logger.info("auto review scheduler skipped in pytest runtime")
             MemoryProbe.log("scheduler.start.skipped_pytest")

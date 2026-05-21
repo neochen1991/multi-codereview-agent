@@ -122,6 +122,45 @@ def test_change_impact_report_service_synthesizes_llm_fields():
     assert updated.analysis_workflow
 
 
+def test_change_impact_report_service_skips_llm_in_thorough_light_mode():
+    service = ChangeImpactReportService()
+    calls = {"count": 0}
+    service._llm.resolve_expert = lambda expert, runtime: LLMResolution(  # type: ignore[method-assign]
+        provider="openai",
+        model="fake-model",
+        base_url="https://example.com",
+        api_key_env="FAKE_KEY",
+    )
+
+    def _complete_text(**kwargs):  # noqa: ANN001
+        calls["count"] += 1
+        return LLMTextResult(
+            text="{}",
+            mode="live",
+            provider="openai",
+            model="fake-model",
+            base_url="https://example.com",
+            api_key_env="FAKE_KEY",
+        )
+
+    service._llm.complete_text = _complete_text  # type: ignore[method-assign]
+
+    updated, llm_result = service.synthesize(
+        expert=_expert(),
+        runtime_settings=RuntimeSettings(review_quality_mode="thorough_review", default_analysis_mode="light"),
+        report=_report(),
+        trace={"repo": "repo", "detect_changes": {}, "context_results": [], "impact_results": []},
+        review_id="rev_test",
+    )
+
+    assert calls["count"] == 0
+    assert llm_result is not None
+    assert llm_result.mode == "fallback"
+    assert llm_result.error == "skipped:fact_template_only_for_thorough_light_review"
+    assert updated.llm_generated is False
+    assert updated.key_impact_points
+
+
 def test_change_impact_report_service_compacts_noisy_graph_facts():
     service = ChangeImpactReportService()
     captured: dict[str, str] = {}

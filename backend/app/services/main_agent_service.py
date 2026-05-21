@@ -931,7 +931,7 @@ class MainAgentService(MainAgentPromptingMixin):
         return False
 
     def _llm_metadata(self, result: LLMTextResult) -> dict[str, object]:
-        return {
+        metadata = {
             "llm_call_id": result.call_id,
             "provider": result.provider,
             "model": result.model,
@@ -943,6 +943,14 @@ class MainAgentService(MainAgentPromptingMixin):
             "completion_tokens": result.completion_tokens,
             "total_tokens": result.total_tokens,
         }
+        trace = {
+            "system_prompt_snapshot_full": str(getattr(result, "system_prompt_snapshot_full", "") or ""),
+            "prompt_snapshot_full": str(getattr(result, "prompt_snapshot_full", "") or ""),
+            "model_raw_response_full": str(getattr(result, "model_raw_response_full", "") or result.text or ""),
+        }
+        if any(trace.values()):
+            metadata["llm_trace"] = trace
+        return metadata
 
     def _build_repository_context(
         self,
@@ -1216,7 +1224,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

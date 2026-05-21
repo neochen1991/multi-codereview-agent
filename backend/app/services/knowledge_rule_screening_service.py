@@ -41,6 +41,21 @@ class KnowledgeRuleScreeningService:
                 list(review_context.get("query_terms", []) or [])[:8],
             )
             return self._empty_result()
+        if (
+            runtime_settings
+            and runtime_settings.rule_screening_mode == "llm"
+            and str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower() == "thorough_review"
+        ):
+            result = self._screen_with_heuristic(expert_id, review_context, rules)
+            result["screening_policy"] = "thorough_review_recall_first"
+            logger.info(
+                "knowledge rule screening used recall-first heuristic in thorough review expert_id=%s review_id=%s total_rules=%s matched_rule_count=%s",
+                str(expert_id).strip(),
+                str(review_id).strip(),
+                int(result.get("total_rules") or 0),
+                int(result.get("matched_rule_count") or 0),
+            )
+            return result
         if runtime_settings and runtime_settings.rule_screening_mode == "llm":
             llm_result = self._screen_with_llm(
                 expert_id=expert_id,
@@ -122,8 +137,13 @@ class KnowledgeRuleScreeningService:
                 self._fallback_possible_rules(no_hit_rules, reason="召回优先：规则筛选未命中，保留专家绑定规则供模型扫描")
             )
 
-        matched_for_llm = (must_review_rules[:8] + possible_hit_rules[:8])[:12]
         enabled_rules = [item for item in rules if item.enabled]
+        all_enabled_rules_for_llm = [
+            item
+            for item in (must_review_rules + possible_hit_rules + no_hit_rules)
+            if str(item.get("decision") or "").strip().lower() != "disabled"
+        ][:48]
+        matched_for_llm = (must_review_rules[:8] + possible_hit_rules[:8])[:12]
         heuristic_batch = {
             "batch_index": 1,
             "batch_count": 1,
@@ -164,6 +184,7 @@ class KnowledgeRuleScreeningService:
             "must_review_rules": must_review_rules[:8],
             "possible_hit_rules": possible_hit_rules[:8],
             "matched_rules_for_llm": matched_for_llm,
+            "all_enabled_rules_for_llm": all_enabled_rules_for_llm,
             "sample_no_hit_rules": no_hit_rules[:5],
             "screening_mode": "heuristic",
             "screening_fallback_used": False,
@@ -395,6 +416,7 @@ class KnowledgeRuleScreeningService:
                 self._fallback_possible_rules(no_hit_rules, reason="召回优先：LLM 规则筛选未命中，保留专家绑定规则供模型扫描")
             )
 
+        all_enabled_rules_for_llm = (must_review_rules + possible_hit_rules + no_hit_rules)[:48]
         matched_for_llm = (must_review_rules[:8] + possible_hit_rules[:8])[:12]
         result = {
             "total_rules": len(rules),
@@ -406,6 +428,7 @@ class KnowledgeRuleScreeningService:
             "must_review_rules": must_review_rules[:8],
             "possible_hit_rules": possible_hit_rules[:8],
             "matched_rules_for_llm": matched_for_llm,
+            "all_enabled_rules_for_llm": all_enabled_rules_for_llm,
             "sample_no_hit_rules": no_hit_rules[:5],
             "screening_mode": "llm",
             "screening_fallback_used": False,
@@ -512,6 +535,11 @@ class KnowledgeRuleScreeningService:
                 "completion_tokens": llm_result.completion_tokens,
                 "total_tokens": llm_result.total_tokens,
                 "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+                "llm_trace": {
+                    "system_prompt_snapshot_full": str(getattr(llm_result, "system_prompt_snapshot_full", "") or ""),
+                    "prompt_snapshot_full": str(getattr(llm_result, "prompt_snapshot_full", "") or ""),
+                    "model_raw_response_full": str(getattr(llm_result, "model_raw_response_full", "") or llm_result.text or ""),
+                },
             },
             "input_rule_count": len(batch),
             "input_rules": [
@@ -1036,6 +1064,7 @@ class KnowledgeRuleScreeningService:
             "must_review_rules": [],
             "possible_hit_rules": [],
             "matched_rules_for_llm": [],
+            "all_enabled_rules_for_llm": [],
             "sample_no_hit_rules": [],
             "screening_mode": "heuristic",
             "screening_fallback_used": False,

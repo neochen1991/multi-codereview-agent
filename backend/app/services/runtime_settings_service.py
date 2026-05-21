@@ -71,6 +71,7 @@ class RuntimeSettingsService:
             "rule_screening_mode",
             "rule_screening_batch_size",
             "rule_screening_llm_timeout_seconds",
+            "review_quality_mode",
             "enable_llm_targeted_debate",
             "llm_targeted_debate_timeout_seconds",
             "enable_sast_prescan",

@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.review import ReviewSubject
+from app.domain.models.review_rule import ReviewRuleCheckResult
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.review_runner import ReviewRunner
 
@@ -33,6 +34,22 @@ def _expert() -> ExpertProfile:
         role="ddd",
         model="minimax-2.5",
     )
+
+
+def test_rule_check_result_normalizes_weak_model_status_synonyms() -> None:
+    direct_defect = ReviewRuleCheckResult(
+        rule_id="GENERAL-EXPERT-CHECKS",
+        status="direct_defect",
+        evidence=["CourseCreator.java:20 直接 new Course"],
+    )
+    failed = ReviewRuleCheckResult(
+        rule_id="GENERAL-EXPERT-CHECKS",
+        status="failed",
+        evidence=["CourseCreator.java:20 直接 new Course"],
+    )
+
+    assert direct_defect.status == "violated"
+    assert failed.status == "violated"
 
 
 def test_parse_minimax_candidate_findings_as_review_candidates(storage_root: Path) -> None:
@@ -99,6 +116,44 @@ def test_rule_guided_contract_rejects_legacy_findings_root(storage_root: Path) -
     assert candidates == []
 
 
+def test_rule_guided_schema_repair_converts_legacy_findings_without_accepting_legacy_root(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    repaired_text, metadata = runner._repair_legacy_findings_response_locally(
+        original_response=(
+            '{"findings":[{"title":"应用服务绕过聚合工厂","file_path":"src/CourseCreator.java",'
+            '"line_start":18,"claim":"直接 new Course 绕过 Course.create",'
+            '"evidence":["Course course = new Course(id, name);"],'
+            '"matched_rules":["ARCH-JDDD-002"],"confidence":0.9}]}'
+        ),
+        required_rule_ids=["ARCH-JDDD-002", "GENERAL-EXPERT-CHECKS"],
+        file_path="src/CourseCreator.java",
+        line_start=18,
+        max_findings=4,
+    )
+
+    valid, errors = runner._validate_rule_guided_llm_response_contract(
+        repaired_text,
+        required_rule_ids=["ARCH-JDDD-002", "GENERAL-EXPERT-CHECKS"],
+    )
+    candidates = runner._parse_expert_analyses(
+        repaired_text,
+        _subject(),
+        _expert(),
+        "src/CourseCreator.java",
+        18,
+        require_rule_guided=True,
+    )
+
+    assert metadata["repair_mode"] == "local_legacy_findings_conversion"
+    assert metadata["repair_success"] is True
+    assert valid is True
+    assert errors == []
+    assert len(candidates) == 1
+    assert candidates[0]["matched_rules"] == ["ARCH-JDDD-002"]
+    assert candidates[0]["title"] == "应用服务绕过聚合工厂"
+
+
 def test_rule_guided_contract_requires_context_requests_and_self_check(storage_root: Path) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     payload = """
@@ -143,6 +198,60 @@ def test_rule_guided_contract_enforces_required_rule_coverage(storage_root: Path
 
     assert valid is False
     assert "rule_coverage_missing:PERF-SQL-001" in errors
+
+
+def test_rule_guided_contract_requires_self_check_all_rules(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    payload = """
+    {
+      "rule_check_results": [
+        {"rule_id": "ARCH-JDDD-002", "status": "violated", "evidence": ["x"], "reason": "x"},
+        {"rule_id": "PERF-SQL-001", "status": "passed", "evidence": ["x"], "reason": "x"}
+      ],
+      "candidate_findings": [],
+      "context_requests": [],
+      "self_check": {"checked_all_rules": false, "used_context_files": [], "unverified_assumptions": []}
+    }
+    """
+
+    valid, errors = runner._validate_rule_guided_llm_response_contract(
+        payload,
+        required_rule_ids=["ARCH-JDDD-002", "PERF-SQL-001"],
+    )
+
+    assert valid is False
+    assert "self_check_checked_all_rules_not_true" in errors
+
+
+def test_rule_guided_contract_rejects_candidate_with_unprovided_rule_id(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    payload = """
+    {
+      "rule_check_results": [
+        {"rule_id": "SEC-JAVA-001", "status": "passed", "evidence": ["x"], "reason": "x"}
+      ],
+      "candidate_findings": [
+        {
+          "rule_id": "GENERAL-EXPERT-CHECKS",
+          "title": "不应混入通用结论",
+          "file_path": "src/CourseCreator.java",
+          "line": 18,
+          "evidence": "Course course = new Course(id, name);"
+        }
+      ],
+      "context_requests": [],
+      "self_check": {"checked_all_rules": true, "used_context_files": [], "unverified_assumptions": []}
+    }
+    """
+
+    valid, errors = runner._validate_rule_guided_llm_response_contract(
+        payload,
+        required_rule_ids=["SEC-JAVA-001"],
+        allow_general_candidate_rule_id=False,
+    )
+
+    assert valid is False
+    assert "candidate_findings_1_rule_id_not_in_required_rules:GENERAL-EXPERT-CHECKS" in errors
 
 
 def test_parse_rule_guided_keeps_evidenced_candidates_with_insufficient_context(storage_root: Path) -> None:
@@ -346,6 +455,43 @@ def test_build_expert_llm_diagnostics_extracts_rule_results_and_candidates(stora
     assert diagnostics["candidate_findings"][0]["title"] == "factory bypass"
     assert "aggregate_factory_method" in diagnostics["context_gaps"]
     assert diagnostics["rule_coverage"]["checked_rule_count"] == 1
+
+
+def test_prompt_contract_lint_detects_stage_scope_conflicts(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    contract = runner._build_prompt_contract_metadata(
+        stage="expert_general_profile_scan",
+        system_prompt="你是专家画像通用代码检视器。",
+        user_prompt="[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]\n[CUSTOM_RULE_BATCH]\n[OUTPUT_JSON]",
+        required_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[TARGET_HUNKS]", "[OUTPUT_JSON]"],
+        forbidden_sections=["[CUSTOM_RULE_BATCH]"],
+        required_rule_ids=["GENERAL-EXPERT-CHECKS"],
+        scope="general scan",
+    )
+
+    assert contract["valid"] is False
+    assert "[TARGET_HUNKS]" in contract["missing_sections"]
+    assert "[CUSTOM_RULE_BATCH]" in contract["forbidden_hits"]
+    assert "general_scan_contains_custom_rule_batch" in contract["conflicts"]
+
+
+def test_build_expert_llm_diagnostics_keeps_system_prompt_and_contract(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    diagnostics = runner._build_expert_llm_diagnostics(
+        system_prompt="system role boundary",
+        user_prompt="[SYSTEM RULES]\n[RULE_CARDS]\n[CONTEXT_PACKET]\n[OUTPUT_JSON]",
+        llm_text='{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true}}',
+        rule_screening={"matched_rule_count": 0},
+        input_completeness={},
+        prompt_profile_name="rule-guided-compact",
+        prompt_contract={"stage": "expert_main_rule_guided_review", "valid": True},
+    )
+
+    assert diagnostics["system_prompt_snapshot_full"] == "system role boundary"
+    assert diagnostics["prompt_contract"]["stage"] == "expert_main_rule_guided_review"
+    assert diagnostics["prompt_snapshot_summary"]["prompt_contract_valid"] is True
 
 
 def test_timeout_recovery_prompt_is_compact_rule_guided_json_contract(storage_root: Path) -> None:

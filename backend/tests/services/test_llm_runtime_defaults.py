@@ -171,6 +171,9 @@ def test_llm_chat_logs_request_and_response_previews(monkeypatch, tmp_path: Path
     assert "attempt_elapsed_ms=" in caplog.text
     assert "total_elapsed_ms=" in caplog.text
     assert '"review_id": "rev_test"' in caplog.text
+    assert result.system_prompt_snapshot_full == "system prompt"
+    assert result.prompt_snapshot_full == "user prompt"
+    assert result.model_raw_response_full == "ok from llm"
 
 
 def test_llm_chat_raises_clear_error_for_invalid_json_response(monkeypatch, tmp_path: Path):
@@ -562,6 +565,77 @@ def test_llm_chat_retries_request_transport_errors_and_succeeds(
     assert result.text == "ok after retry"
     assert "llm request transport failure" in caplog.text
     assert "request_error_kind=connect_error" in caplog.text
+
+
+def test_llm_chat_retries_rate_limit_status_in_thorough_review_mode(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    from app.services import llm_chat_service as llm_chat_module
+
+    service = LLMChatService()
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(llm_chat_module.time, "sleep", lambda _: None)
+    attempts = {"count": 0}
+    request = httpx.Request("POST", "https://coding.dashscope.aliyuncs.com/v1/chat/completions")
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, headers: dict[str, str], json: dict[str, object]):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return httpx.Response(
+                    429,
+                    request=request,
+                    text='{"error":{"code":"RequestBurstTooFast"}}',
+                    headers={"Content-Type": "application/json"},
+                )
+            return httpx.Response(
+                200,
+                request=request,
+                text='{"choices":[{"message":{"content":"ok after rate limit retry"}}]}',
+                headers={"Content-Type": "application/json"},
+            )
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    runtime = RuntimeSettingsService(tmp_path / "storage").get().model_copy(
+        update={
+            "review_quality_mode": "thorough_review",
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+            "default_llm_api_key_env": "DASHSCOPE_API_KEY",
+            "default_llm_api_key": "sk-test",
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = service.complete_text(
+            system_prompt="system prompt",
+            user_prompt="user prompt",
+            resolution=service.resolve_main_agent(runtime),
+            runtime_settings=runtime,
+            fallback_text="fallback",
+            allow_fallback=False,
+            max_attempts=1,
+            log_context={"review_id": "rev_rate_limit_retry"},
+        )
+
+    assert attempts["count"] == 2
+    assert result.mode == "live"
+    assert result.text == "ok after rate limit retry"
+    assert "status=429" in caplog.text
+    assert "will_retry=True" in caplog.text
 
 
 def test_llm_chat_classifies_windows_connection_abort_as_request_error(

@@ -65,6 +65,16 @@ logger = logging.getLogger(__name__)
 FALLBACK_EXPERT_ID = "architecture_design"
 DDD_ARCHITECTURE_EXPERT_IDS = {"ddd_architecture", "ddd_specification"}
 CHANGE_IMPACT_EXPERT_ID = "change_impact_analysis"
+THOROUGH_REVIEW_CORE_EXPERT_IDS = (
+    "correctness_business",
+    "security_compliance",
+    "performance_reliability",
+    "database_analysis",
+    "architecture_design",
+    "ddd_architecture",
+    "maintainability_code_health",
+    "test_verification",
+)
 
 
 class ReviewClosedError(RuntimeError):
@@ -275,6 +285,12 @@ class ReviewRunner(
                 review_policy,
                 enabled_expert_ids=[expert.expert_id for expert in enabled_experts],
             )
+        selection_plan = self._ensure_thorough_review_core_experts(
+            subject=review.subject,
+            selection_plan=selection_plan,
+            enabled_experts=enabled_experts,
+            runtime_settings=effective_runtime_settings,
+        )
         MemoryProbe.log(
             "review_runner.after_expert_selection",
             review_id=review.review_id,
@@ -524,7 +540,11 @@ class ReviewRunner(
             line_start = int(primary_route.get("line_start") or 1)
             llm_metadata = dict(primary_route.get("routing_llm") or {})
             expert_route_jobs: list[dict[str, object]] = []
-            if not bool(primary_route.get("routeable", True)):
+            if self._should_skip_expert_route(
+                subject=review.subject,
+                primary_route=primary_route,
+                runtime_settings=effective_runtime_settings,
+            ):
                 skip_reason = str(primary_route.get("skip_reason") or "当前变更未命中该专家的有效审查线索")
                 skipped_experts.append(
                     {
@@ -566,6 +586,16 @@ class ReviewRunner(
                     )
                 )
                 continue
+            if not bool(primary_route.get("routeable", True)):
+                skip_reason = str(primary_route.get("skip_reason") or "路由模型未给出可审查目标")
+                primary_route["routeable"] = True
+                primary_route["routing_reason"] = (
+                    f"深度检视模式覆盖路由跳过结论：{skip_reason}。"
+                    "该模式要求入选专家覆盖全部候选 hunk，避免弱路由模型漏检。"
+                )
+                primary_route["routing_skip_overridden"] = True
+                llm_metadata["routing_skip_overridden"] = True
+                llm_metadata["routing_skip_reason"] = skip_reason
             effective_experts.append(
                 {
                     "expert_id": expert_id,
@@ -1165,7 +1195,10 @@ class ReviewRunner(
                 len(filtered_finding_ids),
             )
         self._enrich_issues_with_finding_evidence_chains(issues, finding_payloads)
-        issues = self._coalesce_duplicate_issues(issues)
+        if self._should_coalesce_final_issues(effective_runtime_settings):
+            issues = self._coalesce_duplicate_issues(issues)
+        else:
+            issues = [self._normalize_single_coalesced_issue(issue) for issue in issues]
         if issue_filter_decisions:
             self.message_repo.append(
                 ConversationMessage(
@@ -3334,6 +3367,109 @@ class ReviewRunner(
             "skipped_experts": skipped_entries,
         }
 
+    def _ensure_thorough_review_core_experts(
+        self,
+        *,
+        subject: ReviewSubject,
+        selection_plan: dict[str, object],
+        enabled_experts: list[ExpertProfile],
+        runtime_settings,
+    ) -> dict[str, object]:
+        """In thorough review mode, add core quality experts instead of trusting sparse routing."""
+
+        mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        if mode != "thorough_review":
+            return selection_plan
+        if subject.subject_type != "mr":
+            return selection_plan
+        if str((selection_plan.get("llm") or {}).get("mode") or "").strip().lower() == "user_selected_direct":
+            return selection_plan
+
+        enabled_by_id = {expert.expert_id: expert for expert in enabled_experts if expert.enabled}
+        selected_ids = [
+            str(expert_id).strip()
+            for expert_id in list(selection_plan.get("selected_expert_ids", []) or [])
+            if str(expert_id).strip()
+        ]
+        selected_entries = [
+            dict(item)
+            for item in list(selection_plan.get("selected_experts", []) or [])
+            if isinstance(item, dict)
+        ]
+        selected_entry_ids = {
+            str(item.get("expert_id") or "").strip()
+            for item in selected_entries
+            if str(item.get("expert_id") or "").strip()
+        }
+        requested_ids = [
+            str(expert_id).strip()
+            for expert_id in list(selection_plan.get("requested_expert_ids", []) or [])
+            if str(expert_id).strip()
+        ]
+        force_expand_requested = bool(
+            isinstance(subject.metadata, dict)
+            and subject.metadata.get("force_thorough_review_core_experts")
+        )
+        if requested_ids and not force_expand_requested:
+            return selection_plan
+
+        added_ids: list[str] = []
+        for expert_id in THOROUGH_REVIEW_CORE_EXPERT_IDS:
+            expert = enabled_by_id.get(expert_id)
+            if expert is None:
+                continue
+            if expert_id not in selected_ids:
+                selected_ids.append(expert_id)
+                added_ids.append(expert_id)
+            if expert_id not in selected_entry_ids:
+                selected_entries.append(
+                    {
+                        "expert_id": expert_id,
+                        "expert_name": expert.name_zh,
+                        "reason": "深度检视模式固定补入核心质量专家，避免预筛或弱模型路由漏检。",
+                        "confidence": 1.0,
+                        "source": "thorough_review_required",
+                    }
+                )
+                selected_entry_ids.add(expert_id)
+            if expert_id not in requested_ids:
+                requested_ids.append(expert_id)
+
+        if not added_ids:
+            return selection_plan
+
+        skipped_entries = [
+            dict(item)
+            for item in list(selection_plan.get("skipped_experts", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("expert_id") or "").strip() not in set(added_ids)
+        ]
+        return {
+            **selection_plan,
+            "requested_expert_ids": requested_ids,
+            "selected_expert_ids": selected_ids,
+            "selected_experts": selected_entries,
+            "skipped_experts": skipped_entries,
+            "thorough_review_added_expert_ids": added_ids,
+        }
+
+    def _should_skip_expert_route(
+        self,
+        *,
+        subject: ReviewSubject,
+        primary_route: dict[str, object],
+        runtime_settings,
+    ) -> bool:
+        """Decide whether routing may suppress a selected expert."""
+
+        if bool(primary_route.get("routeable", True)):
+            return False
+        if subject.subject_type == "mr" and str(
+            getattr(runtime_settings, "review_quality_mode", "") or ""
+        ).strip().lower() == "thorough_review":
+            return False
+        return True
+
     def _build_manual_routing_plan(
         self,
         subject: ReviewSubject,
@@ -4728,8 +4864,9 @@ class ReviewRunner(
                     "3. 不允许输出 legacy {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
                     "4. 每条 candidate_finding 必须包含 rule_id、title、file_path、line、evidence、confidence；\n"
                     "5. file_path 只能从“本轮批量文件清单”里选择；\n"
-                    "6. 每条适用 RULE_CARDS 都必须在 rule_check_results 中给出 status、evidence、missing_context、reason；\n"
-                    "7. self_check.checked_all_rules 必须反映是否已经逐条检查 RULE_CARDS。\n"
+                    "6. 每条 candidate_finding 只能对应一个具体问题和一个主代码锚点，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
+                    "7. 每条适用 RULE_CARDS 都必须在 rule_check_results 中给出 status、evidence、missing_context、reason；\n"
+                    "8. self_check.checked_all_rules 必须反映是否已经逐条检查 RULE_CARDS。\n"
                 )
             else:
                 output_requirements = (
@@ -4739,7 +4876,8 @@ class ReviewRunner(
                     "3. 每条 finding 都必须同时包含 file_path、line_start、line_end、title、claim、suggested_code；\n"
                     "4. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
                     "5. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条；\n"
-                    "6. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
+                    "6. 每条 finding 只能对应一个具体问题和一个主代码锚点，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
+                    "7. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
                 )
             user_prompt = (
                 f"{user_prompt}\n\n"
@@ -4830,6 +4968,19 @@ class ReviewRunner(
             model_name=llm_resolution.model,
             prompt_profile_name=effective_prompt_profile_name,
         )
+        thorough_review_enabled = self._review_thorough_mode_enabled(runtime_settings, prompt_profile)
+        main_prompt_contract = self._build_prompt_contract_metadata(
+            stage="expert_main_rule_guided_review" if prompt_profile.require_rule_check_results else "expert_main_legacy_review",
+            system_prompt=expert_system_prompt,
+            user_prompt=user_prompt,
+            required_sections=(
+                ["[SYSTEM RULES]", "[TASK]", "[EXPERT_PROFILE]", "[RULE_CARDS]", "[CONTEXT_PACKET]", "[OUTPUT_JSON]"]
+                if prompt_profile.require_rule_check_results
+                else []
+            ),
+            required_rule_ids=required_rule_ids,
+            scope="main expert review: rule checks plus high-recall candidates",
+        )
         try:
             llm_result = self.llm_chat_service.complete_text(
                 system_prompt=expert_system_prompt,
@@ -4849,6 +5000,7 @@ class ReviewRunner(
                     "file_path": file_path,
                     "line_start": line_start,
                     "prompt_budget": prompt_budget_metadata,
+                    "prompt_contract": main_prompt_contract,
                 },
             )
         except Exception as exc:
@@ -4986,11 +5138,13 @@ class ReviewRunner(
         )
         self._abort_if_closed(review.review_id)
         expert_llm_diagnostics = self._build_expert_llm_diagnostics(
+            system_prompt=expert_system_prompt,
             user_prompt=user_prompt,
             llm_text=llm_text_for_parse,
             rule_screening=rule_screening,
             input_completeness=input_completeness,
             prompt_profile_name=effective_prompt_profile_name,
+            prompt_contract=main_prompt_contract,
         )
         if schema_contract_metadata:
             expert_llm_diagnostics["schema_contract"] = schema_contract_metadata
@@ -5049,15 +5203,16 @@ class ReviewRunner(
                         max_findings=max_findings_cap,
                     )
         general_scan_metadata: dict[str, object] = {}
+        should_scan_review_targets = self._should_retry_empty_rule_guided_candidate_response(
+            target_hunk=target_hunk,
+            target_hunks=target_hunks,
+            repository_context=repository_context,
+            rule_screening=rule_screening or {},
+        )
         if (
             prompt_profile.require_rule_check_results
-            and not parsed_candidates
-            and self._should_retry_empty_rule_guided_candidate_response(
-                target_hunk=target_hunk,
-                target_hunks=target_hunks,
-                repository_context=repository_context,
-                rule_screening=rule_screening or {},
-            )
+            and should_scan_review_targets
+            and (thorough_review_enabled or not parsed_candidates)
         ):
             general_scan_text, general_scan_metadata = self._run_rule_guided_general_expert_profile_scan(
                 review=review,
@@ -5136,6 +5291,58 @@ class ReviewRunner(
             initial_candidates=parsed_candidates,
             max_findings=max_findings_cap,
         )
+        if (
+            thorough_review_enabled
+            and prompt_profile.require_rule_check_results
+            and should_scan_review_targets
+            and not parsed_candidates
+        ):
+            zero_gate_metadata = {
+                "phase": "expert_review",
+                "review_quality_mode": "thorough_review",
+                "file_path": file_path,
+                "line_start": line_start,
+                "prompt_profile": effective_prompt_profile_name,
+                "main_candidate_count": int((expert_llm_diagnostics.get("rule_coverage") or {}).get("candidate_count") or 0),
+                "empty_retry_attempted": bool(empty_retry_metadata.get("attempted")),
+                "general_scan_attempted": bool(general_scan_metadata.get("attempted")),
+                "custom_scan_attempted": bool(custom_scan_metadata.get("attempted")),
+                "custom_scan_batch_count": int(custom_scan_metadata.get("batch_count") or 0),
+                "prompt_contract": main_prompt_contract,
+                "general_scan": general_scan_metadata,
+                "custom_rule_batch_scan": custom_scan_metadata,
+                "empty_candidate_retry": empty_retry_metadata,
+                "input_completeness": input_completeness,
+                **self._expert_llm_metadata(expert, runtime_settings),
+            }
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_zero_candidate_quality_gate",
+                    content=(
+                        f"{expert.name_zh} 深度检视已完成主审查、通用扫描和绑定规范扫描，"
+                        "但本轮仍未产出候选问题；系统保留该质量门禁诊断用于回放分析。"
+                    ),
+                    metadata=zero_gate_metadata,
+                )
+            )
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_zero_candidate_quality_gate",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 深度检视零候选质量门禁已记录",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "general_scan_attempted": bool(general_scan_metadata.get("attempted")),
+                        "custom_scan_attempted": bool(custom_scan_metadata.get("attempted")),
+                    },
+                )
+            )
         design_alignment = self._extract_design_alignment(runtime_tool_results)
         saved_count = 0
         pending_findings: list[ReviewFinding] = []
@@ -5197,6 +5404,20 @@ class ReviewRunner(
                 fallback=int((per_file_batch_item or {}).get("line_start") or line_start or 1),
             )
             file_used_lines.add(int(matched_hunk_line_start or line_start or 1))
+            raw_candidate_line_start = self._normalize_optional_line_value(
+                raw_parsed.get("line_start") or raw_parsed.get("line")
+            )
+            if (
+                raw_candidate_line_start is not None
+                and int(raw_candidate_line_start) == int(line_start or 1)
+                and int(matched_hunk_line_start or line_start or 1) != int(line_start or 1)
+                and len(per_file_target_hunks) > 1
+            ):
+                raw_parsed = {
+                    **raw_parsed,
+                    "line_start": int(matched_hunk_line_start or line_start or 1),
+                    "line_end": int(matched_hunk_line_start or line_start or 1),
+                }
             parsed = self._stabilize_expert_analysis(
                 raw_parsed,
                 expert.expert_id,
@@ -5808,8 +6029,62 @@ class ReviewRunner(
             "mode": "pending",
         }
 
-    def _llm_message_metadata(self, llm_result) -> dict[str, object]:
+    def _review_thorough_mode_enabled(self, runtime_settings, prompt_profile) -> bool:
+        """Return whether independent high-recall scans should run for every rule-guided expert."""
+
+        if getattr(prompt_profile, "allow_legacy_expert_output", False):
+            return False
+        mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        return mode == "thorough_review"
+
+    def _build_prompt_contract_metadata(
+        self,
+        *,
+        stage: str,
+        system_prompt: str,
+        user_prompt: str,
+        required_sections: list[str],
+        forbidden_sections: list[str] | None = None,
+        required_rule_ids: list[str] | None = None,
+        scope: str = "",
+    ) -> dict[str, object]:
+        """Build lightweight prompt lint diagnostics for replay and weak-model debugging."""
+
+        user_text = str(user_prompt or "")
+        system_text = str(system_prompt or "")
+        missing_sections = [section for section in required_sections if section and section not in user_text]
+        forbidden_hits = [section for section in list(forbidden_sections or []) if section and section in user_text]
+        conflicts: list[str] = []
+        lowered_user = user_text.lower()
+        lowered_system = system_text.lower()
+        if stage == "expert_general_profile_scan":
+            if "[custom_rule_batch]" in lowered_user or "custom_rule_batch" in lowered_user:
+                conflicts.append("general_scan_contains_custom_rule_batch")
+            if "只按本批 custom_rule_batch" in lowered_system:
+                conflicts.append("general_system_scope_conflicts_with_custom_batch")
+        if stage == "expert_custom_rule_batch_scan":
+            if "rule_id 使用 general-expert-checks" in lowered_user.lower():
+                conflicts.append("custom_scan_allows_general_rule_id")
+            if "语言通用规范" in lowered_system and "custom_rule_batch" not in lowered_system:
+                conflicts.append("custom_system_scope_may_include_general_rules")
+        if stage == "expert_rule_check_prepass" and "candidate_findings 必须输出空数组" not in user_text:
+            conflicts.append("rule_prepass_missing_empty_candidate_instruction")
         return {
+            "stage": stage,
+            "scope": scope,
+            "valid": not missing_sections and not forbidden_hits and not conflicts,
+            "required_sections": list(required_sections),
+            "missing_sections": missing_sections,
+            "forbidden_sections": list(forbidden_sections or []),
+            "forbidden_hits": forbidden_hits,
+            "conflicts": conflicts,
+            "required_rule_ids": [str(item).strip() for item in list(required_rule_ids or []) if str(item).strip()],
+            "system_prompt_chars": len(system_text),
+            "user_prompt_chars": len(user_text),
+        }
+
+    def _llm_message_metadata(self, llm_result) -> dict[str, object]:
+        metadata = {
             "llm_call_id": llm_result.call_id,
             "provider": llm_result.provider,
             "model": llm_result.model,
@@ -5821,6 +6096,14 @@ class ReviewRunner(
             "completion_tokens": llm_result.completion_tokens,
             "total_tokens": llm_result.total_tokens,
         }
+        trace = {
+            "system_prompt_snapshot_full": str(getattr(llm_result, "system_prompt_snapshot_full", "") or ""),
+            "prompt_snapshot_full": str(getattr(llm_result, "prompt_snapshot_full", "") or ""),
+            "model_raw_response_full": str(getattr(llm_result, "model_raw_response_full", "") or llm_result.text or ""),
+        }
+        if any(trace.values()):
+            metadata["llm_trace"] = trace
+        return metadata
 
     def _attach_environment_preflight(self, review: ReviewTask, runtime_settings) -> ReviewTask:
         preflight = run_review_environment_preflight(review.subject, runtime_settings)
@@ -5871,11 +6154,13 @@ class ReviewRunner(
     def _build_expert_llm_diagnostics(
         self,
         *,
+        system_prompt: str = "",
         user_prompt: str,
         llm_text: str,
         rule_screening: dict[str, object],
         input_completeness: dict[str, object],
         prompt_profile_name: str,
+        prompt_contract: dict[str, object] | None = None,
     ) -> dict[str, object]:
         payload = self._parse_json_payload(llm_text)
         rule_check_results: list[dict[str, object]] = []
@@ -5919,13 +6204,17 @@ class ReviewRunner(
         return {
             "prompt_snapshot_summary": {
                 "profile": str(prompt_profile_name or "auto"),
+                "system_prompt_chars": len(str(system_prompt or "")),
                 "prompt_chars": len(str(user_prompt or "")),
                 "contains_system_rules": "[SYSTEM RULES]" in str(user_prompt or ""),
                 "contains_rule_cards": "[RULE_CARDS]" in str(user_prompt or ""),
                 "contains_context_packet": "[CONTEXT_PACKET]" in str(user_prompt or ""),
                 "contains_output_json": "[OUTPUT_JSON]" in str(user_prompt or ""),
+                "prompt_contract_valid": bool((prompt_contract or {}).get("valid", True)),
             },
+            "system_prompt_snapshot_full": self._clip_diagnostic_text(str(system_prompt or ""), 120000),
             "prompt_snapshot_full": self._clip_diagnostic_text(str(user_prompt or ""), 180000),
+            "prompt_contract": dict(prompt_contract or {}),
             "model_raw_response_excerpt": self._clip_diagnostic_text(str(llm_text or ""), 4000),
             "model_raw_response_full": self._clip_diagnostic_text(str(llm_text or ""), 180000),
             "rule_check_results": rule_check_results,
@@ -6111,12 +6400,22 @@ class ReviewRunner(
                 f"原主审 prompt 长度: {len(str(base_user_prompt or ''))} 字符；本阶段不嵌套原主审 prompt，避免输出合同冲突。",
             ]
         )
+        system_prompt = (
+            "你是代码审查规则检查器。只输出 JSON，不输出 Markdown。"
+            "本阶段禁止输出 candidate finding。"
+        )
+        prompt_contract = self._build_prompt_contract_metadata(
+            stage="expert_rule_check_prepass",
+            system_prompt=system_prompt,
+            user_prompt=prepass_prompt,
+            required_sections=["[RULE_CHECK_PREPASS_ONLY]", "[RULE_CARDS]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]"],
+            forbidden_sections=["[EMPTY_CANDIDATE_RETRY]", "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[CUSTOM_RULE_BATCH]"],
+            required_rule_ids=required_rule_ids,
+            scope="rule checks only; candidate_findings must stay empty",
+        )
         try:
             result = self.llm_chat_service.complete_text(
-                system_prompt=(
-                    "你是代码审查规则检查器。只输出 JSON，不输出 Markdown。"
-                    "本阶段禁止输出 candidate finding。"
-                ),
+                system_prompt=system_prompt,
                 user_prompt=prepass_prompt,
                 resolution=resolution,
                 runtime_settings=runtime_settings,
@@ -6135,6 +6434,7 @@ class ReviewRunner(
                     "phase": "expert_rule_check_prepass",
                     "file_path": file_path,
                     "line_start": line_start,
+                    "prompt_contract": prompt_contract,
                 },
             )
         except Exception as exc:  # noqa: BLE001 - prepass failure should degrade, not abort.
@@ -6171,6 +6471,7 @@ class ReviewRunner(
             "prompt_snapshot_full": self._clip_diagnostic_text(prepass_prompt, 120000),
             "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
             "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+            "prompt_contract": prompt_contract,
         }
         self.message_repo.append(
             ConversationMessage(
@@ -6259,6 +6560,7 @@ class ReviewRunner(
                 "上一轮输出结构合法，但 candidate_findings 为空。当前输入包含实质变更代码，因此必须重新做一次证据聚焦审查。",
                 "本阶段不要复述上一轮结论，不要输出 Markdown。",
                 "如果任一目标 hunk 中存在违反专家职责、专家规范、语言通用规范或 RULE_CARDS 的代码证据，必须输出 candidate_findings。",
+                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；同一 hunk 的多个问题必须拆成多条。",
                 "如果仍判断无问题，candidate_findings 可以为空，但 self_check.unverified_assumptions 必须写明逐个 hunk 无问题的具体原因。",
                 "有当前代码锚点但还缺上下文时，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
@@ -6318,12 +6620,22 @@ class ReviewRunner(
                 ),
             ]
         )
+        system_prompt = (
+            "你是代码审查空结果复核器。上一轮为空不是成功结论；"
+            "必须重新扫描目标 hunk，有代码证据就输出候选。只输出 JSON。"
+        )
+        prompt_contract = self._build_prompt_contract_metadata(
+            stage="expert_empty_candidate_retry",
+            system_prompt=system_prompt,
+            user_prompt=retry_prompt,
+            required_sections=["[EMPTY_CANDIDATE_RETRY]", "[RULE_CARDS]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+            forbidden_sections=["[CUSTOM_BOUND_RULE_REVIEW_ONLY]"],
+            required_rule_ids=required_rule_ids or ["GENERAL-EXPERT-CHECKS"],
+            scope="empty-result challenge; rescan all target hunks",
+        )
         try:
             result = self.llm_chat_service.complete_text(
-                system_prompt=(
-                    "你是代码审查空结果复核器。上一轮为空不是成功结论；"
-                    "必须重新扫描目标 hunk，有代码证据就输出候选。只输出 JSON。"
-                ),
+                system_prompt=system_prompt,
                 user_prompt=retry_prompt,
                 resolution=resolution,
                 runtime_settings=runtime_settings,
@@ -6338,6 +6650,7 @@ class ReviewRunner(
                     "phase": "expert_empty_candidate_retry",
                     "file_path": file_path,
                     "line_start": line_start,
+                    "prompt_contract": prompt_contract,
                 },
             )
         except Exception as exc:  # noqa: BLE001 - empty retry is diagnostic and should not abort.
@@ -6381,6 +6694,7 @@ class ReviewRunner(
             "prompt_snapshot_full": self._clip_diagnostic_text(retry_prompt, 120000),
             "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
             "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+            "prompt_contract": prompt_contract,
         }
         self.message_repo.append(
             ConversationMessage(
@@ -6468,9 +6782,10 @@ class ReviewRunner(
             [
                 "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]",
                 "本阶段只按专家画像、专家职责、专家审视规范和代码语言通用规范做通用检视。",
-                "它不依赖专家绑定规范是否命中；即使 CUSTOM_RULE_BATCH 为空或全部未命中，也必须全量扫描 TARGET_HUNKS。",
+                "它不依赖专家绑定规范是否命中；即使绑定规范批次为空或全部未命中，也必须全量扫描 TARGET_HUNKS。",
                 "如果存在当前代码锚点和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
                 "如果缺少关联上下文但已有当前代码证据，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
+                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一问题。",
                 "不要输出专家绑定规范结论，不要编造产品规则 ID。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
                 f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1800)}",
@@ -6523,12 +6838,22 @@ class ReviewRunner(
                 "只输出一个 JSON 对象，不要输出 Markdown，不要添加额外解释。",
             ]
         )
+        system_prompt = (
+            "你是专家画像通用代码检视器。只按专家职责和语言通用规范扫描目标 hunk；"
+            "绑定规则未命中不是无问题结论。只输出 JSON。"
+        )
+        prompt_contract = self._build_prompt_contract_metadata(
+            stage="expert_general_profile_scan",
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            required_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+            forbidden_sections=["[CUSTOM_RULE_BATCH]"],
+            required_rule_ids=["GENERAL-EXPERT-CHECKS"],
+            scope="general expert profile and language-guideline scan",
+        )
         try:
             result = self.llm_chat_service.complete_text(
-                system_prompt=(
-                    "你是专家画像通用代码检视器。只按专家职责和语言通用规范扫描目标 hunk；"
-                    "绑定规则未命中不是无问题结论。只输出 JSON。"
-                ),
+                system_prompt=system_prompt,
                 user_prompt=prompt,
                 resolution=resolution,
                 runtime_settings=runtime_settings,
@@ -6543,6 +6868,7 @@ class ReviewRunner(
                     "phase": "expert_general_profile_scan",
                     "file_path": file_path,
                     "line_start": line_start,
+                    "prompt_contract": prompt_contract,
                 },
             )
         except Exception as exc:  # noqa: BLE001 - general scan should degrade, not abort.
@@ -6586,6 +6912,7 @@ class ReviewRunner(
             "prompt_snapshot_full": self._clip_diagnostic_text(prompt, 120000),
             "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
             "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+            "prompt_contract": prompt_contract,
         }
         self.message_repo.append(
             ConversationMessage(
@@ -6662,6 +6989,7 @@ class ReviewRunner(
                     "不要因为主审或规则预筛没有发现问题就跳过本阶段；本阶段以 CUSTOM_RULE_BATCH 为准重新校验。",
                     "如果某条规则不适用，输出 not_applicable；缺上下文输出 insufficient_context；存在当前代码证据时必须保留 candidate_findings 并写 context_requests。",
                     "candidate_findings 的 rule_id 必须来自 CUSTOM_RULE_BATCH；不得输出通用规则结论或编造规则 ID。",
+                    "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一个自定义规则违反点。",
                     "输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check。",
                     f"BATCH_INDEX: {batch_index}/{len(rule_batches)}",
                     f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
@@ -6710,12 +7038,22 @@ class ReviewRunner(
                     "只输出一个 JSON 对象，不要输出 Markdown，不要添加额外解释。",
                 ]
             )
+            system_prompt = (
+                "你是专家绑定规范批量校验器。只按本批 CUSTOM_RULE_BATCH 逐条审查目标 hunk；"
+                "不要混入通用规范结论，不要编造规则 ID。只输出 JSON。"
+            )
+            prompt_contract = self._build_prompt_contract_metadata(
+                stage="expert_custom_rule_batch_scan",
+                system_prompt=system_prompt,
+                user_prompt=custom_prompt,
+                required_sections=["[CUSTOM_BOUND_RULE_REVIEW_ONLY]", "[CUSTOM_RULE_BATCH]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+                forbidden_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]"],
+                required_rule_ids=required_rule_ids,
+                scope="custom bound RuleCard batch scan only",
+            )
             try:
                 result = self.llm_chat_service.complete_text(
-                    system_prompt=(
-                        "你是专家绑定规范批量校验器。只按本批 CUSTOM_RULE_BATCH 逐条审查目标 hunk；"
-                        "不要混入通用规范结论，不要编造规则 ID。只输出 JSON。"
-                    ),
+                    system_prompt=system_prompt,
                     user_prompt=custom_prompt,
                     resolution=resolution,
                     runtime_settings=runtime_settings,
@@ -6734,6 +7072,7 @@ class ReviewRunner(
                         "file_path": file_path,
                         "line_start": line_start,
                         "batch_index": batch_index,
+                        "prompt_contract": prompt_contract,
                     },
                 )
             except Exception as exc:  # noqa: BLE001 - one custom batch must not abort the expert review.
@@ -6750,6 +7089,7 @@ class ReviewRunner(
             valid, errors = self._validate_rule_guided_llm_response_contract(
                 result.text,
                 required_rule_ids=required_rule_ids,
+                allow_general_candidate_rule_id=False,
             )
             payload = self._parse_json_payload(result.text)
             candidate_count = (
@@ -6771,6 +7111,7 @@ class ReviewRunner(
                 "prompt_snapshot_full": self._clip_diagnostic_text(custom_prompt, 120000),
                 "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
                 "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+                "prompt_contract": prompt_contract,
             }
             batch_metadata.append(metadata)
             self.message_repo.append(
@@ -6816,9 +7157,17 @@ class ReviewRunner(
     ) -> list[list[dict[str, object]]]:
         seen: set[str] = set()
         rules: list[dict[str, object]] = []
-        for item in list((rule_screening or {}).get("matched_rules_for_llm") or []):
-            if not isinstance(item, dict):
-                continue
+        source_rules: list[dict[str, object]] = []
+        for key in (
+            "matched_rules_for_llm",
+            "all_enabled_rules_for_llm",
+            "must_review_rules",
+            "possible_hit_rules",
+        ):
+            for item in list((rule_screening or {}).get(key) or []):
+                if isinstance(item, dict):
+                    source_rules.append(item)
+        for item in source_rules:
             rule_id = str(item.get("rule_id") or item.get("id") or "").strip()
             if not rule_id or rule_id == "GENERAL-EXPERT-CHECKS" or rule_id in seen:
                 continue
@@ -6854,6 +7203,7 @@ class ReviewRunner(
         text: str,
         *,
         required_rule_ids: list[str] | None = None,
+        allow_general_candidate_rule_id: bool = True,
     ) -> tuple[bool, list[str]]:
         payload = self._parse_json_payload(text)
         errors: list[str] = []
@@ -6871,6 +7221,17 @@ class ReviewRunner(
             errors.append("context_requests_missing_or_not_list")
         if not isinstance(self_check, dict):
             errors.append("self_check_missing_or_not_object")
+        elif list(required_rule_ids or []):
+            checked_all_rules = self_check.get("checked_all_rules")
+            if checked_all_rules is not True and str(checked_all_rules).strip().lower() not in {
+                "true",
+                "yes",
+                "y",
+                "1",
+                "是",
+                "已检查",
+            }:
+                errors.append("self_check_checked_all_rules_not_true")
         if "findings" in payload:
             errors.append("legacy_findings_key_not_allowed")
         checked_rule_ids: set[str] = set()
@@ -6889,6 +7250,11 @@ class ReviewRunner(
         for rule_id in list(required_rule_ids or []):
             if rule_id and rule_id not in checked_rule_ids:
                 errors.append(f"rule_coverage_missing:{rule_id}")
+        allowed_candidate_rule_ids = {
+            str(rule_id).strip()
+            for rule_id in list(required_rule_ids or [])
+            if str(rule_id).strip()
+        }
         for index, item in enumerate(candidates if isinstance(candidates, list) else [], start=1):
             if not isinstance(item, dict):
                 errors.append(f"candidate_findings_{index}_not_object")
@@ -6896,6 +7262,14 @@ class ReviewRunner(
             for key in ("rule_id", "title", "file_path", "evidence"):
                 if not str(item.get(key) or "").strip():
                     errors.append(f"candidate_findings_{index}_{key}_missing")
+            candidate_rule_id = str(item.get("rule_id") or "").strip()
+            if (
+                allowed_candidate_rule_ids
+                and candidate_rule_id
+                and candidate_rule_id not in allowed_candidate_rule_ids
+                and not (allow_general_candidate_rule_id and candidate_rule_id == "GENERAL-EXPERT-CHECKS")
+            ):
+                errors.append(f"candidate_findings_{index}_rule_id_not_in_required_rules:{candidate_rule_id}")
             if not (item.get("line") or item.get("line_start")):
                 errors.append(f"candidate_findings_{index}_line_missing")
         return not errors, errors
@@ -7175,6 +7549,15 @@ class ReviewRunner(
             rule_screening,
             max_rules_per_prompt=20,
         )
+        local_repair_text, local_repair_metadata = self._repair_legacy_findings_response_locally(
+            original_response=original_response,
+            required_rule_ids=rule_ids,
+            file_path=file_path,
+            line_start=line_start,
+            max_findings=max_findings,
+        )
+        if local_repair_text:
+            return local_repair_text, local_repair_metadata
         repair_prompt = "\n".join(
             [
                 "你是代码审查结果结构化修复器。只允许把原始专家输出转换为规则驱动 JSON，不要新增原始输出中没有的代码问题。",
@@ -7210,7 +7593,7 @@ class ReviewRunner(
                         ],
                         "context_requests": [],
                         "self_check": {
-                            "checked_all_rules": False,
+                            "checked_all_rules": True,
                             "used_context_files": [],
                             "unverified_assumptions": [],
                         },
@@ -7260,6 +7643,189 @@ class ReviewRunner(
             "repair_prompt_snapshot_full": self._clip_diagnostic_text(repair_prompt, 120000),
             "repair_raw_response_full": self._clip_diagnostic_text(str(repair_result.text or ""), 120000),
         }
+
+    def _repair_legacy_findings_response_locally(
+        self,
+        *,
+        original_response: str,
+        required_rule_ids: list[str],
+        file_path: str,
+        line_start: int,
+        max_findings: int,
+    ) -> tuple[str, dict[str, object]]:
+        """Convert legacy findings JSON into the rule-guided contract without accepting legacy directly."""
+
+        payload = self._parse_json_payload(original_response)
+        if not isinstance(payload, dict):
+            return "", {}
+        raw_findings = payload.get("findings")
+        if not isinstance(raw_findings, list) and any(
+            str(payload.get(key) or "").strip()
+            for key in ("title", "claim", "summary", "evidence", "matched_rules", "violated_guidelines")
+        ):
+            raw_findings = [payload]
+        if not isinstance(raw_findings, list):
+            return "", {}
+        safe_required_rule_ids = [
+            str(rule_id).strip()
+            for rule_id in list(required_rule_ids or [])
+            if str(rule_id).strip()
+        ] or ["GENERAL-EXPERT-CHECKS"]
+        max_count = max(1, int(max_findings or 1))
+        candidate_findings: list[dict[str, object]] = []
+        checked_rule_ids: set[str] = set()
+        for raw in raw_findings[:max_count]:
+            if not isinstance(raw, dict):
+                continue
+            raw_matched_rules = self._normalize_text_list(raw.get("matched_rules"), [])
+            raw_violated_guidelines = self._normalize_text_list(raw.get("violated_guidelines"), [])
+            matched_rules = [
+                str(item).strip()
+                for item in [*raw_matched_rules, *raw_violated_guidelines]
+                if str(item).strip()
+            ]
+            rule_id = ""
+            for item in matched_rules:
+                if item in safe_required_rule_ids:
+                    rule_id = item
+                    break
+                extracted_ids = self._extract_additive_rule_ids(item)
+                matched_known_id = next(
+                    (
+                        known_id
+                        for known_id in safe_required_rule_ids
+                        if known_id in extracted_ids or known_id in item
+                    ),
+                    "",
+                )
+                if matched_known_id:
+                    rule_id = matched_known_id
+                    break
+            if not rule_id:
+                rule_id = "GENERAL-EXPERT-CHECKS"
+            title = str(raw.get("title") or raw.get("claim") or "代码检视候选问题").strip()
+            evidence_items = self._normalize_text_list(raw.get("evidence"), [])
+            evidence = "；".join(evidence_items[:4]) or str(raw.get("claim") or title).strip()
+            line = raw.get("line_start") or raw.get("line") or line_start
+            candidate_findings.append(
+                {
+                    "rule_id": rule_id,
+                    "title": title,
+                    "claim": str(raw.get("claim") or raw.get("summary") or title).strip(),
+                    "file_path": str(raw.get("file_path") or file_path).strip() or file_path,
+                    "line": int(line or line_start or 1),
+                    "line_start": int(line or line_start or 1),
+                    "line_end": int(raw.get("line_end") or line or line_start or 1),
+                    "evidence": evidence,
+                    "confidence": self._string_confidence_label(raw.get("confidence")),
+                    "matched_rules": raw_matched_rules,
+                    "violated_guidelines": raw_violated_guidelines,
+                    "finding_type": str(raw.get("finding_type") or "").strip(),
+                    "normalized_issue_type": str(raw.get("normalized_issue_type") or "").strip(),
+                    "severity": str(raw.get("severity") or "").strip(),
+                    "fix_strategy": str(raw.get("fix_strategy") or "").strip(),
+                    "suggested_fix": str(raw.get("suggested_fix") or "").strip(),
+                    "suggested_code": str(raw.get("suggested_code") or "").strip(),
+                    "change_steps": [
+                        str(item).strip()
+                        for item in list(raw.get("change_steps") or [])
+                        if str(item).strip()
+                    ],
+                    "cross_file_evidence": [
+                        str(item).strip()
+                        for item in list(raw.get("cross_file_evidence") or [])
+                        if str(item).strip()
+                    ],
+                    "assumptions": [
+                        str(item).strip()
+                        for item in list(raw.get("assumptions") or [])
+                        if str(item).strip()
+                    ],
+                    "context_files": [
+                        str(item).strip()
+                        for item in list(raw.get("context_files") or [])
+                        if str(item).strip()
+                    ],
+                    "observation_ids": [
+                        str(item).strip()
+                        for item in list(raw.get("observation_ids") or [])
+                        if str(item).strip()
+                    ],
+                }
+            )
+            checked_rule_ids.add(rule_id)
+        if not candidate_findings:
+            return "", {}
+        rule_check_results: list[dict[str, object]] = []
+        rule_result_ids = list(safe_required_rule_ids)
+        for candidate in candidate_findings:
+            candidate_rule_id = str(candidate.get("rule_id") or "").strip()
+            if candidate_rule_id and candidate_rule_id not in rule_result_ids:
+                rule_result_ids.append(candidate_rule_id)
+        for rule_id in rule_result_ids:
+            violated = rule_id in checked_rule_ids
+            rule_check_results.append(
+                {
+                    "rule_id": rule_id,
+                    "status": "violated" if violated else "passed",
+                    "evidence": (
+                        ["legacy findings converted; candidate_findings carry per-candidate evidence"]
+                        if violated
+                        else []
+                    ),
+                    "missing_context": [],
+                    "reason": (
+                        "由 legacy findings 结构化修复得到候选，后续仍需按规则驱动校验。"
+                        if violated
+                        else "legacy 输出中未发现该规则对应候选。"
+                    ),
+                }
+            )
+        repaired_payload = {
+            "rule_check_results": rule_check_results,
+            "candidate_findings": candidate_findings,
+            "context_requests": [],
+            "self_check": {
+                "checked_all_rules": True,
+                "used_context_files": [],
+                "unverified_assumptions": ["legacy findings converted by schema repair"],
+            },
+        }
+        text = json.dumps(repaired_payload, ensure_ascii=False)
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            text,
+            required_rule_ids=safe_required_rule_ids,
+        )
+        return (
+            text if valid else "",
+            {
+                "repair_attempted": True,
+                "repair_success": valid,
+                "repair_mode": "local_legacy_findings_conversion",
+                "repair_errors": errors,
+                "converted_candidate_count": len(candidate_findings),
+                "required_rule_ids": safe_required_rule_ids,
+            },
+        )
+
+    def _string_confidence_label(self, value: object) -> str:
+        if isinstance(value, (int, float)):
+            score = float(value)
+            if score >= 0.85:
+                return "high"
+            if score >= 0.65:
+                return "medium"
+            return "low"
+        label = str(value or "").strip().lower()
+        if label in {"high", "medium", "low"}:
+            return label
+        if label in {"高", "较高"}:
+            return "high"
+        if label in {"中", "中等"}:
+            return "medium"
+        if label in {"低", "较低"}:
+            return "low"
+        return "medium"
 
     def _clip_diagnostic_text(self, text: str, max_chars: int) -> str:
         safe_max = max(200, int(max_chars or 200))
@@ -7419,7 +7985,31 @@ class ReviewRunner(
     ) -> dict[str, object]:
         if not bool(parsed.get("rule_guided_candidate")):
             return {}
-        rule_id = next((str(item).strip() for item in list(parsed.get("matched_rules") or []) if str(item).strip()), "")
+        rules_by_id = self._build_review_rule_cards_from_screening(rule_screening)
+        rule_id = str(parsed.get("rule_id") or "").strip()
+        if not rule_id:
+            rule_id = next((str(item).strip() for item in list(parsed.get("matched_rules") or []) if str(item).strip()), "")
+        if rule_id and rule_id != "GENERAL-EXPERT-CHECKS" and rule_id not in rules_by_id:
+            known_rule_id = next(
+                (
+                    str(item).strip()
+                    for item in list(parsed.get("matched_rules") or [])
+                    if str(item).strip() in rules_by_id
+                ),
+                "",
+            )
+            if known_rule_id:
+                rule_id = known_rule_id
+            else:
+                extracted_known_rule_id = ""
+                for item in list(parsed.get("matched_rules") or []):
+                    for candidate_rule_id in self._extract_additive_rule_ids(str(item or "")):
+                        if candidate_rule_id in rules_by_id:
+                            extracted_known_rule_id = candidate_rule_id
+                            break
+                    if extracted_known_rule_id:
+                        break
+                rule_id = extracted_known_rule_id or "GENERAL-EXPERT-CHECKS"
         if not rule_id:
             return {
                 "status": "rejected",
@@ -7444,7 +8034,6 @@ class ReviewRunner(
                 "missing_context": [],
                 "matched_false_positive_guards": [],
             }
-        rules_by_id = self._build_review_rule_cards_from_screening(rule_screening)
         rule_results_by_id = {
             rule_id: ReviewRuleCheckResult(
                 rule_id=rule_id,
