@@ -1117,6 +1117,14 @@ def _classify_issue_candidate(
 
     priority_label = _severity_to_priority_label(highest_severity)
     priority_confidence_threshold = _priority_confidence_threshold(config, priority_label)
+    concrete_security_confidence_threshold = _concrete_security_confidence_threshold(
+        items,
+        priority_confidence_threshold,
+    )
+    concrete_security_issue_supported = (
+        concrete_security_issue
+        and effective_confidence >= concrete_security_confidence_threshold
+    )
     strong_direct_code_issue = (
         direct_evidence
         and highest_severity in {"blocker", "critical", "high"}
@@ -1126,7 +1134,7 @@ def _classify_issue_candidate(
     verification_supported_issue = (
         (direct_evidence and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
         or (sast_cross_validated and evidence_strength >= 1 and effective_confidence >= priority_confidence_threshold)
-        or (concrete_security_issue and effective_confidence >= priority_confidence_threshold)
+        or concrete_security_issue_supported
         or (observation_signal and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
         or (
             high_value_design_concern
@@ -1144,7 +1152,7 @@ def _classify_issue_candidate(
             "severity": highest_severity,
         }
 
-    if effective_confidence < priority_confidence_threshold:
+    if effective_confidence < priority_confidence_threshold and not concrete_security_issue_supported:
         return {
             "rule_code": "below_priority_confidence_threshold",
             "rule_label": "低于当前 P 级 issue 置信度阈值",
@@ -1474,6 +1482,15 @@ def _has_concrete_security_issue_evidence(items: list[dict[str, object]], eviden
         if _has_security_rule_prefix(item) or _has_security_code_evidence_signal(item):
             return True
     return False
+
+
+def _concrete_security_confidence_threshold(items: list[dict[str, object]], default_threshold: float) -> float:
+    for item in items:
+        if not _is_security_scoped_finding(item):
+            continue
+        if bool(item.get("direct_evidence")) or str(item.get("finding_type") or "").strip() == "direct_defect":
+            return min(float(default_threshold), 0.70)
+    return min(float(default_threshold), 0.75)
 
 
 def _is_security_scoped_finding(item: dict[str, object]) -> bool:

@@ -423,6 +423,59 @@ def test_detect_conflicts_upgrades_concrete_security_rule_finding_even_when_veri
     assert result["issue_filter_decisions"] == []
 
 
+def test_detect_conflicts_upgrades_security_direct_defect_with_context_gap_and_moderate_confidence():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_security_context_gap",
+                "expert_id": "security_compliance",
+                "title": "通配符未转义可能导致查询范围绕过",
+                "summary": "Criteria 查询从 equal 改为 like，并把 filter.value().value() 直接放入 %...% 模式。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_semantics_regression",
+                "severity": "medium",
+                "confidence": 0.72,
+                "verification_needed": True,
+                "file_path": "src/shared/HibernateCriteriaConverter.java",
+                "line_start": 16,
+                "evidence": [
+                    'return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+                    "filter.value().value() 未对 LIKE 通配符 % 和 _ 做转义",
+                    "检测到查询语义从 equal 精确匹配退化为 like 模糊匹配",
+                    "security_surface",
+                    "local_diff:Local diff inspected for 3 files.",
+                    "当前代码锚点 src/shared/HibernateCriteriaConverter.java:16",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/shared/HibernateCriteriaConverter.java"],
+                "assumptions": [
+                    "缺失上下文: Filter 的 value 来源是否为用户可控输入",
+                    "缺失上下文: equalsPredicateTransformer 的调用方场景",
+                ],
+                "matched_rules": ["GENERAL-EXPERT-CHECKS"],
+                "violated_guidelines": ["GENERAL-EXPERT-CHECKS"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_security_context_gap"
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_keeps_verification_required_finding_out_of_issues_even_when_priority_confidence_threshold_is_met():
     state = {
         "issue_filter_config": {
