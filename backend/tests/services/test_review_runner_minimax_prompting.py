@@ -145,6 +145,60 @@ def test_non_minimax_model_also_uses_rule_guided_quality_contract(storage_root: 
     assert "非 minimax 模型也不能绕过规则驱动质量框架" in prompt
 
 
+def test_security_java_prompt_keeps_context_gap_candidates_instead_of_suppressing_them(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/security",
+        target_ref="main",
+        title="Security review",
+        changed_files=["src/main/java/com/acme/order/OrderRepository.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/acme/order/OrderRepository.java b/src/main/java/com/acme/order/OrderRepository.java\n"
+            "--- a/src/main/java/com/acme/order/OrderRepository.java\n"
+            "+++ b/src/main/java/com/acme/order/OrderRepository.java\n"
+            "@@ -72,1 +72,1 @@\n"
+            '+ return builder.like(root.get("name"), String.format("%%%s%%", keyword));\n'
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全合规专家",
+        role="检查鉴权、输入校验、敏感数据和安全边界",
+        model="minimax-2.5",
+        review_spec="按安全专家职责检查真实代码风险。",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/main/java/com/acme/order/OrderRepository.java",
+        72,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={"summary": "Java repository security context", "java_review_mode": "general"},
+        target_hunk={
+            "hunk_header": "@@ -72,1 +72,1 @@",
+            "excerpt": '+ return builder.like(root.get("name"), String.format("%%%s%%", keyword));',
+        },
+        target_hunks=[],
+        bound_documents=[],
+        disallowed_inference=["证据不足时不要输出 finding"],
+        expected_checks=["检查输入校验和 SQL/Criteria 查询安全"],
+        active_skills=[],
+        rule_screening={"matched_rules_for_llm": []},
+        model_name="minimax-2.5",
+    )
+
+    assert "若结论依赖未展示的鉴权实现，不要输出该条" not in prompt
+    assert "有当前代码证据但缺少鉴权、租户或输入校验上下文时" in prompt
+    assert "candidate_findings" in prompt
+    assert "context_requests" in prompt
+
+
 def test_legacy_expert_prompt_keeps_evidenced_uncertain_findings_instead_of_silent_drop(storage_root: Path) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     subject = ReviewSubject(

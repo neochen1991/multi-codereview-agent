@@ -83,12 +83,15 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
   const aggregatedSuggestions = uniqueList(issue?.aggregated_remediation_suggestions);
   const aggregatedSteps = uniqueList(issue?.aggregated_remediation_steps);
+  const findingMatchedRules = uniqueList(finding?.matched_rules);
+  const findingViolatedGuidelines = uniqueList(finding?.violated_guidelines);
+  const findingRuleReasoning = humanizeReviewText(finding?.rule_based_reasoning || "").trim();
   const hasFullFindingDetails = Boolean(
     finding?.code_excerpt ||
       finding?.suggested_code ||
       (finding?.code_context && Object.keys(finding.code_context).length > 0),
   );
-  const issueDescription = stripReviewSupplementSections(issue?.summary || finding?.summary || "-");
+  const issueDescription = stripReviewSupplementSections(finding?.summary || issue?.summary || "-");
   const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-");
   const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-");
   const issueSteps = uniqueList(issue?.remediation_steps).length
@@ -128,7 +131,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题标题">
                 {humanizeReviewText(issue.title || "-")}
               </Descriptions.Item>
-              <Descriptions.Item label="问题描述">
+              <Descriptions.Item label="问题说明">
                 <div>
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
                     {issueDescription}
@@ -174,6 +177,35 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题分类">
                 {issue.category_label || issue.normalized_issue_type || issue.finding_type || "-"}
               </Descriptions.Item>
+              {findingMatchedRules.length || findingViolatedGuidelines.length || findingRuleReasoning ? (
+                <Descriptions.Item label="规范依据">
+                  <div>
+                    {findingMatchedRules.length ? (
+                      <Space wrap style={{ marginBottom: 6 }}>
+                        {findingMatchedRules.map((rule) => (
+                          <Tag key={rule} color="blue">
+                            {rule}
+                          </Tag>
+                        ))}
+                      </Space>
+                    ) : null}
+                    {findingViolatedGuidelines.length ? (
+                      <div style={{ marginBottom: findingRuleReasoning ? 6 : 0 }}>
+                        {findingViolatedGuidelines.map((rule) => (
+                          <Tag key={rule} color="volcano">
+                            {humanizeReviewText(rule)}
+                          </Tag>
+                        ))}
+                      </div>
+                    ) : null}
+                    {findingRuleReasoning ? (
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                        {findingRuleReasoning}
+                      </Paragraph>
+                    ) : null}
+                  </div>
+                </Descriptions.Item>
+              ) : null}
               {issue.confidence_rationale ? (
                 <Descriptions.Item label="置信度理由">
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
@@ -399,10 +431,43 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 </Descriptions>
               </div>
             ) : null}
-            {finding && (generalRules.length || validCustomRuleIds.length || invalidCustomRuleIds.length) ? (
+            {finding &&
+            (generalRules.length ||
+              validCustomRuleIds.length ||
+              invalidCustomRuleIds.length ||
+              findingMatchedRules.length ||
+              findingViolatedGuidelines.length ||
+              findingRuleReasoning) ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>规范与规则依据</Paragraph>
                 <Descriptions column={1} size="small">
+                  {findingMatchedRules.length ? (
+                    <Descriptions.Item label="命中的规范条款">
+                      <Space wrap>
+                        {findingMatchedRules.map((rule) => (
+                          <Tag key={rule} color="blue">
+                            {rule}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  {findingViolatedGuidelines.length ? (
+                    <Descriptions.Item label="违反的规范要求">
+                      <Space wrap>
+                        {findingViolatedGuidelines.map((rule) => (
+                          <Tag key={rule} color="volcano">
+                            {humanizeReviewText(rule)}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                  ) : null}
+                  {findingRuleReasoning ? (
+                    <Descriptions.Item label="规范依据说明">
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{findingRuleReasoning}</Paragraph>
+                    </Descriptions.Item>
+                  ) : null}
                   <Descriptions.Item label="通用检视依据">
                     {generalRules.length ? (
                       <Space wrap>
@@ -442,9 +507,6 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       </Space>
                     </Descriptions.Item>
                   ) : null}
-                  <Descriptions.Item label="规则定位">
-                    <Tag color="default">附加规则用于增强产品约束，不作为正式问题唯一准入条件</Tag>
-                  </Descriptions.Item>
                 </Descriptions>
               </div>
             ) : null}

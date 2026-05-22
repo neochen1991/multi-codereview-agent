@@ -340,6 +340,11 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       </div>
 
       <div style={{ marginTop: 16 }}>
+        <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题说明</Paragraph>
+        <Paragraph style={{ marginBottom: 0 }}>{finding.summary}</Paragraph>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>
         <Space wrap>
           {(finding.matched_rules || []).length ? (
@@ -460,11 +465,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           ) : null}
         </div>
       ) : null}
-
-      <div style={{ marginTop: 16 }}>
-        <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题说明</Paragraph>
-        <Paragraph style={{ marginBottom: 0 }}>{finding.summary}</Paragraph>
-      </div>
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修改思路</Paragraph>

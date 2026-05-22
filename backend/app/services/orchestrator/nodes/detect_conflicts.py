@@ -75,6 +75,63 @@ HIGH_PRIORITY_OVERRIDE_TOKENS = {
     "unreachable",
 }
 
+SECURITY_RULE_PREFIXES = (
+    "SEC-",
+    "SECURITY-",
+    "JAVA-SEC-",
+    "JAVA-SQL-SEC-",
+    "OWASP",
+    "CWE-",
+)
+
+SECURITY_CODE_EVIDENCE_TOKENS = {
+    "@preauthorize",
+    "@rolesallowed",
+    "hasauthority",
+    "haspermission",
+    "hasrole",
+    "isauthenticated",
+    "permission",
+    "authorize",
+    "authentication",
+    "securitycontext",
+    "userid",
+    "user_id",
+    "ownerid",
+    "owner_id",
+    "tenantid",
+    "tenant_id",
+    "request.getparameter",
+    "getparameter(",
+    "getheader(",
+    "builder.like",
+    "criteria",
+    "nativequery",
+    "createquery",
+    "executequery",
+    "string.format",
+    "where ",
+    "select ",
+    " like ",
+    "%s",
+    "regex",
+    "pattern.compile",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "apikey",
+    "api_key",
+    "encrypt",
+    "decrypt",
+    "logger.",
+    "log.info(",
+    "log.debug(",
+    "http://",
+    "resttemplate",
+    "webclient",
+}
+
 NON_CODE_REVIEW_SCOPE_TOKENS = {
     "业务背景不清晰",
     "业务背景不明确",
@@ -990,6 +1047,7 @@ def _classify_issue_candidate(
     non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
     observation_signal = _has_observation_signal(items)
     sast_cross_validated = bool(_collect_sast_prescan_matches(items))
+    concrete_security_issue = _has_concrete_security_issue_evidence(items, evidence_strength)
 
     if non_code_review_scope and not direct_evidence:
         return {
@@ -1068,6 +1126,7 @@ def _classify_issue_candidate(
     verification_supported_issue = (
         (direct_evidence and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
         or (sast_cross_validated and evidence_strength >= 1 and effective_confidence >= priority_confidence_threshold)
+        or (concrete_security_issue and effective_confidence >= priority_confidence_threshold)
         or (observation_signal and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
         or (
             high_value_design_concern
@@ -1399,6 +1458,59 @@ def _has_direct_code_evidence(items: list[dict[str, object]]) -> bool:
         if _has_swallowed_exception_code_evidence(item):
             return True
     return False
+
+
+def _has_concrete_security_issue_evidence(items: list[dict[str, object]], evidence_strength: int) -> bool:
+    for item in items:
+        if not _is_security_scoped_finding(item):
+            continue
+        has_code_anchor = int(item.get("line_start") or 0) > 0 and bool(str(item.get("file_path") or "").strip())
+        if not has_code_anchor:
+            continue
+        if bool(item.get("direct_evidence")) or str(item.get("finding_type") or "").strip() == "direct_defect":
+            return True
+        if evidence_strength < 2:
+            continue
+        if _has_security_rule_prefix(item) or _has_security_code_evidence_signal(item):
+            return True
+    return False
+
+
+def _is_security_scoped_finding(item: dict[str, object]) -> bool:
+    expert_id = str(item.get("expert_id") or "").strip()
+    if expert_id == "security_compliance":
+        return True
+    normalized_issue_type = str(item.get("normalized_issue_type") or "").strip()
+    if ISSUE_JURISDICTION.get(normalized_issue_type) == "security_compliance":
+        return True
+    if _has_security_rule_prefix(item):
+        return True
+    return False
+
+
+def _has_security_rule_prefix(item: dict[str, object]) -> bool:
+    for key in ("matched_rules", "violated_guidelines"):
+        for raw in list(item.get(key) or []):
+            value = str(raw or "").strip().upper()
+            if any(value.startswith(prefix) for prefix in SECURITY_RULE_PREFIXES):
+                return True
+    return False
+
+
+def _has_security_code_evidence_signal(item: dict[str, object]) -> bool:
+    parts: list[str] = []
+    for key in (
+        "title",
+        "summary",
+        "normalized_issue_type",
+        "rule_based_reasoning",
+        "remediation_suggestion",
+    ):
+        parts.append(str(item.get(key) or ""))
+    for key in ("evidence", "cross_file_evidence", "context_files", "matched_rules", "violated_guidelines"):
+        parts.extend(str(value or "") for value in list(item.get(key) or []))
+    text = "\n".join(parts).lower()
+    return any(token in text for token in SECURITY_CODE_EVIDENCE_TOKENS)
 
 
 def _has_swallowed_exception_code_evidence(item: dict[str, object]) -> bool:

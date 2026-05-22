@@ -378,6 +378,51 @@ def test_detect_conflicts_respects_per_priority_confidence_thresholds():
     assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
+def test_detect_conflicts_upgrades_concrete_security_rule_finding_even_when_verification_is_requested():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_security_like_wildcard",
+                "expert_id": "security_compliance",
+                "title": "搜索参数直接拼接到 LIKE 模式中",
+                "summary": "用户输入 keyword 被直接拼入 LIKE 查询模式，未转义 %/_ 通配符，会导致查询边界被绕过并扩大可访问数据范围。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "input_validation_removed",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verification_needed": True,
+                "file_path": "src/main/java/com/acme/order/OrderRepository.java",
+                "line_start": 72,
+                "evidence": [
+                    'builder.like(root.get("name"), String.format("%%%s%%", keyword))',
+                    "keyword 未经过 LIKE 通配符转义或长度限制",
+                ],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["JAVA-SQL-SEC-002"],
+                "violated_guidelines": ["外部输入进入 SQL/Criteria 查询前必须做白名单校验和转义"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_security_like_wildcard"
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_keeps_verification_required_finding_out_of_issues_even_when_priority_confidence_threshold_is_met():
     state = {
         "issue_filter_config": {

@@ -1424,7 +1424,8 @@ class ReviewRunnerPromptingMixin:
                 [
                     "- 重点检查 Controller/ApplicationService 入口是否完成参数校验、权限校验、租户隔离和敏感字段脱敏。",
                     "- 重点检查 Repository/SQL/Mapper 是否存在拼接查询、越权查询、批量更新越边界、日志泄漏敏感信息。",
-                    "- 若结论依赖未展示的鉴权实现，不要输出该条；只保留可被当前代码证据直接证明的问题。",
+                    "- 有当前代码证据但缺少鉴权、租户或输入校验上下文时，保留 candidate_findings，设置 verification_needed=true，并在 context_requests 写清需要补充的上下文。",
+                    "- 只有完全没有当前代码锚点、也无法指出具体安全边界被削弱的猜测，才不要输出候选。",
                 ]
             )
         elif expert_id == "performance_reliability":
