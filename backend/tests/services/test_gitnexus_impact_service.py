@@ -188,6 +188,51 @@ def test_gitnexus_mcp_impact_client_continues_when_detect_changes_returns_error(
     assert payload["dynamic_targets"] == ["OrderController.create"]
 
 
+def test_gitnexus_mcp_impact_client_skips_detect_changes_without_mr_change_seed():
+    client = GitNexusMcpImpactClient(timeout_seconds=5)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=[],
+        unified_diff="",
+    )
+    call_batches: list[list[dict[str, object]]] = []
+
+    def fake_call_mcp(command, repo_path, requests, runtime_env=None):
+        del command, repo_path, runtime_env
+        call_batches.append(requests)
+        responses = {}
+        for request in requests:
+            params = request.get("params") or {}
+            request_id = request.get("id")
+            if params.get("name") == "list_repos":
+                responses[request_id] = {"result": {"content": [{"text": '[{"name":"repo"}]'}]}}
+        return responses
+
+    with patch.object(client, "_call_mcp", side_effect=fake_call_mcp):
+        payload = client.analyze_mr(
+            repo_name="repo",
+            repo_path="/tmp/repo",
+            subject=subject,
+            changed_symbols=[],
+            runtime_env=None,
+        )
+
+    tool_names = [
+        (request.get("params") or {}).get("name")
+        for batch in call_batches
+        for request in batch
+        if request.get("method") == "tools/call"
+    ]
+    assert tool_names == ["list_repos"]
+    assert payload["detect_changes"] == {}
+    assert "缺少本次 MR 的 diff" in payload["detect_changes_error"]
+    assert payload["queried_targets"] == []
+
+
 def test_gitnexus_mcp_impact_client_stops_when_detect_changes_reports_repo_unavailable():
     client = GitNexusMcpImpactClient(timeout_seconds=5)
     subject = ReviewSubject(
@@ -1927,6 +1972,42 @@ def test_gitnexus_impact_service_extracts_symbols_from_local_git_diff_when_subje
     assert capture.changed_symbols
     assert capture.changed_symbols[0].symbol == "createOrder"
     assert capture.changed_symbols[0].container == "OrderController"
+
+
+def test_gitnexus_impact_service_does_not_use_local_git_diff_for_mr_without_change_seed(
+    storage_root: Path,
+    tmp_path: Path,
+):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    service = GitNexusImpactService(storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo_impact",
+        project_id="proj_impact",
+        source_ref="feature/api",
+        target_ref="main",
+        changed_files=[],
+        unified_diff="",
+        metadata={"workspace_repo_path": str(repo_path), "remote_diff_available": False},
+    )
+
+    with patch.object(
+        service,
+        "_load_local_diff_from_git",
+        return_value=(
+            "diff --git a/src/main/java/com/example/OrderController.java "
+            "b/src/main/java/com/example/OrderController.java\n"
+            "@@ -10,0 +10,4 @@\n"
+            "+  public OrderDTO createOrder() {\n"
+            "+    return service.create();\n"
+            "+  }\n"
+        ),
+    ) as local_diff_loader:
+        symbols = service._build_changed_symbols(subject, RuntimeSettings(code_repo_local_path=str(repo_path)))
+
+    assert symbols == []
+    local_diff_loader.assert_not_called()
 
 
 def test_gitnexus_impact_service_prefers_platform_diff_without_local_git_diff(storage_root: Path, tmp_path: Path):

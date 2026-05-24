@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import experts, governance, issues, knowledge, reviews, settings as settings_routes, streams, triggers
+from app.api.routes import experts, governance, issues, knowledge, projects, reviews, settings as settings_routes, streams, triggers
 from app.config import settings
 from app.logging_config import configure_logging as configure_app_logging
 import app.services.review_service as review_service_module
@@ -35,6 +35,7 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(reviews.router, prefix=settings.API_PREFIX)
+    app.include_router(projects.router, prefix=settings.API_PREFIX)
     app.include_router(triggers.router, prefix=settings.API_PREFIX)
     app.include_router(streams.router, prefix=settings.API_PREFIX)
     app.include_router(issues.router, prefix=settings.API_PREFIX)

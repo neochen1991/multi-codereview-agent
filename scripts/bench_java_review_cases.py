@@ -21,7 +21,7 @@ DEFAULT_CACHE_ROOT = Path("/tmp/java-review-eval-cache")
 DEFAULT_WORKSPACE_ROOT = Path("/tmp/java-review-eval-workspaces")
 DEFAULT_API_BASE = "http://127.0.0.1:8011/api"
 FIXTURE_MARKER_FILE = ".codereview-fixture.json"
-FIXTURE_VERSION = 2
+FIXTURE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -600,6 +600,204 @@ public final class MySqlDomainEventsConsumer {
 
 	private void dispatch(DomainEvent event) {
 	}
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+        """package tv.codely.mooc.courses.application.enroll;
+
+import java.util.List;
+import tv.codely.mooc.courses.domain.CourseId;
+import tv.codely.mooc.courses.domain.CourseEnrollment;
+import tv.codely.mooc.courses.domain.CourseEnrollmentEvent;
+import tv.codely.mooc.courses.domain.CourseEnrollmentRepository;
+import tv.codely.mooc.courses.domain.CourseLockRegistry;
+import tv.codely.mooc.courses.domain.StudentId;
+import tv.codely.shared.domain.bus.event.EventBus;
+
+public final class BulkEnrollmentService {
+    private final CourseEnrollmentRepository repository;
+    private final CourseLockRegistry lockRegistry;
+    private final EventBus eventBus;
+
+    public BulkEnrollmentService(
+        CourseEnrollmentRepository repository,
+        CourseLockRegistry lockRegistry,
+        EventBus eventBus
+    ) {
+        this.repository = repository;
+        this.lockRegistry = lockRegistry;
+        this.eventBus = eventBus;
+    }
+
+    public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {
+        Object lock = lockRegistry.lockFor(courseId.value());
+        synchronized (lock) {
+            if (studentIds.isEmpty()) {
+                return;
+            }
+            List<CourseEnrollment> enrollments = studentIds.stream()
+                .map(studentId -> CourseEnrollment.create(courseId, studentId))
+                .toList();
+            repository.saveAll(enrollments);
+            eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));
+        }
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+        """package tv.codely.mooc.courses.application.payment;
+
+import java.util.List;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.transaction.annotation.Transactional;
+import tv.codely.mooc.courses.domain.CourseId;
+import tv.codely.mooc.courses.domain.Payment;
+import tv.codely.mooc.courses.domain.PaymentGateway;
+import tv.codely.mooc.courses.domain.PaymentRepository;
+import tv.codely.mooc.courses.domain.SettlementResult;
+
+public final class PaymentSettlementService {
+    private final PaymentRepository paymentRepository;
+    private final PaymentGateway gateway;
+
+    public PaymentSettlementService(PaymentRepository paymentRepository, PaymentGateway gateway) {
+        this.paymentRepository = paymentRepository;
+        this.gateway = gateway;
+    }
+
+    @Transactional
+    public SettlementResult settle(CourseId courseId) {
+        List<Payment> payments = paymentRepository.findPendingByCourse(courseId, PageRequest.of(0, 200));
+        for (Payment payment : payments) {
+            gateway.capture(payment);
+            payment.markCaptured();
+        }
+        paymentRepository.saveAll(payments);
+        return SettlementResult.success(payments.size());
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseEnrollment.java",
+        """package tv.codely.mooc.courses.domain;
+
+public final class CourseEnrollment {
+    public static CourseEnrollment create(CourseId courseId, StudentId studentId) {
+        return new CourseEnrollment();
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseEnrollmentEvent.java",
+        """package tv.codely.mooc.courses.domain;
+
+import java.util.List;
+import tv.codely.shared.domain.bus.event.DomainEvent;
+
+public final class CourseEnrollmentEvent implements DomainEvent {
+    public static List<DomainEvent> batchCreated(CourseId courseId, int count) {
+        return List.of(new CourseEnrollmentEvent());
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseEnrollmentRepository.java",
+        """package tv.codely.mooc.courses.domain;
+
+import java.util.List;
+
+public interface CourseEnrollmentRepository {
+    void save(CourseEnrollment enrollment);
+    void saveAll(List<CourseEnrollment> enrollments);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/CourseLockRegistry.java",
+        """package tv.codely.mooc.courses.domain;
+
+public interface CourseLockRegistry {
+    Object lockFor(String courseId);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/StudentId.java",
+        """package tv.codely.mooc.courses.domain;
+
+public final class StudentId {
+    private final String value;
+
+    public StudentId(String value) {
+        this.value = value;
+    }
+
+    public String value() {
+        return value;
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/Payment.java",
+        """package tv.codely.mooc.courses.domain;
+
+public final class Payment {
+    public void markCaptured() {
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/PaymentGateway.java",
+        """package tv.codely.mooc.courses.domain;
+
+public interface PaymentGateway {
+    void capture(Payment payment);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/PaymentRepository.java",
+        """package tv.codely.mooc.courses.domain;
+
+import java.util.List;
+import org.springframework.data.domain.PageRequest;
+
+public interface PaymentRepository {
+    List<Payment> findPendingByCourse(CourseId courseId, PageRequest pageRequest);
+    List<Payment> searchPendingByCourseLike(String courseId);
+    void save(Payment payment);
+    void saveAll(List<Payment> payments);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/domain/SettlementResult.java",
+        """package tv.codely.mooc.courses.domain;
+
+public final class SettlementResult {
+    public static SettlementResult success(int count) {
+        return new SettlementResult();
+    }
 }
 """,
     )

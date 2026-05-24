@@ -203,7 +203,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
     <>
       <ReviewResultListTable
         cardClassName="review-result-issue-card"
-        title={`正式问题清单 (${formalIssues.length})`}
+        title={`有效问题清单 (${formalIssues.length})`}
         extra={<Text type="secondary">这里只展示已确认需要进入处理流程的问题</Text>}
         toolbarExtra={
           <Space wrap>

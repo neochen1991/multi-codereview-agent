@@ -419,7 +419,7 @@ class ReviewRunnerPromptingMixin:
         lines = [
             "[SYSTEM RULES]",
             "你是代码审查专家。只能基于 EXPERT_PROFILE、DIFF、CONTEXT_PACKET、RULE_CARDS 判断，不要编造缺失上下文。",
-            "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；不能只按其中一种来源审查。",
+            "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；绑定规范和专家画像都要参与检视，候选结果取并集。",
             "必须逐条检查 RULE_CARDS。每条适用规则都要输出 rule_check_results。",
             "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
             "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
@@ -456,7 +456,7 @@ class ReviewRunnerPromptingMixin:
             f"结构化观察点:\n{observation_review_summary}",
             f"历史人工反馈:\n{review_learning_hints or '当前目标文件未命中可复用的历史人工反馈案例。'}",
             f"附加产品/仓库规则遍历结果:\n{self._build_rule_screening_summary(rule_screening or {})}",
-            "审查阶段说明:\n规则阶段：逐条检查 RULE_CARDS；通用阶段：按专家画像、专家通用规范和语言通用规范全量扫描目标 hunk；两部分候选取并集。",
+            "审查阶段说明:\n规则阶段：逐条检查 RULE_CARDS 和专家绑定规范；通用阶段：按专家画像、专家审视规范和语言通用规范扫描目标 hunk；两部分候选取并集，最终由收敛层去重。",
             source_context_note,
             f"目标文件完整 diff:\n{target_file_full_diff}",
             f"其他变更文件摘要:\n{related_diff_summary}",
@@ -1519,8 +1519,8 @@ class ReviewRunnerPromptingMixin:
                 "严格遵守用户提示中的 [SYSTEM RULES]、[RULE_CARDS]、[CONTEXT_PACKET] 和 [OUTPUT_JSON]。\n"
                 "必须输出 rule_check_results、candidate_findings、context_requests、self_check。\n"
                 "禁止输出 legacy findings 根结构；只输出 JSON，不输出 Markdown 或额外解释。\n"
-                "规则分层：专家通用规范是基础审查依据；附加产品/仓库规则只增强产品特有约束、优先级和误报保护。"
-                "没有附加规则命中时，仍要按专家通用规范报告证据充分的真实问题。\n\n"
+                "规则分层：专家绑定规范、RULE_CARDS、专家画像和专家审视规范都参与检视；"
+                "绑定规范负责产品/仓库特有约束，专家画像负责该专家通用职责，两部分候选取并集并由收敛层去重。\n\n"
                 "《审视规范文档》开始\n"
                 f"{review_spec_text or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
                 "《审视规范文档》结束\n\n"
@@ -1573,8 +1573,9 @@ class ReviewRunnerPromptingMixin:
             f"7. 输出必须遵守 JSON contract。\n"
             f"8. 每条 finding 必须填写 matched_rules 和 normalized_issue_type；不确定时也要给出稳定英文短语，便于后续去重和阈值过滤。\n"
             f"9. 除 normalized_issue_type、代码标识、文件路径、接口名、类名和方法名外，面向用户的说明字段必须使用中文。\n\n"
-            f"规则分层：专家通用规范是基础审查依据；附加产品/仓库规则只增强产品特有约束、优先级和误报保护。"
-            f"没有附加规则命中时，仍要按专家通用规范报告证据充分的真实问题；引用附加规则时只能引用本轮规则遍历结果里的真实 rule_id。\n\n"
+            f"规则分层：专家绑定规范、RULE_CARDS、专家画像和专家审视规范都参与检视；"
+            f"绑定规范负责产品/仓库特有约束，专家画像负责该专家通用职责，两部分候选取并集并由收敛层去重；"
+            f"引用附加规则时只能引用本轮规则遍历结果里的真实 rule_id。\n\n"
             f"结构化审查步骤：\n"
             f"1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 findings，不要顺手评论其他专家负责的问题。\n"
             f"2. 对每个候选问题先找代码锚点：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"

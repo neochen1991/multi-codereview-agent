@@ -301,6 +301,80 @@
       }
     },
     {
+      "case_id": "java-ddd-bulk-enrollment-lock-comment-loop-regression",
+      "repo_key": "java-ddd-example",
+      "category": "composite",
+      "scenario": "Bulk enrollment removes lock protection, changes batch save into per-row save, and leaves inventory reservation as a TODO",
+      "business_context": "批量报名入口为了快速放开并发限制，删除了课程维度锁，同时把批量保存改成循环逐条保存，并写下“扣减库存并发送预占事件”的 TODO 但没有实现。",
+      "tags": ["ddd", "concurrency", "batch", "comment-contract", "performance"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+          "description": "Remove course lock, change bulk save to per-row save, and add an unimplemented inventory reservation comment.",
+          "search": "    public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {\n        Object lock = lockRegistry.lockFor(courseId.value());\n        synchronized (lock) {\n            if (studentIds.isEmpty()) {\n                return;\n            }\n            List<CourseEnrollment> enrollments = studentIds.stream()\n                .map(studentId -> CourseEnrollment.create(courseId, studentId))\n                .toList();\n            repository.saveAll(enrollments);\n            eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));\n        }\n    }\n",
+          "replace": "    public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {\n        if (studentIds.isEmpty()) {\n            return;\n        }\n        List<CourseEnrollment> enrollments = studentIds.stream()\n            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n            .toList();\n        for (CourseEnrollment enrollment : enrollments) {\n            repository.save(enrollment);\n        }\n        // TODO 批量报名成功后扣减库存并发送预占事件\n        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));\n    }\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["performance_reliability", "correctness_business"],
+        "rule_ids_any_of": ["CONCURRENCY-LOCK-001", "PERF-LOOP-001", "CORRECTNESS-CONTRACT-001"],
+        "finding_keywords": ["synchronized", "锁", "repository.save", "TODO", "扣减库存", "未实现"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": ["synchronized", "锁"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": ["repository.save", "循环"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": ["TODO", "扣减库存"]
+          }
+        ],
+        "min_findings": 3,
+        "min_issues": 1
+      }
+    },
+    {
+      "case_id": "java-ddd-payment-settlement-query-exception-regression",
+      "repo_key": "java-ddd-example",
+      "category": "composite",
+      "scenario": "Payment settlement broadens a bounded query, adds per-row persistence in a loop, and turns capture failure into success",
+      "business_context": "支付结算任务为了兼容模糊课程号，把精确分页查询改成 like 全量查询；同时在循环内逐条保存，并把支付网关异常吞掉后仍返回成功。",
+      "tags": ["ddd", "payment", "query", "exception", "transaction", "performance"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+          "description": "Broaden settlement query, persist per row, and swallow gateway failures.",
+          "search": "    @Transactional\n    public SettlementResult settle(CourseId courseId) {\n        List<Payment> payments = paymentRepository.findPendingByCourse(courseId, PageRequest.of(0, 200));\n        for (Payment payment : payments) {\n            gateway.capture(payment);\n            payment.markCaptured();\n        }\n        paymentRepository.saveAll(payments);\n        return SettlementResult.success(payments.size());\n    }\n",
+          "replace": "    @Transactional\n    public SettlementResult settle(CourseId courseId) {\n        List<Payment> payments = paymentRepository.searchPendingByCourseLike(courseId.value());\n        try {\n            for (Payment payment : payments) {\n                gateway.capture(payment);\n                payment.markCaptured();\n                paymentRepository.save(payment);\n            }\n        } catch (RuntimeException ignored) {\n            return SettlementResult.success(payments.size());\n        }\n        return SettlementResult.success(payments.size());\n    }\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["database_analysis", "performance_reliability", "correctness_business"],
+        "rule_ids_any_of": ["PERF-SQL-001", "PERF-LOOP-001", "CODE-JAVA-002"],
+        "finding_keywords": ["like", "分页", "repository.save", "循环", "catch", "success"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+            "keywords": ["like", "分页"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+            "keywords": ["repository.save", "循环"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+            "keywords": ["catch", "success"]
+          }
+        ],
+        "min_findings": 3,
+        "min_issues": 1
+      }
+    },
+    {
       "case_id": "java-ddd-composite-quality-regression",
       "repo_key": "java-ddd-example",
       "category": "composite",

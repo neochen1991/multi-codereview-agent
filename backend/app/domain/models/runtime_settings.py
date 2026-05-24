@@ -42,6 +42,17 @@ class CodeRepositorySettings(BaseModel):
     database_source_ids: list[str] = Field(default_factory=list)
 
 
+class ProjectSettings(BaseModel):
+    """定义在线系统中的项目租户配置。"""
+
+    project_id: str = ""
+    name: str = ""
+    description: str = ""
+    owner_team: str = ""
+    status: Literal["active", "archived"] = "active"
+    repositories: list[CodeRepositorySettings] = Field(default_factory=list)
+
+
 class RuntimeSettings(BaseModel):
     """定义审核运行时、网络和默认模型的完整设置。"""
 
@@ -65,6 +76,8 @@ class RuntimeSettings(BaseModel):
     auto_review_poll_interval_seconds: int = 120
     default_repository_id: str = ""
     code_repositories: list[CodeRepositorySettings] = Field(default_factory=list)
+    default_project_id: str = "default"
+    projects: list[ProjectSettings] = Field(default_factory=list)
     database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=lambda: ["local_diff", "schema_diff", "coverage_diff", "static_diff"])
     mcp_allowlist: list[str] = Field(default_factory=list)
@@ -174,6 +187,7 @@ class RuntimeSettings(BaseModel):
         self.code_repositories = repositories
         if not self.default_repository_id and repositories:
             self.default_repository_id = repositories[0].repository_id
+        self._ensure_project_compatibility()
         default_repo = self.resolve_repository(self.default_repository_id) if repositories else None
         if default_repo is not None:
             self.code_repo_clone_url = default_repo.clone_url
@@ -184,6 +198,31 @@ class RuntimeSettings(BaseModel):
             self.auto_review_repo_url = default_repo.clone_url
             self.auto_review_poll_interval_seconds = default_repo.auto_review_poll_interval_seconds or self.auto_review_poll_interval_seconds
         return self
+
+    def _ensure_project_compatibility(self) -> None:
+        """从旧全局仓库配置生成默认项目，并同步当前默认项目仓库。"""
+
+        projects = [item for item in self.projects if item.project_id]
+        if not self.default_project_id:
+            self.default_project_id = "default"
+        if not projects:
+            projects = [
+                ProjectSettings(
+                    project_id=self.default_project_id or "default",
+                    name="默认项目",
+                    description="由历史全局配置自动生成的默认项目。",
+                    owner_team="",
+                    status="active",
+                    repositories=list(self.code_repositories),
+                )
+            ]
+        if not any(item.project_id == self.default_project_id for item in projects):
+            self.default_project_id = projects[0].project_id
+        for index, project in enumerate(projects):
+            if project.project_id == self.default_project_id and not project.repositories and self.code_repositories:
+                projects[index] = project.model_copy(update={"repositories": list(self.code_repositories)})
+                break
+        self.projects = projects
 
     def enabled_repositories(self) -> list[CodeRepositorySettings]:
         return [item for item in self.code_repositories if item.enabled]

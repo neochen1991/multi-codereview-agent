@@ -1059,12 +1059,41 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         finding_by_id = {item.finding_id: item for item in findings}
         if self._issues_require_finding_rehydration(issues, findings):
             issues = self._rehydrate_issues_from_findings(review_id, issues, findings)
-            return [issue for issue in issues if _is_formal_issue(issue)]
-        return [
+            return self._dedupe_display_issues([issue for issue in issues if _is_formal_issue(issue)])
+        return self._dedupe_display_issues([
             self._realign_issue_location(issue, finding_by_id)
             for issue in issues
             if _is_formal_issue(issue)
-        ]
+        ])
+
+    def _dedupe_display_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        """查询结果面向页面展示，再按归一化后的根因做一次轻量去重。"""
+
+        deduped: dict[tuple[str, int, str, str], DebateIssue] = {}
+        order: list[tuple[str, int, str, str]] = []
+        for issue in issues:
+            key = (
+                str(issue.file_path or "").strip(),
+                int(issue.line_start or 1),
+                str(issue.normalized_issue_type or "").strip().lower(),
+                str(issue.summary or "").strip().lower(),
+            )
+            if key not in deduped:
+                deduped[key] = issue
+                order.append(key)
+                continue
+            existing = deduped[key]
+            merged_finding_ids = list(dict.fromkeys([*existing.finding_ids, *issue.finding_ids]))
+            merged_participants = list(dict.fromkeys([*existing.participant_expert_ids, *issue.participant_expert_ids]))
+            deduped[key] = existing.model_copy(
+                update={
+                    "finding_ids": merged_finding_ids,
+                    "participant_expert_ids": merged_participants,
+                    "confidence": max(float(existing.confidence or 0.0), float(issue.confidence or 0.0)),
+                    "evidence": list(dict.fromkeys([*existing.evidence, *issue.evidence])),
+                }
+            )
+        return [deduped[key] for key in order]
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return self.message_repo.list_by_issue(review_id, issue_id)

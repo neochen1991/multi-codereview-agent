@@ -16,6 +16,7 @@ class JavaQualitySignalExtractor:
         "event_ordering_risk",
         "loop_call_amplification",
         "comment_contract_unimplemented",
+        "lock_guard_removed",
     }
 
     def extract(
@@ -936,6 +937,8 @@ class JavaQualitySignalExtractor:
         )
         dependency_pattern = re.compile(
             r"\b("
+            r"repository|repo|dao|mapper|client|gateway|service|manager|provider|publisher"
+            r"|"
             r"[A-Za-z_][A-Za-z0-9_]*(?:repository|repo|dao|mapper|query|jdbcTemplate|sqlSession|entityManager)"
             r"|[A-Za-z_][A-Za-z0-9_]*(?:client|api|gateway|facade|proxy|feign|adapter|connector|remote)"
             r"|[A-Za-z_][A-Za-z0-9_]*(?:service|manager|provider)"
@@ -958,14 +961,24 @@ class JavaQualitySignalExtractor:
             loop_token = loop_match.group(1).strip()
             # 在循环起点后的窗口中检索外部调用，覆盖 for(:)、stream().forEach 与 lambda block 的常见写法。
             window = excerpt[loop_match.start() : loop_match.start() + 900]
-            call_match = dependency_pattern.search(window)
-            if call_match:
+            call_terms: list[tuple[int, str]] = []
+            for call_match in dependency_pattern.finditer(window):
                 dependency_name = call_match.group(1).strip()
                 method_name = call_match.group(2).strip()
                 if method_name.lower() in risky_call_verbs or dependency_name.lower().endswith(
                     ("repository", "repo", "dao", "mapper", "client", "gateway", "facade", "proxy", "feign")
                 ):
-                    return [loop_token, f"{dependency_name}.{method_name}"]
+                    dependency_lower = dependency_name.lower()
+                    method_lower = method_name.lower()
+                    priority = 1
+                    if dependency_lower.endswith(("repository", "repo", "dao", "mapper")) or dependency_lower in {"repository", "repo", "dao", "mapper"}:
+                        priority = 3
+                    if method_lower in {"save", "insert", "update", "delete"}:
+                        priority += 2
+                    call_terms.append((priority, f"{dependency_name}.{method_name}"))
+            if call_terms:
+                ordered_terms = [term for _, term in sorted(call_terms, key=lambda item: (-item[0], item[1].lower()))]
+                return [loop_token, *self._dedupe(ordered_terms)[:3]]
             method_ref_match = method_ref_pattern.search(window)
             if method_ref_match:
                 dependency_name = method_ref_match.group(1).strip()
@@ -995,6 +1008,8 @@ class JavaQualitySignalExtractor:
         code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
         implementation_blob = self._implementation_only_blob(context_lines, comment_lines)
         contract_pairs = [
+            (["审计事件", "审计日志", "audit event", "audit log", "audit"], ["audit", "auditlogger", "recordaudit", "appendaudit"]),
+            (["操作日志", "行为日志", "operation log"], ["operationlog", "audit", "logger", "logservice"]),
             (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
             (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),
             (["发送通知", "notify", "通知"], ["notify", "message", "publish"]),
@@ -1086,6 +1101,14 @@ class JavaQualitySignalExtractor:
         if not implementation_blob.strip():
             return False
         intent_to_impl_patterns = [
+            (
+                ("审计事件", "审计日志", "audit event", "audit log", "audit"),
+                (r"\baudit\b", r"\bauditlogger\b", r"\.\s*(recordaudit|appendaudit|writeaudit)\s*\("),
+            ),
+            (
+                ("操作日志", "行为日志", "operation log"),
+                (r"\boperationlog\b", r"\baudit\b", r"\.\s*(info|record|append|write)\s*\("),
+            ),
             (
                 ("发送事件", "事件", "publish event", "domain event"),
                 (r"\.\s*publish\s*\(", r"\beventbus\s*\.", r"\boutbox\b", r"domain\s*event", r"\beventpublisher\b"),

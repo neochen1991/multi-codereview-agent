@@ -906,6 +906,7 @@ class ReviewRunner(
             expert_execution_elapsed_ms,
         )
         self._append_deterministic_query_bound_findings(review, finding_payloads)
+        self._append_deterministic_java_quality_findings(review, finding_payloads)
         self._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
         self._append_empty_diff_fallback_finding(
             review,
@@ -2251,11 +2252,15 @@ class ReviewRunner(
                 if not self._hunk_removes_query_bound(excerpt):
                     continue
                 line_start = int(hunk.get("start_line") or 1)
+                query_shape = self._query_shape_summary(excerpt)
+                summary = "本次 diff 删除了查询的 LIMIT、分页或批量边界保护，数据量放大后可能返回大结果集并拖垮数据库访问路径。"
+                if query_shape:
+                    summary = f"{summary} 新查询形态包含 {query_shape}，需要特别确认是否仍有分页、LIMIT 或精确过滤边界。"
                 finding = ReviewFinding(
                     review_id=review.review_id,
                     expert_id="database_analysis",
                     title="查询边界缺失",
-                    summary="本次 diff 删除了查询的 LIMIT、分页或批量边界保护，数据量放大后可能返回大结果集并拖垮数据库访问路径。",
+                    summary=summary,
                     finding_type="direct_defect",
                     normalized_issue_type="query_bound_removed",
                     category_label="data_access",
@@ -2294,6 +2299,152 @@ class ReviewRunner(
                     )
                 )
                 return
+
+    def _query_shape_summary(self, excerpt: str) -> str:
+        lowered = str(excerpt or "").lower()
+        terms: list[str] = []
+        if "like" in lowered:
+            terms.append("like")
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*?(?:Like|Containing|Contains|StartsWith|EndsWith)[A-Za-z0-9_]*)\s*\(", str(excerpt or "")):
+            terms.append(match.group(1))
+        if "pageable" not in lowered and "page<" not in lowered and "page" in lowered:
+            terms.append("分页被移除")
+        return " / ".join(self._merge_unique(terms)[:4])
+
+    def _append_deterministic_java_quality_findings(
+        self,
+        review: ReviewTask,
+        finding_payloads: list[dict[str, object]],
+    ) -> None:
+        """把 Java diff 中可直接确认的锁删除和循环调用放大补成 finding。"""
+
+        if not str(review.subject.unified_diff or "").strip():
+            return
+
+        existing_keys = {
+            (
+                str(item.get("file_path") or "").strip(),
+                str(item.get("normalized_issue_type") or "").strip(),
+            )
+            for item in finding_payloads
+        }
+        profiles = {
+            "lock_guard_removed": {
+                "expert_id": "performance_reliability",
+                "title": "并发保护被删除",
+                "normalized_issue_type": "lock_guard_removed",
+                "category_label": "performance",
+                "summary": "本次 diff 删除了 synchronized、Lock 或分布式锁等并发保护，新增代码没有看到等价保护。",
+                "matched_rules": ["CONCURRENCY-LOCK-001"],
+                "violated_guidelines": ["并发保护不能在没有等价替代机制时被删除"],
+                "rule_based_reasoning": "删除行中出现锁保护，新增行没有同步、锁或幂等替代，属于可由静态 diff 直接确认的并发风险。",
+                "remediation_strategy": "恢复原有锁保护，或补充数据库唯一约束、乐观锁、幂等表、分布式锁等等价并发控制。",
+                "remediation_suggestion": "不要直接删除并发保护；先说明替代机制，并补充并发提交或重复消费回归测试。",
+                "remediation_steps": ["确认被保护的共享资源", "恢复锁或补充等价并发控制", "增加并发场景测试"],
+                "confidence": 0.88,
+            },
+            "loop_call_amplification": {
+                "expert_id": "performance_reliability",
+                "title": "循环内逐条外部调用会放大批量处理成本",
+                "normalized_issue_type": "n_plus_one",
+                "category_label": "performance",
+                "summary": "本次 diff 把仓储、服务、网关或客户端调用放进循环路径，批量输入会把外部依赖访问放大为 N 次。",
+                "matched_rules": ["PERF-LOOP-001"],
+                "violated_guidelines": ["循环体内不应逐条执行仓储、远程调用或消息发送"],
+                "rule_based_reasoning": "新增代码中循环体直接调用外部依赖，这类调用放大可由静态 diff 直接确认。",
+                "remediation_strategy": "把循环内逐条外部调用改成批量查询、批量提交或循环外聚合后统一处理。",
+                "remediation_suggestion": "优先收集批量输入后调用批量接口，避免每个元素都触发一次外部依赖访问。",
+                "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
+                "confidence": 0.86,
+            },
+        }
+
+        for file_path in review.subject.changed_files:
+            normalized_file_path = str(file_path or "").strip()
+            if not normalized_file_path.lower().endswith(".java"):
+                continue
+            for hunk in self.diff_excerpt_service.list_hunks(review.subject.unified_diff, normalized_file_path):
+                excerpt = str(hunk.get("excerpt") or "")
+                java_quality = self.java_quality_signal_extractor.extract(
+                    file_path=normalized_file_path,
+                    target_hunk=hunk,
+                    full_diff=review.subject.unified_diff,
+                )
+                signals = {str(item).strip() for item in list(java_quality.get("signals") or []) if str(item).strip()}
+                signal_terms = dict(java_quality.get("signal_terms") or {})
+                for signal_name in ("lock_guard_removed", "loop_call_amplification"):
+                    if signal_name not in signals:
+                        continue
+                    profile = profiles[signal_name]
+                    issue_type = str(profile["normalized_issue_type"])
+                    key = (normalized_file_path, issue_type)
+                    if key in existing_keys:
+                        continue
+                    line_start = int(hunk.get("start_line") or 1)
+                    evidence_terms = [str(item).strip() for item in list(signal_terms.get(signal_name) or []) if str(item).strip()]
+                    evidence = evidence_terms[:3] or [str(profile["summary"])]
+                    summary = str(profile["summary"])
+                    rule_based_reasoning = str(profile["rule_based_reasoning"])
+                    remediation_suggestion = str(profile["remediation_suggestion"])
+                    if signal_name == "loop_call_amplification" and evidence_terms:
+                        loop_token = evidence_terms[0]
+                        call_terms = evidence_terms[1:] or evidence_terms[:1]
+                        call_text = "、".join(call_terms)
+                        summary = (
+                            f"本次 diff 在循环 `{loop_token}` 内调用 `{call_text}`，"
+                            "批量输入会把外部依赖访问放大为 N 次。"
+                        )
+                        rule_based_reasoning = (
+                            f"新增代码中循环体直接调用 {call_text}，这类调用放大可由静态 diff 直接确认。"
+                        )
+                        remediation_suggestion = (
+                            f"优先把循环内的 {call_text} 改成批量接口或循环外统一提交，"
+                            "避免每个元素都触发一次外部依赖访问。"
+                        )
+                    finding = ReviewFinding(
+                        review_id=review.review_id,
+                        expert_id=str(profile["expert_id"]),
+                        title=str(profile["title"]),
+                        summary=summary,
+                        finding_type="direct_defect",
+                        normalized_issue_type=issue_type,
+                        category_label=str(profile["category_label"]),
+                        severity="high",
+                        confidence=float(profile["confidence"]),
+                        confidence_rationale="确定性 Java 质量信号；直接代码证据；无需依赖额外条件确认",
+                        file_path=normalized_file_path,
+                        line_start=line_start,
+                        evidence=evidence,
+                        matched_rules=[str(item) for item in list(profile["matched_rules"])],
+                        violated_guidelines=[str(item) for item in list(profile["violated_guidelines"])],
+                        rule_based_reasoning=rule_based_reasoning,
+                        remediation_strategy=str(profile["remediation_strategy"]),
+                        remediation_suggestion=remediation_suggestion,
+                        remediation_steps=[str(item) for item in list(profile["remediation_steps"])],
+                        code_excerpt=excerpt,
+                        code_context={"deterministic_signal": signal_name},
+                        suggested_code="",
+                        suggested_code_language="java",
+                        verification_needed=False,
+                    )
+                    self.finding_repo.save(review.review_id, finding)
+                    finding_payloads.append(finding.model_dump(mode="json"))
+                    existing_keys.add(key)
+                    self.event_repo.append(
+                        ReviewEvent(
+                            review_id=review.review_id,
+                            event_type="finding_created",
+                            phase="expert_review",
+                            message=f"系统通过确定性 Java 质量信号补充了 {issue_type} finding",
+                            payload={
+                                "finding_id": finding.finding_id,
+                                "expert_id": finding.expert_id,
+                                "file_path": finding.file_path,
+                                "line_start": finding.line_start,
+                                "deterministic_signal": signal_name,
+                            },
+                        )
+                    )
 
     def _append_empty_diff_fallback_finding(
         self,
@@ -2386,6 +2537,21 @@ class ReviewRunner(
                 "confidence_min": 0.65,
                 "confidence_cap": 0.78,
             },
+            "lock_guard_removed": {
+                "expert_id": "performance_reliability",
+                "title": "并发保护被删除",
+                "normalized_issue_type": "lock_guard_removed",
+                "summary": "当前改动删除了 synchronized、Lock 或分布式锁等并发保护，重复提交或并发执行时可能出现状态错乱。",
+                "matched_rules": ["CONCURRENCY-LOCK-001"],
+                "violated_guidelines": ["涉及共享状态、库存、余额、幂等或批处理入口的并发保护不能被无替代地删除"],
+                "rule_based_reasoning": "observation 已明确命中锁保护从 diff 中被删除，且新增代码没有等价并发控制，这类竞态风险可以从代码结构直接确认。",
+                "remediation_strategy": "恢复原有锁保护，或用数据库唯一约束、乐观锁、幂等表、分布式锁等等价机制替代。",
+                "remediation_suggestion": "不要直接删除并发保护；先说明替代机制，再补充并发提交或重复消费场景的回归测试。",
+                "remediation_steps": ["确认被保护的共享资源或业务不变量", "恢复锁或补充等价并发控制", "增加并发/重复提交测试"],
+                "suggested_code": "",
+                "confidence_min": 0.68,
+                "confidence_cap": 0.82,
+            },
             "declared_intent_without_implementation": {
                 "expert_id": "correctness_business",
                 "title": "承诺未落地",
@@ -2446,6 +2612,11 @@ class ReviewRunner(
                 claim = (
                     f"当前实现把外部依赖调用放进循环路径（{symbol_display}），"
                     "批量场景下会线性放大数据库/网络往返与整体时延。"
+                )
+            elif kind == "lock_guard_removed":
+                claim = (
+                    f"当前改动删除了锁或并发保护（{symbol_display}），"
+                    "但没有看到等价替代机制，重复提交或并发执行时可能破坏状态一致性。"
                 )
             elif kind == "declared_intent_without_implementation":
                 claim = (
@@ -2959,7 +3130,7 @@ class ReviewRunner(
                     bound_documents=list(job.get("bound_documents") or []),
                     rule_screening=rule_screening,
                 ),
-                suggested_code=str(candidate.get("suggested_code") or self._build_suggested_code(review.subject, file_path, forced_line_start, expert.expert_id)).strip(),
+                suggested_code=str(candidate.get("suggested_code") or "").strip(),
                 suggested_code_language=self._infer_code_language(file_path),
             )
             if observation_ids:
@@ -3040,7 +3211,7 @@ class ReviewRunner(
                 bound_documents=list(job.get("bound_documents") or []),
                 rule_screening=rule_screening,
             ),
-            suggested_code=self._build_suggested_code(review.subject, file_path, line_start, expert.expert_id),
+            suggested_code="",
             suggested_code_language=self._infer_code_language(file_path),
         )
         return finding
@@ -5202,13 +5373,44 @@ class ReviewRunner(
                         retry_candidates,
                         max_findings=max_findings_cap,
                     )
-        general_scan_metadata: dict[str, object] = {}
         should_scan_review_targets = self._should_retry_empty_rule_guided_candidate_response(
             target_hunk=target_hunk,
             target_hunks=target_hunks,
             repository_context=repository_context,
             rule_screening=rule_screening or {},
         )
+        custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
+            review=review,
+            expert=expert,
+            runtime_settings=runtime_settings,
+            resolution=llm_resolution,
+            rule_screening=rule_screening or {},
+            normalized_batch_items=normalized_batch_items,
+            repository_context=repository_context,
+            max_rules_per_batch=prompt_profile.max_rules_per_prompt,
+            file_path=file_path,
+            line_start=line_start,
+            timeout_seconds=float(llm_request_options["timeout_seconds"]),
+        )
+        if custom_scan_metadata:
+            expert_llm_diagnostics["custom_rule_batch_scan"] = custom_scan_metadata
+        for custom_scan_text in custom_scan_texts:
+            custom_candidates = self._parse_expert_analyses(
+                custom_scan_text,
+                review.subject,
+                expert,
+                file_path,
+                line_start,
+                max_findings=max_findings_cap,
+                require_rule_guided=True,
+            )
+            if custom_candidates:
+                parsed_candidates = self._merge_expert_analysis_candidates(
+                    parsed_candidates,
+                    custom_candidates,
+                    max_findings=max_findings_cap,
+                )
+        general_scan_metadata: dict[str, object] = {}
         if (
             prompt_profile.require_rule_check_results
             and should_scan_review_targets
@@ -5243,37 +5445,6 @@ class ReviewRunner(
                         general_candidates,
                         max_findings=max_findings_cap,
                     )
-        custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
-            review=review,
-            expert=expert,
-            runtime_settings=runtime_settings,
-            resolution=llm_resolution,
-            rule_screening=rule_screening or {},
-            normalized_batch_items=normalized_batch_items,
-            repository_context=repository_context,
-            max_rules_per_batch=prompt_profile.max_rules_per_prompt,
-            file_path=file_path,
-            line_start=line_start,
-            timeout_seconds=float(llm_request_options["timeout_seconds"]),
-        )
-        if custom_scan_metadata:
-            expert_llm_diagnostics["custom_rule_batch_scan"] = custom_scan_metadata
-        for custom_scan_text in custom_scan_texts:
-            custom_candidates = self._parse_expert_analyses(
-                custom_scan_text,
-                review.subject,
-                expert,
-                file_path,
-                line_start,
-                max_findings=max_findings_cap,
-                require_rule_guided=True,
-            )
-            if custom_candidates:
-                parsed_candidates = self._merge_expert_analysis_candidates(
-                    parsed_candidates,
-                    custom_candidates,
-                    max_findings=max_findings_cap,
-                )
         parsed_candidates = self._append_observation_followup_candidates(
             review=review,
             subject=review.subject,
@@ -5445,6 +5616,21 @@ class ReviewRunner(
             confidence = self._normalize_confidence(parsed.get("confidence"), base_confidence)
             parsed_line_start = self._normalize_line_start(parsed.get("line_start"), matched_hunk_line_start)
             parsed_line_start = self._refine_line_start_within_hunk(parsed, matched_target_hunk, parsed_line_start)
+            parsed_line_start = self._refine_line_start_across_hunks(
+                parsed,
+                per_file_target_hunks,
+                parsed_line_start,
+            )
+            parsed = self._normalize_candidate_for_refined_anchor(
+                parsed,
+                expert_id=expert.expert_id,
+                line_start=parsed_line_start,
+            )
+            parsed_line_start = self._refine_line_start_across_hunks(
+                parsed,
+                per_file_target_hunks,
+                parsed_line_start,
+            )
             if not self._line_in_target_hunks(parsed_line_start, per_file_target_hunks):
                 parsed_line_start = int(matched_hunk_line_start or parsed_line_start or 1)
             if not self._finding_has_valid_diff_anchor(
@@ -6782,7 +6968,7 @@ class ReviewRunner(
             [
                 "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]",
                 "本阶段只按专家画像、专家职责、专家审视规范和代码语言通用规范做通用检视。",
-                "它不依赖专家绑定规范是否命中；即使绑定规范批次为空或全部未命中，也必须全量扫描 TARGET_HUNKS。",
+                "它和专家绑定规范扫描相互补充，最终候选取并集并由收敛层去重。",
                 "如果存在当前代码锚点和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
                 "如果缺少关联上下文但已有当前代码证据，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
                 "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一问题。",
@@ -6840,7 +7026,7 @@ class ReviewRunner(
         )
         system_prompt = (
             "你是专家画像通用代码检视器。只按专家职责和语言通用规范扫描目标 hunk；"
-            "绑定规则未命中不是无问题结论。只输出 JSON。"
+            "不要编造绑定规则 ID，候选会和绑定规范扫描结果取并集。只输出 JSON。"
         )
         prompt_contract = self._build_prompt_contract_metadata(
             stage="expert_general_profile_scan",
@@ -6984,7 +7170,7 @@ class ReviewRunner(
             custom_prompt = "\n".join(
                 [
                     "[CUSTOM_BOUND_RULE_REVIEW_ONLY]",
-                    "本阶段只做专家绑定/产品/仓库自定义规范校验，和通用规范扫描相互独立，最终结果取并集。",
+                    "本阶段只做专家绑定/产品/仓库自定义规范校验，和通用规范扫描相互补充，最终结果取并集。",
                     "必须严格逐条检查 CUSTOM_RULE_BATCH 中的规则，并全量扫描 TARGET_HUNKS 中的所有目标 hunk。",
                     "不要因为主审或规则预筛没有发现问题就跳过本阶段；本阶段以 CUSTOM_RULE_BATCH 为准重新校验。",
                     "如果某条规则不适用，输出 not_applicable；缺上下文输出 insufficient_context；存在当前代码证据时必须保留 candidate_findings 并写 context_requests。",
@@ -7160,7 +7346,6 @@ class ReviewRunner(
         source_rules: list[dict[str, object]] = []
         for key in (
             "matched_rules_for_llm",
-            "all_enabled_rules_for_llm",
             "must_review_rules",
             "possible_hit_rules",
         ):
@@ -7250,6 +7435,12 @@ class ReviewRunner(
         for rule_id in list(required_rule_ids or []):
             if rule_id and rule_id not in checked_rule_ids:
                 errors.append(f"rule_coverage_missing:{rule_id}")
+        if (
+            "self_check_checked_all_rules_not_true" in errors
+            and list(required_rule_ids or [])
+            and all(rule_id in checked_rule_ids for rule_id in required_rule_ids if rule_id)
+        ):
+            errors = [error for error in errors if error != "self_check_checked_all_rules_not_true"]
         allowed_candidate_rule_ids = {
             str(rule_id).strip()
             for rule_id in list(required_rule_ids or [])

@@ -283,7 +283,16 @@ class GitNexusMcpImpactClient:
                 repo_path,
             )
         detect_changes_result: dict[str, Any] = {}
-        if skip_detect_changes_reason:
+        missing_change_seed_reason = self._missing_authoritative_change_seed_reason(subject, changed_symbols)
+        if missing_change_seed_reason:
+            detect_changes_result = {"__error": missing_change_seed_reason}
+            logger.warning(
+                "gitnexus detect_changes skipped repo=%s repo_path=%s reason=%s",
+                effective_repo_name,
+                repo_path,
+                missing_change_seed_reason,
+            )
+        elif skip_detect_changes_reason:
             detect_changes_result = {"__error": skip_detect_changes_reason}
             logger.warning(
                 "gitnexus detect_changes skipped repo=%s repo_path=%s reason=%s",
@@ -424,6 +433,15 @@ class GitNexusMcpImpactClient:
         finally:
             if mcp_session is not None:
                 mcp_session.close()
+
+    def _missing_authoritative_change_seed_reason(self, subject: ReviewSubject, changed_symbols: list[ImpactSymbol]) -> str:
+        if changed_symbols:
+            return ""
+        if [str(item).strip() for item in list(subject.changed_files or []) if str(item).strip()]:
+            return ""
+        if str(subject.unified_diff or "").strip():
+            return ""
+        return "缺少本次 MR 的 diff、changed_files 或显式变更符号，已跳过 detect_changes(scope=all)，避免读取本地工作区无关变更。"
 
     def _command(self) -> list[str]:
         raw = str(os.getenv("GITNEXUS_MCP_COMMAND") or "").strip()
@@ -2598,6 +2616,11 @@ class GitNexusImpactService:
                 "gitnexus symbol extraction used platform diff only because unified_diff is present but produced no symbol declarations"
             )
             return []
+        if self._should_skip_local_diff_symbol_extraction(subject):
+            logger.info(
+                "gitnexus symbol extraction skipped local git diff because MR has no authoritative diff or changed_files"
+            )
+            return []
         local_diff = self._load_local_diff_from_git(repo_path, subject) if repo_path else ""
         if local_diff:
             symbols = self._extract_changed_symbols(local_diff)
@@ -2618,6 +2641,18 @@ class GitNexusImpactService:
                 )
                 return symbols
         return []
+
+    def _should_skip_local_diff_symbol_extraction(self, subject: ReviewSubject) -> bool:
+        if str(subject.subject_type or "").strip().lower() != "mr":
+            return False
+        if [str(item).strip() for item in list(subject.changed_files or []) if str(item).strip()]:
+            return False
+        if str(subject.unified_diff or "").strip():
+            return False
+        metadata = dict(subject.metadata or {})
+        if metadata.get("allow_local_diff_fallback") is True:
+            return False
+        return True
 
     def _dedupe_symbols(self, symbols: list[ImpactSymbol]) -> list[ImpactSymbol]:
         result: list[ImpactSymbol] = []

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import settings
-from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings, RuntimeSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings, ProjectSettings, RuntimeSettings
 
 
 class ServerConfig(BaseModel):
@@ -63,6 +63,17 @@ class CodeRepositoryConfig(BaseModel):
     auto_sync: bool = False
     gitnexus_enabled: bool = True
     database_source_ids: list[str] = Field(default_factory=list)
+
+
+class ProjectConfig(BaseModel):
+    """定义在线系统项目租户配置。"""
+
+    project_id: str = ""
+    name: str = ""
+    description: str = ""
+    owner_team: str = ""
+    status: Literal["active", "archived"] = "active"
+    repositories: list[CodeRepositoryConfig] = Field(default_factory=list)
 
 
 class PostgresDataSourceConfig(BaseModel):
@@ -155,6 +166,8 @@ class AppConfig(BaseModel):
     code_repo: CodeRepoConfig = Field(default_factory=CodeRepoConfig)
     code_repositories: list[CodeRepositoryConfig] = Field(default_factory=list)
     default_repository_id: str = ""
+    projects: list[ProjectConfig] = Field(default_factory=list)
+    default_project_id: str = "default"
     database_sources: list[PostgresDataSourceConfig] = Field(default_factory=list)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
@@ -177,6 +190,15 @@ class AppConfig(BaseModel):
             if isinstance(value, CodeRepositorySettings):
                 return CodeRepositoryConfig.model_validate(value.model_dump(mode="json"))
             return CodeRepositoryConfig.model_validate(value)
+
+        def _to_project_config(value: object) -> ProjectConfig:
+            if isinstance(value, ProjectConfig):
+                return value
+            if isinstance(value, ProjectSettings):
+                payload = value.model_dump(mode="json")
+                payload["repositories"] = [_to_repo_config(item) for item in payload.get("repositories", []) or []]
+                return ProjectConfig.model_validate(payload)
+            return ProjectConfig.model_validate(value)
 
         return cls(
             llm=LlmConfig(
@@ -203,6 +225,8 @@ class AppConfig(BaseModel):
             ),
             code_repositories=[_to_repo_config(item) for item in list(runtime.code_repositories)],
             default_repository_id=runtime.default_repository_id,
+            projects=[_to_project_config(item) for item in list(runtime.projects)],
+            default_project_id=runtime.default_project_id,
             database_sources=[_to_pg_config(item) for item in list(runtime.database_sources)],
             runtime=RuntimeConfig(
                 default_target_branch=runtime.default_target_branch,
@@ -263,6 +287,15 @@ class AppConfig(BaseModel):
                 return CodeRepositorySettings.model_validate(value.model_dump(mode="json"))
             return CodeRepositorySettings.model_validate(value)
 
+        def _to_project_runtime(value: object) -> ProjectSettings:
+            if isinstance(value, ProjectSettings):
+                return value
+            if isinstance(value, ProjectConfig):
+                payload = value.model_dump(mode="json")
+                payload["repositories"] = [_to_repo_runtime(item) for item in value.repositories]
+                return ProjectSettings.model_validate(payload)
+            return ProjectSettings.model_validate(value)
+
         return RuntimeSettings(
             default_target_branch=self.runtime.default_target_branch,
             default_analysis_mode=self.runtime.default_analysis_mode,
@@ -284,6 +317,8 @@ class AppConfig(BaseModel):
             auto_review_poll_interval_seconds=self.code_repo.auto_review_poll_interval_seconds,
             default_repository_id=self.default_repository_id,
             code_repositories=[_to_repo_runtime(item) for item in list(self.code_repositories)],
+            default_project_id=self.default_project_id,
+            projects=[_to_project_runtime(item) for item in list(self.projects)],
             database_sources=[_to_pg_runtime(item) for item in list(self.database_sources)],
             tool_allowlist=list(self.allowlist.tools),
             mcp_allowlist=list(self.allowlist.mcp),

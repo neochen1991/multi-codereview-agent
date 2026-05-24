@@ -4799,6 +4799,20 @@ def test_review_runner_recognizes_generic_suggested_code_as_invalid(storage_root
     )
     assert (
         runner._looks_like_concrete_suggested_code(
+            "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
+            file_path="src/main/java/com/example/OrderService.java",
+        )
+        is False
+    )
+    assert (
+        runner._looks_like_concrete_suggested_code(
+            "// 先批量查询订单\n// 再组装返回结果",
+            file_path="src/main/java/com/example/OrderService.java",
+        )
+        is False
+    )
+    assert (
+        runner._looks_like_concrete_suggested_code(
             "public void save(Order request) {\n    Objects.requireNonNull(request);\n    repository.save(request);\n}",
             file_path="src/main/java/com/example/OrderService.java",
         )
@@ -5949,6 +5963,44 @@ def test_issue_current_code_prefers_target_hunk_over_repository_source_context(s
     assert "legacyValidate" not in current_code
 
 
+def test_issue_current_code_prefers_focused_code_excerpt_over_large_hunk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    finding = ReviewFinding(
+        finding_id="fdg_focus",
+        review_id="rev_focus",
+        expert_id="performance_reliability",
+        title="批量查询存在循环内逐条调用风险",
+        summary="listOrders 在批量输入下循环逐条调用 orderRepository.findById。",
+        finding_type="direct_defect",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=22,
+        code_excerpt="# src/main/java/com/example/OrderService.java\n  22 | +        orderRepository.findById(orderId);",
+        code_context={
+            "target_hunk": {
+                "excerpt": "\n".join(
+                    [
+                        "# src/main/java/com/example/OrderService.java",
+                        "  10 | + public List<OrderDTO> listOrders(List<Long> orderIds) {",
+                        "  11 | +     List<OrderDTO> result = new ArrayList<>();",
+                        "  12 | +     // TODO: 只返回当前登录用户有权限的订单",
+                        "  13 | +     for (Long orderId : orderIds) {",
+                        "  14 | +         Order order = orderRepository.findById(orderId);",
+                        "  15 | +         result.add(toDTO(order));",
+                        "  16 | +     }",
+                        "  17 | +     return result;",
+                        "  18 | + }",
+                    ]
+                ),
+            },
+        },
+    )
+
+    current_code = runner._extract_issue_current_code(finding)
+
+    assert current_code == "# src/main/java/com/example/OrderService.java\n  22 | +        orderRepository.findById(orderId);"
+    assert "TODO" not in current_code
+
+
 def test_issue_consistency_baseline_prefers_finding_hunk_over_stale_issue_code(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     issue = DebateIssue(
@@ -6811,6 +6863,65 @@ def test_review_runner_infers_normalized_issue_type(storage_root: Path):
     )
 
     assert issue_type == "loop_call_amplification"
+
+
+def test_review_runner_deterministic_loop_finding_keeps_call_symbol_in_summary(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_loop_symbol_summary",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/payment",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/PaymentSettlementService.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/com/example/PaymentSettlementService.java "
+                "b/src/main/java/com/example/PaymentSettlementService.java\n"
+            ),
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    monkeypatch.setattr(
+        runner.diff_excerpt_service,
+        "list_hunks",
+        lambda *_args, **_kwargs: [
+            {
+                "start_line": 20,
+                "excerpt": (
+                    "+        for (Payment payment : payments) {\n"
+                    "+            gateway.capture(payment);\n"
+                    "+            paymentRepository.save(payment);\n"
+                    "+        }"
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        runner.java_quality_signal_extractor,
+        "extract",
+        lambda **_kwargs: {
+            "signals": ["loop_call_amplification"],
+            "signal_terms": {
+                "loop_call_amplification": [
+                    "for (Payment payment : payments) {",
+                    "paymentRepository.save",
+                    "gateway.capture",
+                ]
+            },
+        },
+    )
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._append_deterministic_java_quality_findings(review, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert "paymentRepository.save" in findings[0].summary
+    assert "循环" in findings[0].summary
+    assert "paymentRepository.save" in findings[0].remediation_suggestion
 
 
 def test_review_runner_system_prompt_prefers_matched_sections_over_full_document(storage_root: Path):
@@ -7734,6 +7845,7 @@ def test_review_runner_apply_issue_consistency_validation_downgrades_conflicted_
     assert validated.resolution == "consistency_validation_failed"
     assert validated.consistency_check_status == "downgraded"
     assert validated.consistency_conflicts == ["建议代码修的是缓存问题，不是 N+1 查询问题。"]
+    assert validated.suggested_code == ""
     assert "当前 issue 内容存在明显冲突" in str(metadata["summary"])
 
 
@@ -7925,7 +8037,7 @@ def test_review_runner_disables_issue_coalescing_in_thorough_review_mode(storage
     runner = ReviewRunner(storage_root=storage_root)
 
     assert runner._should_coalesce_final_issues(SimpleNamespace(review_quality_mode="standard")) is True
-    assert runner._should_coalesce_final_issues(SimpleNamespace(review_quality_mode="thorough_review")) is False
+    assert runner._should_coalesce_final_issues(SimpleNamespace(review_quality_mode="thorough_review")) is True
 
 
 def test_review_runner_sanitizes_mixed_issue_candidate_to_current_anchor(storage_root: Path):
@@ -8412,6 +8524,136 @@ def test_review_runner_coalesces_event_consumer_batch_boundary_across_lines(stor
     assert set(issues[0].finding_ids) == {"fdg_chunks_tmp", "fdg_query_bound"}
     assert set(issues[0].participant_expert_ids) == {"architecture_design", "database_analysis"}
     assert "LIMIT :chunk" in issues[0].summary
+
+
+def test_review_runner_refines_n_plus_one_anchor_to_semantic_changed_line(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "changed_lines": [19, 22, 30, 31, 32, 33, 34, 35, 36],
+        "excerpt": "\n".join(
+            [
+                "# src/main/java/com/example/order/OrderService.java",
+                "  19 | +        // TODO 按产品要求，只能返回当前登录用户有权限的订单，避免越权读取",
+                "  22 | +            // 每个订单循环查询一次数据库，批量场景会触发 N+1 查询",
+                "  31 | +    public void createOrder(OrderRequest request) {",
+                "  32 | +        // 这里应该先校验库存并加库存锁，防止并发超卖",
+                "  33 | +        Order order = new Order(request.getSkuId(), request.getQuantity());",
+                "  34 | +        orderRepository.save(order);",
+                "  35 | +        eventPublisher.publish(new OrderCreatedEvent(order.getId()));",
+                "  36 | +    }",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "批量订单查询存在循环内逐条Repository调用的N+1风险",
+        "claim": "循环内调用 orderRepository.findById 会触发 N+1 查询",
+        "evidence": ["for (Long orderId : orderIds) { Order order = orderRepository.findById(orderId); }"],
+        "line_start": 34,
+    }
+
+    assert runner._refine_line_start_within_hunk(parsed, target_hunk, 34) == 22
+
+
+def test_review_runner_refines_stock_lock_anchor_across_changed_lines(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunks = [
+        {
+            "changed_lines": [19, 22, 30, 31, 32, 33, 34, 35, 36],
+            "excerpt": "\n".join(
+                [
+                    "# src/main/java/com/example/order/OrderService.java",
+                    "  19 | +        // TODO 按产品要求，只能返回当前登录用户有权限的订单，避免越权读取",
+                    "  22 | +            // 每个订单循环查询一次数据库，批量场景会触发 N+1 查询",
+                    "  31 | +    public void createOrder(OrderRequest request) {",
+                    "  32 | +        // 这里应该先校验库存并加库存锁，防止并发超卖",
+                    "  33 | +        Order order = new Order(request.getSkuId(), request.getQuantity());",
+                    "  34 | +        orderRepository.save(order);",
+                    "  35 | +        eventPublisher.publish(new OrderCreatedEvent(order.getId()));",
+                    "  36 | +    }",
+                ]
+            ),
+        }
+    ]
+    parsed = {
+        "title": "createOrder 未实现注释承诺的库存校验与加锁",
+        "claim": "库存校验与加锁未落地，存在并发超卖风险",
+        "evidence": ["// 这里应该先校验库存并加库存锁，防止并发超卖"],
+        "line_start": 19,
+    }
+
+    assert runner._refine_line_start_across_hunks(parsed, target_hunks, 19) == 32
+
+
+def test_review_runner_coalesces_n_plus_one_findings_across_nearby_lines(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    file_path = "src/main/java/com/example/order/OrderService.java"
+    performance_issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_perf_n_plus_one",
+        title="批量订单查询存在循环内逐条Repository调用的N+1风险",
+        summary="循环内调用 orderRepository.findById，批量输入会放大为 N 次数据库查询。",
+        finding_type="direct_defect",
+        normalized_issue_type="n_plus_one",
+        file_path=file_path,
+        line_start=22,
+        status="open",
+        severity="high",
+        confidence=0.92,
+        finding_ids=["fdg_perf"],
+        participant_expert_ids=["performance_reliability"],
+        primary_expert_id="performance_reliability",
+    )
+    maintainability_issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_maint_loop_call",
+        title="循环调用放大",
+        summary="循环内逐条 Repository 查询会增加排障和演进成本。",
+        finding_type="direct_defect",
+        normalized_issue_type="maintainability_regression",
+        file_path=file_path,
+        line_start=23,
+        status="open",
+        severity="medium",
+        confidence=0.86,
+        finding_ids=["fdg_maint"],
+        participant_expert_ids=["maintainability_code_health"],
+        primary_expert_id="maintainability_code_health",
+    )
+
+    issues = runner._coalesce_duplicate_issues([performance_issue, maintainability_issue])
+
+    assert len(issues) == 1
+    assert issues[0].normalized_issue_type == "n_plus_one"
+    assert set(issues[0].finding_ids) == {"fdg_perf", "fdg_maint"}
+    assert set(issues[0].participant_expert_ids) == {"performance_reliability", "maintainability_code_health"}
+
+
+def test_review_runner_keeps_current_issue_text_when_coalescing_contract_summary(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_stock_lock",
+        title="承诺未落地",
+        summary="循环内逐条数据库查询会在批量输入时放大 I/O；新增的创建订单方法缺少库存前置校验与并发控制锁，高并发场景下可能引发超卖。",
+        finding_type="direct_defect",
+        normalized_issue_type="comment_contract_unimplemented",
+        file_path="src/main/java/com/example/order/OrderService.java",
+        line_start=32,
+        status="open",
+        severity="high",
+        confidence=0.92,
+        finding_ids=["fdg_stock"],
+        participant_expert_ids=["correctness_business"],
+        primary_expert_id="correctness_business",
+        needs_human=True,
+    )
+
+    normalized = runner._coalesce_duplicate_issues([issue])
+
+    assert normalized[0].title == "承诺未落地"
+    assert "创建订单方法缺少库存前置校验与并发控制锁" in normalized[0].summary
+    assert "N 次数据库访问" not in normalized[0].summary
+    assert normalized[0].needs_human is True
 
 
 def test_review_runner_appends_deterministic_query_bound_finding(storage_root: Path):
@@ -8931,6 +9173,117 @@ def test_review_runner_batches_issue_consistency_validation_by_file(storage_root
 
     assert call_count["value"] == 1
     assert len(validated) == 2
+
+
+def test_review_runner_judge_repairs_empty_issue_suggested_code(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_judge_repairs_empty_suggested_code",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/bulk-save",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/BulkEnrollmentService.java"],
+        ),
+        status="running",
+        phase="judge",
+    )
+    issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_bulk_save",
+        title="批量写入退化为逐条保存",
+        summary="批量报名路径把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。",
+        file_path="src/main/java/com/example/BulkEnrollmentService.java",
+        line_start=31,
+        status="resolved",
+        severity="high",
+        confidence=0.92,
+        finding_ids=["fdg_bulk_save"],
+        participant_expert_ids=["performance_reliability"],
+        current_code="for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+        suggested_code="",
+    )
+    finding = ReviewFinding(
+        review_id=review.review_id,
+        finding_id="fdg_bulk_save",
+        expert_id="performance_reliability",
+        title="循环调用放大",
+        summary="批量报名路径循环内逐条 repository.save，应该恢复批量保存。",
+        file_path="src/main/java/com/example/BulkEnrollmentService.java",
+        line_start=31,
+        remediation_strategy="恢复批量写入",
+        remediation_suggestion="使用 repository.saveAll(enrollments) 代替循环内逐条 save。",
+        remediation_steps=["构造 enrollments", "调用 saveAll", "补充批量失败测试"],
+        code_excerpt="for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+        code_context={
+            "problem_source_context": {
+                "snippet": "for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+            },
+            "target_hunk": {
+                "excerpt": "+        for (CourseEnrollment enrollment : enrollments) {\n+            repository.save(enrollment);\n+        }",
+            },
+        },
+        suggested_code="",
+    )
+    calls: list[str] = []
+
+    def _fake_complete_text(**kwargs):
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        calls.append(phase)
+        if phase == "judge_repair_suggested_code":
+            text = (
+                '{"suggested_code":"List<CourseEnrollment> enrollments = studentIds.stream()\\n'
+                '    .map(studentId -> CourseEnrollment.create(courseId, studentId))\\n'
+                '    .toList();\\n'
+                'repository.saveAll(enrollments);"}'
+            )
+        else:
+            text = (
+                '{"results":[{"issue_id":"iss_bulk_save","status":"passed","title":"批量写入退化为逐条保存",'
+                '"summary":"批量报名路径把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。",'
+                '"normalized_issue_type":"n_plus_one","file_path":"src/main/java/com/example/BulkEnrollmentService.java",'
+                '"line_start":31,"remediation_strategy":"恢复批量写入","remediation_suggestion":"使用 repository.saveAll(enrollments) 代替循环内逐条 save。",'
+                '"remediation_steps":["构造 enrollments","调用 saveAll"],'
+                '"current_code":"for (CourseEnrollment enrollment : enrollments) {\\n    repository.save(enrollment);\\n}",'
+                '"suggested_code":"","consistency_conflicts":[],"reason":"通过，但建议代码缺失。"}]}'
+            )
+        return LLMTextResult(
+            text=text,
+            mode="live",
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _fake_complete_text)
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "resolve_main_agent",
+        lambda _runtime: LLMResolution(
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            api_key="secret",
+        ),
+    )
+
+    validated = runner._validate_final_issues_with_judge(
+        review=review,
+        issues=[issue],
+        findings_by_id={"fdg_bulk_save": finding},
+        runtime_settings=runner.runtime_settings_service.get(),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+    )
+
+    assert validated[0].suggested_code
+    assert "repository.saveAll(enrollments)" in validated[0].suggested_code
+    assert "judge_repair_suggested_code" in calls
+    messages = runner.message_repo.list(review.review_id)
+    assert any(item.message_type == "judge_repair_suggested_code" for item in messages)
     assert all(item.consistency_check_status == "passed" for item in validated)
 
 
@@ -8984,3 +9337,178 @@ def test_review_runner_build_issue_consistency_validation_prompt_uses_compact_is
     assert '"confidence_breakdown"' not in prompt
     assert '"issue_id": "iss_demo"' in prompt
     assert '"finding_ids": [' in prompt
+
+
+def test_review_runner_rule_guided_prompt_states_bound_rules_and_profile_union(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/x",
+        target_ref="main",
+        title="测试 MR",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff="diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n@@ -1 +1 @@\n+return orders;",
+    )
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="correctness-business",
+        name_zh="正确性与业务专家",
+        role="关注业务正确性、注释承诺和状态流转",
+        system_prompt="只检查业务正确性。",
+        review_spec="注释承诺必须落地。",
+    )
+    prompt = runner._build_rule_guided_expert_prompt(
+        subject=subject,
+        expert=expert,
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=12,
+        runtime_tool_results=[],
+        repository_context={},
+        target_hunk={"file_path": "src/main/java/com/example/OrderService.java", "line_start": 12, "excerpt": "+return orders;"},
+        target_hunks=[],
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=["注释承诺是否落地"],
+        active_skills=[],
+        rule_screening={
+            "matched_rules_for_llm": [
+                {
+                    "rule_id": "CORR-CONTRACT-001",
+                    "title": "注释承诺必须落地",
+                    "must_check_items": ["检查 TODO 是否有对应实现"],
+                    "normalized_issue_type": "comment_contract_unimplemented",
+                }
+            ],
+            "enabled_rules": 1,
+            "matched_rule_count": 1,
+        },
+        include_target_file_full_diff=True,
+        include_related_diff_summary=True,
+        max_context_chars=4000,
+        max_rules_per_prompt=8,
+    )
+
+    assert "绑定规范和专家画像都要参与检视，候选结果取并集" in prompt
+    assert "规则阶段：逐条检查 RULE_CARDS 和专家绑定规范" in prompt
+    assert "通用阶段：按专家画像、专家审视规范和语言通用规范扫描目标 hunk" in prompt
+
+
+def test_review_runner_user_facing_issue_summary_removes_internal_labels(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    summary = runner._build_merged_issue_summary(
+        [
+            "问题汇总：\n- createOrder 注释承诺先校验库存并加锁，但代码直接保存订单。 定向辩论预裁决：证据充分。",
+            "修复建议汇总：\n- 这行不应该作为第二个问题标题展示。",
+        ],
+        ["修复建议汇总：\n- 在保存前补齐库存校验和加锁保护。"],
+    )
+
+    assert "问题汇总" not in summary
+    assert "修复建议汇总" not in summary
+    assert "定向辩论预裁决" not in summary
+    assert summary == "createOrder 注释承诺先校验库存并加锁，但代码直接保存订单。\n建议：在保存前补齐库存校验和加锁保护。"
+
+
+def test_review_runner_custom_rule_batches_ignore_unmatched_enabled_rules(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    batches = runner._split_custom_rule_scan_batches(
+        {
+            "matched_rules_for_llm": [
+                {"rule_id": "PERF-SQL-002", "title": "N+1 查询风险必须在服务层被识别"}
+            ],
+            "all_enabled_rules_for_llm": [
+                {"rule_id": "PERF-POOL-001", "title": "连接池扩容必须配套容量评估"}
+            ],
+            "possible_hit_rules": [
+                {"rule_id": "PERF-JDDD-002", "title": "循环 Repository 查询必须识别 N+1"}
+            ],
+        },
+        max_rules_per_batch=10,
+    )
+
+    rule_ids = [item["rule_id"] for batch in batches for item in batch]
+    assert rule_ids == ["PERF-SQL-002", "PERF-JDDD-002"]
+    assert "PERF-POOL-001" not in rule_ids
+
+
+def test_review_runner_normalizes_mixed_candidate_by_refined_anchor(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    stock_candidate = runner._normalize_candidate_for_refined_anchor(
+        {
+            "title": "createOrder方法未实现库存校验与加锁，同时 listOrders 有 N+1",
+            "claim": "本次改动存在两处问题：listOrders N+1；createOrder 缺少库存锁。",
+            "normalized_issue_type": "query_bound_removed",
+        },
+        expert_id="correctness_business",
+        line_start=32,
+    )
+    loop_candidate = runner._normalize_candidate_for_refined_anchor(
+        {
+            "title": "listOrders 方法在循环中逐条调用 repository.findById",
+            "claim": "for 循环内调用 orderRepository.findById。",
+            "normalized_issue_type": "query_bound_removed",
+        },
+        expert_id="database_analysis",
+        line_start=22,
+    )
+
+    assert stock_candidate["title"] == "createOrder方法未实现库存校验与加锁，同时 listOrders 有 N+1"
+    assert stock_candidate["normalized_issue_type"] == "comment_contract_unimplemented"
+    assert "listOrders N+1" in stock_candidate["claim"]
+    assert loop_candidate["title"] == "listOrders 方法在循环中逐条调用 repository.findById"
+    assert loop_candidate["normalized_issue_type"] == "n_plus_one"
+
+
+def test_review_runner_preserves_explicit_exception_type_when_candidate_mentions_save(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    candidate = runner._normalize_candidate_for_refined_anchor(
+        {
+            "title": "支付结算批处理异常被吞掉并返回成功",
+            "claim": "catch RuntimeException 后仍返回 success，capture/save 失败会被误当成成功。",
+            "normalized_issue_type": "exception_swallowed",
+        },
+        expert_id="correctness_business",
+        line_start=28,
+    )
+
+    assert candidate["normalized_issue_type"] == "exception_swallowed"
+
+
+def test_review_runner_refines_line_again_after_anchor_normalization(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunks = [
+        {
+            "changed_lines": [19, 22, 31, 32, 33, 34, 35],
+            "excerpt": "\n".join(
+                [
+                    "  19 | +        // TODO 按产品要求，只能返回当前登录用户有权限的订单，避免越权读取",
+                    "  22 | +            // 每个订单循环查询一次数据库，批量场景会触发 N+1 查询",
+                    "  31 | +    public void createOrder(OrderRequest request) {",
+                    "  32 | +        // 这里应该先校验库存并加库存锁，防止并发超卖",
+                    "  33 | +        Order order = new Order(request.getSkuId(), request.getQuantity());",
+                    "  34 | +        orderRepository.save(order);",
+                    "  35 | +        eventPublisher.publish(new OrderCreatedEvent(order.getId()));",
+                ]
+            ),
+        }
+    ]
+
+    stock = runner._normalize_candidate_for_refined_anchor(
+        {"title": "createOrder 缺少库存锁", "claim": "createOrder 缺少库存校验与加锁。"},
+        expert_id="correctness_business",
+        line_start=19,
+    )
+    loop = runner._normalize_candidate_for_refined_anchor(
+        {"title": "listOrders N+1", "claim": "循环里调用 repository.findById。"},
+        expert_id="database_analysis",
+        line_start=19,
+    )
+
+    assert runner._refine_line_start_across_hunks(stock, target_hunks, 19) == 32
+    assert runner._refine_line_start_across_hunks(loop, target_hunks, 19) == 22

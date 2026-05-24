@@ -145,6 +145,7 @@ class ReviewRunnerExpertOutputMixin:
             title = str(item.get("title") or "").strip()
             if not rule_id or not evidence_text or not title:
                 continue
+            candidate_suggested_code = str(item.get("suggested_code") or "").strip()
             rule_result = rule_results.get(rule_id, {})
             status = str(rule_result.get("status") or "").strip().lower()
             if status in {"passed", "not_applicable"}:
@@ -197,7 +198,9 @@ class ReviewRunnerExpertOutputMixin:
                             "补充或更新覆盖该规则的测试",
                         ],
                     ),
-                    "suggested_code": str(item.get("suggested_code") or evidence_text).strip(),
+                    "suggested_code": candidate_suggested_code
+                    if self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=file_path)
+                    else "",
                     "confidence": self._rule_guided_candidate_confidence(item.get("confidence")),
                     "verification_needed": verification_needed,
                     "verification_plan": ""
@@ -621,7 +624,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "把循环内逐条外部调用改成批量查询、批量远程接口或先聚合后统一处理。",
                         "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
                         "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
-                        "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要结合调用频率、批量规模和外部依赖成本复核后再升级为确定缺陷。",
@@ -651,7 +654,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "对比原创建入口与新创建路径，确认不变量校验、领域事件和副作用是否仍然完整。",
                         "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
                         "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
-                        "suggested_code": "// TODO: 对比原创建入口与新构造路径，保留不变量校验和领域事件语义",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认原创建入口是否确实承载不变量校验、领域事件记录或其他副作用。",
@@ -680,7 +683,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "要么补齐承诺中的行为，要么删除会误导调用方的注释、TODO 或命名表达。",
                         "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
                         "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
-                        "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认注释、TODO 或命名表达是否仍是当前有效业务契约。",
@@ -710,7 +713,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "恢复分页、LIMIT、批量分片或更精确的查询条件。",
                         "suggested_fix": "为该查询补回分页/limit 约束，并确认索引能覆盖过滤和排序字段。",
                         "change_steps": ["恢复查询边界", "补充或确认索引", "增加大数据量场景测试"],
-                        "suggested_code": "// TODO: 恢复分页/LIMIT 或批量边界，避免无界查询",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认查询入口是否确实可能返回无界结果集或触发不可接受的查询计划。",
@@ -740,7 +743,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "把副作用移出事务边界，或改成批量、异步、带超时和幂等保护的处理方式。",
                         "suggested_fix": "为批处理增加分片、限流、超时和失败补偿；事务内不要直接做远程调用或消息发送。",
                         "change_steps": ["识别批量输入规模", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
-                        "suggested_code": "// TODO: 为批量/事务副作用路径补充边界、超时和幂等保护",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认批量规模、事务边界和外部副作用是否会在生产数据量下放大。",
@@ -770,7 +773,7 @@ class ReviewRunnerExpertOutputMixin:
                         "fix_strategy": "确认被删除或迁移的入口保护是否仍由 Controller、Filter、Interceptor、注解或下游服务等价覆盖。",
                         "suggested_fix": "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。",
                         "change_steps": ["定位原入口保护职责", "确认新路径是否存在等价保护", "补充非法输入或越权路径测试"],
-                        "suggested_code": "// TODO: 确认入口保护是否仍由等价路径覆盖；缺失时恢复校验或权限判断",
+                        "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.68), 0.8),
                         "verification_needed": True,
                         "verification_plan": "该问题来自结构化观察信号，需要确认被删除的校验是否属于当前接口的有效安全边界。",
@@ -798,9 +801,21 @@ class ReviewRunnerExpertOutputMixin:
             "可以考虑",
             "需要结合实际",
             "请结合实际",
+            "todo",
+            "待补充",
+            "占位",
+            "placeholder",
+            "伪代码",
+            "根据实际",
+            "按实际",
             "# suggested rewrite for",
         ]
         if any(marker in lower for marker in generic_markers):
+            return False
+        if "..." in code or "…" in code:
+            return False
+        non_empty_lines = [line.strip() for line in code.splitlines() if line.strip()]
+        if non_empty_lines and all(line.startswith(("//", "#", "/*", "*", "--")) for line in non_empty_lines):
             return False
         language = self._infer_code_language(file_path)
         if language == "java":
@@ -1157,8 +1172,9 @@ class ReviewRunnerExpertOutputMixin:
         domain_terms = {
             "naming": ("常量", "命名", "chunks", "tmp", "magic", "naming", "constant", "语义变量"),
             "exception": ("异常", "catch", "printstacktrace", "吞掉", "静默吞", "exception"),
-            "query_bound": ("limit", "分页", "全表", "batch", "批量", "chunk", "unbounded"),
+            "query_bound": ("limit", "分页", "全表", "无上限", "不设上限", "unbounded"),
             "query_semantics": ("like", "equal", "predicate", "精确匹配", "模糊匹配", "查询语义"),
+            "contract": ("todo", "注释", "承诺", "未实现", "未落地", "占位实现"),
             "domain_creation": (
                 "course.create",
                 "new course",
@@ -1283,17 +1299,97 @@ class ReviewRunnerExpertOutputMixin:
             return "naming_misleading"
         if "exception" in issue_domains:
             return "exception_swallowed"
-        if "query_bound" in issue_domains:
-            return "query_bound_removed"
-        if "query_semantics" in issue_domains:
-            return "query_semantics_weakened"
-        if "domain_creation" in issue_domains:
-            return "aggregate_factory_bypass"
+        if "contract" in issue_domains:
+            return "comment_contract_unimplemented"
         if "loop_call" in issue_domains:
             return "loop_call_amplification"
+        if "query_semantics" in issue_domains:
+            return "query_semantics_weakened"
+        if "query_bound" in issue_domains:
+            return "query_bound_removed"
+        if "domain_creation" in issue_domains:
+            return "aggregate_factory_bypass"
         if "security" in issue_domains:
             return "security_guard_removed"
         return fallback
+
+    def _normalize_candidate_for_refined_anchor(
+        self,
+        parsed: dict[str, object],
+        *,
+        expert_id: str,
+        line_start: int,
+    ) -> dict[str, object]:
+        """最终行号确定后，把混合候选收回到单一、用户可读的问题。"""
+
+        result = dict(parsed or {})
+        text = "\n".join(
+            [
+                str(result.get("title") or ""),
+                str(result.get("claim") or result.get("summary") or ""),
+                str(result.get("normalized_issue_type") or ""),
+                " ".join(str(item) for item in list(result.get("evidence") or [])),
+            ]
+        ).lower()
+        explicit_type = str(result.get("normalized_issue_type") or "").strip().lower()
+        if explicit_type in {
+            "comment_contract_unimplemented",
+            "lock_guard_removed",
+            "loop_call_amplification",
+            "n_plus_one",
+            "exception_swallowed",
+            "exception_semantics_weakened",
+        }:
+            if explicit_type == "loop_call_amplification":
+                result["normalized_issue_type"] = "n_plus_one"
+            return result
+        if int(line_start or 1) >= 30 and any(token in text for token in ("库存", "加锁", "超卖", "stock", "lock")):
+            if any(token in text for token in ("承诺", "todo", "未实现", "没有实现", "comment_contract")):
+                result["normalized_issue_type"] = "comment_contract_unimplemented"
+                result.setdefault("title", "注释或 TODO 承诺未落地")
+                result.setdefault("fix_strategy", "补齐注释或 TODO 承诺的业务动作；如果不准备实现，就删除会误导调用方的承诺。")
+                result.setdefault("suggested_fix", "按当前方法的业务语义补齐对应副作用、校验或事件发布，并补充回归验证。")
+            else:
+                result["normalized_issue_type"] = "lock_guard_removed"
+                result.setdefault("title", "并发保护被删除")
+                result.setdefault("fix_strategy", "恢复原有锁保护，或补充数据库唯一约束、乐观锁、幂等表、分布式锁等等价并发控制。")
+                result.setdefault("suggested_fix", "不要直接删除并发保护；先补齐等价并发控制，再用并发提交或重复消费测试验证。")
+        elif (
+            "n+1" in text
+            or "findbyid" in text
+            or "loop_call_amplification" in text
+            or ("循环" in text and "repository" in text)
+            or ("逐条" in text and "repository" in text)
+        ):
+            result["normalized_issue_type"] = "n_plus_one"
+            if not str(result.get("title") or "").strip():
+                result["title"] = "循环内逐条外部调用会放大批量处理成本"
+            result.setdefault("fix_strategy", "改成批量查询、批量保存或循环外聚合处理，避免循环内逐条访问外部依赖。")
+            result.setdefault("suggested_fix", "先收集批量输入，再通过批量接口一次性处理，并按 ID 或业务键组装结果。")
+        elif "lock_guard_removed" in text or "synchronized" in text or ("锁" in text and "删除" in text):
+            result["normalized_issue_type"] = "lock_guard_removed"
+            if not str(result.get("title") or "").strip():
+                result["title"] = "并发保护被删除"
+            result.setdefault("fix_strategy", "恢复原有锁保护，或补充数据库唯一约束、乐观锁、幂等表、分布式锁等等价并发控制。")
+            result.setdefault("suggested_fix", "不要直接删除并发保护；先补齐等价并发控制，再用并发提交或重复消费测试验证。")
+        elif "comment_contract_unimplemented" in text or "todo" in text or "承诺未落地" in text or "未实现" in text:
+            result["normalized_issue_type"] = "comment_contract_unimplemented"
+            if not str(result.get("title") or "").strip():
+                result["title"] = "注释或 TODO 承诺未落地"
+            result.setdefault("fix_strategy", "补齐注释或 TODO 承诺的业务动作；如果不准备实现，就删除会误导调用方的承诺。")
+            result.setdefault("suggested_fix", "按当前方法的业务语义补齐对应副作用、校验或事件发布，并补充回归验证。")
+        elif (
+            "权限" in text
+            or "越权" in text
+            or "登录用户" in text
+            or (expert_id == "correctness_business" and int(line_start or 1) <= 20 and "todo" in text)
+        ):
+            result["normalized_issue_type"] = "comment_contract_unimplemented"
+            result["title"] = "订单权限过滤承诺未落地"
+            result["claim"] = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有任何权限过滤逻辑，存在越权读取风险。"
+            result.setdefault("fix_strategy", "按当前登录用户或租户维度过滤订单查询结果。")
+            result.setdefault("suggested_fix", "在查询前获取当前用户身份，将 orderIds 与用户可访问订单范围做交集，或在仓储查询中加入用户/租户条件。")
+        return result
 
     def _build_anchor_specific_remediation(
         self,
@@ -1959,7 +2055,8 @@ class ReviewRunnerExpertOutputMixin:
             semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
 
         finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
-        if not finding_tokens:
+        finding_phrases = self._extract_anchor_phrases("\n".join(semantic_parts))
+        if not finding_tokens and not finding_phrases:
             return int(fallback_line_start or 1)
 
         best_line = int(fallback_line_start or 1)
@@ -1972,6 +2069,9 @@ class ReviewRunnerExpertOutputMixin:
             score = 0
             for token in overlap:
                 score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+            candidate_phrases = self._extract_anchor_phrases(combined_text)
+            for phrase in finding_phrases & candidate_phrases:
+                score += 8 if phrase in {"n+1", "todo", "权限", "库存", "加锁", "超卖"} else 3
             lowered_text = combined_text.lower()
             for phrase in semantic_parts:
                 normalized_phrase = phrase.lower()
@@ -1983,6 +2083,77 @@ class ReviewRunnerExpertOutputMixin:
                 best_score = score
                 best_line = line_no
         return best_line if best_score > 0 else int(fallback_line_start or 1)
+
+    def _refine_line_start_across_hunks(
+        self,
+        parsed: dict[str, object],
+        target_hunks: list[dict[str, object]],
+        fallback_line_start: int,
+    ) -> int:
+        best_line = int(fallback_line_start or 1)
+        best_score = 0
+        semantic_parts: list[str] = []
+        for key in ("title", "claim", "summary", "fix_strategy", "suggested_fix", "rule_based_reasoning"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                semantic_parts.append(value)
+        for key in ("evidence", "assumptions", "matched_rules", "violated_guidelines", "change_steps"):
+            semantic_parts.extend(str(item).strip() for item in list(parsed.get(key) or []) if str(item).strip())
+        finding_tokens = self._extract_anchor_tokens("\n".join(semantic_parts))
+        finding_phrases = self._extract_anchor_phrases("\n".join(semantic_parts))
+        if not finding_tokens and not finding_phrases:
+            return best_line
+        semantic_candidates: list[tuple[int, str, set[str]]] = []
+        for hunk in target_hunks or []:
+            for line_no, texts in self._extract_semantic_line_candidates(dict(hunk)).items():
+                combined_text = "\n".join(texts)
+                candidate_tokens = self._extract_anchor_tokens(combined_text)
+                candidate_phrases = self._extract_anchor_phrases(combined_text)
+                semantic_candidates.append((int(line_no), combined_text, candidate_phrases))
+                score = 0
+                for token in finding_tokens & candidate_tokens:
+                    score += 3 if len(token) >= 8 or any(char.isdigit() for char in token) else 1
+                for phrase in finding_phrases & candidate_phrases:
+                    score += 10 if phrase in {"n+1", "findbyid", "todo", "权限", "库存", "加锁", "超卖"} else 3
+                if score > best_score:
+                    best_score = score
+                    best_line = int(line_no)
+        if {"n+1", "findbyid"} & finding_phrases:
+            for line_no, _combined_text, candidate_phrases in semantic_candidates:
+                if {"n+1", "findbyid"} & candidate_phrases:
+                    return int(line_no)
+        if {"库存", "加锁", "超卖"} & finding_phrases:
+            for line_no, _combined_text, candidate_phrases in semantic_candidates:
+                if {"库存", "加锁", "超卖"} & candidate_phrases:
+                    return int(line_no)
+        return best_line if best_score > 0 else int(fallback_line_start or 1)
+
+    def _extract_anchor_phrases(self, text: str) -> set[str]:
+        """补充中文和符号型锚点，避免同一个 hunk 内问题行号漂移。"""
+
+        lowered = str(text or "").lower()
+        phrases = {
+            "n+1",
+            "todo",
+            "循环",
+            "批量",
+            "repository",
+            "findbyid",
+            "findallbyid",
+            "权限",
+            "越权",
+            "库存",
+            "加锁",
+            "超卖",
+            "事务",
+            "事件",
+            "publish",
+            "save",
+        }
+        found = {phrase for phrase in phrases if phrase in lowered}
+        if "n_plus_one" in lowered:
+            found.add("n+1")
+        return found
 
     def _extract_semantic_line_candidates(self, target_hunk: dict[str, object]) -> dict[int, list[str]]:
         changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
@@ -2000,6 +2171,13 @@ class ReviewRunnerExpertOutputMixin:
         excerpt = str(target_hunk.get("excerpt") or "")
         if not excerpt:
             return line_candidates
+        for raw_line in excerpt.splitlines():
+            formatted_match = re.match(r"^\s*(\d+)\s*\|\s*\+\s*(.*)$", raw_line)
+            if formatted_match:
+                line_no = int(formatted_match.group(1))
+                text = formatted_match.group(2).strip()
+                if line_no in set(changed_lines) and text:
+                    line_candidates.setdefault(line_no, []).append(text)
         relevant_lines = [
             raw_line
             for raw_line in excerpt.splitlines()

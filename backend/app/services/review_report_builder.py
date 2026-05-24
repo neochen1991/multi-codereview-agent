@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from app.domain.models.finding import ReviewFinding
 from app.domain.models.issue import DebateIssue
 from app.domain.models.report import ImpactIssueLink, ImpactReport, ReviewReport
@@ -211,23 +213,38 @@ def _string_list(value: object) -> list[str]:
     return [str(item).strip() for item in value or [] if str(item).strip()] if isinstance(value, list) else []
 
 
+def _sanitize_user_facing_issue_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
+    text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"^[-*]\s*", "", raw_line.strip()).strip()
+        if not line or line in {"问题汇总：", "问题汇总:", "修复建议汇总：", "修复建议汇总:"}:
+            continue
+        if line.startswith(("定向辩论预裁决", "问题汇总", "修复建议汇总")):
+            continue
+        lines.append(line)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip("；;，, ")
+
+
 def build_issue_summary_from_finding(finding: ReviewFinding) -> str:
-    parts: list[str] = []
-    summary_text = str(finding.summary or "").strip()
-    if summary_text:
-        parts.append("问题汇总：")
-        parts.append(f"- {summary_text}")
+    summary_text = _sanitize_user_facing_issue_text(str(finding.summary or "").strip())
     remediation_items: list[str] = []
     remediation_suggestion = str(finding.remediation_suggestion or "").strip()
     if remediation_suggestion:
-        remediation_items.append(remediation_suggestion)
+        remediation_items.append(_sanitize_user_facing_issue_text(remediation_suggestion))
     remediation_items.extend(
-        str(item or "").strip() for item in list(finding.remediation_steps or []) if str(item or "").strip()
+        _sanitize_user_facing_issue_text(str(item or "").strip())
+        for item in list(finding.remediation_steps or [])
+        if str(item or "").strip()
     )
-    if remediation_items:
-        parts.append("修复建议汇总：")
-        parts.extend(f"- {item}" for item in remediation_items)
-    return "\n".join(parts).strip() or summary_text or "当前 issue 由单条 finding 升级而来。"
+    remediation_items = [item for item in remediation_items if item]
+    if summary_text and remediation_items:
+        return f"{summary_text}\n建议：{remediation_items[0]}"
+    return summary_text or "当前 issue 来自一条有代码证据的检视发现。"
 
 
 def build_light_report_finding(finding: ReviewFinding) -> ReviewFinding:

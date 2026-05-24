@@ -675,6 +675,8 @@ export interface RuntimeSettings {
   auto_review_poll_interval_seconds: number;
   default_repository_id: string;
   code_repositories: CodeRepositorySettings[];
+  default_project_id?: string;
+  projects?: ProjectSettings[];
   database_sources: PostgresDataSourceSettings[];
   tool_allowlist: string[];
   mcp_allowlist: string[];
@@ -752,6 +754,20 @@ export interface CodeRepositorySettings {
   auto_sync?: boolean;
   gitnexus_enabled?: boolean;
   database_source_ids?: string[];
+}
+
+export interface ProjectSettings {
+  project_id: string;
+  name: string;
+  description?: string;
+  owner_team?: string;
+  status?: "active" | "archived";
+  repositories: CodeRepositorySettings[];
+}
+
+export interface ProjectListResponse {
+  default_project_id: string;
+  projects: ProjectSettings[];
 }
 
 export interface GitNexusIndexStatus {
@@ -1042,6 +1058,8 @@ export const reviewApi = {
     target_ref?: string;
     title?: string;
     mr_url?: string;
+    repo_id?: string;
+    project_id?: string;
     repo_url?: string;
     selected_experts?: string[];
     metadata?: Record<string, unknown>;
@@ -1333,6 +1351,33 @@ export const governanceApi = {
   },
   async updateReviewLearningCaseStatus(caseId: string, status: "active" | "disabled"): Promise<ReviewLearningCase> {
     const { data } = await api.patch(`/governance/review-learning-cases/${caseId}`, { status });
+    return data;
+  },
+};
+
+export const projectApi = {
+  async list(): Promise<ProjectListResponse> {
+    const { data } = await api.get("/projects");
+    return data;
+  },
+  async create(payload: ProjectSettings): Promise<ProjectSettings> {
+    const { data } = await api.post("/projects", payload);
+    return data;
+  },
+  async update(projectId: string, payload: ProjectSettings): Promise<ProjectSettings> {
+    const { data } = await api.put(`/projects/${encodeURIComponent(projectId)}`, payload);
+    return data;
+  },
+  async remove(projectId: string): Promise<{ project_id: string; status: string; default_project_id: string }> {
+    const { data } = await api.delete(`/projects/${encodeURIComponent(projectId)}`);
+    return data;
+  },
+  async setDefault(projectId: string): Promise<ProjectListResponse> {
+    const { data } = await api.put(`/projects/default/${encodeURIComponent(projectId)}`);
+    return data;
+  },
+  async updateRepositories(projectId: string, repositories: CodeRepositorySettings[]): Promise<ProjectSettings> {
+    const { data } = await api.put(`/projects/${encodeURIComponent(projectId)}/repositories`, { repositories });
     return data;
   },
 };

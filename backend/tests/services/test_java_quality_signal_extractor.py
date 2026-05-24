@@ -317,6 +317,25 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_fr
     assert "comment_contract_unimplemented" in payload["signals"]
 
 
+def test_java_quality_signal_extractor_distinguishes_audit_contract_from_domain_event_publish() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/CourseCreator.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,3 +22,4 @@ public class CourseCreator {",
+                    "+    // TODO 持久化后同步发送审计事件",
+                    "     repository.save(course);",
+                    "     eventBus.publish(course.pullDomainEvents());",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]
+
+
 def test_java_quality_signal_extractor_does_not_flag_interface_contract_when_implementation_context_matches() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(

@@ -107,19 +107,96 @@ class ReviewServiceReportMixin:
                 issue.title,
                 issue.summary,
                 issue.normalized_issue_type,
+                issue.primary_expert_id,
+                *issue.participant_expert_ids,
                 *issue.aggregated_titles,
                 *issue.aggregated_summaries,
             ]
         ).lower()
         compact = re.sub(r"\s+", "", text)
+        sanitized_summary = self._sanitize_user_facing_issue_text(issue.summary) or next(
+            (
+                item
+                for item in (
+                    self._sanitize_user_facing_issue_text(str(value or ""))
+                    for value in list(issue.aggregated_summaries or [])
+                )
+                if item
+            ),
+            "",
+        )
+        sanitized_remediation_suggestion = self._sanitize_user_facing_issue_text(issue.remediation_suggestion) or next(
+            (
+                item
+                for item in (
+                    self._sanitize_user_facing_issue_text(str(value or ""))
+                    for value in list(issue.aggregated_remediation_suggestions or [])
+                )
+                if item
+            ),
+            "",
+        )
+        update_payload: dict[str, object] = {
+            "summary": sanitized_summary,
+            "remediation_strategy": self._sanitize_user_facing_issue_text(issue.remediation_strategy),
+            "remediation_suggestion": sanitized_remediation_suggestion,
+            "remediation_steps": [
+                item
+                for item in (self._sanitize_user_facing_issue_text(step) for step in list(issue.remediation_steps or []))
+                if item
+            ],
+            "current_code": self._extract_display_current_code(issue),
+            "suggested_code": issue.suggested_code
+            if self._looks_like_concrete_report_suggested_code(issue.suggested_code)
+            else "",
+        }
+        anchor_line = self._infer_issue_line_from_display_code(issue)
+        if anchor_line is not None:
+            update_payload["line_start"] = anchor_line
         if "hibernatecriteriaconverter" in str(issue.file_path or "").lower() and any(
             token in compact
             for token in ("equal", "equals", "like", "精确匹配", "模糊匹配", "查询语义", "语义退化")
         ):
             return issue.model_copy(
                 update={
+                    **update_payload,
                     "normalized_issue_type": "query_semantics_regression",
                     "title": "查询语义从精确匹配退化为模糊匹配",
+                }
+            )
+        loop_tokens = (
+            "n+1",
+            "nplusone",
+            "n_plus_one",
+            "loop_call_amplification",
+            "循环调用放大",
+            "循环内逐条",
+            "逐条repository",
+            "逐条save",
+            "repository.save",
+            "saveall",
+            "批量写入放大",
+            "批量保存",
+        )
+        performance_owned = (
+            "performance_reliability" in compact
+            or issue.normalized_issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}
+        )
+        if performance_owned and any(token in compact for token in loop_tokens):
+            loop_title = (
+                "批量写入从 saveAll 退化为循环逐条 repository.save"
+                if "repository.save" in compact and "saveall" in compact
+                else "循环内逐条外部调用会放大批量处理成本"
+            )
+            loop_suggestion = sanitized_remediation_suggestion
+            if not loop_suggestion and "repository.save" in compact:
+                loop_suggestion = "将循环内逐条 repository.save 改回批量 saveAll，或先聚合后统一批量提交，并补充批量失败场景测试。"
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "n_plus_one",
+                    "title": loop_title,
+                    "remediation_suggestion": loop_suggestion,
                 }
             )
         if any(
@@ -128,11 +205,99 @@ class ReviewServiceReportMixin:
         ):
             return issue.model_copy(
                 update={
+                    **update_payload,
                     "normalized_issue_type": "comment_contract_unimplemented",
                     "title": "承诺未落地",
                 }
             )
-        return issue
+        return issue.model_copy(update=update_payload)
+
+    def _extract_display_current_code(self, issue: DebateIssue) -> str:
+        current_code = str(issue.current_code or "").strip()
+        if not current_code:
+            return ""
+        anchor_line = self._infer_issue_line_from_display_code(issue)
+        if anchor_line is None:
+            return current_code
+        lines = current_code.splitlines()
+        numbered_lines: list[tuple[int, str]] = []
+        for raw_line in lines:
+            match = re.match(r"^\s*(\d+)\s*\|\s?(.*)$", raw_line)
+            if match:
+                numbered_lines.append((int(match.group(1)), raw_line))
+        if not numbered_lines:
+            return current_code
+        window = [
+            raw_line
+            for line_no, raw_line in numbered_lines
+            if anchor_line - 2 <= line_no <= anchor_line + 3
+        ]
+        if not window:
+            window = [
+                raw_line
+                for line_no, raw_line in numbered_lines
+                if int(issue.line_start or 1) - 2 <= line_no <= int(issue.line_start or 1) + 2
+            ]
+        if not window:
+            return current_code
+        header = lines[0] if lines and lines[0].startswith("# ") else ""
+        return "\n".join([header, *window] if header else window).strip()
+
+    def _infer_issue_line_from_display_code(self, issue: DebateIssue) -> int | None:
+        current_code = str(issue.current_code or "").strip()
+        if not current_code:
+            return None
+        issue_text = "\n".join([issue.title, issue.summary, issue.normalized_issue_type]).lower()
+        keyword_groups: list[tuple[str, tuple[str, ...]]] = [
+            ("stock", ("库存", "加锁", "超卖", "createorder", "eventpublisher.publish", "orderrepository.save")),
+            ("n_plus_one", ("n+1", "findbyid", "循环查询", "逐条")),
+            ("permission", ("权限", "越权", "登录用户", "todo")),
+        ]
+        preferred_tokens: tuple[str, ...] = ()
+        for _group, tokens in keyword_groups:
+            if any(token in issue_text for token in tokens):
+                preferred_tokens = tokens
+                break
+        if not preferred_tokens:
+            return None
+        numbered_lines: list[tuple[int, str]] = []
+        for raw_line in current_code.splitlines():
+            match = re.match(r"^\s*(\d+)\s*\|\s?(.*)$", raw_line)
+            if match:
+                numbered_lines.append((int(match.group(1)), match.group(2).lower()))
+        for token in preferred_tokens:
+            for line_no, line_text in numbered_lines:
+                if token in line_text:
+                    return line_no
+        return None
+
+    @staticmethod
+    def _looks_like_concrete_report_suggested_code(value: object) -> bool:
+        code = str(value or "").strip()
+        if not code:
+            return False
+        lower = code.lower()
+        generic_markers = (
+            "todo",
+            "示例",
+            "placeholder",
+            "伪代码",
+            "待补充",
+            "占位",
+            "应该先",
+            "请根据规则",
+            "需要结合实际",
+            "按实际",
+            "...",
+            "…",
+            "suggested rewrite",
+        )
+        if any(marker in lower for marker in generic_markers):
+            return False
+        lines = [line.strip() for line in code.splitlines() if line.strip()]
+        if lines and all(line.startswith(("//", "#", "/*", "*", "--")) for line in lines):
+            return False
+        return any(token in code for token in (";", "{", "}", "return ", "=>", "def ", "ALTER ", "UPDATE "))
 
     def _issues_require_finding_rehydration(
         self,
@@ -292,22 +457,39 @@ class ReviewServiceReportMixin:
         )
 
     def _build_issue_summary_from_finding(self, finding: ReviewFinding) -> str:
-        parts: list[str] = []
-        summary_text = str(finding.summary or "").strip()
-        if summary_text:
-            parts.append("问题汇总：")
-            parts.append(f"- {summary_text}")
+        summary_text = self._sanitize_user_facing_issue_text(str(finding.summary or "").strip())
         remediation_items: list[str] = []
         remediation_suggestion = str(finding.remediation_suggestion or "").strip()
         if remediation_suggestion:
-            remediation_items.append(remediation_suggestion)
+            remediation_items.append(self._sanitize_user_facing_issue_text(remediation_suggestion))
         remediation_items.extend(
-            str(item or "").strip() for item in list(finding.remediation_steps or []) if str(item or "").strip()
+            self._sanitize_user_facing_issue_text(str(item or "").strip())
+            for item in list(finding.remediation_steps or [])
+            if str(item or "").strip()
         )
-        if remediation_items:
-            parts.append("修复建议汇总：")
-            parts.extend(f"- {item}" for item in remediation_items)
-        return "\n".join(parts).strip() or summary_text or "当前 issue 由单条 finding 升级而来。"
+        remediation_items = [item for item in remediation_items if item]
+        if summary_text and remediation_items:
+            return f"{summary_text}\n建议：{remediation_items[0]}"
+        return summary_text or "当前 issue 来自一条有代码证据的检视发现。"
+
+    @staticmethod
+    def _sanitize_user_facing_issue_text(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
+        text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
+        if "请根据规则要求补齐正确实现" in text:
+            return ""
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = re.sub(r"^[-*]\s*", "", raw_line.strip()).strip()
+            if not line or line in {"问题汇总：", "问题汇总:", "修复建议汇总：", "修复建议汇总:"}:
+                continue
+            if line.startswith(("定向辩论预裁决", "问题汇总", "修复建议汇总")):
+                continue
+            lines.append(line)
+        return re.sub(r"\s+", " ", " ".join(lines)).strip("；;，, ")
 
     def _build_light_report_finding(self, finding: ReviewFinding) -> ReviewFinding:
         """结果页首屏只返回轻量 finding，避免 report 载荷过大。"""

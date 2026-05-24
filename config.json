@@ -17,20 +17,126 @@
     "codehub_access_token": "codehub_example"
   },
   "code_repo": {
-    "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
-    "local_path": "/tmp/java-ddd-example-review-repo",
+    "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
+    "local_path": "/Users/neochen/multi-codereview-agent",
     "default_branch": "main",
     "auto_sync": false,
-    "auto_review_enabled": true,
-    "auto_review_repo_url": "https://github.com/CodelyTV/java-ddd-example.git",
+    "auto_review_enabled": false,
+    "auto_review_repo_url": "https://github.com/neochen1991/multi-codereview-agent.git",
     "auto_review_poll_interval_seconds": 120
   },
+  "code_repositories": [
+    {
+      "repository_id": "tenant-ui-current-0524-repo",
+      "name": "tenant-ui-current-0524-repo",
+      "provider": "generic",
+      "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
+      "web_url_prefixes": [],
+      "local_path": "/Users/neochen/multi-codereview-agent",
+      "default_branch": "main",
+      "enabled": true,
+      "auto_review_enabled": false,
+      "auto_review_poll_interval_seconds": 120,
+      "auto_sync": false,
+      "gitnexus_enabled": true,
+      "database_source_ids": []
+    }
+  ],
+  "default_repository_id": "tenant-ui-current-0524-repo",
+  "projects": [
+    {
+      "project_id": "default",
+      "name": "默认项目",
+      "description": "由历史全局配置自动生成的默认项目。",
+      "owner_team": "",
+      "status": "active",
+      "repositories": [
+        {
+          "repository_id": "java-ddd-example",
+          "name": "java-ddd-example",
+          "provider": "github",
+          "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
+          "web_url_prefixes": [
+            "https://github.com/CodelyTV/java-ddd-example.git"
+          ],
+          "local_path": "/tmp/java-ddd-example-review-repo",
+          "default_branch": "main",
+          "enabled": true,
+          "auto_review_enabled": true,
+          "auto_review_poll_interval_seconds": 120,
+          "auto_sync": false,
+          "gitnexus_enabled": true,
+          "database_source_ids": []
+        }
+      ]
+    },
+    {
+      "project_id": "tenant-ui-1779544685904",
+      "name": "租户全流程测试项目",
+      "description": "用于验证项目隔离、仓库绑定和审核任务上下文",
+      "owner_team": "Codex QA 团队",
+      "status": "active",
+      "repositories": [
+        {
+          "repository_id": "tenant-ui-1779544685904-repo",
+          "name": "tenant-ui-1779544685904-repo",
+          "provider": "generic",
+          "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
+          "web_url_prefixes": [],
+          "local_path": "/Users/neochen/multi-codereview-agent",
+          "default_branch": "main",
+          "enabled": true,
+          "auto_review_enabled": false,
+          "auto_review_poll_interval_seconds": 120,
+          "auto_sync": false,
+          "gitnexus_enabled": true,
+          "database_source_ids": []
+        }
+      ]
+    },
+    {
+      "project_id": "tenant-ui-current-0524",
+      "name": "多项目切换验证项目",
+      "description": "验证项目隔离、仓库绑定和创建审核取当前项目",
+      "owner_team": "Codex 多项目验证",
+      "status": "active",
+      "repositories": [
+        {
+          "repository_id": "tenant-ui-current-0524-repo",
+          "name": "tenant-ui-current-0524-repo",
+          "provider": "generic",
+          "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
+          "web_url_prefixes": [],
+          "local_path": "/Users/neochen/multi-codereview-agent",
+          "default_branch": "main",
+          "enabled": true,
+          "auto_review_enabled": false,
+          "auto_review_poll_interval_seconds": 120,
+          "auto_sync": false,
+          "gitnexus_enabled": true,
+          "database_source_ids": []
+        }
+      ]
+    }
+  ],
+  "default_project_id": "tenant-ui-current-0524",
   "database_sources": [],
   "runtime": {
     "default_target_branch": "main",
     "default_analysis_mode": "light",
+    "storage_backend": "sqlite",
+    "storage_pg_url": "",
+    "storage_pg_schema": "public",
+    "storage_pg_user": "",
+    "storage_pg_password": "",
     "allow_llm_fallback": false,
     "allow_human_gate": true,
+    "enable_llm_issue_judge": false,
+    "llm_issue_judge_confidence_threshold": 0.78,
+    "llm_issue_judge_timeout_seconds": 45,
+    "enable_llm_targeted_debate": false,
+    "llm_targeted_debate_timeout_seconds": 60,
+    "enable_sast_prescan": false,
     "default_max_debate_rounds": 3,
     "standard_llm_timeout_seconds": 60,
     "standard_llm_retry_count": 3,

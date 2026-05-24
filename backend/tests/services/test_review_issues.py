@@ -79,6 +79,163 @@ def test_list_issues_realigns_issue_location_from_linked_finding(storage_root: P
     assert report.issues[0].line_start == 88
 
 
+def test_list_issues_normalizes_display_code_and_suggested_code(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_display",
+            "project_id": "proj_display",
+            "source_ref": "feature/display-fields",
+            "target_ref": "main",
+            "title": "display field normalization",
+        }
+    )
+    current_code = (
+        "# src/main/java/com/example/order/OrderService.java\n"
+        "  18 |      public List<OrderDTO> listOrders(List<Long> orderIds) {\n"
+        "  19 | +        // TODO 按产品要求，只能返回当前登录用户有权限的订单，避免越权读取\n"
+        "  20 |          List<OrderDTO> result = new ArrayList<>();\n"
+        "  21 |          for (Long orderId : orderIds) {\n"
+        "  22 | +            // 每个订单循环查询一次数据库，批量场景会触发 N+1 查询\n"
+        "  23 |              Order order = orderRepository.findById(orderId);\n"
+        "  24 |              if (order != null) {\n"
+        "  25 |                  result.add(toDTO(order));\n"
+        "  26 |              }\n"
+        "  31 | +    public void createOrder(OrderRequest request) {\n"
+        "  32 | +        // 这里应该先校验库存并加库存锁，防止并发超卖\n"
+        "  33 | +        Order order = new Order(request.getSkuId(), request.getQuantity());\n"
+        "  34 | +        orderRepository.save(order);\n"
+        "  35 | +        eventPublisher.publish(new OrderCreatedEvent(order.getId()));\n"
+        "  36 | +    }"
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_display_stock",
+                title="承诺未落地",
+                summary="createOrder 的注释承诺先校验库存并加锁防止超卖，但当前实现直接创建订单、保存并发布事件，缺少并发库存保护。",
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/order/OrderService.java",
+                line_start=19,
+                current_code=current_code,
+                suggested_code=(
+                    "public void createOrder(OrderRequest request) {\n"
+                    "    // 这里应该先校验库存并加库存锁，防止并发超卖\n"
+                    "    Order order = new Order(request.getSkuId(), request.getQuantity());\n"
+                    "    orderRepository.save(order);\n"
+                    "}"
+                ),
+                remediation_suggestion="请根据规则要求补齐正确实现，并保留必要测试。",
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.line_start == 32
+    assert "createOrder" in issue.current_code
+    assert "eventPublisher.publish" in issue.current_code
+    assert "listOrders" not in issue.current_code
+    assert issue.suggested_code == ""
+    assert issue.remediation_suggestion == ""
+
+
+def test_build_report_prefers_loop_call_display_over_incidental_contract_word(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_loop_display",
+            "project_id": "proj_loop_display",
+            "source_ref": "feature/bulk-loop",
+            "target_ref": "main",
+            "title": "loop display normalization",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_loop_display",
+                title="承诺未落地",
+                summary="",
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/BulkEnrollmentService.java",
+                line_start=31,
+                participant_expert_ids=["performance_reliability"],
+                primary_expert_id="performance_reliability",
+                aggregated_titles=[
+                    "批量报名从 saveAll 退化为循环逐条 save，会把批量写入放大为 N 次持久化调用（循环调用放大）",
+                    "批量报名写入被改为逐条 repository.save，缺少批大小与事务范围控制（循环调用放大）",
+                ],
+                aggregated_summaries=[
+                    "批量报名入口接收 List<StudentId>，当前改动把批量写入放大为逐条仓储写入，且没有控制 batch size 或事务范围；当前实现存在循环内调用放大（for (CourseEnrollment enrollment : enrollments) { / repository.save）。",
+                ],
+                current_code=(
+                    "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                    "  34 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                    "  35 | +            repository.save(enrollment);\n"
+                    "  36 | +        }"
+                ),
+                suggested_code="repository.saveAll(enrollments);",
+            )
+        ],
+    )
+
+    report_issue = service.build_report(review.review_id).issues[0]
+
+    assert report_issue.normalized_issue_type == "n_plus_one"
+    assert report_issue.title == "批量写入从 saveAll 退化为循环逐条 repository.save"
+    assert "repository.save" in report_issue.summary
+    assert "承诺未落地" not in report_issue.title
+
+
+def test_list_issues_dedupes_same_display_root_cause(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_dedupe",
+            "project_id": "proj_dedupe",
+            "source_ref": "feature/dedupe",
+            "target_ref": "main",
+            "title": "dedupe display issues",
+        }
+    )
+    issue_a = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_dup_a",
+        title="承诺未落地",
+        summary="createOrder 的注释承诺先校验库存并加锁防止超卖，但当前实现直接创建订单、保存并发布事件，缺少并发库存保护。",
+        normalized_issue_type="comment_contract_unimplemented",
+        file_path="src/main/java/com/example/order/OrderService.java",
+        line_start=32,
+        finding_ids=["fdg_a"],
+        participant_expert_ids=["correctness_business"],
+        confidence=0.72,
+    )
+    issue_b = issue_a.model_copy(
+        update={
+            "issue_id": "iss_dup_b",
+            "finding_ids": ["fdg_b"],
+            "participant_expert_ids": ["database_analysis"],
+            "confidence": 0.86,
+        }
+    )
+    service.issue_repo.save_all(review.review_id, [issue_a, issue_b])
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 1
+    assert issues[0].finding_ids == ["fdg_a", "fdg_b"]
+    assert issues[0].participant_expert_ids == ["correctness_business", "database_analysis"]
+    assert issues[0].confidence == 0.86
+
+
 def test_build_report_exposes_impact_report_for_each_review(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

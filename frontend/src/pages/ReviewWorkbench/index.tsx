@@ -14,8 +14,10 @@ import {
   buildReviewEventStreamUrl,
   expertApi,
   knowledgeApi,
+  projectApi,
   reviewApi,
   settingsApi,
+  type CodeRepositorySettings,
   type DebateIssue,
   type ExpertProfile,
   type IssueFilterDecision,
@@ -91,6 +93,10 @@ type WorkspaceTabKey = "overview" | "process" | "result" | "impact";
 type ProcessMainTabKey = "dialogue" | "lanes" | "impact" | "diff" | "replay";
 type ProcessSidebarTabKey = "issues" | "knowledge" | "events";
 type ResultMainTabKey = "issues";
+type CurrentProjectSelection = {
+  projectId: string;
+  repository?: CodeRepositorySettings;
+};
 
 const { Paragraph, Text, Title } = Typography;
 const DEFAULT_SELECTED_EXPERTS = ["change_impact_analysis"];
@@ -1255,16 +1261,33 @@ const ReviewWorkbenchPage: React.FC = () => {
     });
   }, []);
 
-  const createPayload = (): Parameters<typeof reviewApi.create>[0] => ({
+  const resolveCurrentProjectSelection = useCallback(async (): Promise<CurrentProjectSelection> => {
+    const payload = await projectApi.list();
+    const currentProject =
+      payload.projects.find((item) => item.project_id === payload.default_project_id) || payload.projects[0];
+    const repository = currentProject?.repositories?.find((item) => item.enabled !== false) || currentProject?.repositories?.[0];
+    return {
+      projectId: currentProject?.project_id || payload.default_project_id || "",
+      repository,
+    };
+  }, []);
+
+  const createPayload = (selection?: CurrentProjectSelection): Parameters<typeof reviewApi.create>[0] => ({
     subject_type: form.subject_type,
     analysis_mode: form.analysis_mode,
     mr_url: form.mr_url.trim(),
     title: form.title.trim(),
+    project_id: selection?.projectId || "",
+    repo_id: selection?.repository?.repository_id || "",
+    repo_url: selection?.repository?.clone_url || "",
     source_ref: form.source_ref.trim(),
-    target_ref: form.target_ref.trim() || "main",
+    target_ref: form.target_ref.trim() || selection?.repository?.default_branch || "main",
     selected_experts: form.selected_experts,
     metadata: {
       manual_expert_selection: form.expert_selection_mode === "manual",
+      project_tenant_id: selection?.projectId || "",
+      repository_id: selection?.repository?.repository_id || "",
+      repository_name: selection?.repository?.name || selection?.repository?.repository_id || "",
     },
     design_docs: form.design_docs,
   });
@@ -1277,7 +1300,8 @@ const ReviewWorkbenchPage: React.FC = () => {
     }
     setStarting(true);
     try {
-      const created = await reviewApi.create(createPayload());
+      const selection = await resolveCurrentProjectSelection();
+      const created = await reviewApi.create(createPayload(selection));
       const search = new URLSearchParams();
       search.set("tab", "process");
       search.set("auto_start", "1");
@@ -1698,87 +1722,83 @@ const ReviewWorkbenchPage: React.FC = () => {
                 description={impactFailureSummary.error_message || "GitNexus 调用失败，本次审核没有可用的关联影响报告。"}
               />
             ) : null}
-            <Row gutter={[16, 16]} align="stretch">
-              <Col xs={24} xl={15}>
-                <div ref={resultSummaryRef}>
-                  <Suspense fallback={<WorkbenchPanelFallback description="审核报告加载中..." />}>
-                    <ReportSummaryPanel
-                      className="result-top-card"
-                      report={report}
-                      findings={findings}
-                      issues={issues}
-                      issueFilterDecisions={issueFilterDecisions}
-                      review={review}
-                      onNavigateToGroup={focusResultGroup}
-                    />
-                  </Suspense>
-                </div>
-              </Col>
-              <Col xs={24} xl={9}>
-                <div ref={resultHumanRef}>
-                  <Suspense fallback={<WorkbenchPanelFallback description="人工确认加载中..." />}>
-                    <HumanGatePanel
-                      className="result-top-card"
-                      review={review}
-                      selectedIssue={activeHumanIssue}
-                      finding={activeHumanIssueFinding}
-                      isFallbackIssue={humanGateUsingFallbackIssue}
-                      decisionComment={decisionComment}
-                      submitting={submittingDecision}
-                      onDecisionCommentChange={setDecisionComment}
-                      onApprove={async () => {
-                        let targetIssue = activeHumanIssue;
-                        if (!reviewId || !targetIssue) return;
-                        setSubmittingDecision(true);
-                        try {
-                          targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
-                          if (!targetIssue) {
-                            message.warning("当前没有待人工确认的问题，已刷新列表");
-                            return;
-                          }
-                          const result = await reviewApi.submitHumanDecision(reviewId, {
-                            issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
-                            decision: "approved",
-                            comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
-                          });
-                          await loadWorkspaceData(reviewId);
-                          setDecisionComment("");
-                          message.success(result.learning_recorded ? "已记录人工批准结论，并沉淀为确认样本" : "已记录人工批准结论");
-                        } catch (error: any) {
-                          message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
-                        } finally {
-                          setSubmittingDecision(false);
+            <div className="result-top-stack">
+              <div ref={resultSummaryRef} className="result-top-stack-item">
+                <Suspense fallback={<WorkbenchPanelFallback description="审核报告加载中..." />}>
+                  <ReportSummaryPanel
+                    className="result-top-card"
+                    report={report}
+                    findings={findings}
+                    issues={issues}
+                    issueFilterDecisions={issueFilterDecisions}
+                    review={review}
+                    onNavigateToGroup={focusResultGroup}
+                  />
+                </Suspense>
+              </div>
+              <div ref={resultHumanRef} className="result-top-stack-item">
+                <Suspense fallback={<WorkbenchPanelFallback description="人工确认加载中..." />}>
+                  <HumanGatePanel
+                    className="result-top-card"
+                    review={review}
+                    selectedIssue={activeHumanIssue}
+                    finding={activeHumanIssueFinding}
+                    isFallbackIssue={humanGateUsingFallbackIssue}
+                    decisionComment={decisionComment}
+                    submitting={submittingDecision}
+                    onDecisionCommentChange={setDecisionComment}
+                    onApprove={async () => {
+                      let targetIssue = activeHumanIssue;
+                      if (!reviewId || !targetIssue) return;
+                      setSubmittingDecision(true);
+                      try {
+                        targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
+                        if (!targetIssue) {
+                          message.warning("当前没有待人工确认的问题，已刷新列表");
+                          return;
                         }
-                      }}
-                      onReject={async () => {
-                        let targetIssue = activeHumanIssue;
-                        if (!reviewId || !targetIssue) return;
-                        setSubmittingDecision(true);
-                        try {
-                          targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
-                          if (!targetIssue) {
-                            message.warning("当前没有待人工确认的问题，已刷新列表");
-                            return;
-                          }
-                          const result = await reviewApi.submitHumanDecision(reviewId, {
-                            issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
-                            decision: "rejected",
-                            comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
-                          });
-                          await loadWorkspaceData(reviewId);
-                          setDecisionComment("");
-                          message.success(result.learning_recorded ? "已记录人工驳回结论，并沉淀为误报样本" : "已记录人工驳回结论");
-                        } catch (error: any) {
-                          message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
-                        } finally {
-                          setSubmittingDecision(false);
+                        const result = await reviewApi.submitHumanDecision(reviewId, {
+                          issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
+                          decision: "approved",
+                          comment: decisionComment.trim() || "人工审核确认存在风险，批准进入整改。",
+                        });
+                        await loadWorkspaceData(reviewId);
+                        setDecisionComment("");
+                        message.success(result.learning_recorded ? "已记录人工批准结论，并沉淀为确认样本" : "已记录人工批准结论");
+                      } catch (error: any) {
+                        message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
+                      } finally {
+                        setSubmittingDecision(false);
+                      }
+                    }}
+                    onReject={async () => {
+                      let targetIssue = activeHumanIssue;
+                      if (!reviewId || !targetIssue) return;
+                      setSubmittingDecision(true);
+                      try {
+                        targetIssue = (await resolveLatestPendingHumanIssue()) || targetIssue;
+                        if (!targetIssue) {
+                          message.warning("当前没有待人工确认的问题，已刷新列表");
+                          return;
                         }
-                      }}
-                    />
-                  </Suspense>
-                </div>
-              </Col>
-            </Row>
+                        const result = await reviewApi.submitHumanDecision(reviewId, {
+                          issue_id: targetIssue.canonical_issue_id || targetIssue.issue_id,
+                          decision: "rejected",
+                          comment: decisionComment.trim() || "人工审核认为证据不足，暂不采纳。",
+                        });
+                        await loadWorkspaceData(reviewId);
+                        setDecisionComment("");
+                        message.success(result.learning_recorded ? "已记录人工驳回结论，并沉淀为误报样本" : "已记录人工驳回结论");
+                      } catch (error: any) {
+                        message.error(error?.response?.data?.detail || error?.message || "提交人工结论失败");
+                      } finally {
+                        setSubmittingDecision(false);
+                      }
+                    }}
+                  />
+                </Suspense>
+              </div>
+            </div>
             <Tabs
               className="result-main-tabs"
               activeKey={resultMainTab}
@@ -1787,11 +1807,11 @@ const ReviewWorkbenchPage: React.FC = () => {
               items={[
                 {
                   key: "issues",
-                  label: "正式问题清单",
+                  label: "有效问题清单",
                   children: (
                     <Space direction="vertical" size={16} style={{ width: "100%" }}>
                       <ExpertRuleCoveragePanel items={expertRuleCoverage} />
-                      <Suspense fallback={<WorkbenchPanelFallback description="正式问题清单加载中..." />}>
+                      <Suspense fallback={<WorkbenchPanelFallback description="有效问题清单加载中..." />}>
                         <ResultIssuePanel
                           reviewId={reviewId}
                           issues={issues}

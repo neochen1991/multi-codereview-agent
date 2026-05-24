@@ -56,9 +56,10 @@ def run_targeted_debate(state: ReviewState) -> ReviewState:
             confidence,
             float(debate_result.get("confidence_adjustment") or 0.0),
         )
-        issue["summary"] = (
-            f"{issue.get('summary', '')} 定向辩论预裁决：{debate_result.get('reason', '证据已完成预评估')}。"
-        ).strip()
+        issue["debate_precheck"] = {
+            "reason": str(debate_result.get("reason") or "证据已完成预评估").strip(),
+            "confidence_adjustment": debate_result.get("confidence_adjustment"),
+        }
         issues.append(issue)
     next_state["issues"] = issues
     return next_state

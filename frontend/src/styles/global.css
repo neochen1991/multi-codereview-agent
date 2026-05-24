@@ -118,6 +118,67 @@ body {
   text-transform: uppercase;
 }
 
+.app-project-switcher {
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.app-project-switcher .app-sider-title {
+  padding-left: 8px;
+}
+
+.app-project-summary {
+  margin-top: 8px;
+  padding: 10px 11px;
+  border: 1px solid #cfe0f7;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff, #f8fbff);
+}
+
+.app-project-name {
+  color: var(--brand-strong);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.app-project-meta {
+  margin: 4px 0 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-edit-form .ant-form-item {
+  margin-bottom: 12px;
+}
+
+.project-repo-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #d8e3f2;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.project-repo-editor {
+  padding: 12px;
+  border: 1px solid #d8e3f2;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.project-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+}
+
 .app-sider-menu {
   border-right: 0 !important;
   background: transparent !important;
@@ -501,8 +562,16 @@ body {
   margin-bottom: 8px;
 }
 
+.result-top-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.result-top-stack-item,
 .result-top-card {
-  height: 100%;
+  width: 100%;
 }
 
 .incident-section-nav-shell {

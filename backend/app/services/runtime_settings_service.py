@@ -33,6 +33,8 @@ class RuntimeSettingsService:
             "auto_review_poll_interval_seconds",
             "default_repository_id",
             "code_repositories",
+            "default_project_id",
+            "projects",
             "database_sources",
             "default_llm_provider",
             "default_llm_base_url",
@@ -224,6 +226,8 @@ class RuntimeSettingsService:
         next_config = AppConfig.from_runtime_settings(runtime)
         merged_config.code_repositories = next_config.code_repositories
         merged_config.default_repository_id = runtime.default_repository_id
+        merged_config.projects = next_config.projects
+        merged_config.default_project_id = runtime.default_project_id
 
         merged_config.database_sources = next_config.database_sources
 

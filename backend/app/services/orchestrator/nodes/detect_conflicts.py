@@ -921,29 +921,42 @@ def _build_issue_title(titles: list[str]) -> str:
 
 
 def _build_issue_summary(summaries: list[str], remediation_suggestions: list[str]) -> str:
+    clean_summaries = [_sanitize_issue_text(item) for item in summaries if _sanitize_issue_text(item)]
+    clean_suggestions = [_sanitize_issue_text(item) for item in remediation_suggestions if _sanitize_issue_text(item)]
     if len(summaries) == 1:
-        summary = summaries[0].strip()
+        summary = clean_summaries[0] if clean_summaries else summaries[0].strip()
         concrete_suggestions = [
-            item.strip()
-            for item in remediation_suggestions
-            if item.strip()
-            and item.strip()
+            item
+            for item in clean_suggestions
+            if item
             not in {
                 "请根据规则要求补齐正确实现，并保留必要测试。",
                 "按命中的规则修正当前代码。",
             }
         ]
         if concrete_suggestions:
-            return f"{summary}\n修复建议：{concrete_suggestions[0]}"
+            return f"{summary}\n建议：{concrete_suggestions[0]}"
         return summary
-    parts: list[str] = []
-    if summaries:
-        parts.append("问题汇总：")
-        parts.extend(f"- {item}" for item in summaries)
-    if remediation_suggestions:
-        parts.append("修复建议汇总：")
-        parts.extend(f"- {item}" for item in remediation_suggestions)
-    return "\n".join(parts).strip() or "当前议题聚合了同一代码行上的多个 finding。"
+    if clean_summaries and clean_suggestions:
+        return f"{clean_summaries[0]}\n建议：{clean_suggestions[0]}"
+    return (clean_summaries[0] if clean_summaries else "") or "当前议题聚合了同一代码行上的多个 finding。"
+
+
+def _sanitize_issue_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
+    text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"^[-*]\s*", "", raw_line.strip()).strip()
+        if not line or line in {"问题汇总：", "问题汇总:", "修复建议汇总：", "修复建议汇总:"}:
+            continue
+        if line.startswith(("定向辩论预裁决", "问题汇总", "修复建议汇总")):
+            continue
+        lines.append(line)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip("；;，, ")
 
 
 def _collect_unique_values(items: list[dict[str, object]], field: str) -> list[str]:

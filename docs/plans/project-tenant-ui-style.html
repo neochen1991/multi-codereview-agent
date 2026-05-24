@@ -1,0 +1,1031 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>项目多租户页面样式稿</title>
+    <style>
+      :root {
+        --bg-page: #f3f6fb;
+        --surface-card: rgba(255, 255, 255, 0.94);
+        --surface-card-strong: #ffffff;
+        --text-primary: #0f172a;
+        --text-secondary: #475569;
+        --text-muted: #64748b;
+        --border-soft: #dbe3ef;
+        --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.06);
+        --radius-lg: 14px;
+        --radius-md: 10px;
+        --brand: #2563eb;
+        --brand-strong: #1d4ed8;
+        --success: #16a34a;
+        --warning: #d97706;
+        --danger: #dc2626;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--text-primary);
+        font-family: "IBM Plex Sans", "Source Han Sans SC", "Noto Sans SC", "PingFang SC", sans-serif;
+        background: linear-gradient(180deg, #f1f5fb 0%, #eef3fa 32%, #edf2f8 100%);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .app-header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 68px;
+        padding: 0 18px 0 20px;
+        background: linear-gradient(120deg, #0f172a 0%, #1e293b 55%, #1f2937 100%);
+        border-bottom: 1px solid rgba(148, 163, 184, 0.26);
+      }
+
+      .brand {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .logo {
+        width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 9px;
+        color: #dbeafe;
+        font-size: 18px;
+        font-weight: 800;
+        background: linear-gradient(135deg, #2563eb, #38bdf8);
+      }
+
+      .app-title {
+        color: #f8fafc;
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.2;
+        letter-spacing: 0.01em;
+      }
+
+      .app-subtitle {
+        margin-top: 2px;
+        color: rgba(226, 232, 240, 0.86);
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        padding: 0 8px;
+        border: 1px solid #91caff;
+        border-radius: 6px;
+        color: #1677ff;
+        font-size: 12px;
+        background: #e6f4ff;
+      }
+
+      .app-layout {
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr);
+        align-items: flex-start;
+        min-height: calc(100vh - 68px);
+      }
+
+      .app-sider {
+        position: sticky;
+        top: 68px;
+        height: calc(100vh - 68px);
+        overflow: hidden;
+        border-right: 1px solid var(--border-soft);
+        background: rgba(255, 255, 255, 0.82);
+        backdrop-filter: blur(6px);
+      }
+
+      .sider-title {
+        padding: 14px 16px 6px;
+        color: var(--text-muted);
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .project-select {
+        margin: 8px;
+        padding: 12px;
+        border: 1px solid #cfe0f7;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #eff6ff, #f8fbff);
+      }
+
+      .project-select-label {
+        color: var(--text-muted);
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      .project-select-name {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+        color: var(--brand-strong);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .project-select-meta {
+        margin-top: 5px;
+        color: var(--text-secondary);
+        font-size: 12px;
+      }
+
+      .menu {
+        display: grid;
+        gap: 4px;
+        padding: 8px;
+      }
+
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 42px;
+        padding: 0 14px;
+        border-radius: 9px;
+        color: var(--text-secondary);
+        font-size: 14px;
+        text-decoration: none;
+      }
+
+      .menu-item.active {
+        color: var(--brand-strong);
+        font-weight: 600;
+        background: #e0ebff;
+      }
+
+      .app-content {
+        padding: 18px;
+      }
+
+      .page {
+        display: grid;
+        gap: 16px;
+      }
+
+      .module-card {
+        border: 1px solid var(--border-soft);
+        border-radius: var(--radius-lg);
+        background: var(--surface-card-strong);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .hero {
+        overflow: hidden;
+        padding: 22px 24px;
+      }
+
+      .hero-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
+        gap: 24px;
+        align-items: center;
+      }
+
+      .hero h1 {
+        margin: 12px 0 10px;
+        font-size: 28px;
+        line-height: 1.25;
+        font-weight: 700;
+      }
+
+      .hero p {
+        max-width: 760px;
+        margin: 0;
+        color: var(--text-secondary);
+        line-height: 1.65;
+      }
+
+      .hero-status-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .status-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 92px;
+        padding: 14px;
+        border: 1px solid #d8e3f2;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      }
+
+      .status-card b {
+        color: var(--text-primary);
+        font-size: 26px;
+        line-height: 1;
+      }
+
+      .status-card span {
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 16px;
+      }
+
+      .toolbar-title {
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .toolbar-desc {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid #d9d9d9;
+        border-radius: 6px;
+        color: var(--text-primary);
+        font-size: 14px;
+        background: #fff;
+      }
+
+      .button.primary {
+        border-color: var(--brand);
+        color: #fff;
+        background: var(--brand);
+      }
+
+      .content-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.8fr);
+        gap: 16px;
+      }
+
+      .section-body {
+        padding: 0 16px 16px;
+      }
+
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: #fff;
+      }
+
+      .table th,
+      .table td {
+        padding: 13px 14px;
+        border-bottom: 1px solid var(--border-soft);
+        text-align: left;
+        vertical-align: top;
+        font-size: 13px;
+      }
+
+      .table th {
+        color: var(--text-secondary);
+        font-weight: 600;
+        background: #f8fbff;
+      }
+
+      .table tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .name-cell {
+        color: var(--text-primary);
+        font-weight: 700;
+      }
+
+      .subtext {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        padding: 0 8px;
+        border-radius: 6px;
+        font-size: 12px;
+        border: 1px solid transparent;
+      }
+
+      .status-pill.ok {
+        color: #389e0d;
+        border-color: #b7eb8f;
+        background: #f6ffed;
+      }
+
+      .status-pill.warn {
+        color: #d46b08;
+        border-color: #ffd591;
+        background: #fff7e6;
+      }
+
+      .side-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .list {
+        display: grid;
+        gap: 10px;
+        padding: 0 16px 16px;
+      }
+
+      .list-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        padding: 12px;
+        border: 1px solid #d8e3f2;
+        border-radius: 10px;
+        background: #f8fbff;
+      }
+
+      .list-item-title {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .list-item-desc {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+
+      .role-tag {
+        white-space: nowrap;
+        border: 1px solid #91caff;
+        border-radius: 6px;
+        padding: 3px 7px;
+        color: #1677ff;
+        font-size: 12px;
+        background: #e6f4ff;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        padding: 0 16px 16px;
+      }
+
+      .flow-step {
+        min-height: 120px;
+        padding: 14px;
+        border: 1px solid #d8e3f2;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      }
+
+      .flow-step-num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 999px;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        background: var(--brand);
+      }
+
+      .flow-step strong {
+        display: block;
+        margin-top: 10px;
+        font-size: 14px;
+      }
+
+      .flow-step span {
+        display: block;
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .project-boundary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        padding: 0 16px 16px;
+      }
+
+      .boundary-card {
+        padding: 14px;
+        border: 1px solid #d8e3f2;
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .boundary-card strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .boundary-card span {
+        display: block;
+        margin-top: 8px;
+        color: var(--text-muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .project-admin-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+        gap: 16px;
+        padding: 0 16px 16px;
+      }
+
+      .form-card {
+        border: 1px solid #d8e3f2;
+        border-radius: 12px;
+        background: #f8fbff;
+      }
+
+      .form-card-header {
+        padding: 14px 14px 0;
+      }
+
+      .form-card-title {
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .form-card-desc {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px;
+      }
+
+      .form-field.full {
+        grid-column: 1 / -1;
+      }
+
+      .form-field label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--text-secondary);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .input,
+      .textarea,
+      .select {
+        width: 100%;
+        border: 1px solid #d9d9d9;
+        border-radius: 6px;
+        color: var(--text-primary);
+        font: inherit;
+        background: #fff;
+      }
+
+      .input,
+      .select {
+        height: 34px;
+        padding: 0 11px;
+      }
+
+      .textarea {
+        min-height: 74px;
+        padding: 8px 11px;
+        resize: vertical;
+      }
+
+      .form-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 0 14px 14px;
+      }
+
+      .link-button {
+        border: none;
+        padding: 0;
+        color: var(--brand);
+        font: inherit;
+        font-size: 13px;
+        background: transparent;
+      }
+
+      .danger-link {
+        color: var(--danger);
+      }
+
+      .project-detail-panel {
+        display: grid;
+        gap: 10px;
+      }
+
+      .detail-box {
+        padding: 12px;
+        border: 1px solid #d8e3f2;
+        border-radius: 10px;
+        background: #fff;
+      }
+
+      .detail-box strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .detail-box span {
+        display: block;
+        margin-top: 5px;
+        color: var(--text-muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .danger-zone {
+        border-color: #ffccc7;
+        background: #fff2f0;
+      }
+
+      .danger-zone strong {
+        color: #a8071a;
+      }
+
+      .modal-mask {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px dashed #ffccc7;
+        border-radius: 12px;
+        background: rgba(255, 242, 240, 0.55);
+      }
+
+      .modal-card {
+        padding: 14px;
+        border: 1px solid #ffccc7;
+        border-radius: 10px;
+        background: #fff;
+        box-shadow: 0 8px 24px rgba(220, 38, 38, 0.08);
+      }
+
+      .modal-title {
+        color: #a8071a;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .modal-desc {
+        margin-top: 6px;
+        color: var(--text-secondary);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      @media (max-width: 1180px) {
+        .app-layout,
+        .hero-row,
+        .content-grid,
+        .flow,
+        .project-boundary,
+        .project-admin-grid,
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .app-sider {
+          position: static;
+          height: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo">🤖</div>
+        <div>
+          <div class="app-title">代码检视协同平台</div>
+          <div class="app-subtitle">质量检视 · 影响范围 · 人工确认</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="tag">review-ready</span>
+      </div>
+    </header>
+
+    <div class="app-layout">
+      <aside class="app-sider">
+        <div class="sider-title">项目</div>
+        <section class="project-select">
+          <div class="project-select-label">当前项目</div>
+          <div class="project-select-name">
+            <span>支付中台 / pay-core</span>
+            <span>⌄</span>
+          </div>
+          <div class="project-select-meta">3 个代码仓 · 12 位成员 · 8 个专家</div>
+        </section>
+
+        <div class="sider-title">导航</div>
+        <nav class="menu">
+          <a class="menu-item active" href="#">⌂ 首页</a>
+          <a class="menu-item" href="#">⌘ 检视工作台</a>
+          <a class="menu-item" href="#">◷ 历史记录</a>
+          <a class="menu-item" href="#">☷ 检查角色</a>
+          <a class="menu-item" href="#">▣ 知识库</a>
+          <a class="menu-item" href="#">◈ 治理中心</a>
+          <a class="menu-item" href="#">⚙ 项目设置</a>
+        </nav>
+      </aside>
+
+      <main class="app-content">
+        <div class="page">
+          <section class="module-card hero">
+            <div class="hero-row">
+              <div>
+                <span class="tag">项目多租户</span>
+                <h1>当前项目下，统一管理代码仓、规范、专家和审核结果</h1>
+                <p>
+                  这页不是新增一套独立后台，而是在现有“代码检视协同平台”里增加项目上下文。
+                  用户切换项目后，首页、工作台、历史、知识库、专家配置和设置页都只展示当前项目的数据。
+                </p>
+              </div>
+              <div class="hero-status-grid">
+                <div class="status-card"><b>3</b><span>项目代码仓</span></div>
+                <div class="status-card"><b>42</b><span>历史审核</span></div>
+                <div class="status-card"><b>18</b><span>结构化规范规则</span></div>
+                <div class="status-card"><b>12</b><span>项目成员</span></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="module-card">
+            <div class="toolbar">
+              <div>
+                <div class="toolbar-title">项目隔离边界</div>
+                <div class="toolbar-desc">后端不能只做页面筛选，检视链路每一步都必须带 project_id。</div>
+              </div>
+              <button class="button primary">新建审核</button>
+            </div>
+            <div class="project-boundary">
+              <div class="boundary-card">
+                <strong>代码仓隔离</strong>
+                <span>创建审核时只能选择当前项目绑定的仓库，自动拉 MR 也按项目遍历。</span>
+              </div>
+              <div class="boundary-card">
+                <strong>知识库隔离</strong>
+                <span>规范文档、结构化规则和检索结果都只来自当前项目。</span>
+              </div>
+              <div class="boundary-card">
+                <strong>专家配置隔离</strong>
+                <span>内置专家全局复用，项目可以覆盖启用状态、规范绑定和工具权限。</span>
+              </div>
+              <div class="boundary-card">
+                <strong>结果隔离</strong>
+                <span>审核历史、问题清单、过程消息、影响报告全部按项目存取。</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="module-card">
+            <div class="toolbar">
+              <div>
+                <div class="toolbar-title">项目管理：增删改查</div>
+                <div class="toolbar-desc">这个区域对应后续“项目管理”页面，样式沿用当前表格、表单、按钮和确认框风格。</div>
+              </div>
+              <div>
+                <button class="button">刷新</button>
+                <button class="button primary">新建项目</button>
+              </div>
+            </div>
+            <div class="project-admin-grid">
+              <div>
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>项目</th>
+                      <th>团队</th>
+                      <th>状态</th>
+                      <th>资源</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <div class="name-cell">支付中台 / pay-core</div>
+                        <div class="subtext">project_id: pay-core</div>
+                      </td>
+                      <td>支付研发团队</td>
+                      <td><span class="status-pill ok">启用中</span></td>
+                      <td>3 仓 · 12 人 · 42 审核</td>
+                      <td>
+                        <button class="link-button">查看</button>
+                        <button class="link-button">编辑</button>
+                        <button class="link-button danger-link">归档</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <div class="name-cell">库存服务 / stock-service</div>
+                        <div class="subtext">project_id: stock-service</div>
+                      </td>
+                      <td>供应链团队</td>
+                      <td><span class="status-pill ok">启用中</span></td>
+                      <td>2 仓 · 8 人 · 19 审核</td>
+                      <td>
+                        <button class="link-button">查看</button>
+                        <button class="link-button">编辑</button>
+                        <button class="link-button danger-link">归档</button>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <div class="name-cell">营销活动 / campaign</div>
+                        <div class="subtext">project_id: campaign</div>
+                      </td>
+                      <td>增长研发团队</td>
+                      <td><span class="status-pill warn">已归档</span></td>
+                      <td>1 仓 · 4 人 · 7 审核</td>
+                      <td>
+                        <button class="link-button">查看</button>
+                        <button class="link-button">恢复</button>
+                        <button class="link-button danger-link">删除</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="project-detail-panel">
+                <div class="form-card">
+                  <div class="form-card-header">
+                    <div class="form-card-title">新建 / 编辑项目</div>
+                    <div class="form-card-desc">和 AntD Form 的默认密度保持一致，适合直接落到设置页或独立项目页。</div>
+                  </div>
+                  <div class="form-grid">
+                    <div class="form-field">
+                      <label>项目 ID</label>
+                      <input class="input" value="pay-core" />
+                    </div>
+                    <div class="form-field">
+                      <label>项目状态</label>
+                      <select class="select">
+                        <option>启用中</option>
+                        <option>已归档</option>
+                      </select>
+                    </div>
+                    <div class="form-field">
+                      <label>项目名称</label>
+                      <input class="input" value="支付中台" />
+                    </div>
+                    <div class="form-field">
+                      <label>归属团队</label>
+                      <input class="input" value="支付研发团队" />
+                    </div>
+                    <div class="form-field full">
+                      <label>项目说明</label>
+                      <textarea class="textarea">支付核心链路代码检视项目，包含后端服务、前端控制台和定时任务仓库。</textarea>
+                    </div>
+                  </div>
+                  <div class="form-actions">
+                    <button class="button">取消</button>
+                    <button class="button primary">保存项目</button>
+                  </div>
+                </div>
+
+                <div class="detail-box">
+                  <strong>查看项目详情</strong>
+                  <span>详情页展示项目基本信息、成员、代码仓、知识库、专家配置、最近审核和 GitNexus 建图状态。</span>
+                </div>
+                <div class="detail-box danger-zone">
+                  <strong>归档 / 删除项目</strong>
+                  <span>项目有审核历史时默认只允许归档；真正删除需要先清理历史数据，避免误删审查证据。</span>
+                </div>
+                <div class="modal-mask">
+                  <div class="modal-card">
+                    <div class="modal-title">确认归档项目？</div>
+                    <div class="modal-desc">
+                      归档后项目不会再出现在创建审核的项目列表中，历史审核仍可只读查看。这个动作可以恢复。
+                    </div>
+                    <div class="modal-actions">
+                      <button class="button">取消</button>
+                      <button class="button primary">确认归档</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="content-grid">
+            <div class="module-card">
+              <div class="toolbar">
+                <div>
+                  <div class="toolbar-title">当前项目代码仓</div>
+                  <div class="toolbar-desc">复用当前设置页的多代码仓能力，但仓库归属项目。</div>
+                </div>
+                <button class="button">管理仓库</button>
+              </div>
+              <div class="section-body">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>仓库</th>
+                      <th>平台</th>
+                      <th>默认分支</th>
+                      <th>GitNexus</th>
+                      <th>自动拉 MR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <div class="name-cell">ipc-fnd-service</div>
+                        <div class="subtext">d://workspace//ipc-fnd-service</div>
+                      </td>
+                      <td>CodeHub</td>
+                      <td>master</td>
+                      <td><span class="status-pill ok">已建图</span></td>
+                      <td><span class="status-pill ok">已启用</span></td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <div class="name-cell">pay-web-console</div>
+                        <div class="subtext">/workspace/pay-web-console</div>
+                      </td>
+                      <td>GitLab</td>
+                      <td>main</td>
+                      <td><span class="status-pill ok">已建图</span></td>
+                      <td><span class="status-pill warn">未启用</span></td>
+                    </tr>
+                    <tr>
+                      <td>
+                        <div class="name-cell">pay-job-worker</div>
+                        <div class="subtext">/workspace/pay-job-worker</div>
+                      </td>
+                      <td>CodeHub</td>
+                      <td>master</td>
+                      <td><span class="status-pill warn">待建图</span></td>
+                      <td><span class="status-pill ok">已启用</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="side-stack">
+              <div class="module-card">
+                <div class="toolbar">
+                  <div>
+                    <div class="toolbar-title">成员权限</div>
+                    <div class="toolbar-desc">第一版先保持简单。</div>
+                  </div>
+                </div>
+                <div class="list">
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">陈同学</div>
+                      <div class="list-item-desc">可管理项目配置和成员</div>
+                    </div>
+                    <span class="role-tag">project_admin</span>
+                  </div>
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">李同学</div>
+                      <div class="list-item-desc">可创建审核和提交评论</div>
+                    </div>
+                    <span class="role-tag">reviewer</span>
+                  </div>
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">王同学</div>
+                      <div class="list-item-desc">只读查看审核结果</div>
+                    </div>
+                    <span class="role-tag">viewer</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="module-card">
+                <div class="toolbar">
+                  <div>
+                    <div class="toolbar-title">项目设置拆分</div>
+                    <div class="toolbar-desc">从全局设置下沉到项目。</div>
+                  </div>
+                </div>
+                <div class="list">
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">质量阈值和模型参数</div>
+                      <div class="list-item-desc">不同团队可以按项目调优。</div>
+                    </div>
+                  </div>
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">影响报告模板</div>
+                      <div class="list-item-desc">按项目适配不同报告格式。</div>
+                    </div>
+                  </div>
+                  <div class="list-item">
+                    <div>
+                      <div class="list-item-title">PG 数据源和工具权限</div>
+                      <div class="list-item-desc">只开放当前项目允许的数据源。</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="module-card">
+            <div class="toolbar">
+              <div>
+                <div class="toolbar-title">审核链路中的项目上下文</div>
+                <div class="toolbar-desc">这里对应后端实现，不是单纯页面筛选。</div>
+              </div>
+            </div>
+            <div class="flow">
+              <div class="flow-step">
+                <span class="flow-step-num">1</span>
+                <strong>选择项目</strong>
+                <span>Header 或侧边栏确定当前 project_id。</span>
+              </div>
+              <div class="flow-step">
+                <span class="flow-step-num">2</span>
+                <strong>创建审核</strong>
+                <span>任务写入 project_id 和 repository_id。</span>
+              </div>
+              <div class="flow-step">
+                <span class="flow-step-num">3</span>
+                <strong>组装上下文</strong>
+                <span>读取项目代码仓、规范、专家配置和图谱。</span>
+              </div>
+              <div class="flow-step">
+                <span class="flow-step-num">4</span>
+                <strong>执行检视</strong>
+                <span>Agent 只能调用当前项目允许的工具和数据源。</span>
+              </div>
+              <div class="flow-step">
+                <span class="flow-step-num">5</span>
+                <strong>沉淀结果</strong>
+                <span>问题、消息、报告都写回项目空间。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
