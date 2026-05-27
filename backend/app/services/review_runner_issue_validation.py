@@ -618,6 +618,33 @@ class ReviewRunnerIssueValidationMixin:
         text = str(value or "").strip()
         if not text:
             return ""
+        lower = text.lower()
+        internal_markers = (
+            "baseline",
+            "related_findings",
+            "validator_failed",
+            "consistency_validation",
+            "static diff signals",
+            "issue.issue.",
+            "replace with actual patched code",
+            "placeholder",
+            "请结合审核结论补充修复方案",
+            "当前 issue 来自一条有代码证据的检视发现",
+            "当前问题来自一条有代码证据的检视发现",
+            "当前未返回明确",
+            "当前未识别",
+            "当前未生成",
+            "后端未返回",
+            "系统没有生成",
+            "不应直接提交",
+            "请先补齐证据",
+            "根据实际",
+            "请结合实际",
+            "伪代码",
+            "占位",
+        )
+        if any(marker in lower for marker in internal_markers):
+            return ""
         text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
         text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
         lines: list[str] = []
@@ -630,10 +657,19 @@ class ReviewRunnerIssueValidationMixin:
                 continue
             if line.startswith(("定向辩论预裁决", "问题汇总", "修复建议汇总")):
                 continue
+            if any(marker in line.lower() for marker in internal_markers):
+                continue
             lines.append(line)
         text = " ".join(lines).strip()
         text = re.sub(r"\s+", " ", text)
         return text.strip("；;，, ")
+
+    def _first_sanitized_user_facing_text(self, *values: object) -> str:
+        for value in values:
+            text = self._sanitize_user_facing_issue_text(str(value or ""))
+            if text:
+                return text
+        return ""
 
     @staticmethod
     def _severity_rank(severity: str) -> int:
@@ -1262,8 +1298,11 @@ class ReviewRunnerIssueValidationMixin:
         # Judge 只做一致性门禁。弱模型在这里重写展示字段会让最终详情页
         # 与专家原始证据错位，因此正式 issue/finding baseline 永远优先。
         next_issue.title = str(issue.title or baseline.get("title") or payload.get("title") or "").strip() or issue.title
-        next_issue.summary = self._sanitize_user_facing_issue_text(
-            str(issue.summary or baseline.get("summary") or payload.get("summary") or "").strip() or issue.summary
+        next_issue.summary = self._first_sanitized_user_facing_text(
+            issue.summary,
+            baseline.get("summary"),
+            payload.get("summary"),
+            issue.title,
         )
         next_issue.normalized_issue_type = str(
             issue.normalized_issue_type or baseline.get("normalized_issue_type") or payload.get("normalized_issue_type") or ""
@@ -1272,19 +1311,29 @@ class ReviewRunnerIssueValidationMixin:
         baseline_line_start = int(baseline.get("line_start") or issue.line_start or 1)
         next_issue.file_path = baseline_file_path or issue.file_path
         next_issue.line_start = baseline_line_start
-        next_issue.remediation_strategy = self._sanitize_user_facing_issue_text(
-            str(issue.remediation_strategy or baseline.get("remediation_strategy") or payload.get("remediation_strategy") or "").strip()
+        next_issue.remediation_strategy = self._first_sanitized_user_facing_text(
+            issue.remediation_strategy,
+            baseline.get("remediation_strategy"),
+            payload.get("remediation_strategy"),
         )
-        next_issue.remediation_suggestion = self._sanitize_user_facing_issue_text(
-            str(issue.remediation_suggestion or baseline.get("remediation_suggestion") or payload.get("remediation_suggestion") or "").strip()
+        next_issue.remediation_suggestion = self._first_sanitized_user_facing_text(
+            issue.remediation_suggestion,
+            baseline.get("remediation_suggestion"),
+            payload.get("remediation_suggestion"),
         )
         baseline_steps = list(baseline.get("remediation_steps") or [])
         if issue.remediation_steps:
-            next_issue.remediation_steps = self._normalize_text_list(issue.remediation_steps, [])
+            next_issue.remediation_steps = [
+                item for item in self._normalize_text_list(issue.remediation_steps, []) if self._sanitize_user_facing_issue_text(item)
+            ]
         elif baseline_steps:
-            next_issue.remediation_steps = self._normalize_text_list(baseline_steps, [])
+            next_issue.remediation_steps = [
+                item for item in self._normalize_text_list(baseline_steps, []) if self._sanitize_user_facing_issue_text(item)
+            ]
         else:
-            next_issue.remediation_steps = self._normalize_text_list(payload.get("remediation_steps"), [])
+            next_issue.remediation_steps = [
+                item for item in self._normalize_text_list(payload.get("remediation_steps"), []) if self._sanitize_user_facing_issue_text(item)
+            ]
         next_issue.current_code = self._select_issue_current_code_from_anchor(
             payload.get("current_code"),
             baseline.get("current_code"),

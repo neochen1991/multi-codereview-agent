@@ -71,6 +71,79 @@ const buildIssueTypeLabels = (issue: DebateIssue, findings: ReviewFinding[]): st
   return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
 };
 
+const INTERNAL_SUMMARY_PATTERNS = [
+  /问题聚合/i,
+  /关联发现\s*\d+/i,
+  /主责角色/i,
+  /参与角色/i,
+  /合并问题\s*\d+/i,
+  /Static diff signals/i,
+  /baseline/i,
+  /related_findings/i,
+  /consistency/i,
+  /validation/i,
+  /Judge/i,
+  /结果复核/,
+  /审核调度/,
+  /当前 issue 来自/i,
+  /当前问题来自一条有代码证据的检视发现/,
+];
+
+const compactReadableText = (value?: string | null): string => {
+  const text = stripReviewSupplementSections(value || "")
+    .replace(/^[-*]\s*/gm, "")
+    .replace(/^[\s:：,，;；。]+|[\s:：,，;；。]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text === "-" ? "" : text;
+};
+
+const isReadableIssueSummary = (value: string): boolean => {
+  const text = value.trim();
+  if (text.length < 8) return false;
+  if (/^[\[{]/.test(text)) return false;
+  if (INTERNAL_SUMMARY_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  if (/^[a-z_]+[:：]/i.test(text)) return false;
+  return /[\u4e00-\u9fa5]/.test(text) || text.split(/\s+/).length >= 6;
+};
+
+const pickReadableSentence = (value: string): string => {
+  const sentences = value
+    .split(/(?<=[。！？!?])|\n|；|;/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const preferred = sentences.find((item) => isReadableIssueSummary(item));
+  return preferred || value.trim();
+};
+
+const clipListSummary = (value: string): string => {
+  const text = value.trim();
+  if (text.length <= 150) return text;
+  return `${text.slice(0, 148).replace(/[，,、；;。\s]+$/g, "")}…`;
+};
+
+const buildIssueListSummary = (
+  issue: DebateIssue,
+  relatedFindings: ReviewFinding[],
+  filePath: string,
+  lineStart?: number,
+): string => {
+  const candidates = [
+    issue.summary,
+    ...(issue.aggregated_summaries || []),
+    ...relatedFindings.map((finding) => finding.summary),
+    ...relatedFindings.map((finding) => finding.rule_based_reasoning),
+    ...(issue.evidence || []),
+  ];
+  for (const candidate of candidates) {
+    const readable = pickReadableSentence(compactReadableText(candidate));
+    if (isReadableIssueSummary(readable)) return clipListSummary(readable);
+  }
+  const title = compactReadableText(issue.title) || "当前改动存在风险";
+  const location = [filePath, lineStart ? `L${lineStart}` : ""].filter(Boolean).join(":");
+  return clipListSummary(location ? `${title}，请优先查看 ${location} 附近的改动。` : title);
+};
+
 const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
   reviewId,
   issues,
@@ -126,24 +199,19 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         const lineStart =
           issue.line_start ||
           (distinctFiles.length <= 1 ? primaryFinding?.line_start : undefined);
-        const metaSummaryParts = [
-          "问题聚合",
-          `关联发现 ${issue.finding_ids.length}`,
-          `主责角色 ${humanizeExpertId(issue.primary_expert_id || issue.participant_expert_ids[0])}`,
-          `参与角色 ${issue.participant_expert_ids.length}`,
-        ];
-        if ((issue.aggregated_titles || []).length > 1) {
-          metaSummaryParts.push(`合并问题 ${issue.aggregated_titles?.length || 0}`);
-        }
+        const metaSummaryParts = [`定位 ${filePath || "-"}`];
+        if (lineStart) metaSummaryParts.push(`L${lineStart}`);
+        const owner = humanizeExpertId(issue.primary_expert_id || issue.participant_expert_ids[0]);
+        if (owner && owner !== "-") metaSummaryParts.push(`主责 ${owner}`);
         if (distinctFiles.length > 1) {
-          metaSummaryParts.push(`涉及文件 ${distinctFiles.length}`);
+          metaSummaryParts.push(`涉及 ${distinctFiles.length} 个文件`);
         }
         return {
           id: issue.issue_id,
           file_path: filePath,
           line_start: lineStart,
           title: issue.title,
-          summary: stripReviewSupplementSections(issue.summary),
+          summary: buildIssueListSummary(issue, relatedFindings, filePath, lineStart),
           metaSummary: metaSummaryParts.join(" · "),
           finding_types:
             issue.aggregated_finding_types && issue.aggregated_finding_types.length > 0

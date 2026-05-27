@@ -7,9 +7,9 @@ import {
   humanizeReviewStatus,
   humanizeReviewText,
   humanizeSeverity,
-  stripReviewSupplementSections,
 } from "@/utils/displayText";
 import { evidenceContextSourceLabel, evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
+import { cleanUserFacingList, cleanUserFacingText, pickUserFacingText } from "./issueDisplayQuality";
 
 const { Paragraph } = Typography;
 
@@ -104,11 +104,11 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const customRuleDetails: FindingRuleAttributionDetail[] = Array.isArray(ruleAttribution.custom_rule_details)
     ? ruleAttribution.custom_rule_details
     : [];
-  const aggregatedTitles = uniqueList(issue?.aggregated_titles);
-  const aggregatedSummaries = uniqueList(issue?.aggregated_summaries);
-  const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
-  const aggregatedSuggestions = uniqueList(issue?.aggregated_remediation_suggestions);
-  const aggregatedSteps = uniqueList(issue?.aggregated_remediation_steps);
+  const aggregatedTitles = cleanUserFacingList(issue?.aggregated_titles);
+  const aggregatedSummaries = cleanUserFacingList(issue?.aggregated_summaries);
+  const aggregatedStrategies = cleanUserFacingList(issue?.aggregated_remediation_strategies);
+  const aggregatedSuggestions = cleanUserFacingList(issue?.aggregated_remediation_suggestions);
+  const aggregatedSteps = cleanUserFacingList(issue?.aggregated_remediation_steps);
   const findingMatchedRules = uniqueList(alignedFinding?.matched_rules);
   const findingViolatedGuidelines = uniqueList(alignedFinding?.violated_guidelines);
   const issueType = String(issue?.normalized_issue_type || "").trim().toLowerCase();
@@ -126,21 +126,32 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
     "query_bound_removed",
     "query_boundary_missing",
   ].includes(issueType);
-  const findingRuleReasoning = humanizeReviewText(alignedFinding?.rule_based_reasoning || "").trim();
+  const findingRuleReasoning = cleanUserFacingText(alignedFinding?.rule_based_reasoning || "");
   const displayFindingRuleReasoning = preferIssueEvidenceForBasis ? "" : findingRuleReasoning;
   const hasFullFindingDetails = Boolean(
     alignedFinding?.code_excerpt ||
       alignedFinding?.suggested_code ||
       (alignedFinding?.code_context && Object.keys(alignedFinding.code_context).length > 0),
   );
-  const issueDescription = stripReviewSupplementSections(issue?.summary || alignedFinding?.summary || "-");
-  const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || alignedFinding?.remediation_strategy || "-");
-  const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || alignedFinding?.remediation_suggestion || "-");
-  const issueSteps = uniqueList(issue?.remediation_steps).length
-    ? uniqueList(issue?.remediation_steps)
+  const issueDescription = pickUserFacingText(
+    [issue?.summary, alignedFinding?.summary, issue?.title],
+    "当前问题已定位到代码改动，请结合下方代码锚点和证据处理。",
+  );
+  const issueStrategy = pickUserFacingText([
+    issue?.remediation_strategy,
+    aggregatedStrategies[0],
+    alignedFinding?.remediation_strategy,
+  ]);
+  const issueSuggestion = pickUserFacingText([
+    issue?.remediation_suggestion,
+    aggregatedSuggestions[0],
+    alignedFinding?.remediation_suggestion,
+  ]);
+  const issueSteps = cleanUserFacingList(issue?.remediation_steps).length
+    ? cleanUserFacingList(issue?.remediation_steps)
     : aggregatedSteps.length
       ? aggregatedSteps
-      : uniqueList(alignedFinding?.remediation_steps);
+      : cleanUserFacingList(alignedFinding?.remediation_steps);
   const primaryExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || "").trim();
   const participantExperts = uniqueList(issue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
   const showFindingRuleDiagnostics = false;
@@ -148,6 +159,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const displayAggregatedSummaries = aggregatedSummaries.filter(
     (summary) => humanizeReviewText(summary) !== humanizeReviewText(issueDescription),
   );
+  const displayEvidence = cleanUserFacingList(issue?.evidence);
+  const displayConfidenceRationale = cleanUserFacingText(issue?.confidence_rationale || "");
+  const displayGraphSummary = cleanUserFacingText(graphSummary);
+  const displayEvidenceChain = graphEvidenceChain
+    .map((step, index) => ({
+      key: `${index}-${step.step || "evidence"}`,
+      label: evidenceStepLabel(step),
+      summary: cleanUserFacingText(evidenceStepSummary(step)),
+    }))
+    .filter((step) => step.summary);
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="问题详情">
@@ -213,7 +234,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 {participantExperts.map((item) => humanizeExpertId(item)).join("、") || (primaryExpertId ? "仅主责角色参与" : "-")}
               </Descriptions.Item>
               <Descriptions.Item label="证据">
-                {issue.evidence.map((item) => humanizeReviewText(item)).join("、") || "-"}
+                {displayEvidence.join("、") || "-"}
               </Descriptions.Item>
               <Descriptions.Item label="关联发现">
                 {issue.finding_ids.join("、") || "-"}
@@ -224,7 +245,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题分类">
                 {issue.category_label || issue.normalized_issue_type || issue.finding_type || "-"}
               </Descriptions.Item>
-              {findingMatchedRules.length || findingViolatedGuidelines.length || displayFindingRuleReasoning || issue.evidence.length ? (
+              {findingMatchedRules.length || findingViolatedGuidelines.length || displayFindingRuleReasoning || displayEvidence.length ? (
                 <Descriptions.Item label="规范依据">
                   <div>
                     {findingMatchedRules.length ? (
@@ -250,18 +271,18 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                         {displayFindingRuleReasoning}
                       </Paragraph>
                     ) : null}
-                    {!displayFindingRuleReasoning && issue.evidence.length ? (
+                    {!displayFindingRuleReasoning && displayEvidence.length ? (
                       <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                        {issue.evidence.map((item) => humanizeReviewText(item)).join("；")}
+                        {displayEvidence.join("；")}
                       </Paragraph>
                     ) : null}
                   </div>
                 </Descriptions.Item>
               ) : null}
-              {issue.confidence_rationale ? (
+              {displayConfidenceRationale ? (
                 <Descriptions.Item label="置信度理由">
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                    {humanizeReviewText(issue.confidence_rationale)}
+                    {displayConfidenceRationale}
                   </Paragraph>
                 </Descriptions.Item>
               ) : null}
@@ -269,15 +290,15 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             <div style={{ marginTop: 16 }}>
               <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>证据链</Paragraph>
-              {graphEvidenceChain.length ? (
+              {displayEvidenceChain.length ? (
                 <Descriptions column={1} size="small">
-                  {graphEvidenceChain.slice(0, 8).map((step, index) => (
+                  {displayEvidenceChain.slice(0, 8).map((step) => (
                     <Descriptions.Item
-                      key={`${index}-${step.step || "evidence"}`}
-                      label={evidenceStepLabel(step)}
+                      key={step.key}
+                      label={step.label}
                     >
                       <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                        {humanizeReviewText(evidenceStepSummary(step))}
+                        {step.summary}
                       </Paragraph>
                     </Descriptions.Item>
                   ))}
@@ -347,16 +368,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </div>
             ) : null}
 
-            {issueStrategy !== "-" || issueSuggestion !== "-" || issueSteps.length ? (
+            {issueStrategy || issueSuggestion || issueSteps.length ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合修复方案</Paragraph>
                 <Descriptions column={1} size="small">
-                  {issueStrategy !== "-" ? (
+                  {issueStrategy ? (
                     <Descriptions.Item label="修复思路">
                       <Paragraph style={{ marginBottom: 0 }}>{issueStrategy}</Paragraph>
                     </Descriptions.Item>
                   ) : null}
-                  {issueSuggestion !== "-" ? (
+                  {issueSuggestion ? (
                     <Descriptions.Item label="修复建议">
                       <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{issueSuggestion}</Paragraph>
                     </Descriptions.Item>
@@ -381,12 +402,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>关联代码上下文</Paragraph>
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="检查角色">{humanizeExpertId(alignedFinding.expert_id)}</Descriptions.Item>
-                  <Descriptions.Item label="路由原因">
-                    {codeContext?.routing_reason || "当前未记录路由原因"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="目标 hunk">
-                    {codeContext?.target_hunk?.hunk_header || "当前未记录 target hunk"}
-                  </Descriptions.Item>
+                  {cleanUserFacingText(codeContext?.routing_reason || "") ? (
+                    <Descriptions.Item label="路由原因">
+                      {cleanUserFacingText(codeContext?.routing_reason || "")}
+                    </Descriptions.Item>
+                  ) : null}
+                  {cleanUserFacingText(codeContext?.target_hunk?.hunk_header || "") ? (
+                    <Descriptions.Item label="目标 hunk">
+                      {cleanUserFacingText(codeContext?.target_hunk?.hunk_header || "")}
+                    </Descriptions.Item>
+                  ) : null}
                   <Descriptions.Item label="上下文文件">
                     {contextFiles.length ? contextFiles.join("、") : "-"}
                   </Descriptions.Item>
@@ -400,9 +425,9 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       {[graphRiskLevel || "未分级", typeof graphRiskScore === "number" ? graphRiskScore : ""].filter(Boolean).join(" · ")}
                     </Descriptions.Item>
                   ) : null}
-                  {graphSummary ? (
+                  {displayGraphSummary ? (
                     <Descriptions.Item label="图谱摘要">
-                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{graphSummary}</Paragraph>
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{displayGraphSummary}</Paragraph>
                     </Descriptions.Item>
                   ) : null}
                   {graphReviewPriorities.length ? (

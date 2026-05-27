@@ -9131,6 +9131,49 @@ def test_review_runner_judge_does_not_overwrite_confirmed_issue_details_with_dri
     assert metadata["updated_fields"] == []
 
 
+def test_review_runner_judge_cleans_internal_fallback_text_from_issue_details(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_dirty_display",
+        title="批量写入退化为逐条保存",
+        summary="当前 issue 来自一条有代码证据的检视发现。",
+        normalized_issue_type="n_plus_one",
+        file_path="src/main/java/com/example/BulkEnrollmentService.java",
+        line_start=31,
+        status="resolved",
+        severity="high",
+        confidence=0.9,
+        remediation_strategy="当前未返回明确修复思路",
+        remediation_suggestion="请结合审核结论补充修复方案。",
+        remediation_steps=["根据实际情况处理", "恢复批量保存"],
+        current_code="for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+    )
+    baseline = {
+        "title": issue.title,
+        "summary": "批量报名路径把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。",
+        "normalized_issue_type": issue.normalized_issue_type,
+        "file_path": issue.file_path,
+        "line_start": issue.line_start,
+        "remediation_strategy": "恢复批量写入",
+        "remediation_suggestion": "使用 repository.saveAll(enrollments) 代替循环内逐条 save。",
+        "remediation_steps": ["构造 enrollments", "调用 saveAll"],
+        "current_code": issue.current_code,
+        "suggested_code": "",
+    }
+
+    validated, _metadata = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline=baseline,
+        payload={"issue_id": issue.issue_id, "status": "passed"},
+    )
+
+    assert validated.summary == "批量报名路径把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。"
+    assert validated.remediation_strategy == "恢复批量写入"
+    assert validated.remediation_suggestion == "使用 repository.saveAll(enrollments) 代替循环内逐条 save。"
+    assert validated.remediation_steps == ["恢复批量保存"]
+
+
 def test_review_runner_batches_issue_consistency_validation_by_file(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
