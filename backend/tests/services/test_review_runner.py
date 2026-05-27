@@ -7849,7 +7849,7 @@ def test_review_runner_apply_issue_consistency_validation_downgrades_conflicted_
     assert "当前 issue 内容存在明显冲突" in str(metadata["summary"])
 
 
-def test_review_runner_apply_issue_consistency_validation_filters_misaligned_remediation(storage_root: Path):
+def test_review_runner_apply_issue_consistency_validation_ignores_drifted_judge_remediation(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     issue = DebateIssue(
         review_id="rev_demo",
@@ -7906,14 +7906,13 @@ def test_review_runner_apply_issue_consistency_validation_filters_misaligned_rem
         },
     )
 
-    assert validated.remediation_alignment_status == "misaligned"
-    assert validated.remediation_filtered is True
-    assert validated.remediation_strategy == ""
-    assert validated.remediation_suggestion == ""
-    assert validated.remediation_steps == []
-    assert validated.suggested_code == ""
-    assert any("修复建议" in item for item in validated.remediation_alignment_conflicts)
-    assert "已过滤越界修复建议" in str(metadata["summary"])
+    assert validated.remediation_alignment_status == "aligned"
+    assert validated.remediation_filtered is False
+    assert validated.remediation_strategy == "恢复精确匹配语义"
+    assert validated.remediation_suggestion == "把 builder.like 改回 builder.equal。"
+    assert validated.remediation_steps == ["恢复 equal 条件", "补充语义回归测试"]
+    assert validated.suggested_code == "return builder.equal(root.get(filter.field().value()), filter.value().value());"
+    assert metadata["updated_fields"] == ["remediation_strategy", "remediation_suggestion", "current_code", "suggested_code"]
 
 
 def test_review_runner_apply_issue_consistency_validation_detects_query_anchor_conflict(storage_root: Path):
@@ -9021,12 +9020,12 @@ def test_review_runner_validate_final_issues_with_judge_emits_validation_message
                 "snippet": "for (Long id : ids) {\n    repository.findById(id);\n}",
             }
         },
-        suggested_code="Map<Long, Order> orderMap = repository.findAllById(ids)...;",
+        suggested_code="Map<Long, Order> orderMap = repository.findAllById(ids).stream()\n    .collect(Collectors.toMap(Order::getId, Function.identity()));",
     )
 
     def _fake_complete_text(**_kwargs):
         return LLMTextResult(
-            text='{"results":[{"issue_id":"iss_demo","status":"repaired","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询","组装Map"],"current_code":"for (Long id : ids) {\\n    repository.findById(id);\\n}","suggested_code":"Map<Long, Order> orderMap = repository.findAllById(ids)...;","consistency_conflicts":[],"reason":"Judge 已修正 issue 文案与代码片段，四段内容现已一致。"}]}',
+            text='{"results":[{"issue_id":"iss_demo","status":"repaired","title":"订单循环里逐条查库","summary":"for 循环中逐条调用 repository.findById，存在 N+1 查询风险。","file_path":"src/main/java/com/example/OrderService.java","line_start":42,"remediation_strategy":"改成批量查询","remediation_suggestion":"先批量查，再组装映射。","remediation_steps":["抽取ID","批量查询","组装Map"],"current_code":"for (Long id : ids) {\\n    repository.findById(id);\\n}","suggested_code":"Map<Long, Order> orderMap = repository.findAllById(ids).stream()\\n    .collect(Collectors.toMap(Order::getId, Function.identity()));","consistency_conflicts":[],"reason":"Judge 已修正 issue 文案与代码片段，四段内容现已一致。"}]}',
             mode="live",
             provider="test",
             model="test-model",
@@ -9062,6 +9061,74 @@ def test_review_runner_validate_final_issues_with_judge_emits_validation_message
     validation_message = next(item for item in messages if item.message_type == "judge_consistency_validation")
     assert validation_message.metadata["validation_status"] == "repaired"
     assert "Judge 已修正 issue 文案与代码片段" in validation_message.content
+
+
+def test_review_runner_judge_does_not_overwrite_confirmed_issue_details_with_drift_payload(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_business_rule",
+        title="订单取消缺少库存回滚",
+        summary="cancelOrder 新增分支只更新订单状态，没有调用 inventoryService.release 释放库存。",
+        normalized_issue_type="business_rule_broken",
+        file_path="src/main/java/com/example/OrderService.java",
+        line_start=42,
+        status="resolved",
+        severity="high",
+        confidence=0.91,
+        finding_ids=["fdg_business_rule"],
+        participant_expert_ids=["correctness_business"],
+        remediation_strategy="补齐取消订单的库存释放动作",
+        remediation_suggestion="在订单状态更新成功后调用 inventoryService.release(orderId)。",
+        remediation_steps=["更新订单状态", "释放库存", "补充取消订单回归测试"],
+        current_code="order.cancel();\norderRepository.save(order);",
+        suggested_code="order.cancel();\norderRepository.save(order);\ninventoryService.release(orderId);",
+    )
+    baseline = {
+        "title": issue.title,
+        "summary": issue.summary,
+        "normalized_issue_type": issue.normalized_issue_type,
+        "file_path": issue.file_path,
+        "line_start": issue.line_start,
+        "remediation_strategy": issue.remediation_strategy,
+        "remediation_suggestion": issue.remediation_suggestion,
+        "remediation_steps": issue.remediation_steps,
+        "current_code": issue.current_code,
+        "suggested_code": issue.suggested_code,
+    }
+    drift_payload = {
+        "issue_id": issue.issue_id,
+        "status": "repaired",
+        "title": "循环中逐条查库",
+        "summary": "for 循环中逐条调用 repository.findById，存在 N+1 查询风险。",
+        "normalized_issue_type": "n_plus_one",
+        "file_path": issue.file_path,
+        "line_start": 99,
+        "remediation_strategy": "改成批量查询",
+        "remediation_suggestion": "使用 repository.findAllById 批量查询。",
+        "remediation_steps": ["抽取ID", "批量查询"],
+        "current_code": "for (Long id : ids) { repository.findById(id); }",
+        "suggested_code": "Map<Long, Order> orderMap = repository.findAllById(ids);",
+        "consistency_conflicts": [],
+        "reason": "Judge 错误地漂移到了另一个问题。",
+    }
+
+    validated, metadata = runner._apply_issue_consistency_validation(
+        issue=issue,
+        baseline=baseline,
+        payload=drift_payload,
+    )
+
+    assert validated.title == issue.title
+    assert validated.summary == issue.summary
+    assert validated.normalized_issue_type == issue.normalized_issue_type
+    assert validated.line_start == issue.line_start
+    assert validated.remediation_strategy == issue.remediation_strategy
+    assert validated.remediation_suggestion == issue.remediation_suggestion
+    assert validated.remediation_steps == issue.remediation_steps
+    assert validated.current_code == issue.current_code
+    assert validated.suggested_code == issue.suggested_code
+    assert metadata["updated_fields"] == []
 
 
 def test_review_runner_batches_issue_consistency_validation_by_file(storage_root: Path, monkeypatch):

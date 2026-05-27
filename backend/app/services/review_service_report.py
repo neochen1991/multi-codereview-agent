@@ -154,6 +154,30 @@ class ReviewServiceReportMixin:
         anchor_line = self._infer_issue_line_from_display_code(issue)
         if anchor_line is not None:
             update_payload["line_start"] = anchor_line
+        comment_contract_signal = (
+            issue.normalized_issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
+            or "承诺未落地" in str(issue.title or "")
+            or any(token in compact for token in ("todo", "fixme", "unsupportedoperationexception", "未实现", "没有实现", "承诺"))
+        )
+        loop_tokens = (
+            "n+1",
+            "nplusone",
+            "n_plus_one",
+            "loop_call_amplification",
+            "循环调用放大",
+            "循环内逐条",
+            "逐条repository",
+            "逐条save",
+            "repository.save",
+            "saveall",
+            "批量写入放大",
+            "批量保存",
+        )
+        performance_owned = (
+            "performance_reliability" in compact
+            or issue.normalized_issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}
+        )
+        performance_loop_signal = performance_owned and any(token in compact for token in loop_tokens)
         if "hibernatecriteriaconverter" in str(issue.file_path or "").lower() and any(
             token in compact
             for token in ("equal", "equals", "like", "精确匹配", "模糊匹配", "查询语义", "语义退化")
@@ -166,9 +190,11 @@ class ReviewServiceReportMixin:
                 }
             )
         if (
-            issue.normalized_issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}
+            not comment_contract_signal
+            and issue.normalized_issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}
             or (
-                "coursecreator" in file_path_lower
+                not comment_contract_signal
+                and "coursecreator" in file_path_lower
                 and any(token in compact for token in ("course.create", "newcourse", "domainevent", "coursecreateddomainevent", "聚合工厂", "领域事件", "eventbus.publish"))
             )
         ):
@@ -204,10 +230,13 @@ class ReviewServiceReportMixin:
                 }
             )
         if (
-            issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
-            or (
-                any(token in compact for token in ("catch", "runtimeexception", "ignored", "异常"))
-                and any(token in compact for token in ("返回成功", "success", "静默吞", "吞掉"))
+            "paymentsettlementservice" in file_path_lower
+            and (
+                issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
+                or (
+                    any(token in compact for token in ("catch", "runtimeexception", "ignored", "异常"))
+                    and any(token in compact for token in ("返回成功", "success", "静默吞", "吞掉"))
+                )
             )
         ):
             return issue.model_copy(
@@ -255,13 +284,42 @@ class ReviewServiceReportMixin:
                 }
             )
         if (
-            issue.normalized_issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
-            or "承诺未落地" in str(issue.title or "")
+            issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
             or (
-                any(token in compact for token in ("todo", "扣减库存", "预占事件"))
-                and not any(token in str(issue.title or "").lower() for token in ("循环", "n+1", "逐条", "批量写入", "批量保存"))
+                any(token in compact for token in ("catch", "runtimeexception", "ignored", "异常"))
+                and any(token in compact for token in ("返回成功", "success", "静默吞", "吞掉"))
             )
         ):
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "exception_swallowed",
+                    "title": str(issue.title or "").strip() or "异常被吞掉",
+                    "primary_expert_id": "correctness_business",
+                    "category_label": "正确性与业务",
+                }
+            )
+        if (
+            not performance_loop_signal
+            and (
+                issue.normalized_issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
+                or "承诺未落地" in str(issue.title or "")
+                or (
+                any(token in compact for token in ("todo", "扣减库存", "预占事件"))
+                and not any(token in str(issue.title or "").lower() for token in ("循环", "n+1", "逐条", "批量写入", "批量保存"))
+                )
+            )
+        ):
+            if "bulkenrollmentservice" not in file_path_lower or not any(token in compact for token in ("扣减库存", "预占事件", "batchcreated")):
+                return issue.model_copy(
+                    update={
+                        **update_payload,
+                        "normalized_issue_type": "comment_contract_unimplemented",
+                        "title": "承诺未落地",
+                        "primary_expert_id": issue.primary_expert_id or "correctness_business",
+                        "category_label": issue.category_label or "正确性与业务",
+                    }
+                )
             comment_summary = (
                 "BulkEnrollmentService 在批量报名成功路径新增 TODO，承诺“扣减库存并发送预占事件”，"
                 "但当前代码只保存报名记录并发布 batchCreated 事件，没有任何库存扣减或预占事件实现。"
@@ -287,25 +345,7 @@ class ReviewServiceReportMixin:
                     "aggregated_remediation_suggestions": [comment_suggestion],
                 }
             )
-        loop_tokens = (
-            "n+1",
-            "nplusone",
-            "n_plus_one",
-            "loop_call_amplification",
-            "循环调用放大",
-            "循环内逐条",
-            "逐条repository",
-            "逐条save",
-            "repository.save",
-            "saveall",
-            "批量写入放大",
-            "批量保存",
-        )
-        performance_owned = (
-            "performance_reliability" in compact
-            or issue.normalized_issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}
-        )
-        if performance_owned and any(token in compact for token in loop_tokens):
+        if performance_loop_signal:
             loop_title = (
                 "批量写入从 saveAll 退化为循环逐条 repository.save"
                 if "repository.save" in compact and "saveall" in compact

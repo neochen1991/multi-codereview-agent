@@ -1051,13 +1051,15 @@ class ReviewRunnerIssueValidationMixin:
             )
         return (
             f"请对下面这批正式 issue 做最终一致性校验，本批共 {len(batch_payload)} 条。\n"
-            "你必须逐条检查并保证以下四部分完全一致：问题说明、修改思路、当前代码、建议修改后代码。\n"
+            "你必须逐条检查以下四部分是否一致：问题说明、修改思路、当前代码、建议修改后代码。\n"
+            "注意：你是质量门禁，不是重新生成 issue 的专家。已有 issue 与 related_findings 是事实来源，"
+            "不要为了润色而改写标题、问题说明、规范依据或修改思路。\n"
             "严格要求：\n"
             "1. 当前代码必须与问题说明指向同一文件、同一代码位置、同一问题点；\n"
             "2. 建议修改后代码必须与问题说明和修改思路修复的是同一个问题；\n"
             "3. 每条 passed 或 repaired issue 都必须输出具体 suggested_code，不能为空，不能输出 TODO、占位、伪代码或解释性文字；\n"
             "4. 只能使用提供的 findings 和代码上下文，不允许臆造新代码、新文件或新问题；\n"
-            "5. 如果能从给定材料中纠正错位，请输出 repaired；\n"
+            "5. 如果只是发现内容错位，不要自行重写成新问题；能从 baseline/related_findings 补齐缺失字段时输出 repaired；\n"
             "6. 如果材料本身互相冲突且无法可靠纠正，请输出 downgraded，并列出冲突；\n"
             "7. 如果完全一致，请输出 passed；\n"
             "8. 必须为每一条 issue 都返回一条结果，按 issue_id 对应，不能遗漏。\n\n"
@@ -1257,42 +1259,43 @@ class ReviewRunnerIssueValidationMixin:
         status = str(payload.get("status") or "validator_failed").strip().lower()
         if status not in {"passed", "repaired", "downgraded"}:
             status = "validator_failed"
-        next_issue.title = str(payload.get("title") or baseline["title"] or issue.title).strip() or issue.title
+        # Judge 只做一致性门禁。弱模型在这里重写展示字段会让最终详情页
+        # 与专家原始证据错位，因此正式 issue/finding baseline 永远优先。
+        next_issue.title = str(issue.title or baseline.get("title") or payload.get("title") or "").strip() or issue.title
         next_issue.summary = self._sanitize_user_facing_issue_text(
-            str(payload.get("summary") or baseline["summary"] or issue.summary).strip() or issue.summary
+            str(issue.summary or baseline.get("summary") or payload.get("summary") or "").strip() or issue.summary
         )
         next_issue.normalized_issue_type = str(
-            payload.get("normalized_issue_type") or baseline.get("normalized_issue_type") or issue.normalized_issue_type
+            issue.normalized_issue_type or baseline.get("normalized_issue_type") or payload.get("normalized_issue_type") or ""
         ).strip()
         baseline_file_path = str(baseline.get("file_path") or issue.file_path or "").strip()
         baseline_line_start = int(baseline.get("line_start") or issue.line_start or 1)
         next_issue.file_path = baseline_file_path or issue.file_path
         next_issue.line_start = baseline_line_start
         next_issue.remediation_strategy = self._sanitize_user_facing_issue_text(
-            str(payload.get("remediation_strategy") or baseline["remediation_strategy"] or issue.remediation_strategy).strip()
+            str(issue.remediation_strategy or baseline.get("remediation_strategy") or payload.get("remediation_strategy") or "").strip()
         )
         next_issue.remediation_suggestion = self._sanitize_user_facing_issue_text(
-            str(payload.get("remediation_suggestion") or baseline["remediation_suggestion"] or issue.remediation_suggestion).strip()
+            str(issue.remediation_suggestion or baseline.get("remediation_suggestion") or payload.get("remediation_suggestion") or "").strip()
         )
-        next_issue.remediation_steps = self._normalize_text_list(
-            payload.get("remediation_steps"),
-            list(baseline.get("remediation_steps") or issue.remediation_steps or []),
-        )
+        baseline_steps = list(baseline.get("remediation_steps") or [])
+        if issue.remediation_steps:
+            next_issue.remediation_steps = self._normalize_text_list(issue.remediation_steps, [])
+        elif baseline_steps:
+            next_issue.remediation_steps = self._normalize_text_list(baseline_steps, [])
+        else:
+            next_issue.remediation_steps = self._normalize_text_list(payload.get("remediation_steps"), [])
         next_issue.current_code = self._select_issue_current_code_from_anchor(
             payload.get("current_code"),
             baseline.get("current_code"),
             issue.current_code,
         )
-        candidate_suggested_code = str(payload.get("suggested_code") or baseline["suggested_code"] or issue.suggested_code).strip()
-        if not self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=next_issue.file_path):
-            candidate_suggested_code = self._build_deterministic_suggested_code_for_issue(next_issue)
+        candidate_suggested_code = str(issue.suggested_code or baseline.get("suggested_code") or payload.get("suggested_code") or "").strip()
         if self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=next_issue.file_path):
             next_issue.suggested_code = candidate_suggested_code
         else:
             next_issue.suggested_code = ""
         self._apply_canonical_issue_family_summary(next_issue)
-        if not self._looks_like_concrete_suggested_code(next_issue.suggested_code, file_path=next_issue.file_path):
-            next_issue.suggested_code = self._build_deterministic_suggested_code_for_issue(next_issue)
         next_issue.category_label = next_issue.category_label or self._category_label_for_issue_type(next_issue.normalized_issue_type)
         next_issue.consistency_check_status = status
         next_issue.consistency_conflicts = self._normalize_text_list(payload.get("consistency_conflicts"), [])

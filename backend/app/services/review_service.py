@@ -478,13 +478,69 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         return max(0.0, round((safe_completed - safe_started).total_seconds(), 3))
 
     def get_review(self, review_id: str) -> ReviewTask | None:
-        return self.review_repo.get(review_id)
+        review = self.review_repo.get(review_id)
+        if review is None:
+            return None
+        return self._ensure_waiting_human_analysis_duration(review)
 
     def list_reviews(self) -> list[ReviewTask]:
-        return self.review_repo.list()
+        return [self._ensure_waiting_human_analysis_duration(review) for review in self.review_repo.list()]
 
     def list_review_summaries(self) -> list[dict[str, object]]:
-        return self.review_repo.list_light()
+        return [self._ensure_waiting_human_summary_duration(item) for item in self.review_repo.list_light()]
+
+    def _ensure_waiting_human_analysis_duration(self, review: ReviewTask) -> ReviewTask:
+        """历史 waiting_human 任务若缺少耗时，用进入人工门控的事件时间补齐。"""
+
+        if (
+            review.status != "waiting_human"
+            or review.completed_at is not None
+            or review.duration_seconds is not None
+        ):
+            return review
+        human_gate_at = self._human_gate_requested_at(review.review_id)
+        if human_gate_at is None:
+            return review
+        review.completed_at = human_gate_at
+        review.duration_seconds = self._duration_seconds(review.started_at or review.created_at, human_gate_at)
+        review.updated_at = datetime.now(UTC)
+        self.review_repo.save(review)
+        return review
+
+    def _ensure_waiting_human_summary_duration(self, review: dict[str, object]) -> dict[str, object]:
+        if (
+            review.get("status") != "waiting_human"
+            or review.get("completed_at")
+            or review.get("duration_seconds") is not None
+        ):
+            return review
+        review_id = str(review.get("review_id") or "").strip()
+        human_gate_at = self._human_gate_requested_at(review_id)
+        if human_gate_at is None:
+            return review
+        started_raw = str(review.get("started_at") or review.get("created_at") or "").strip()
+        try:
+            started_at = datetime.fromisoformat(started_raw.replace("Z", "+00:00")) if started_raw else None
+        except ValueError:
+            started_at = None
+        duration_seconds = self._duration_seconds(started_at, human_gate_at)
+        next_review = dict(review)
+        next_review["completed_at"] = human_gate_at.isoformat()
+        next_review["duration_seconds"] = duration_seconds
+        return next_review
+
+    def _human_gate_requested_at(self, review_id: str) -> datetime | None:
+        if not review_id:
+            return None
+        events = [
+            event
+            for event in self.event_repo.list(review_id)
+            if event.event_type == "human_gate_requested" or event.phase == "human_gate"
+        ]
+        if not events:
+            return None
+        events.sort(key=lambda event: event.created_at)
+        return events[0].created_at
 
     def save_benchmark_evaluation(self, review_id: str, evaluation: dict[str, object]) -> ReviewTask:
         """保存 Benchmark 人工评测结论到任务 metadata。"""
@@ -1507,7 +1563,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         review.human_review_status = decision if not pending_ids else "requested"
         review.pending_human_issue_ids = pending_ids
         if not pending_ids:
-            review.completed_at = datetime.now(UTC)
+            review.completed_at = review.completed_at or datetime.now(UTC)
             review.duration_seconds = self._duration_seconds(review.started_at or review.created_at, review.completed_at)
         formal_issues = [issue for issue in updated_issues if _is_formal_issue(issue)]
         review.report_summary = build_report_summary(

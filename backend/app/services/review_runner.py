@@ -1268,12 +1268,17 @@ class ReviewRunner(
 
         pending_human_issue_ids = [issue.issue_id for issue in issues if issue.needs_human]
         if pending_human_issue_ids:
+            analysis_completed_at = datetime.now(UTC)
             review.status = "waiting_human"
             review.phase = "human_gate"
             review.human_review_status = "requested"
             review.pending_human_issue_ids = pending_human_issue_ids
-            review.completed_at = None
-            review.duration_seconds = None
+            # 自动分析到达人工门控时即结束；后续人工等待时间不计入分析耗时。
+            review.completed_at = analysis_completed_at
+            review.duration_seconds = self._safe_duration_seconds(
+                review.started_at or review.created_at,
+                analysis_completed_at,
+            )
             self.event_repo.append(
                 ReviewEvent(
                     review_id=review_id,

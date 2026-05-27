@@ -1,7 +1,9 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.domain.models.finding import ReviewFinding
+from app.domain.models.event import ReviewEvent
 from app.domain.models.issue import DebateIssue
 from app.repositories.fs import read_json
 
@@ -358,6 +360,84 @@ def test_human_decision_refreshes_report_summary_and_artifacts(storage_root: Pat
     assert "0 个待人工裁决" in summary_comment["summary"]
     assert check_run["status"] == "completed"
     assert check_run["conclusion"] == "completed"
+
+
+def test_human_decision_keeps_analysis_duration_ended_at_human_gate(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/high-risk-review",
+            "target_ref": "main",
+            "title": "security migration review",
+            "changed_files": ["backend/app/security/authz.py"],
+        }
+    )
+    issue = _seed_pending_human_issue(service, review.review_id)
+    seeded = service.get_review(review.review_id)
+    assert seeded is not None
+    seeded.started_at = datetime(2026, 5, 27, 10, 0, tzinfo=UTC)
+    seeded.completed_at = seeded.started_at + timedelta(seconds=42)
+    seeded.duration_seconds = 42
+    service.review_repo.save(seeded)
+
+    updated = service.record_human_decision(
+        review.review_id,
+        issue.issue_id,
+        "approved",
+        "人工确认需要整改",
+    )
+
+    assert updated.status == "completed"
+    assert updated.completed_at == seeded.completed_at
+    assert updated.duration_seconds == 42
+
+
+def test_waiting_human_review_duration_is_backfilled_from_human_gate_event(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_1",
+            "project_id": "proj_1",
+            "source_ref": "feature/high-risk-review",
+            "target_ref": "main",
+            "title": "security migration review",
+            "changed_files": ["backend/app/security/authz.py"],
+        }
+    )
+    issue = _seed_pending_human_issue(service, review.review_id)
+    started_at = datetime(2026, 5, 27, 10, 0, tzinfo=UTC)
+    human_gate_at = started_at + timedelta(seconds=17)
+    seeded = service.review_repo.get(review.review_id)
+    assert seeded is not None
+    seeded.started_at = started_at
+    seeded.completed_at = None
+    seeded.duration_seconds = None
+    seeded.pending_human_issue_ids = [issue.issue_id]
+    service.review_repo.save(seeded)
+    service.event_repo.append(
+        ReviewEvent(
+            review_id=review.review_id,
+            event_type="human_gate_requested",
+            phase="human_gate",
+            message="高风险议题已提交人工复核",
+            created_at=human_gate_at,
+            payload={"issue_ids": [issue.issue_id]},
+        )
+    )
+
+    hydrated = service.get_review(review.review_id)
+    summaries = service.list_review_summaries()
+    row = next(item for item in summaries if item["review_id"] == review.review_id)
+
+    assert hydrated is not None
+    assert hydrated.completed_at == human_gate_at
+    assert hydrated.duration_seconds == 17
+    assert datetime.fromisoformat(str(row["completed_at"]).replace("Z", "+00:00")) == human_gate_at
+    assert row["duration_seconds"] == 17
 
 
 def test_human_decision_can_continue_with_remaining_pending_issues(storage_root: Path):
