@@ -8,7 +8,7 @@ import type {
   ReviewFinding,
   RuleScreeningMetadata,
 } from "@/services/api";
-import { humanizeExpertId, humanizeReviewStatus, humanizeSeverity } from "@/utils/displayText";
+import { humanizeExpertId, humanizeReviewStatus, humanizeReviewText, humanizeSeverity, stripReviewSupplementSections } from "@/utils/displayText";
 import { buildIssueCallChainGraph } from "./callChainGraph";
 import { evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
 import MermaidBlock from "./MermaidBlock";
@@ -158,11 +158,21 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   }
 
   const codeContext = finding.code_context;
+  const displayFilePath = String(issue?.file_path || finding.file_path || "").trim();
+  const displayLineStart = Number(issue?.line_start || finding.line_start || 1);
+  const displaySeverity = String(issue?.severity || finding.severity || "medium");
+  const displayConfidence = typeof issue?.confidence === "number" ? issue.confidence : finding.confidence;
+  const displayExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || finding.expert_id || "").trim();
+  const displayCategory = issue?.category_label || issue?.normalized_issue_type || finding.category_label || finding.normalized_issue_type || finding.finding_type;
+  const issueSummary = stripReviewSupplementSections(issue?.summary || finding.summary || "");
+  const issueStrategy = humanizeReviewText(issue?.remediation_strategy || finding.remediation_strategy || "");
+  const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || finding.remediation_suggestion || "");
+  const issueSteps = (issue?.remediation_steps?.length ? issue.remediation_steps : finding.remediation_steps) || [];
   const currentCode =
+    String(issue?.current_code || "").trim() ||
     finding.code_excerpt ||
     codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
-    String(issue?.current_code || "").trim() ||
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet;
   const suggestedCode = (() => {
@@ -214,17 +224,17 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           {
             key: "location",
             label: "代码位置",
-            children: `${issue?.file_path || finding.file_path}:${issue?.line_start || finding.line_start}`,
+            children: `${displayFilePath}:${displayLineStart}`,
           },
           {
             key: "severity",
             label: "问题级别",
-            children: <Tag color={severityColor(finding.severity)}>{humanizeSeverity(finding.severity)}</Tag>,
+            children: <Tag color={severityColor(displaySeverity)}>{humanizeSeverity(displaySeverity)}</Tag>,
           },
           {
             key: "expert",
             label: "检查角色",
-            children: <Tag color="geekblue">{humanizeExpertId(finding.expert_id)}</Tag>,
+            children: <Tag color="geekblue">{humanizeExpertId(displayExpertId)}</Tag>,
           },
           {
             key: "status",
@@ -253,14 +263,14 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             children: (
               <Space wrap>
                 <Tag color="purple">{getFindingTypeLabel(finding.finding_type)}</Tag>
-                {finding.category_label ? <Tag color="cyan">{finding.category_label}</Tag> : null}
+                {displayCategory ? <Tag color="cyan">{humanizeReviewText(displayCategory)}</Tag> : null}
               </Space>
             ),
           },
           {
             key: "confidence",
             label: "置信度",
-            children: `${(finding.confidence * 100).toFixed(0)}%`,
+            children: `${(displayConfidence * 100).toFixed(0)}%`,
           },
           ...(finding.confidence_rationale
             ? [
@@ -341,7 +351,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>问题说明</Paragraph>
-        <Paragraph style={{ marginBottom: 0 }}>{finding.summary}</Paragraph>
+        <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{humanizeReviewText(issueSummary)}</Paragraph>
       </div>
 
       <div style={{ marginTop: 16 }}>
@@ -376,8 +386,13 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>规范依据</Paragraph>
-        <Paragraph style={{ marginBottom: 0 }}>
-          {finding.rule_based_reasoning || "当前还没有返回更详细的规范依据说明。"}
+        <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+          {humanizeReviewText(
+            finding.rule_based_reasoning ||
+              issue?.evidence?.join("；") ||
+              issue?.consistency_check_summary ||
+              "根据当前代码锚点和专家规则完成收敛，未返回单独的规范条款说明。",
+          )}
         </Paragraph>
       </div>
 
@@ -468,25 +483,25 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修改思路</Paragraph>
-        <Paragraph style={{ marginBottom: 0 }}>
-          {finding.remediation_strategy || "当前还没有给出更具体的修改思路。"}
+        <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+          {issueStrategy || "按问题锚点修正当前代码，并补充覆盖该风险的回归测试。"}
         </Paragraph>
       </div>
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修复建议</Paragraph>
-        <Paragraph style={{ marginBottom: 0 }}>
-          {finding.remediation_suggestion || "当前还没有给出修复建议。"}
+        <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+          {issueSuggestion || "优先恢复被移除的保护逻辑或边界约束，确保行为与问题说明指向同一代码片段。"}
         </Paragraph>
       </div>
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 10, fontWeight: 600 }}>建议修改步骤</Paragraph>
         <ol className="review-remediation-steps">
-          {(finding.remediation_steps || []).length ? (
-            (finding.remediation_steps || []).map((step, index) => <li key={`${index}-${step}`}>{step}</li>)
+          {issueSteps.length ? (
+            issueSteps.map((step, index) => <li key={`${index}-${step}`}>{humanizeReviewText(step)}</li>)
           ) : (
-            <li>先补足定位证据，再按建议修复并补回归测试。</li>
+            <li>先按当前代码锚点修复问题，再补充对应的单元或集成回归测试。</li>
           )}
         </ol>
       </div>
@@ -498,12 +513,12 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             <div className="review-code-panel">
               <div className="review-code-panel-header">
                 <span>当前代码</span>
-                <Tag>{finding.file_path}:{finding.line_start}</Tag>
+                <Tag>{displayFilePath}:{displayLineStart}</Tag>
               </div>
-              {renderCodeLines(
-                currentCode || `${finding.file_path}:${finding.line_start}`,
-                finding.line_start,
-                lineRefs,
+              {currentCode ? (
+                renderCodeLines(currentCode, displayLineStart, lineRefs)
+              ) : (
+                <Alert type="warning" showIcon message="当前代码片段缺失" description="后端未返回稳定代码锚点，本条问题不应直接提交，请先补齐证据。" />
               )}
             </div>
           </Col>
@@ -513,8 +528,10 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                 <span>建议修改后代码</span>
                 {finding.suggested_code_language ? <Tag color="blue">{finding.suggested_code_language}</Tag> : null}
               </div>
-              {renderSuggestedCode(
-                suggestedCode || "// 当前未生成可直接落地的建议代码，请结合本条问题说明和修改思路处理。"
+              {suggestedCode ? (
+                renderSuggestedCode(suggestedCode)
+              ) : (
+                <Alert type="warning" showIcon message="建议修改后代码缺失" description="系统没有生成可直接落地的代码片段，本条问题需要回到裁决链路补全后再提交。" />
               )}
             </div>
           </Col>

@@ -65,6 +65,12 @@ HIGH_PRIORITY_OVERRIDE_TOKENS = {
     "数据丢失",
     "不可达",
     "死代码",
+    "锁",
+    "加锁",
+    "并发保护",
+    "synchronized",
+    "lock_guard_removed",
+    "lockregistry",
     "authorization",
     "unauthorized",
     "injection",
@@ -258,6 +264,25 @@ PROBLEM_FAMILY_TOKENS = {
     "domain_aggregate_creation": {
         "aggregate_factory",
         "domain_event",
+    },
+    "loop_call_amplification": {
+        "loop_call_amplification",
+        "n_plus_one",
+        "bulk_processing_boundary_missing",
+    },
+    "lock_guard_removed": {
+        "lock_guard_removed",
+        "concurrency_guard_removed",
+        "lock_scope_risk",
+    },
+    "comment_contract_unimplemented": {
+        "comment_contract_unimplemented",
+        "declared_intent_without_implementation",
+        "comment_promise_unimplemented",
+    },
+    "exception_swallowed": {
+        "exception_swallowed",
+        "exception_semantics_weakened",
     },
 }
 
@@ -1478,6 +1503,34 @@ def _has_direct_code_evidence(items: list[dict[str, object]]) -> bool:
             return True
         if _has_swallowed_exception_code_evidence(item):
             return True
+        if _has_structural_code_anchor_evidence(item):
+            return True
+    return False
+
+
+def _has_structural_code_anchor_evidence(item: dict[str, object]) -> bool:
+    issue_type = str(item.get("normalized_issue_type") or _build_single_problem_type(item) or "").strip().lower()
+    text = "\n".join(
+        [
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            str(item.get("code_excerpt") or ""),
+            *[str(value) for value in list(item.get("evidence") or [])],
+            *[str(value) for value in list(item.get("matched_rules") or [])],
+            *[str(value) for value in list(item.get("violated_guidelines") or [])],
+        ]
+    ).lower()
+    compact = re.sub(r"\s+", "", text)
+    if issue_type in {"lock_guard_removed", "concurrency_guard_removed", "lock_scope_risk"}:
+        return any(token in compact for token in ("synchronized", "lockregistry", "lockfor", "锁", "并发保护"))
+    if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}:
+        return any(token in compact for token in ("todo", "fixme", "unsupportedoperationexception", "承诺未落地", "未实现"))
+    if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
+        return any(token in compact for token in ("for(", "foreach", "repository.save", ".save(", "saveall", "循环", "逐条"))
+    if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
+        return any(token in compact for token in ("limit", "pagerequest", "pageable", "分页", "全量", "全表"))
+    if issue_type in {"query_semantics_weakened", "query_semantics_regression"}:
+        return any(token in compact for token in ("builder.like", "builder.equal", "精确匹配", "模糊匹配"))
     return False
 
 

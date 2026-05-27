@@ -814,6 +814,8 @@ class JavaQualitySignalExtractor:
             r"return\s+true\s*;",
             r"return\s+false\s*;",
             r"return\s+null\s*;",
+            r"return\s+[^;]*\.success\s*\(",
+            r"return\s+success\s*\(",
             r"return\s+collections\.empty\w*\(",
             r"return\s+list\.of\(",
             r"return\s+optional\.empty\(",
@@ -931,10 +933,18 @@ class JavaQualitySignalExtractor:
         excerpt = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))
         if not excerpt.strip():
             return []
+        added_only_excerpt = self._normalize_java_context_snippet(
+            "\n".join(
+                line[1:].strip()
+                for line in str(diff_excerpt or "").splitlines()
+                if line.startswith("+") and not line.startswith("+++")
+            )
+        )
         loop_pattern = re.compile(
             r"(for\s*\([^)]*\)\s*\{|while\s*\([^)]*\)\s*\{|do\s*\{|\bforEach\s*\(|\.forEach\s*\()",
             flags=re.IGNORECASE,
         )
+        search_excerpt = added_only_excerpt if added_only_excerpt and loop_pattern.search(added_only_excerpt) else excerpt
         dependency_pattern = re.compile(
             r"\b("
             r"repository|repo|dao|mapper|client|gateway|service|manager|provider|publisher"
@@ -957,10 +967,10 @@ class JavaQualitySignalExtractor:
             "pull", "push", "batchquery", "batchfetch", "calculate", "compute",
             "convert", "transform", "sync",
         }
-        for loop_match in loop_pattern.finditer(excerpt):
+        for loop_match in loop_pattern.finditer(search_excerpt):
             loop_token = loop_match.group(1).strip()
             # 在循环起点后的窗口中检索外部调用，覆盖 for(:)、stream().forEach 与 lambda block 的常见写法。
-            window = excerpt[loop_match.start() : loop_match.start() + 900]
+            window = search_excerpt[loop_match.start() : loop_match.start() + 900]
             call_terms: list[tuple[int, str]] = []
             for call_match in dependency_pattern.finditer(window):
                 dependency_name = call_match.group(1).strip()

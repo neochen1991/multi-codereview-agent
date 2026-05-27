@@ -1238,6 +1238,11 @@ class ReviewRunner(
             runtime_settings=effective_runtime_settings,
             llm_request_options=llm_request_options,
         )
+        if self._should_coalesce_final_issues(effective_runtime_settings):
+            issues = self._coalesce_duplicate_issues(issues)
+        else:
+            issues = [self._normalize_single_coalesced_issue(issue) for issue in issues]
+        issues = self._filter_invalid_final_issues(review_id, issues)
         issues, auto_confirmed_issue_ids = self._auto_confirm_high_confidence_issues(issues)
         if auto_confirmed_issue_ids:
             self.event_repo.append(
@@ -2357,6 +2362,48 @@ class ReviewRunner(
                 "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
                 "confidence": 0.86,
             },
+            "comment_contract_unimplemented": {
+                "expert_id": "correctness_business",
+                "title": "承诺未落地",
+                "normalized_issue_type": "comment_contract_unimplemented",
+                "category_label": "correctness",
+                "summary": "本次 diff 新增或保留了 TODO/注释承诺，但当前实现没有对应业务动作，调用方会误以为该能力已经落地。",
+                "matched_rules": ["CORRECTNESS-CONTRACT-001"],
+                "violated_guidelines": ["注释、TODO、接口说明和方法意图必须与真实实现保持一致"],
+                "rule_based_reasoning": "新增代码中存在 TODO 或注释承诺，且当前 hunk 未出现承诺动作的实现，属于可由静态 diff 直接确认的语义缺口。",
+                "remediation_strategy": "补齐注释承诺的业务动作；如果短期不实现，应删除误导性承诺并改成明确的待办跟踪。",
+                "remediation_suggestion": "不要只留下 TODO。要么实现库存扣减、预占事件等承诺动作，要么删除该承诺并把未完成项移到任务系统。",
+                "remediation_steps": ["确认注释承诺的目标行为", "补齐对应业务动作或副作用", "增加覆盖该业务动作的回归测试"],
+                "confidence": 0.84,
+            },
+            "exception_swallowed": {
+                "expert_id": "correctness_business",
+                "title": "异常被静默吞掉",
+                "normalized_issue_type": "exception_swallowed",
+                "category_label": "correctness",
+                "summary": "本次 diff 的 catch 分支吞掉 RuntimeException，并在失败路径返回成功结果，调用方会误以为处理已经完成。",
+                "matched_rules": ["CODE-JAVA-002", "REL-JDDD-001"],
+                "violated_guidelines": ["关键链路 catch 分支不得静默吞掉异常或把失败伪装成成功"],
+                "rule_based_reasoning": "新增代码中 catch 分支包含 ignored/返回 success 等强锚点，异常路径和成功返回直接冲突。",
+                "remediation_strategy": "恢复失败语义：记录必要上下文，并重新抛出异常、返回失败结果或触发补偿，不能在失败路径返回成功。",
+                "remediation_suggestion": "把 catch 中的 success 返回改为抛出或失败结果，并补充支付网关异常的回归测试。",
+                "remediation_steps": ["保留异常对象和错误上下文", "不要在 catch 分支返回 success", "补充网关失败和仓储保存失败的测试"],
+                "confidence": 0.9,
+            },
+            "exception_semantics_weakened": {
+                "expert_id": "correctness_business",
+                "title": "异常被静默吞掉",
+                "normalized_issue_type": "exception_swallowed",
+                "category_label": "correctness",
+                "summary": "本次 diff 的 catch 分支把失败路径包装成成功语义返回，调用方会误以为处理已经完成。",
+                "matched_rules": ["CODE-JAVA-002", "REL-JDDD-001"],
+                "violated_guidelines": ["关键链路 catch 分支不得把失败伪装成成功"],
+                "rule_based_reasoning": "新增代码中 catch 分支包含 success 返回等强锚点，异常路径和成功返回直接冲突。",
+                "remediation_strategy": "恢复失败语义：记录必要上下文，并重新抛出异常、返回失败结果或触发补偿，不能在失败路径返回成功。",
+                "remediation_suggestion": "把 catch 中的 success 返回改为抛出或失败结果，并补充异常路径的回归测试。",
+                "remediation_steps": ["保留异常对象和错误上下文", "不要在 catch 分支返回 success", "补充异常路径测试"],
+                "confidence": 0.88,
+            },
         }
 
         for file_path in review.subject.changed_files:
@@ -2372,7 +2419,13 @@ class ReviewRunner(
                 )
                 signals = {str(item).strip() for item in list(java_quality.get("signals") or []) if str(item).strip()}
                 signal_terms = dict(java_quality.get("signal_terms") or {})
-                for signal_name in ("lock_guard_removed", "loop_call_amplification"):
+                for signal_name in (
+                    "lock_guard_removed",
+                    "loop_call_amplification",
+                    "comment_contract_unimplemented",
+                    "exception_swallowed",
+                    "exception_semantics_weakened",
+                ):
                     if signal_name not in signals:
                         continue
                     profile = profiles[signal_name]

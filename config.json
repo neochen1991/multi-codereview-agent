@@ -6,7 +6,7 @@
   "llm": {
     "default_provider": "dashscope-openai-compatible",
     "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
-    "default_model": "Doubao-Seed-2.0-Code",
+    "default_model": "MiniMax-M2.7",
     "default_api_key_env": null,
     "default_api_key": "7b446c97-7172-4c90-a4ef-3f3ff5a8f894"
   },

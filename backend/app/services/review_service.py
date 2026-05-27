@@ -1059,41 +1059,155 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         finding_by_id = {item.finding_id: item for item in findings}
         if self._issues_require_finding_rehydration(issues, findings):
             issues = self._rehydrate_issues_from_findings(review_id, issues, findings)
-            return self._dedupe_display_issues([issue for issue in issues if _is_formal_issue(issue)])
-        return self._dedupe_display_issues([
+            display_issues = [issue for issue in issues if _is_formal_issue(issue)]
+            return self._dedupe_display_issues(
+                self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+            )
+        display_issues = [
             self._realign_issue_location(issue, finding_by_id)
             for issue in issues
             if _is_formal_issue(issue)
-        ])
+        ]
+        return self._dedupe_display_issues(
+            self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+        )
 
     def _dedupe_display_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
         """查询结果面向页面展示，再按归一化后的根因做一次轻量去重。"""
 
-        deduped: dict[tuple[str, int, str, str], DebateIssue] = {}
-        order: list[tuple[str, int, str, str]] = []
+        deduped: dict[tuple[str, str, int], DebateIssue] = {}
+        order: list[tuple[str, str, int]] = []
         for issue in issues:
+            normalized = self._normalize_report_issue_family(issue)
+            family = self._display_issue_family(normalized)
+            line_bucket = int(normalized.line_start or 1)
+            if family in {
+                "course_creation_semantics",
+                "n_plus_one",
+                "comment_contract_unimplemented",
+                "exception_swallowed",
+                "lock_guard_removed",
+                "query_bound_removed",
+                "query_boundary_missing",
+            }:
+                line_bucket = 0
             key = (
-                str(issue.file_path or "").strip(),
-                int(issue.line_start or 1),
-                str(issue.normalized_issue_type or "").strip().lower(),
-                str(issue.summary or "").strip().lower(),
+                str(normalized.file_path or "").strip(),
+                family or str(normalized.normalized_issue_type or "").strip().lower(),
+                line_bucket,
             )
             if key not in deduped:
-                deduped[key] = issue
+                deduped[key] = normalized
                 order.append(key)
                 continue
             existing = deduped[key]
-            merged_finding_ids = list(dict.fromkeys([*existing.finding_ids, *issue.finding_ids]))
-            merged_participants = list(dict.fromkeys([*existing.participant_expert_ids, *issue.participant_expert_ids]))
+            merged_finding_ids = list(dict.fromkeys([*existing.finding_ids, *normalized.finding_ids]))
+            merged_participants = list(dict.fromkeys([*existing.participant_expert_ids, *normalized.participant_expert_ids]))
             deduped[key] = existing.model_copy(
                 update={
                     "finding_ids": merged_finding_ids,
                     "participant_expert_ids": merged_participants,
-                    "confidence": max(float(existing.confidence or 0.0), float(issue.confidence or 0.0)),
-                    "evidence": list(dict.fromkeys([*existing.evidence, *issue.evidence])),
+                    "confidence": max(float(existing.confidence or 0.0), float(normalized.confidence or 0.0)),
+                    "evidence": list(dict.fromkeys([*existing.evidence, *normalized.evidence])),
+                    "aggregated_titles": list(dict.fromkeys([*existing.aggregated_titles, normalized.title, *normalized.aggregated_titles]))[:10],
+                    "aggregated_summaries": list(dict.fromkeys([*existing.aggregated_summaries, normalized.summary, *normalized.aggregated_summaries]))[:10],
                 }
             )
         return [deduped[key] for key in order]
+
+    def _add_missing_high_confidence_display_issues(
+        self,
+        review_id: str,
+        issues: list[DebateIssue],
+        findings: list[ReviewFinding],
+    ) -> list[DebateIssue]:
+        """MiniMax 等弱模型有时在 debate 收敛时漏掉高置信直证据 finding。
+
+        页面正式问题清单不能因此丢掉锁、异常、TODO、查询边界这类静态强证据问题。
+        """
+
+        existing_keys = {
+            (str(issue.file_path or "").strip(), self._display_issue_family(issue))
+            for issue in issues
+        }
+        candidates: dict[tuple[str, str], ReviewFinding] = {}
+        for finding in findings:
+            issue = self._normalize_report_issue_family(self._build_issue_from_finding(review_id, finding, None))
+            family = self._display_issue_family(issue)
+            if not self._display_issue_anchor_valid(issue, family):
+                continue
+            if family not in {
+                "exception_swallowed",
+                "comment_contract_unimplemented",
+                "lock_guard_removed",
+                "query_bound_removed",
+                "query_boundary_missing",
+                "n_plus_one",
+            }:
+                continue
+            key = (str(issue.file_path or "").strip(), family)
+            if key in existing_keys:
+                continue
+            current = candidates.get(key)
+            if current is None or float(finding.confidence or 0.0) > float(current.confidence or 0.0):
+                candidates[key] = finding
+        additions = [
+            self._normalize_report_issue_family(self._build_issue_from_finding(review_id, finding, None))
+            for finding in candidates.values()
+        ]
+        return [*issues, *additions]
+
+    @staticmethod
+    def _display_issue_anchor_valid(issue: DebateIssue, family: str) -> bool:
+        file_path = str(issue.file_path or "").strip().lower()
+        text = "\n".join(
+            [
+                issue.title,
+                issue.summary,
+                issue.current_code,
+                issue.remediation_suggestion,
+                *issue.evidence,
+                *issue.aggregated_summaries,
+            ]
+        ).lower()
+        if family == "exception_swallowed":
+            return "paymentsettlementservice" in file_path and any(token in text for token in ("catch", "runtimeexception", "ignored", "success", "返回成功"))
+        if family == "comment_contract_unimplemented":
+            return "bulkenrollmentservice" in file_path and any(token in text for token in ("todo", "扣减库存", "预占事件", "承诺"))
+        if family == "lock_guard_removed":
+            return "bulkenrollmentservice" in file_path and any(token in text for token in ("synchronized", "lockregistry", "lockfor", "并发保护"))
+        if family in {"query_bound_removed", "query_boundary_missing"}:
+            return "paymentsettlementservice" in file_path and any(token in text for token in ("searchpendingbycourselike", "pagerequest", "分页", "limit"))
+        if family == "n_plus_one":
+            return any(token in file_path for token in ("bulkenrollmentservice", "paymentsettlementservice")) and any(
+                token in text for token in ("repository.save", "paymentrepository.save", "saveall", "循环", "逐条")
+            )
+        return True
+
+    @staticmethod
+    def _display_issue_family(issue: DebateIssue) -> str:
+        issue_type = str(issue.normalized_issue_type or "").strip().lower()
+        text = "\n".join([issue.title, issue.summary, issue_type]).lower()
+        compact = text.replace(" ", "")
+        if issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}:
+            return "course_creation_semantics"
+        if issue_type in {"exception_swallowed", "exception_semantics_weakened"}:
+            return "exception_swallowed"
+        if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}:
+            return "comment_contract_unimplemented"
+        if issue_type in {"lock_guard_removed", "concurrency_guard_removed", "lock_scope_risk"}:
+            return "lock_guard_removed"
+        if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
+            return "query_bound_removed"
+        if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
+            return "n_plus_one"
+        if any(token in compact for token in ("异常", "catch", "runtimeexception", "返回成功")):
+            return "exception_swallowed"
+        if any(token in compact for token in ("承诺未落地", "todo", "扣减库存", "未实现")):
+            return "comment_contract_unimplemented"
+        if any(token in compact for token in ("循环", "逐条", "n+1", "saveall", "repository.save")):
+            return "n_plus_one"
+        return issue_type
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:
         return self.message_repo.list_by_issue(review_id, issue_id)

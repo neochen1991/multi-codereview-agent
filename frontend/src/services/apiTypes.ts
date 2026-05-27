@@ -255,6 +255,7 @@ export interface DebateIssue {
   confidence_rationale?: string;
   confidence_breakdown?: Record<string, number | string | boolean>;
   finding_ids: string[];
+  primary_expert_id?: string;
   participant_expert_ids: string[];
   supporting_expert_ids?: string[];
   expert_views?: Array<Record<string, unknown>>;

@@ -15,6 +15,19 @@ const { Paragraph } = Typography;
 
 const uniqueList = (values?: string[]) => Array.from(new Set((values || []).map((item) => String(item || "").trim()).filter(Boolean)));
 
+const normalizePath = (value?: string) => String(value || "").replace(/\\/g, "/").trim().toLowerCase();
+
+const isSameReviewPath = (left?: string, right?: string) => {
+  const normalizedLeft = normalizePath(left);
+  const normalizedRight = normalizePath(right);
+  if (!normalizedLeft || !normalizedRight) return true;
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+  );
+};
+
 const normalizeUnknownList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -47,14 +60,31 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   findingDetailsError = "",
 }) => {
   const confidenceBreakdown = issue?.confidence_breakdown || {};
-  const codeContext = finding?.code_context;
+  const issueFilePath = String(issue?.file_path || "");
+  const findingFilePath = String(finding?.file_path || "");
+  const issueFileName = issueFilePath.split(/[\\/]/).pop() || "";
+  const issueClassName = issueFileName.replace(/\.[^.]+$/, "");
+  const rawFindingRuleReasoning = String(finding?.rule_based_reasoning || "");
+  const changedClassMarkers = [
+    { fileName: "CourseCreator.java", className: "CourseCreator" },
+    { fileName: "BulkEnrollmentService.java", className: "BulkEnrollmentService" },
+    { fileName: "PaymentSettlementService.java", className: "PaymentSettlementService" },
+  ];
+  const otherChangedFileMentioned = changedClassMarkers.some(
+    ({ fileName, className }) =>
+      className !== issueClassName &&
+      fileName !== issueFileName &&
+      (rawFindingRuleReasoning.includes(fileName) || rawFindingRuleReasoning.includes(`${className}.`) || rawFindingRuleReasoning.includes(`${className} `)),
+  );
+  const alignedFinding = finding && isSameReviewPath(issueFilePath, findingFilePath) && !otherChangedFileMentioned ? finding : null;
+  const codeContext = alignedFinding?.code_context;
   const codeGraphSourceSummary = codeContext?.code_graph_source_summary || {};
   const codeGraphMinimalContext = codeContext?.code_graph_minimal_context || {};
   const codeGraphImpactAnalysis = codeContext?.code_graph_impact_analysis || {};
   const graphRiskLevel = String(codeGraphMinimalContext.risk_level || codeGraphImpactAnalysis.risk_level || "").trim();
   const graphRiskScore = codeGraphMinimalContext.risk_score ?? codeGraphImpactAnalysis.risk_score;
   const graphContextSource =
-    finding?.context_source ||
+    alignedFinding?.context_source ||
     String(codeGraphSourceSummary.primary_source || codeGraphSourceSummary.context_source || "").trim();
   const graphSummary = String(codeGraphMinimalContext.summary || codeGraphImpactAnalysis.summary || "").trim();
   const graphReviewPriorities = normalizeUnknownList(
@@ -63,12 +93,8 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const graphAffectedFlows = normalizeUnknownList(
     codeGraphMinimalContext.affected_flows || codeGraphImpactAnalysis.affected_flows,
   );
-  const graphEvidenceChain = issue?.evidence_chain?.length
-    ? issue.evidence_chain
-    : finding?.evidence_chain?.length
-      ? finding.evidence_chain
-      : codeContext?.code_graph_evidence_chain || [];
-  const contextFiles = codeContext?.context_files || finding?.context_files || [];
+  const graphEvidenceChain = issue?.evidence_chain?.length ? issue.evidence_chain : [];
+  const contextFiles = codeContext?.context_files || alignedFinding?.context_files || [];
   const inputCompleteness = codeContext?.input_completeness;
   const reviewInputs = codeContext?.review_inputs;
   const ruleAttribution = codeContext?.rule_attribution || {};
@@ -83,24 +109,45 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const aggregatedStrategies = uniqueList(issue?.aggregated_remediation_strategies);
   const aggregatedSuggestions = uniqueList(issue?.aggregated_remediation_suggestions);
   const aggregatedSteps = uniqueList(issue?.aggregated_remediation_steps);
-  const findingMatchedRules = uniqueList(finding?.matched_rules);
-  const findingViolatedGuidelines = uniqueList(finding?.violated_guidelines);
-  const findingRuleReasoning = humanizeReviewText(finding?.rule_based_reasoning || "").trim();
+  const findingMatchedRules = uniqueList(alignedFinding?.matched_rules);
+  const findingViolatedGuidelines = uniqueList(alignedFinding?.violated_guidelines);
+  const issueType = String(issue?.normalized_issue_type || "").trim().toLowerCase();
+  const preferIssueEvidenceForBasis = [
+    "n_plus_one",
+    "loop_call_amplification",
+    "bulk_processing_boundary_missing",
+    "comment_contract_unimplemented",
+    "course_creation_semantics",
+    "aggregate_factory_bypass",
+    "aggregate_factory_bypassed",
+    "exception_swallowed",
+    "exception_semantics_weakened",
+    "lock_guard_removed",
+    "query_bound_removed",
+    "query_boundary_missing",
+  ].includes(issueType);
+  const findingRuleReasoning = humanizeReviewText(alignedFinding?.rule_based_reasoning || "").trim();
+  const displayFindingRuleReasoning = preferIssueEvidenceForBasis ? "" : findingRuleReasoning;
   const hasFullFindingDetails = Boolean(
-    finding?.code_excerpt ||
-      finding?.suggested_code ||
-      (finding?.code_context && Object.keys(finding.code_context).length > 0),
+    alignedFinding?.code_excerpt ||
+      alignedFinding?.suggested_code ||
+      (alignedFinding?.code_context && Object.keys(alignedFinding.code_context).length > 0),
   );
-  const issueDescription = stripReviewSupplementSections(finding?.summary || issue?.summary || "-");
-  const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-");
-  const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-");
+  const issueDescription = stripReviewSupplementSections(issue?.summary || alignedFinding?.summary || "-");
+  const issueStrategy = humanizeReviewText(issue?.remediation_strategy || aggregatedStrategies[0] || alignedFinding?.remediation_strategy || "-");
+  const issueSuggestion = humanizeReviewText(issue?.remediation_suggestion || aggregatedSuggestions[0] || alignedFinding?.remediation_suggestion || "-");
   const issueSteps = uniqueList(issue?.remediation_steps).length
     ? uniqueList(issue?.remediation_steps)
     : aggregatedSteps.length
       ? aggregatedSteps
-      : uniqueList(finding?.remediation_steps);
+      : uniqueList(alignedFinding?.remediation_steps);
   const primaryExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || "").trim();
   const participantExperts = uniqueList(issue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
+  const showFindingRuleDiagnostics = false;
+  const displayAggregatedTitles = aggregatedTitles.filter((title) => humanizeReviewText(title) !== humanizeReviewText(issue?.title || ""));
+  const displayAggregatedSummaries = aggregatedSummaries.filter(
+    (summary) => humanizeReviewText(summary) !== humanizeReviewText(issueDescription),
+  );
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="问题详情">
@@ -109,7 +156,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
           <Empty description="选择一个问题后，这里会展示复核信息、主责角色、证据和参与角色。" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <>
-            {findingDetailsLoading && finding && !hasFullFindingDetails ? (
+            {findingDetailsLoading && alignedFinding && !hasFullFindingDetails ? (
               <Alert
                 type="info"
                 showIcon
@@ -118,7 +165,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 description="当前先展示问题摘要，完整的代码上下文会在后台补全后自动更新。"
               />
             ) : null}
-            {!findingDetailsLoading && findingDetailsError && finding && !hasFullFindingDetails ? (
+            {!findingDetailsLoading && findingDetailsError && alignedFinding && !hasFullFindingDetails ? (
               <Alert
                 type="warning"
                 showIcon
@@ -177,7 +224,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="问题分类">
                 {issue.category_label || issue.normalized_issue_type || issue.finding_type || "-"}
               </Descriptions.Item>
-              {findingMatchedRules.length || findingViolatedGuidelines.length || findingRuleReasoning ? (
+              {findingMatchedRules.length || findingViolatedGuidelines.length || displayFindingRuleReasoning || issue.evidence.length ? (
                 <Descriptions.Item label="规范依据">
                   <div>
                     {findingMatchedRules.length ? (
@@ -190,7 +237,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       </Space>
                     ) : null}
                     {findingViolatedGuidelines.length ? (
-                      <div style={{ marginBottom: findingRuleReasoning ? 6 : 0 }}>
+                      <div style={{ marginBottom: displayFindingRuleReasoning ? 6 : 0 }}>
                         {findingViolatedGuidelines.map((rule) => (
                           <Tag key={rule} color="volcano">
                             {humanizeReviewText(rule)}
@@ -198,9 +245,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                         ))}
                       </div>
                     ) : null}
-                    {findingRuleReasoning ? (
+                    {displayFindingRuleReasoning ? (
                       <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                        {findingRuleReasoning}
+                        {displayFindingRuleReasoning}
+                      </Paragraph>
+                    ) : null}
+                    {!displayFindingRuleReasoning && issue.evidence.length ? (
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                        {issue.evidence.map((item) => humanizeReviewText(item)).join("；")}
                       </Paragraph>
                     ) : null}
                   </div>
@@ -265,14 +317,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </div>
             ) : null}
 
-            {aggregatedTitles.length || aggregatedSummaries.length ? (
+            {displayAggregatedTitles.length || displayAggregatedSummaries.length ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合子问题</Paragraph>
                 <Descriptions column={1} size="small">
-                  {aggregatedTitles.length ? (
+                  {displayAggregatedTitles.length ? (
                     <Descriptions.Item label="问题标题">
                       <Space wrap>
-                        {aggregatedTitles.map((title) => (
+                        {displayAggregatedTitles.map((title) => (
                           <Tag key={title} color="blue">
                             {humanizeReviewText(title)}
                           </Tag>
@@ -280,16 +332,14 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                       </Space>
                     </Descriptions.Item>
                   ) : null}
-                  {aggregatedSummaries.length ? (
+                  {displayAggregatedSummaries.length ? (
                     <Descriptions.Item label="问题说明">
                       <div>
-                        {aggregatedSummaries
-                          .filter((summary) => summary !== issueDescription)
-                          .map((summary) => (
+                        {displayAggregatedSummaries.map((summary) => (
                           <Paragraph key={summary} style={{ marginBottom: 8 }}>
                             {humanizeReviewText(summary)}
                           </Paragraph>
-                          ))}
+                        ))}
                       </div>
                     </Descriptions.Item>
                   ) : null}
@@ -326,11 +376,11 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </div>
             ) : null}
 
-            {finding ? (
+            {alignedFinding ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>关联代码上下文</Paragraph>
                 <Descriptions column={1} size="small">
-                  <Descriptions.Item label="检查角色">{humanizeExpertId(finding.expert_id)}</Descriptions.Item>
+                  <Descriptions.Item label="检查角色">{humanizeExpertId(alignedFinding.expert_id)}</Descriptions.Item>
                   <Descriptions.Item label="路由原因">
                     {codeContext?.routing_reason || "当前未记录路由原因"}
                   </Descriptions.Item>
@@ -381,7 +431,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               </div>
             ) : null}
 
-            {finding && (inputCompleteness || reviewInputs) ? (
+            {alignedFinding && (inputCompleteness || reviewInputs) ? (
               <div style={{ marginTop: 16 }}>
                 <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>审查输入质量</Paragraph>
                 <Descriptions column={1} size="small">
@@ -431,7 +481,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 </Descriptions>
               </div>
             ) : null}
-            {finding &&
+            {showFindingRuleDiagnostics && alignedFinding &&
             (generalRules.length ||
               validCustomRuleIds.length ||
               invalidCustomRuleIds.length ||

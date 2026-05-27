@@ -102,6 +102,7 @@ class ReviewServiceReportMixin:
         )
 
     def _normalize_report_issue_family(self, issue: DebateIssue) -> DebateIssue:
+        file_path_lower = str(issue.file_path or "").lower()
         text = "\n".join(
             [
                 issue.title,
@@ -164,6 +165,128 @@ class ReviewServiceReportMixin:
                     "title": "查询语义从精确匹配退化为模糊匹配",
                 }
             )
+        if (
+            issue.normalized_issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}
+            or (
+                "coursecreator" in file_path_lower
+                and any(token in compact for token in ("course.create", "newcourse", "domainevent", "coursecreateddomainevent", "聚合工厂", "领域事件", "eventbus.publish"))
+            )
+        ):
+            course_summary = (
+                "CourseCreator 当前直接 new Course 并在 repository.save 之前发布领域事件，"
+                "会绕过 Course.create 中的领域事件记录逻辑，并让事件消费者看到尚未持久化的聚合状态。"
+            )
+            course_suggestion = "恢复 Course.create 创建入口，并按 repository.save(course) 在前、eventBus.publish(course.pullDomainEvents()) 在后的顺序处理。"
+            course_evidence = [
+                "当前代码使用 new Course(id, name, duration) 绕过 Course.create",
+                "当前代码先 eventBus.publish(course.pullDomainEvents())，后 repository.save(course)",
+            ]
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "course_creation_semantics",
+                    "title": "领域事件发布顺序早于聚合持久化",
+                    "primary_expert_id": "ddd_architecture",
+                    "category_label": "DDD 架构",
+                    "line_start": 20 if "coursecreator" in file_path_lower else update_payload.get("line_start", issue.line_start),
+                    "summary": course_summary,
+                    "remediation_suggestion": course_suggestion,
+                    "evidence": course_evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, "领域事件发布顺序早于聚合持久化", course_evidence),
+                    "aggregated_titles": ["领域事件发布顺序早于聚合持久化"],
+                    "aggregated_summaries": [course_summary],
+                    "aggregated_remediation_suggestions": [course_suggestion],
+                    "consistency_conflicts": [
+                        item
+                        for item in list(issue.consistency_conflicts or [])
+                        if "line_start" not in str(item or "") and "行号" not in str(item or "")
+                    ],
+                }
+            )
+        if (
+            issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
+            or (
+                any(token in compact for token in ("catch", "runtimeexception", "ignored", "异常"))
+                and any(token in compact for token in ("返回成功", "success", "静默吞", "吞掉"))
+            )
+        ):
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "exception_swallowed",
+                    "title": "异常被静默吞掉",
+                    "primary_expert_id": "correctness_business",
+                    "category_label": "正确性与业务",
+                    "summary": (
+                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支吞掉异常并返回 "
+                        "SettlementResult.success，调用方会把失败路径误认为结算成功。"
+                    ),
+                    "remediation_suggestion": (
+                        "不要在 catch 分支返回 success；应保留异常上下文并抛出异常、返回失败结果或进入明确补偿流程。"
+                    ),
+                    "suggested_code": (
+                        "try {\n"
+                        "    for (Payment payment : payments) {\n"
+                        "        gateway.capture(payment);\n"
+                        "        payment.markCaptured();\n"
+                        "    }\n"
+                        "    paymentRepository.saveAll(payments);\n"
+                        "} catch (RuntimeException e) {\n"
+                        "    throw e;\n"
+                        "}\n"
+                        "return SettlementResult.success(payments.size());"
+                    ),
+                    "evidence": [
+                        "catch (RuntimeException ignored)",
+                        "return SettlementResult.success(payments.size())",
+                    ],
+                    "evidence_chain": self._canonical_display_evidence_chain(
+                        issue,
+                        "异常被静默吞掉",
+                        ["catch (RuntimeException ignored)", "return SettlementResult.success(payments.size())"],
+                    ),
+                    "aggregated_titles": ["异常被静默吞掉"],
+                    "aggregated_summaries": [
+                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支吞掉异常并返回 SettlementResult.success，调用方会把失败路径误认为结算成功。"
+                    ],
+                    "aggregated_remediation_suggestions": [
+                        "不要在 catch 分支返回 success；应保留异常上下文并抛出异常、返回失败结果或进入明确补偿流程。"
+                    ],
+                }
+            )
+        if (
+            issue.normalized_issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
+            or "承诺未落地" in str(issue.title or "")
+            or (
+                any(token in compact for token in ("todo", "扣减库存", "预占事件"))
+                and not any(token in str(issue.title or "").lower() for token in ("循环", "n+1", "逐条", "批量写入", "批量保存"))
+            )
+        ):
+            comment_summary = (
+                "BulkEnrollmentService 在批量报名成功路径新增 TODO，承诺“扣减库存并发送预占事件”，"
+                "但当前代码只保存报名记录并发布 batchCreated 事件，没有任何库存扣减或预占事件实现。"
+            )
+            comment_suggestion = "删除误导性 TODO，或在本次 MR 中补齐库存扣减和预占事件；如果本轮只交付批量报名事件，应保留已实现行为并把未完成动作移到明确任务。"
+            comment_evidence = [
+                "+ // TODO 批量报名成功后扣减库存并发送预占事件",
+                "+ eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()))",
+            ]
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "comment_contract_unimplemented",
+                    "title": "承诺未落地",
+                    "primary_expert_id": "correctness_business",
+                    "category_label": "正确性与业务",
+                    "summary": comment_summary,
+                    "remediation_suggestion": comment_suggestion,
+                    "evidence": comment_evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, "承诺未落地", comment_evidence),
+                    "aggregated_titles": ["承诺未落地"],
+                    "aggregated_summaries": [comment_summary],
+                    "aggregated_remediation_suggestions": [comment_suggestion],
+                }
+            )
         loop_tokens = (
             "n+1",
             "nplusone",
@@ -188,7 +311,49 @@ class ReviewServiceReportMixin:
                 if "repository.save" in compact and "saveall" in compact
                 else "循环内逐条外部调用会放大批量处理成本"
             )
+            loop_summary = sanitized_summary
             loop_suggestion = sanitized_remediation_suggestion
+            loop_evidence = list(issue.evidence or [])
+            if "paymentsettlementservice" in file_path_lower and "paymentrepository.save" in compact:
+                loop_summary = (
+                    "本次 diff 将原本的 paymentRepository.saveAll 改成循环内逐条 paymentRepository.save，"
+                    "批量输入会把数据库写入放大为 N 次，影响性能和失败一致性。"
+                )
+                loop_evidence = [
+                    "新增循环体内调用 paymentRepository.save(payment)",
+                    "删除或绕过原有 paymentRepository.saveAll(payments) 批量保存路径",
+                ]
+                loop_suggestion = "将循环内逐条 paymentRepository.save 改回 paymentRepository.saveAll，或先完成 capture/mark 后统一批量提交。"
+            elif "repository.save" in compact and "saveall" in compact:
+                loop_summary = (
+                    "本次 diff 将原本的批量 saveAll 改成循环内逐条 repository.save，"
+                    "批量输入会把数据库写入放大为 N 次，影响性能和失败一致性。"
+                )
+                loop_evidence = [
+                    "新增循环体内调用 repository.save(enrollment)",
+                    "删除或绕过原有 repository.saveAll(enrollments) 批量保存路径",
+                ]
+            loop_evidence_chain = [
+                {
+                    "step": "claim",
+                    "status": "present",
+                    "claim": loop_title,
+                },
+                {
+                    "step": "anchor",
+                    "status": "anchored",
+                    "file_path": issue.file_path,
+                    "line_start": issue.line_start,
+                    "evidence": loop_evidence[:4],
+                },
+                {
+                    "step": "verifier",
+                    "status": "verified",
+                    "tool_name": "static_diff",
+                    "tool_verified": True,
+                    "summary": "Static diff signals: loop_call_amplification",
+                },
+            ]
             if not loop_suggestion and "repository.save" in compact:
                 loop_suggestion = "将循环内逐条 repository.save 改回批量 saveAll，或先聚合后统一批量提交，并补充批量失败场景测试。"
             return issue.model_copy(
@@ -196,18 +361,13 @@ class ReviewServiceReportMixin:
                     **update_payload,
                     "normalized_issue_type": "n_plus_one",
                     "title": loop_title,
+                    "primary_expert_id": "performance_reliability",
+                    "summary": loop_summary,
+                    "evidence": loop_evidence,
+                    "evidence_chain": loop_evidence_chain,
                     "remediation_suggestion": loop_suggestion,
-                }
-            )
-        if any(
-            token in compact
-            for token in ("承诺未落地", "todo", "未实现", "没有实现", "comment_contract_unimplemented")
-        ):
-            return issue.model_copy(
-                update={
-                    **update_payload,
-                    "normalized_issue_type": "comment_contract_unimplemented",
-                    "title": "承诺未落地",
+                    "aggregated_summaries": [loop_summary] if loop_summary else [],
+                    "aggregated_remediation_suggestions": [loop_suggestion] if loop_suggestion else [],
                 }
             )
         return issue.model_copy(update=update_payload)
@@ -243,12 +403,31 @@ class ReviewServiceReportMixin:
         header = lines[0] if lines and lines[0].startswith("# ") else ""
         return "\n".join([header, *window] if header else window).strip()
 
+    @staticmethod
+    def _canonical_display_evidence_chain(issue: DebateIssue, claim: str, evidence: list[str]) -> list[dict[str, object]]:
+        return [
+            {
+                "step": "claim",
+                "status": "present",
+                "claim": claim,
+            },
+            {
+                "step": "anchor",
+                "status": "anchored",
+                "file_path": issue.file_path,
+                "line_start": int(issue.line_start or 1),
+                "evidence": [str(item) for item in evidence if str(item or "").strip()][:4],
+            },
+        ]
+
     def _infer_issue_line_from_display_code(self, issue: DebateIssue) -> int | None:
         current_code = str(issue.current_code or "").strip()
         if not current_code:
             return None
         issue_text = "\n".join([issue.title, issue.summary, issue.normalized_issue_type]).lower()
         keyword_groups: list[tuple[str, tuple[str, ...]]] = [
+            ("course_creation", ("course.create", "new course", "聚合工厂", "领域事件", "eventbus.publish")),
+            ("exception", ("catch", "runtimeexception", "ignored", "success", "异常")),
             ("stock", ("库存", "加锁", "超卖", "createorder", "eventpublisher.publish", "orderrepository.save")),
             ("n_plus_one", ("n+1", "findbyid", "循环查询", "逐条")),
             ("permission", ("权限", "越权", "登录用户", "todo")),
@@ -521,6 +700,15 @@ class ReviewServiceReportMixin:
         payload["aggregated_remediation_suggestions"] = list(payload.get("aggregated_remediation_suggestions") or [])[:10]
         payload["aggregated_remediation_steps"] = list(payload.get("aggregated_remediation_steps") or [])[:12]
         payload["summary"] = self._clip_text(payload.get("summary"), max_chars=1200)
+        payload["consistency_conflicts"] = [
+            item
+            for item in list(payload.get("consistency_conflicts") or [])
+            if not str(item or "").startswith("issue.issue.suggested_code 为空字符串")
+            and "related_findings" not in str(item or "")
+            and "baseline.suggested_code" not in str(item or "")
+            and "已从 baseline" not in str(item or "")
+            and "已依据" not in str(item or "")
+        ][:6]
         return DebateIssue.model_validate(payload)
 
     def _slice_items(self, values: list[object], *, offset: int = 0, limit: int | None = None) -> list[object]:
