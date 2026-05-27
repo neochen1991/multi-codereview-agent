@@ -466,6 +466,57 @@ def test_main_agent_final_summary_distinguishes_filtered_findings_from_no_issues
     assert "未升级为 issue 的 finding 数: 2" in stub.user_prompt
 
 
+def test_main_agent_final_summary_uses_review_pending_human_count():
+    class StubLLM:
+        def __init__(self) -> None:
+            self.user_prompt = ""
+
+        def resolve_main_agent(self, _runtime: RuntimeSettings):
+            return None
+
+        def complete_text(self, **kwargs):
+            self.user_prompt = str(kwargs.get("user_prompt") or "")
+            return LLMTextResult(
+                text=str(kwargs.get("fallback_text") or ""),
+                mode="fallback",
+                provider="stub",
+                model="stub-model",
+                base_url="https://example.invalid",
+                api_key_env="DUMMY_API_KEY",
+            )
+
+    agent = MainAgentService()
+    stub = StubLLM()
+    agent._llm = stub  # type: ignore[assignment]
+    review = ReviewTask(
+        review_id="rev_pending_summary",
+        status="waiting_human",
+        phase="human_gate",
+        analysis_mode="light",
+        pending_human_issue_ids=["iss_needs_human"],
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/CourseCreator.java"],
+        ),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    agent.build_final_summary(
+        review,
+        [],
+        RuntimeSettings(allow_llm_fallback=True),
+    )
+
+    assert "待人工裁决数: 1" in stub.user_prompt
+    assert "待人工裁决 issue_id: iss_needs_human" in stub.user_prompt
+    assert "不能说“无待人工裁决”" in stub.user_prompt
+
+
 def test_main_agent_prefers_migration_hunk_for_database_expert():
     agent = MainAgentService()
     subject = ReviewSubject(

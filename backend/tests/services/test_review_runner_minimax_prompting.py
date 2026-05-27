@@ -80,6 +80,87 @@ def test_minimax_expert_prompt_uses_short_rule_guided_contract(storage_root: Pat
     assert "每条 finding 的 JSON 字段要求" not in prompt
 
 
+def test_minimax_prompt_schema_does_not_pin_candidate_to_first_file(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/composite",
+        target_ref="main",
+        title="Composite Java review",
+        changed_files=[
+            "src/app/CourseCreator.java",
+            "src/app/BulkEnrollmentService.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/app/CourseCreator.java b/src/app/CourseCreator.java\n"
+            "@@ -1,1 +1,1 @@\n"
+            "+ Course course = new Course(id, name);\n"
+            "diff --git a/src/app/BulkEnrollmentService.java b/src/app/BulkEnrollmentService.java\n"
+            "@@ -10,2 +10,3 @@\n"
+            "- repository.saveAll(enrollments);\n"
+            "+ for (CourseEnrollment enrollment : enrollments) {\n"
+            "+     repository.save(enrollment);\n"
+            "+ }\n"
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="performance_reliability",
+        name="Performance",
+        name_zh="性能与可靠性专家",
+        role="performance",
+        model="MiniMax-M2.7",
+        review_spec="检查批量路径是否退化为逐条调用。",
+    )
+
+    prompt = runner._build_expert_prompt(
+        subject,
+        expert,
+        "src/app/CourseCreator.java",
+        1,
+        tool_evidence=[],
+        runtime_tool_results=[],
+        repository_context={},
+        target_hunk={"hunk_header": "@@ -1,1 +1,1 @@", "excerpt": "+ Course course = new Course(id, name);"},
+        target_hunks=[
+            {"hunk_header": "@@ -1,1 +1,1 @@", "excerpt": "+ Course course = new Course(id, name);", "changed_lines": [1]},
+            {
+                "file_path": "src/app/BulkEnrollmentService.java",
+                "hunk_header": "@@ -10,2 +10,3 @@",
+                "excerpt": "- repository.saveAll(enrollments);\n+ for (CourseEnrollment enrollment : enrollments) {\n+     repository.save(enrollment);\n+ }",
+                "changed_lines": [10, 11, 12],
+            },
+        ],
+        bound_documents=[],
+        disallowed_inference=[],
+        expected_checks=["检查循环内仓储调用"],
+        active_skills=[],
+        rule_screening={"matched_rules_for_llm": []},
+        model_name="MiniMax-M2.7",
+        include_target_file_full_diff=False,
+    )
+
+    assert '"target_id": "必须从 TARGET_HUNKS[].target_id 原样选择"' in prompt
+    assert '"file_path": "必须从 TARGET_HUNKS[].file_path 原样选择"' in prompt
+    assert '"line": "必须取对应 hunk changed_lines 中的当前代码行号"' in prompt
+    assert '"file_path": "src/app/CourseCreator.java"' not in prompt.split("[OUTPUT_JSON]", 1)[1]
+
+
+def test_expert_language_guidance_is_scoped_by_expert(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    correctness_guidance = runner._build_expert_language_general_guidance("java", "correctness_business")
+    ddd_guidance = runner._build_expert_language_general_guidance("java", "ddd_architecture")
+    database_guidance = runner._build_expert_language_general_guidance("java", "database_analysis")
+
+    assert "注释/TODO/接口承诺" in correctness_guidance
+    assert "不主提命名、代码风格、索引、分页、N+1" in correctness_guidance
+    assert "聚合工厂、聚合边界" in ddd_guidance
+    assert "不主提命名、普通代码风格、SQL 分页、N+1" in ddd_guidance
+    assert "无分页、全表扫描、N+1" in database_guidance
+
+
 def test_non_minimax_model_also_uses_rule_guided_quality_contract(storage_root: Path) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     subject = ReviewSubject(

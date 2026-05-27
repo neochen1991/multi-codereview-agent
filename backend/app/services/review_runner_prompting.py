@@ -116,7 +116,7 @@ class ReviewRunnerPromptingMixin:
         active_skill_summary = self._build_active_skill_summary(active_skills)
         design_doc_summary = self._build_design_doc_summary(subject)
         language = self._infer_code_language(file_path)
-        language_general_guidance = self._build_language_general_guidance(language)
+        language_general_guidance = self._build_expert_language_general_guidance(language, expert.expert_id)
         java_ddd_focus = self._build_java_ddd_review_focus(language, expert.expert_id, prompt_repository_context)
         observation_review_summary = self._build_observation_review_summary(prompt_repository_context)
         review_learning_hints = ""
@@ -259,7 +259,7 @@ class ReviewRunnerPromptingMixin:
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","line_start":{line_start},"line_end":{line_start},"matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","target_id":"必须从目标 hunk 的 target_id 原样选择","file_path":"必须从目标 hunk 的 file_path 原样选择","line_start":"必须取该 hunk changed_lines 中的当前代码行号","line_end":"必须取该 hunk changed_lines 中的当前代码行号","matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _build_rule_guided_expert_prompt(
@@ -293,7 +293,7 @@ class ReviewRunnerPromptingMixin:
             1800,
         )
         language_general_guidance = self._compact_prompt_block(
-            self._build_language_general_guidance(language),
+            self._build_expert_language_general_guidance(language, expert.expert_id),
             1200,
         )
         java_ddd_focus = self._compact_prompt_block(
@@ -391,8 +391,9 @@ class ReviewRunnerPromptingMixin:
                 {
                     "rule_id": "string",
                     "title": "string",
-                    "file_path": file_path,
-                    "line": line_start,
+                    "target_id": "必须从 TARGET_HUNKS[].target_id 原样选择",
+                    "file_path": "必须从 TARGET_HUNKS[].file_path 原样选择",
+                    "line": "必须取对应 hunk changed_lines 中的当前代码行号",
                     "evidence": "string",
                     "confidence": "high|medium|low",
                     "observation_ids": ["string"],
@@ -424,6 +425,7 @@ class ReviewRunnerPromptingMixin:
             "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
             "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
             "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
+            "candidate_findings 的 file_path/line/target_id 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 中的占位说明或主任务默认文件。",
             "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；不要把多个文件、多个风险点或多个修复方向合并成一条。",
             "如果同一 hunk 存在多个问题，请拆成多条 candidate_findings；每条的 title、evidence、reason、suggested_code 必须互相指向同一问题。",
             "如果缺少上下文但存在可疑代码证据，必须同时输出 candidate_findings 和 context_requests，不要静默省略。",
@@ -541,6 +543,51 @@ class ReviewRunnerPromptingMixin:
         if not values:
             values = list(fallback)
         return list(dict.fromkeys(values))
+
+    def _build_expert_language_general_guidance(self, language: str, expert_id: str) -> str:
+        """按专家职责裁剪语言通用规范，避免弱模型把其他专家的问题串到当前专家。"""
+
+        normalized_language = str(language or "").strip().lower()
+        normalized_expert = str(expert_id or "").strip().lower()
+        if normalized_language != "java":
+            return self._build_language_general_guidance(language)
+
+        base_lines = [
+            "- 以《阿里巴巴 Java 开发手册》作为 Java 代码最低通用规范基线；本专家只审查自己职责边界内的问题。",
+            "- 结论必须绑定当前 `| +` 代码行或由当前新增代码直接暴露的问题；不能把 `| -` 删除代码当作当前问题。",
+            "- 若结论依赖调用链、ORM 映射或事务传播，必须结合已提供源码上下文和工具证据；证据不足的条目不要输出。",
+        ]
+        expert_lines: dict[str, list[str]] = {
+            "correctness_business": [
+                "- 重点检查业务规则、状态流转、返回语义、异常分支、副作用和注释/TODO/接口承诺是否真正落地。",
+                "- 不主提命名、代码风格、索引、分页、N+1、事务性能等问题；这些交给通用编码规范、数据库或性能专家。",
+            ],
+            "ddd_architecture": [
+                "- 重点检查聚合工厂、聚合边界、分层职责、依赖方向、领域事件和不变量是否被绕过。",
+                "- 不主提命名、普通代码风格、SQL 分页、N+1、循环写入等问题；除非它们直接破坏 DDD 边界。",
+            ],
+            "database_analysis": [
+                "- 重点检查 Repository / JPA / MyBatis 查询是否存在无分页、全表扫描、N+1、批量逐条写、索引或事务一致性风险。",
+                "- 不主提聚合工厂、领域事件、业务承诺未实现或命名规范问题，除非它们直接导致数据一致性问题。",
+            ],
+            "performance_reliability": [
+                "- 重点检查循环体内 Repository / Service / Client / HTTP / SQL / MQ 调用、批量串行放大、事务内外部 IO、异常吞没和可靠性降级。",
+                "- 不主提聚合边界、普通命名、SQL 语义正确性或业务承诺未实现，除非它们直接导致性能或可靠性风险。",
+            ],
+            "maintainability_code_health": [
+                "- 重点检查命名、复杂度、方法职责、魔法值、重复代码、可读性和阿里巴巴 Java 代码规范类常规问题。",
+                "- 不主提业务语义、DDD 边界、数据库性能或可靠性问题，除非它们已经退化为明确的可维护性问题。",
+            ],
+            "security_compliance": [
+                "- 重点检查输入校验、权限/租户隔离、敏感信息、注入风险、日志脱敏和合规边界。",
+                "- 不主提普通性能、DDD 边界或命名规范问题，除非它们直接造成安全或合规风险。",
+            ],
+            "test_verification": [
+                "- 重点检查关键路径、异常路径、边界条件和回归风险是否有测试保护。",
+                "- 不主提生产代码实现风格、SQL 性能或 DDD 边界本身；只评价验证缺口和测试建议。",
+            ],
+        }
+        return "\n".join([*base_lines, *expert_lines.get(normalized_expert, [])])
 
     def _extract_review_learning_issue_types(
         self,

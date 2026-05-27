@@ -367,12 +367,19 @@ class MainAgentService(MainAgentPromptingMixin):
         partial_failure_count: int = 0,
         finding_count: int = 0,
         filtered_finding_count: int = 0,
+        pending_human_count: int | None = None,
         timeout_seconds: float = 60.0,
         max_attempts: int = 3,
     ) -> tuple[str, dict[str, object]]:
         """让主 Agent 在 issue 收敛后输出控制台播报式总结。"""
         blocker_count = len([issue for issue in issues if issue.severity in {"blocker", "critical"}])
-        pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
+        computed_pending_count = len([issue for issue in issues if issue.needs_human and issue.status != "resolved"])
+        review_pending_count = len(list(getattr(review, "pending_human_issue_ids", []) or []))
+        pending_count = (
+            int(pending_human_count)
+            if pending_human_count is not None
+            else max(computed_pending_count, review_pending_count)
+        )
         finding_note = ""
         if not issues and finding_count > 0:
             finding_note = (
@@ -401,10 +408,12 @@ class MainAgentService(MainAgentPromptingMixin):
             f"未升级为 issue 的 finding 数: {filtered_finding_count}\n"
             f"高风险议题数: {blocker_count}\n"
             f"待人工裁决数: {pending_count}\n"
+            f"待人工裁决 issue_id: {', '.join(list(getattr(review, 'pending_human_issue_ids', []) or [])) or '无'}\n"
             f"专家执行失败数: {partial_failure_count}\n"
             f"候选风险说明: {finding_note or '无'}\n"
             "如果 issue 为 0 但 finding 或过滤候选大于 0，必须明确说明“不是无问题”，而是候选未升级或需继续核验。\n"
-            f"请输出一段中文总结，风格像主Agent对控制台的收敛播报。"
+            "如果待人工裁决数大于 0，必须明确说明仍需人工确认，不能说“无待人工裁决”。\n"
+            "请输出一段中文总结，风格像主Agent对控制台的收敛播报；不要使用 Markdown 表格或夸张结论。"
         )
         try:
             result = self._llm.complete_text(
@@ -1224,7 +1233,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

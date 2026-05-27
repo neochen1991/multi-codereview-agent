@@ -1321,6 +1321,7 @@ class ReviewRunner(
                 partial_failure_count=len(expert_failures),
                 finding_count=len(finding_payloads),
                 filtered_finding_count=len(filtered_finding_ids),
+                pending_human_count=len(pending_human_issue_ids),
                 timeout_seconds=float(llm_request_options["timeout_seconds"]),
                 max_attempts=int(llm_request_options["max_attempts"]),
             )
@@ -6548,8 +6549,9 @@ class ReviewRunner(
                             {
                                 "rule_id": "string",
                                 "title": "string",
-                                "file_path": file_path,
-                                "line": line_start,
+                                "target_id": "必须从 TARGET_HUNKS[].target_id 原样选择",
+                                "file_path": "必须从 TARGET_HUNKS[].file_path 原样选择",
+                                "line": "必须取对应 hunk changed_lines 中的当前代码行号",
                                 "evidence": "string",
                                 "confidence": "high|medium|low",
                             }
@@ -6981,8 +6983,10 @@ class ReviewRunner(
             for hunk in target_hunks[:8]:
                 if not hunk:
                     continue
+                target_id = f"T{len(targets) + 1}"
                 targets.append(
                     {
+                        "target_id": target_id,
                         "file_path": file_path,
                         "line_start": int(hunk.get("start_line") or hunk.get("line_start") or item.get("line_start") or fallback_line_start or 1),
                         "hunk_header": str(hunk.get("hunk_header") or ""),
@@ -6991,12 +6995,26 @@ class ReviewRunner(
                             for value in list(hunk.get("changed_lines") or [])
                             if isinstance(value, int)
                         ],
+                        "current_added_lines": self._extract_current_added_lines_from_hunk(hunk),
                         "excerpt": self._clip_diagnostic_text(str(hunk.get("excerpt") or ""), 4000),
                     }
                 )
         if not targets:
-            targets.append({"file_path": fallback_file_path, "line_start": int(fallback_line_start or 1)})
+            targets.append({"target_id": "T1", "file_path": fallback_file_path, "line_start": int(fallback_line_start or 1)})
         return targets
+
+    def _extract_current_added_lines_from_hunk(self, hunk: dict[str, object]) -> list[str]:
+        """只把 MR 当前新增行单独暴露给弱模型，降低它引用删除代码的概率。"""
+
+        excerpt = str((hunk or {}).get("excerpt") or "")
+        added_lines: list[str] = []
+        for raw_line in excerpt.splitlines():
+            line = raw_line.strip()
+            if "| +" in line:
+                added_lines.append(line)
+            elif line.startswith("+") and not line.startswith("+++"):
+                added_lines.append(line)
+        return added_lines[:24]
 
     def _run_rule_guided_general_expert_profile_scan(
         self,
@@ -7025,12 +7043,13 @@ class ReviewRunner(
                 "如果存在当前代码锚点和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
                 "如果缺少关联上下文但已有当前代码证据，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
                 "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一问题。",
+                "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 的占位说明，禁止使用不在 TARGET_HUNKS 中的文件。",
                 "不要输出专家绑定规范结论，不要编造产品规则 ID。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
                 f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1800)}",
                 f"专家审视规范:\n{self._compact_prompt_block(self._build_review_spec_summary(str(expert.review_spec or '')), 2200)}",
                 f"代码语言: {language or 'unknown'}",
-                f"语言通用规范:\n{self._compact_prompt_block(self._build_language_general_guidance(language), 1600)}",
+                f"语言通用规范:\n{self._compact_prompt_block(self._build_expert_language_general_guidance(language, expert.expert_id), 1600)}",
                 "REQUIRED_RULE_IDS: [\"GENERAL-EXPERT-CHECKS\"]",
                 "",
                 "[TARGET_HUNKS]",
@@ -7058,8 +7077,9 @@ class ReviewRunner(
                             {
                                 "rule_id": "GENERAL-EXPERT-CHECKS",
                                 "title": "string",
-                                "file_path": file_path,
-                                "line": line_start,
+                                "target_id": "必须从 TARGET_HUNKS[].target_id 原样选择",
+                                "file_path": "必须从 TARGET_HUNKS[].file_path 原样选择",
+                                "line": "必须取对应 hunk changed_lines 中的当前代码行号",
                                 "evidence": "string",
                                 "confidence": "high|medium|low",
                             }
@@ -7229,6 +7249,7 @@ class ReviewRunner(
                     "如果某条规则不适用，输出 not_applicable；缺上下文输出 insufficient_context；存在当前代码证据时必须保留 candidate_findings 并写 context_requests。",
                     "candidate_findings 的 rule_id 必须来自 CUSTOM_RULE_BATCH；不得输出通用规则结论或编造规则 ID。",
                     "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一个自定义规则违反点。",
+                    "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 的占位说明，禁止使用不在 TARGET_HUNKS 中的文件。",
                     "输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check。",
                     f"BATCH_INDEX: {batch_index}/{len(rule_batches)}",
                     f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
@@ -7258,8 +7279,9 @@ class ReviewRunner(
                                 {
                                     "rule_id": required_rule_ids[0],
                                     "title": "string",
-                                    "file_path": file_path,
-                                    "line": line_start,
+                                    "target_id": "必须从 TARGET_HUNKS[].target_id 原样选择",
+                                    "file_path": "必须从 TARGET_HUNKS[].file_path 原样选择",
+                                    "line": "必须取对应 hunk changed_lines 中的当前代码行号",
                                     "evidence": "string",
                                     "confidence": "high|medium|low",
                                 }
@@ -7401,6 +7423,7 @@ class ReviewRunner(
             "matched_rules_for_llm",
             "must_review_rules",
             "possible_hit_rules",
+            "all_enabled_rules_for_llm",
         ):
             for item in list((rule_screening or {}).get(key) or []):
                 if isinstance(item, dict):
