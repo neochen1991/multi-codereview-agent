@@ -497,13 +497,9 @@ class GitNexusIndexScheduler:
         raw = str(repository_id or "").strip()
         if raw:
             return raw
-        repositories = list(getattr(runtime, "code_repositories", []) or [])
-        default_repository_id = str(getattr(runtime, "default_repository_id", "") or "").strip()
-        if default_repository_id and (
-            not repositories
-            or any(str(getattr(repository, "repository_id", "") or "").strip() == default_repository_id for repository in repositories)
-        ):
-            return default_repository_id
+        project_id = str(getattr(runtime, "default_project_id", "") or "").strip()
+        project_repositories = getattr(runtime, "project_repositories", None)
+        repositories = list(project_repositories(project_id) if callable(project_repositories) else [])
         for repository in repositories:
             candidate = str(getattr(repository, "repository_id", "") or "").strip()
             if candidate:
@@ -512,11 +508,13 @@ class GitNexusIndexScheduler:
 
     def _resolve_repo_path(self, runtime, repository_id: str = "") -> str:
         normalized_repository_id = str(repository_id or "").strip()
-        repositories = list(getattr(runtime, "code_repositories", []) or [])
+        project_id = str(getattr(runtime, "default_project_id", "") or "").strip()
+        project_repositories = getattr(runtime, "project_repositories", None)
+        repositories = list(project_repositories(project_id) if callable(project_repositories) else [])
         if normalized_repository_id and repositories and not any(repo.repository_id == normalized_repository_id for repo in repositories):
             return ""
-        repository = runtime.resolve_repository(repository_id=normalized_repository_id)
-        raw = str((repository.local_path if repository is not None else "") or getattr(runtime, "code_repo_local_path", "") or "").strip()
+        repository = runtime.resolve_repository(repository_id=normalized_repository_id, project_id=project_id)
+        raw = str(repository.local_path if repository is not None else "").strip()
         if not raw:
             return ""
         return str(Path(raw).expanduser().resolve(strict=False))

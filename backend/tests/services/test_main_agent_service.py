@@ -345,7 +345,7 @@ def test_main_agent_final_summary_marks_partial_failures_as_inconclusive():
         review_id="rev_partial",
         status="completed",
         phase="completed",
-        analysis_mode="light",
+        analysis_mode="standard",
         subject=ReviewSubject(
             subject_type="mr",
             repo_id="repo",
@@ -388,7 +388,7 @@ def test_main_agent_final_summary_falls_back_when_llm_call_fails():
         review_id="rev_summary_fallback",
         status="waiting_human",
         phase="human_gate",
-        analysis_mode="light",
+        analysis_mode="standard",
         subject=ReviewSubject(
             subject_type="mr",
             repo_id="repo",
@@ -440,7 +440,7 @@ def test_main_agent_final_summary_distinguishes_filtered_findings_from_no_issues
         review_id="rev_filtered_findings",
         status="completed",
         phase="completed",
-        analysis_mode="light",
+        analysis_mode="standard",
         subject=ReviewSubject(
             subject_type="mr",
             repo_id="repo",
@@ -492,7 +492,7 @@ def test_main_agent_final_summary_uses_review_pending_human_count():
         review_id="rev_pending_summary",
         status="waiting_human",
         phase="human_gate",
-        analysis_mode="light",
+        analysis_mode="standard",
         pending_human_issue_ids=["iss_needs_human"],
         subject=ReviewSubject(
             subject_type="mr",
@@ -515,6 +515,44 @@ def test_main_agent_final_summary_uses_review_pending_human_count():
     assert "待人工裁决数: 1" in stub.user_prompt
     assert "待人工裁决 issue_id: iss_needs_human" in stub.user_prompt
     assert "不能说“无待人工裁决”" in stub.user_prompt
+
+
+def test_main_agent_final_summary_skips_llm_in_light_mode():
+    class FailingLLM:
+        def resolve_main_agent(self, _runtime: RuntimeSettings):
+            raise AssertionError("light mode should not resolve or call final summary LLM")
+
+        def complete_text(self, **_kwargs):
+            raise AssertionError("light mode should not call final summary LLM")
+
+    agent = MainAgentService()
+    agent._llm = FailingLLM()  # type: ignore[assignment]
+    review = ReviewTask(
+        review_id="rev_light_summary",
+        status="completed",
+        phase="completed",
+        analysis_mode="light",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/x",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/CourseCreator.java"],
+        ),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    summary, metadata = agent.build_final_summary(
+        review,
+        [],
+        RuntimeSettings(allow_llm_fallback=False),
+    )
+
+    assert "主Agent收敛完成" in summary
+    assert metadata["mode"] == "deterministic"
+    assert metadata["skipped_reason"] == "light_mode_fast_path"
 
 
 def test_main_agent_prefers_migration_hunk_for_database_expert():

@@ -16,6 +16,7 @@ import {
   type ImpactReportTemplate,
   type ImpactReportTemplatePreview,
   type PostgresDataSourceSettings,
+  type ProjectSettings,
   type ReviewWorkspaceCleanupResult,
   type RuntimeSettings,
 } from "@/services/api";
@@ -58,6 +59,42 @@ const normalizeCodeRepositories = (value: unknown): CodeRepositorySettings[] => 
     return value as CodeRepositorySettings[];
   }
   return parseJsonArray<CodeRepositorySettings>(String(value || ""));
+};
+
+const currentProjectFromRuntime = (runtime?: Pick<RuntimeSettings, "default_project_id" | "projects"> | null): ProjectSettings | undefined => {
+  const projects = runtime?.projects || [];
+  const currentProjectId = String(runtime?.default_project_id || "").trim();
+  return projects.find((project) => project.project_id === currentProjectId) || projects[0];
+};
+
+const currentProjectRepositories = (runtime?: Pick<RuntimeSettings, "default_project_id" | "projects" | "code_repositories"> | null): CodeRepositorySettings[] => {
+  const project = currentProjectFromRuntime(runtime);
+  if (project?.repositories?.length) return project.repositories;
+  return [];
+};
+
+const buildRuntimeProjectsWithRepositories = (runtime: RuntimeSettings, repositories: CodeRepositorySettings[]): ProjectSettings[] => {
+  const projects = runtime.projects || [];
+  const currentProjectId = String(runtime.default_project_id || projects[0]?.project_id || "").trim();
+  if (!currentProjectId) return projects;
+  if (!projects.length) {
+    return [
+      {
+        project_id: currentProjectId,
+        name: "默认项目",
+        status: "active",
+        repositories,
+      },
+    ];
+  }
+  return projects.map((project) =>
+    project.project_id === currentProjectId
+      ? {
+          ...project,
+          repositories,
+        }
+      : project,
+  );
 };
 
 const collapseExpandIconPosition = "end" as const;
@@ -180,12 +217,9 @@ const SettingsPage: React.FC = () => {
   const [savingTool, setSavingTool] = React.useState(false);
   const [gitnexusStatus, setGitnexusStatus] = React.useState<GitNexusIndexStatus | null>(null);
   const [gitnexusPreflight, setGitnexusPreflight] = React.useState<GitNexusPreflightStatus | null>(null);
-  const [gitnexusRunning, setGitnexusRunning] = React.useState(false);
   const [repositoryGitnexusStatuses, setRepositoryGitnexusStatuses] = React.useState<Record<string, GitNexusIndexStatus>>({});
   const [repositoryGitnexusPreflights, setRepositoryGitnexusPreflights] = React.useState<Record<string, GitNexusPreflightStatus>>({});
   const [repositoryGitnexusRunning, setRepositoryGitnexusRunning] = React.useState<Record<string, boolean>>({});
-  const [codeGraphStatus, setCodeGraphStatus] = React.useState<CodeGraphIndexStatus | null>(null);
-  const [codeGraphRunning, setCodeGraphRunning] = React.useState(false);
   const [repositoryCodeGraphStatuses, setRepositoryCodeGraphStatuses] = React.useState<Record<string, CodeGraphIndexStatus>>({});
   const [repositoryCodeGraphRunning, setRepositoryCodeGraphRunning] = React.useState<Record<string, boolean>>({});
   const [impactTemplate, setImpactTemplate] = React.useState<ImpactReportTemplate | null>(null);
@@ -284,19 +318,23 @@ const SettingsPage: React.FC = () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, codeGraph, impactTemplatePayload] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, impactTemplatePayload] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
         settingsApi.getGitNexusIndexStatus().catch(() => null),
         settingsApi.getGitNexusPreflight().catch(() => null),
-        settingsApi.getCodeGraphIndexStatus().catch(() => null),
         settingsApi.getImpactReportTemplate(),
       ]);
-      form.setFieldsValue(runtime);
-      void refreshRepositoryGitNexusStatuses(runtime.code_repositories || []);
-      void refreshRepositoryCodeGraphStatuses(runtime.code_repositories || []);
+      const projectRepositories = currentProjectRepositories(runtime);
+      form.setFieldsValue({
+        ...runtime,
+        code_repositories: projectRepositories,
+        default_repository_id: "",
+      });
+      void refreshRepositoryGitNexusStatuses(projectRepositories);
+      void refreshRepositoryCodeGraphStatuses(projectRepositories);
       setExperts(expertList);
       setExtensionSkills(skills);
       setExtensionTools(tools);
@@ -307,12 +345,6 @@ const SettingsPage: React.FC = () => {
         },
       );
       setGitnexusPreflight(gitnexusDiagnostic);
-      setCodeGraphStatus(
-        codeGraph || {
-          state: "unknown",
-          message: "Tree-sitter 图谱状态暂时不可用，不影响读取已保存设置。",
-        },
-      );
       setImpactTemplate(impactTemplatePayload);
       setImpactTemplateContent(impactTemplatePayload.content || "");
       setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
@@ -356,42 +388,6 @@ const SettingsPage: React.FC = () => {
     void loadPage();
   }, [loadPage]);
 
-  const refreshGitNexusStatus = React.useCallback(async () => {
-    try {
-      const [status, diagnostic] = await Promise.all([
-        settingsApi.getGitNexusIndexStatus(),
-        settingsApi.getGitNexusPreflight().catch(() => null),
-      ]);
-      setGitnexusStatus(status);
-      setGitnexusPreflight(diagnostic);
-      await refreshRepositoryGitNexusStatuses();
-    } catch (error: any) {
-      setGitnexusStatus((prev) =>
-        prev || {
-          state: "unknown",
-          message: error?.message || "GitNexus 图谱状态暂时不可用。",
-        },
-      );
-      message.warning(error?.message || "刷新 GitNexus 图谱状态失败");
-    }
-  }, [refreshRepositoryGitNexusStatuses]);
-
-  const handleRunGitNexusIndex = React.useCallback(async () => {
-    setGitnexusRunning(true);
-    try {
-      const status = await settingsApi.runGitNexusIndex();
-      setGitnexusStatus(status);
-      message.success("GitNexus 建图任务已触发");
-      window.setTimeout(() => {
-        void refreshGitNexusStatus();
-      }, 1500);
-    } catch (error: any) {
-      message.error(error?.message || "触发 GitNexus 建图失败");
-    } finally {
-      setGitnexusRunning(false);
-    }
-  }, [refreshGitNexusStatus]);
-
   const handleRefreshRepositoryGitNexusStatus = React.useCallback(async (repositoryId: string) => {
     const id = String(repositoryId || "").trim();
     if (!id) return;
@@ -429,42 +425,6 @@ const SettingsPage: React.FC = () => {
       setRepositoryGitnexusRunning((prev) => ({ ...prev, [id]: false }));
     }
   }, [handleRefreshRepositoryGitNexusStatus]);
-
-  const refreshCodeGraphStatus = React.useCallback(async () => {
-    try {
-      const status = await settingsApi.getCodeGraphIndexStatus();
-      setCodeGraphStatus(status);
-      await refreshRepositoryCodeGraphStatuses();
-    } catch (error: any) {
-      setCodeGraphStatus((prev) =>
-        prev || {
-          state: "unknown",
-          message: error?.message || "Tree-sitter 图谱状态暂时不可用。",
-        },
-      );
-      message.warning(error?.message || "刷新 Tree-sitter 图谱状态失败");
-    }
-  }, [refreshRepositoryCodeGraphStatuses]);
-
-  const handleRunCodeGraphIndex = React.useCallback(async () => {
-    setCodeGraphRunning(true);
-    try {
-      const status = await settingsApi.runCodeGraphIndex();
-      setCodeGraphStatus(status);
-      if (status.state === "blocked") {
-        message.warning(status.message || "Tree-sitter 当前正在处理其他仓库");
-      } else {
-        message.success("Tree-sitter 图谱建图任务已触发");
-      }
-      window.setTimeout(() => {
-        void refreshCodeGraphStatus();
-      }, 1500);
-    } catch (error: any) {
-      message.error(error?.message || "触发 Tree-sitter 图谱建图失败");
-    } finally {
-      setCodeGraphRunning(false);
-    }
-  }, [refreshCodeGraphStatus]);
 
   const handleRefreshRepositoryCodeGraphStatus = React.useCallback(async (repositoryId: string) => {
     const id = String(repositoryId || "").trim();
@@ -627,11 +587,11 @@ const SettingsPage: React.FC = () => {
       {() => {
         const mode = String(form.getFieldValue("default_analysis_mode") || "standard");
         const targetBranch = String(form.getFieldValue("default_target_branch") || "main");
-        const repoUrl = String(form.getFieldValue("code_repo_clone_url") || "").trim();
         const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
         const enabledRepositoryCount = repositories.filter((repo) => repo?.enabled !== false).length;
         const autoReviewEnabled = Boolean(form.getFieldValue("auto_review_enabled"));
         const priorityThreshold = String(form.getFieldValue("issue_min_priority_level") || "P2");
+        const currentProjectId = String(form.getFieldValue("default_project_id") || "").trim();
         return (
           <div className="settings-summary-grid">
             <div className="settings-summary-card">
@@ -640,10 +600,10 @@ const SettingsPage: React.FC = () => {
               <span className="settings-summary-meta">{`目标分支 ${targetBranch}`}</span>
             </div>
             <div className="settings-summary-card">
-              <span className="settings-summary-label">代码仓</span>
-              <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : repoUrl ? "单仓兼容" : "未配置"}</strong>
-              <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || repoUrl || "尚未配置代码仓地址"}>
-                {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || repoUrl || "尚未配置代码仓地址"}
+              <span className="settings-summary-label">当前项目代码仓</span>
+              <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : "未配置"}</strong>
+              <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || "当前项目尚未绑定代码仓"}>
+                {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || `项目 ${currentProjectId || "-"} 尚未绑定代码仓`}
               </span>
             </div>
             <div className="settings-summary-card">
@@ -810,12 +770,7 @@ const SettingsPage: React.FC = () => {
         title="Tree-sitter 代码图谱"
         style={{ marginTop: 16 }}
         extra={
-          <Space>
-            <Button onClick={() => void refreshCodeGraphStatus()}>刷新全部状态</Button>
-            <Button type="primary" loading={codeGraphRunning} onClick={() => void handleRunCodeGraphIndex()}>
-              兼容单仓建图
-            </Button>
-          </Space>
+          <Button onClick={() => void refreshRepositoryCodeGraphStatuses()}>刷新当前项目仓库状态</Button>
         }
       >
         <Alert
@@ -830,33 +785,7 @@ const SettingsPage: React.FC = () => {
             const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
             if (!repositories.length) {
               return (
-                <Descriptions column={1} size="small">
-                  <Descriptions.Item label="状态">
-                    <Space wrap>
-                      <Tag color={gitnexusStateColor(codeGraphStatus?.state)}>{codeGraphStatus?.state || "idle"}</Tag>
-                      <span>{codeGraphStatus?.message || "尚未读取 Tree-sitter 图谱状态。"}</span>
-                    </Space>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="依赖检查">{renderCodeGraphDependencyChecks(codeGraphStatus)}</Descriptions.Item>
-                  <Descriptions.Item label="代码仓路径">
-                    {codeGraphStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="图谱数据库">
-                    {codeGraphStatus?.graph_db_path || "建图后会生成在代码仓 .code-review-graph/graph.db"}
-                    {typeof codeGraphStatus?.graph_db_exists === "boolean" ? (
-                      <Tag style={{ marginLeft: 8 }} color={codeGraphStatus.graph_db_exists ? "success" : "warning"}>
-                        {codeGraphStatus.graph_db_exists ? "已生成" : "未生成"}
-                      </Tag>
-                    ) : null}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="图谱规模">{codeGraphCountSummary(codeGraphStatus)}</Descriptions.Item>
-                  <Descriptions.Item label="最近更新时间">
-                    {formatBeijingTime(codeGraphStatus?.indexed_at || codeGraphStatus?.graph_db_updated_at || codeGraphStatus?.updated_at)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="本次建图">
-                    {`索引 ${Number(codeGraphStatus?.indexed_file_count || 0)} 个，跳过 ${Number(codeGraphStatus?.skipped_unchanged_file_count || 0)} 个，失败 ${Number(codeGraphStatus?.failed_file_count || 0)} 个`}
-                  </Descriptions.Item>
-                </Descriptions>
+                <Alert type="warning" showIcon message="当前项目还没有绑定代码仓" description="请先在下方“当前项目代码仓设置”里新增代码仓，再建立 Tree-sitter 图谱。" />
               );
             }
             return (
@@ -933,12 +862,7 @@ const SettingsPage: React.FC = () => {
         title="GitNexus 代码图谱"
         style={{ marginTop: 16 }}
         extra={
-          <Space>
-            <Button onClick={() => void refreshGitNexusStatus()}>刷新全部状态</Button>
-            <Button type="primary" loading={gitnexusRunning} onClick={() => void handleRunGitNexusIndex()}>
-              兼容单仓建图
-            </Button>
-          </Space>
+          <Button onClick={() => void refreshRepositoryGitNexusStatuses()}>刷新当前项目仓库状态</Button>
         }
       >
         <Alert
@@ -965,39 +889,8 @@ const SettingsPage: React.FC = () => {
           {() => {
             const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
             if (!repositories.length) {
-              const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
               return (
-                <Descriptions column={1} size="small">
-                  <Descriptions.Item label="状态">
-                    <Space wrap>
-                      <Tag color={gitnexusStateColor(gitnexusStatus?.state)}>{gitnexusStatus?.state || "idle"}</Tag>
-                      <span>{gitnexusStatus?.message || "尚未执行 GitNexus 建图。"}</span>
-                    </Space>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="安装状态">
-                    <Space wrap>
-                      <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
-                      <span>{installDisplay.path}</span>
-                    </Space>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="执行命令">{gitnexusStatus?.gitnexus_command || "gitnexus analyze"}</Descriptions.Item>
-                  <Descriptions.Item label="环境诊断">{renderGitNexusPreflight(gitnexusPreflight)}</Descriptions.Item>
-                  <Descriptions.Item label="代码仓路径">
-                    {gitnexusStatus?.repo_path || form.getFieldValue("code_repo_local_path") || "未配置 code_repo_local_path"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="图谱目录">
-                    {gitnexusStatus?.graph_dir || "建图后会生成在代码仓 .gitnexus/ 目录"}
-                    {typeof gitnexusStatus?.graph_dir_exists === "boolean" ? (
-                      <Tag style={{ marginLeft: 8 }} color={gitnexusStatus.graph_dir_exists ? "success" : "warning"}>
-                        {gitnexusStatus.graph_dir_exists ? "目录存在" : "目录不存在"}
-                      </Tag>
-                    ) : null}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="最近更新时间">
-                    {formatBeijingTime(gitnexusStatus?.indexed_at || gitnexusStatus?.updated_at)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="当前 commit">{gitnexusStatus?.commit || "暂无"}</Descriptions.Item>
-                </Descriptions>
+                <Alert type="warning" showIcon message="当前项目还没有绑定代码仓" description="请先在下方“当前项目代码仓设置”里新增代码仓，再建立 GitNexus 图谱。" />
               );
             }
             return (
@@ -1273,7 +1166,12 @@ const SettingsPage: React.FC = () => {
           onFinish={async (values) => {
             setSaving(true);
             try {
+              const normalizedRepositories = normalizeCodeRepositories(values.code_repositories);
+              const runtimeSnapshot = form.getFieldsValue(true) as RuntimeSettings;
+              const updatedProjects = buildRuntimeProjectsWithRepositories(runtimeSnapshot, normalizedRepositories);
               const updatedRuntime = await settingsApi.updateRuntime({
+                default_project_id: runtimeSnapshot.default_project_id || updatedProjects[0]?.project_id || "",
+                projects: updatedProjects,
                 default_target_branch: values.default_target_branch,
                 default_analysis_mode: values.default_analysis_mode || "standard",
                 storage_backend: values.storage_backend || "sqlite",
@@ -1281,19 +1179,19 @@ const SettingsPage: React.FC = () => {
                 storage_pg_schema: values.storage_pg_schema || "public",
                 storage_pg_user: values.storage_pg_user || "",
                 storage_pg_password: String(values.storage_pg_password || "").trim() || undefined,
-                code_repo_clone_url: values.code_repo_clone_url || "",
-                code_repo_local_path: values.code_repo_local_path || "",
-                code_repo_default_branch: values.code_repo_default_branch || values.default_target_branch || "main",
+                code_repo_clone_url: "",
+                code_repo_local_path: "",
+                code_repo_default_branch: values.default_target_branch || "main",
                 code_repo_access_token: String(values.code_repo_access_token || "").trim() || undefined,
                 github_access_token: String(values.github_access_token || "").trim() || undefined,
                 gitlab_access_token: String(values.gitlab_access_token || "").trim() || undefined,
                 codehub_access_token: String(values.codehub_access_token || "").trim() || undefined,
-                code_repo_auto_sync: Boolean(values.code_repo_auto_sync),
+                code_repo_auto_sync: false,
                 auto_review_enabled: Boolean(values.auto_review_enabled),
-                auto_review_repo_url: values.code_repo_clone_url || "",
+                auto_review_repo_url: "",
                 auto_review_poll_interval_seconds: Number(values.auto_review_poll_interval_seconds || 120),
-                default_repository_id: values.default_repository_id || "",
-                code_repositories: normalizeCodeRepositories(values.code_repositories),
+                default_repository_id: "",
+                code_repositories: [],
                 database_sources: parseJsonArray<PostgresDataSourceSettings>(String(values.database_sources || "")),
                 tool_allowlist: parseList(String(values.tool_allowlist || "")),
                 mcp_allowlist: parseList(String(values.mcp_allowlist || "")),
@@ -1350,9 +1248,14 @@ const SettingsPage: React.FC = () => {
                 ca_bundle_path: values.ca_bundle_path || "",
               });
               message.success("运行时设置已更新");
-              form.setFieldsValue(updatedRuntime);
-              void refreshRepositoryGitNexusStatuses(updatedRuntime.code_repositories || []);
-              void refreshRepositoryCodeGraphStatuses(updatedRuntime.code_repositories || []);
+              const projectRepositories = currentProjectRepositories(updatedRuntime);
+              form.setFieldsValue({
+                ...updatedRuntime,
+                code_repositories: projectRepositories,
+                default_repository_id: "",
+              });
+              void refreshRepositoryGitNexusStatuses(projectRepositories);
+              void refreshRepositoryCodeGraphStatuses(projectRepositories);
               form.setFieldValue("default_llm_api_key", "");
               form.setFieldValue("storage_pg_password", "");
               form.setFieldValue("code_repo_access_token", "");
@@ -1373,23 +1276,14 @@ const SettingsPage: React.FC = () => {
             items={[
               {
                 key: "basic",
-                label: "多代码仓设置",
+                label: "当前项目代码仓设置",
                 extra: <Tag color="processing">最常用</Tag>,
                 children: (
                   <div className="settings-collapse-content">
                     <Paragraph className="settings-section-tip">
-                      在这里维护所有可审核代码仓。Git 地址、本地目录、默认分支、自动同步和 GitNexus 开关都以这份列表为准。
+                      这里维护当前项目下绑定的代码仓。不同团队、不同项目的仓库相互隔离，不再维护全局代码仓列表。
                     </Paragraph>
                     <Row gutter={[16, 0]}>
-                      <Col xs={24} xl={12}>
-                        <Form.Item
-                          name="default_repository_id"
-                          label="默认代码仓 ID"
-                          extra="填写下方列表中的仓库 ID；为空时默认使用列表第一项。"
-                        >
-                          <Input placeholder="ipc-fnd-service" />
-                        </Form.Item>
-                      </Col>
                       <Col xs={24} xl={6}>
                         <Form.Item name="auto_review_enabled" label="启用自动审核队列" valuePropName="checked">
                           <Switch />
@@ -1400,8 +1294,8 @@ const SettingsPage: React.FC = () => {
                           type="info"
                           showIcon
                           style={{ marginBottom: 16 }}
-                          message="代码仓信息统一维护在下方列表"
-                          description="新增、删除或调整代码仓时，只修改这份列表即可。系统会按 repository_id 定位本地仓、GitNexus 图谱和数据源。"
+                          message="代码仓信息跟随当前项目保存"
+                          description="新增、删除或调整代码仓时，只会修改当前项目的 repositories；MR 队列、源码上下文、GitNexus 和 Tree-sitter 图谱都会按项目内仓库取数。"
                         />
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1516,7 +1410,7 @@ const SettingsPage: React.FC = () => {
                                       clone_url: "",
                                       web_url_prefixes: [],
                                       local_path: "",
-                                      default_branch: form.getFieldValue("code_repo_default_branch") || form.getFieldValue("default_target_branch") || "master",
+                                      default_branch: form.getFieldValue("default_target_branch") || "master",
                                       enabled: true,
                                       auto_review_enabled: true,
                                       auto_review_poll_interval_seconds: Number(form.getFieldValue("auto_review_poll_interval_seconds") || 120),

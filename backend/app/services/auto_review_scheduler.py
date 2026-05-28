@@ -64,7 +64,8 @@ class AutoReviewScheduler:
             auto_review_enabled=runtime.auto_review_enabled,
             poll_interval=runtime.auto_review_poll_interval_seconds,
         )
-        repositories = self._review_service.resolve_auto_review_repositories(runtime)
+        current_project_id = str(runtime.default_project_id or "").strip()
+        repositories = self._review_service.resolve_auto_review_repositories(runtime, project_id=current_project_id)
         if not runtime.auto_review_enabled and not repositories:
             MemoryProbe.log("scheduler.tick.auto_review_disabled")
             return
@@ -74,7 +75,13 @@ class AutoReviewScheduler:
             return
         created = []
         for repository in repositories:
-            created.extend(self._review_service.enqueue_open_merge_requests(repository.clone_url, repository.repository_id))
+            created.extend(
+                self._review_service.enqueue_open_merge_requests(
+                    repository.clone_url,
+                    repository.repository_id,
+                    current_project_id,
+                )
+            )
         MemoryProbe.log(
             "scheduler.tick.after_enqueue",
             created_count=len(created),
@@ -87,7 +94,7 @@ class AutoReviewScheduler:
                 len(created),
                 [item.review_id for item in created],
             )
-        started = self._review_service.start_next_pending_review()
+        started = self._review_service.start_next_pending_review(project_id=current_project_id)
         MemoryProbe.log(
             "scheduler.tick.after_start_next",
             started_review_id=started.review_id if started is not None else "",

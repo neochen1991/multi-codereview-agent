@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from app.domain.models.message import ConversationMessage
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.domain.models.finding import ReviewFinding
@@ -321,7 +326,7 @@ class ReviewRunnerIssueValidationMixin:
         elif family == "comment_contract_unimplemented":
             normalized.normalized_issue_type = "comment_contract_unimplemented"
             if "承诺未落地" in normalized.title or "todo" in normalized.title.lower():
-                normalized.title = "承诺未落地"
+                normalized.title = "注释/TODO 承诺未实现"
         elif family == "course_creation_semantics":
             normalized.normalized_issue_type = "course_creation_semantics"
         elif family == "event_consumer_batch_boundary":
@@ -446,7 +451,7 @@ class ReviewRunnerIssueValidationMixin:
             issue.title = "查询边界缺失"
         elif family == "comment_contract_unimplemented":
             issue.normalized_issue_type = "comment_contract_unimplemented"
-            issue.title = "承诺未落地"
+            issue.title = "注释/TODO 承诺未实现"
             if any(token in compact for token in ("权限", "越权", "登录用户")):
                 issue.summary = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有权限过滤逻辑，存在越权读取风险。"
                 issue.needs_human = False
@@ -457,7 +462,7 @@ class ReviewRunnerIssueValidationMixin:
         if family == "query_semantics_regression":
             return "查询语义从精确匹配退化为模糊匹配"
         if family == "comment_contract_unimplemented":
-            return "承诺未落地"
+            return "注释/TODO 承诺未实现"
         if family == "lock_guard_removed":
             return "并发保护被移除"
         if family == "exception_swallowed":
@@ -692,119 +697,244 @@ class ReviewRunnerIssueValidationMixin:
     ) -> list[DebateIssue]:
         if not issues:
             return []
+        started_at = time.perf_counter()
+        skipped_count = 0
+        llm_issue_count = 0
+        llm_call_count = 0
         validated_issues: list[DebateIssue] = []
         resolution = self.llm_chat_service.resolve_main_agent(runtime_settings)
         validation_batches = self._build_issue_consistency_batches(issues, findings_by_id)
         for batch_index, batch in enumerate(validation_batches, start=1):
             self._abort_if_closed(review.review_id)
-            fallback_results = []
-            for item in batch:
-                baseline = item["baseline"]
-                fallback_results.append(
-                    {
-                        "issue_id": item["issue"].issue_id,
-                        "status": "validator_failed",
-                        **baseline,
-                        "consistency_conflicts": ["LLM 一致性校验未完成，本次保留原 issue 内容。"],
-                        "reason": "LLM 一致性校验失败，当前先保留原始 issue 内容。",
-                    }
-                )
-            validator_result = self.llm_chat_service.complete_text(
-                system_prompt=(
-                    "你是最终裁决校验 Judge。你的唯一任务是校验正式 issue 的问题说明、修改思路、当前代码、建议修改后代码"
-                    " 是否完全一致，并在必要时只基于给定上下文修正这些字段。"
-                ),
-                user_prompt=self._build_issue_consistency_validation_prompt(batch),
-                resolution=resolution,
-                runtime_settings=runtime_settings,
-                fallback_text=json.dumps({"results": fallback_results}, ensure_ascii=False),
-                allow_fallback=True,
-                timeout_seconds=max(20.0, float(llm_request_options["timeout_seconds"]) * 0.6),
-                max_attempts=1,
-                log_context={
-                    "review_id": review.review_id,
-                    "issue_id": "judge_batch_validation",
-                    "expert_id": "judge",
-                    "phase": "judge_consistency_validation",
-                    "file_path": str(batch[0]["baseline"].get("file_path") or "") if batch else "",
-                    "line_start": int(batch[0]["baseline"].get("line_start") or 1) if batch else 1,
-                    "issue_count": len(batch),
-                    "batch_index": batch_index,
-                },
-            )
-            result_payloads = self._extract_issue_consistency_batch_results(validator_result.text)
-            payload_by_issue_id = {
-                str(item.get("issue_id") or "").strip(): item
-                for item in result_payloads
-                if str(item.get("issue_id") or "").strip()
-            }
+            llm_batch: list[dict[str, object]] = []
+            batch_validated_by_issue_id: dict[str, DebateIssue] = {}
             for item in batch:
                 issue = item["issue"]
                 baseline = item["baseline"]
                 related_findings = item["related_findings"]
-                payload = payload_by_issue_id.get(issue.issue_id, {"issue_id": issue.issue_id, **baseline, "status": "validator_failed"})
+                if self._issue_needs_llm_consistency_validation(
+                    issue=issue,
+                    baseline=baseline,
+                    related_findings=related_findings,
+                    runtime_settings=runtime_settings,
+                ):
+                    llm_batch.append(item)
+                    continue
                 validated_issue, validation_metadata = self._apply_issue_consistency_validation(
                     issue=issue,
                     baseline=baseline,
-                    payload=payload,
+                    payload={
+                        "issue_id": issue.issue_id,
+                        "status": "passed",
+                        "reason": "字段完整且代码锚点一致，已跳过 LLM 一致性校验。",
+                    },
                 )
-                if not self._looks_like_concrete_suggested_code(
-                    validated_issue.suggested_code,
-                    file_path=validated_issue.file_path,
-                ):
-                    repaired_suggested_code = self._repair_issue_suggested_code_with_judge(
-                        review=review,
-                        issue=validated_issue,
+                validated_issue.consistency_check_status = "skipped"
+                validated_issue.consistency_check_summary = "字段完整且代码锚点一致，已跳过 LLM 一致性校验。"
+                batch_validated_by_issue_id[issue.issue_id] = validated_issue
+                skipped_count += 1
+                logger.info(
+                    "judge consistency validation skipped review_id=%s issue_id=%s file_path=%s line_start=%s summary=%s",
+                    review.review_id,
+                    issue.issue_id,
+                    validated_issue.file_path,
+                    validated_issue.line_start,
+                    validation_metadata.get("summary"),
+                )
+            if llm_batch:
+                llm_issue_count += len(llm_batch)
+                llm_call_count += 1
+                fallback_results = []
+                for item in llm_batch:
+                    baseline = item["baseline"]
+                    fallback_results.append(
+                        {
+                            "issue_id": item["issue"].issue_id,
+                            "status": "validator_failed",
+                            **baseline,
+                            "consistency_conflicts": ["LLM 一致性校验未完成，本次保留原 issue 内容。"],
+                            "reason": "LLM 一致性校验失败，当前先保留原始 issue 内容。",
+                        }
+                    )
+                validator_result = self.llm_chat_service.complete_text(
+                    system_prompt=(
+                        "你是最终裁决校验 Judge。你的唯一任务是校验正式 issue 的问题说明、修改思路、当前代码、建议修改后代码"
+                        " 是否完全一致，并在必要时只基于给定上下文修正这些字段。"
+                    ),
+                    user_prompt=self._build_issue_consistency_validation_prompt(llm_batch),
+                    resolution=resolution,
+                    runtime_settings=runtime_settings,
+                    fallback_text=json.dumps({"results": fallback_results}, ensure_ascii=False),
+                    allow_fallback=True,
+                    timeout_seconds=max(
+                        20.0,
+                        min(
+                            float(llm_request_options["timeout_seconds"]) * 0.6,
+                            float(os.getenv("REVIEW_JUDGE_VALIDATION_TIMEOUT_CAP_SECONDS", "45") or 45),
+                        ),
+                    ),
+                    max_attempts=1,
+                    log_context={
+                        "review_id": review.review_id,
+                        "issue_id": "judge_batch_validation",
+                        "expert_id": "judge",
+                        "phase": "judge_consistency_validation",
+                        "file_path": str(llm_batch[0]["baseline"].get("file_path") or "") if llm_batch else "",
+                        "line_start": int(llm_batch[0]["baseline"].get("line_start") or 1) if llm_batch else 1,
+                        "issue_count": len(llm_batch),
+                        "batch_index": batch_index,
+                    },
+                )
+                result_payloads = self._extract_issue_consistency_batch_results(validator_result.text)
+                payload_by_issue_id = {
+                    str(item.get("issue_id") or "").strip(): item
+                    for item in result_payloads
+                    if str(item.get("issue_id") or "").strip()
+                }
+                for item in llm_batch:
+                    issue = item["issue"]
+                    baseline = item["baseline"]
+                    related_findings = item["related_findings"]
+                    payload = payload_by_issue_id.get(issue.issue_id, {"issue_id": issue.issue_id, **baseline, "status": "validator_failed"})
+                    validated_issue, validation_metadata = self._apply_issue_consistency_validation(
+                        issue=issue,
                         baseline=baseline,
-                        related_findings=related_findings,
-                        runtime_settings=runtime_settings,
-                        llm_request_options=llm_request_options,
+                        payload=payload,
                     )
-                    if repaired_suggested_code:
-                        validated_issue.suggested_code = repaired_suggested_code
-                        validated_issue.updated_at = datetime.now(UTC)
-                        validation_metadata["updated_fields"] = list(
-                            dict.fromkeys([*list(validation_metadata.get("updated_fields") or []), "suggested_code"])
+                    if not self._looks_like_concrete_suggested_code(
+                        validated_issue.suggested_code,
+                        file_path=validated_issue.file_path,
+                    ):
+                        repaired_suggested_code = self._repair_issue_suggested_code_with_judge(
+                            review=review,
+                            issue=validated_issue,
+                            baseline=baseline,
+                            related_findings=related_findings,
+                            runtime_settings=runtime_settings,
+                            llm_request_options=llm_request_options,
                         )
-                        repair_note = "Judge 已补全具体建议修改代码。"
-                        validation_metadata["summary"] = (
-                            f"{str(validation_metadata.get('summary') or '').strip()} {repair_note}"
-                        ).strip()
-                validated_issues.append(validated_issue)
-                self.message_repo.append(
-                    ConversationMessage(
-                        review_id=review.review_id,
-                        issue_id=issue.issue_id,
-                        expert_id="judge",
-                        message_type="judge_consistency_validation",
-                        content=str(validation_metadata.get("summary") or "Judge 已完成正式 issue 一致性校验。"),
-                        metadata={
-                            "phase": "judge",
-                            "validation_status": validated_issue.consistency_check_status,
-                            "consistency_check_summary": validated_issue.consistency_check_summary,
-                            "consistency_conflicts": validated_issue.consistency_conflicts,
-                            "updated_fields": validation_metadata.get("updated_fields", []),
-                            "file_path": validated_issue.file_path,
-                            "line_start": validated_issue.line_start,
-                            "current_code": validated_issue.current_code,
-                            "suggested_code": validated_issue.suggested_code,
-                            "remediation_strategy": validated_issue.remediation_strategy,
-                            "remediation_suggestion": validated_issue.remediation_suggestion,
-                            "remediation_steps": validated_issue.remediation_steps,
-                            "batch_index": batch_index,
-                            "batch_issue_count": len(batch),
-                            **self._llm_message_metadata(validator_result),
-                        },
+                        if repaired_suggested_code:
+                            validated_issue.suggested_code = repaired_suggested_code
+                            validated_issue.updated_at = datetime.now(UTC)
+                            validation_metadata["updated_fields"] = list(
+                                dict.fromkeys([*list(validation_metadata.get("updated_fields") or []), "suggested_code"])
+                            )
+                            repair_note = "Judge 已补全具体建议修改代码。"
+                            validation_metadata["summary"] = (
+                                f"{str(validation_metadata.get('summary') or '').strip()} {repair_note}"
+                            ).strip()
+                    batch_validated_by_issue_id[issue.issue_id] = validated_issue
+                    self.message_repo.append(
+                        ConversationMessage(
+                            review_id=review.review_id,
+                            issue_id=issue.issue_id,
+                            expert_id="judge",
+                            message_type="judge_consistency_validation",
+                            content=str(validation_metadata.get("summary") or "Judge 已完成正式 issue 一致性校验。"),
+                            metadata={
+                                "phase": "judge",
+                                "validation_status": validated_issue.consistency_check_status,
+                                "consistency_check_summary": validated_issue.consistency_check_summary,
+                                "consistency_conflicts": validated_issue.consistency_conflicts,
+                                "updated_fields": validation_metadata.get("updated_fields", []),
+                                "file_path": validated_issue.file_path,
+                                "line_start": validated_issue.line_start,
+                                "current_code": validated_issue.current_code,
+                                "suggested_code": validated_issue.suggested_code,
+                                "remediation_strategy": validated_issue.remediation_strategy,
+                                "remediation_suggestion": validated_issue.remediation_suggestion,
+                                "remediation_steps": validated_issue.remediation_steps,
+                                "batch_index": batch_index,
+                                "batch_issue_count": len(llm_batch),
+                                **self._llm_message_metadata(validator_result),
+                            },
+                        )
                     )
-                )
+            for item in batch:
+                issue = item["issue"]
+                validated = batch_validated_by_issue_id.get(issue.issue_id)
+                if validated is not None:
+                    validated_issues.append(validated)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
+        logger.info(
+            "judge consistency validation completed review_id=%s issue_count=%s skipped_count=%s llm_issue_count=%s llm_call_count=%s elapsed_ms=%s",
+            review.review_id,
+            len(issues),
+            skipped_count,
+            llm_issue_count,
+            llm_call_count,
+            elapsed_ms,
+        )
         return validated_issues
+
+    def _issue_needs_llm_consistency_validation(
+        self,
+        *,
+        issue: DebateIssue,
+        baseline: dict[str, object],
+        related_findings: list[ReviewFinding],
+        runtime_settings,
+    ) -> bool:
+        """Only spend Judge LLM calls on issues that have a real quality risk.
+
+        The deterministic path still sanitizes display fields and runs anchor checks via
+        ``_apply_issue_consistency_validation``. LLM validation is reserved for cases
+        where the model can add value: missing concrete repair code, dirty fallback
+        text, or code/issue anchor conflicts.
+        """
+
+        if str(os.getenv("REVIEW_ALWAYS_VALIDATE_FINAL_ISSUES", "") or "").strip().lower() in {"1", "true", "yes"}:
+            return True
+        if bool(getattr(runtime_settings, "enable_llm_issue_judge", False)):
+            return True
+        file_path = str(baseline.get("file_path") or issue.file_path or "").strip()
+        if not file_path:
+            return True
+        current_code = str(issue.current_code or baseline.get("current_code") or "").strip()
+        if not self._looks_like_precise_issue_code(current_code):
+            return True
+        suggested_code = str(issue.suggested_code or baseline.get("suggested_code") or "").strip()
+        if not self._looks_like_concrete_suggested_code(suggested_code, file_path=file_path):
+            return True
+        text_fields = [
+            issue.summary,
+            issue.remediation_strategy,
+            issue.remediation_suggestion,
+            *list(issue.remediation_steps or []),
+        ]
+        if any(str(value or "").strip() and not self._sanitize_user_facing_issue_text(str(value or "")) for value in text_fields):
+            return True
+        if not self._first_sanitized_user_facing_text(issue.summary, baseline.get("summary"), issue.title):
+            return True
+        if not self._first_sanitized_user_facing_text(
+            issue.remediation_strategy,
+            issue.remediation_suggestion,
+            baseline.get("remediation_strategy"),
+            baseline.get("remediation_suggestion"),
+            *list(baseline.get("remediation_steps") or []),
+        ):
+            return True
+        if self._detect_issue_anchor_conflicts(
+            issue.model_copy(
+                update={
+                    "file_path": file_path,
+                    "current_code": current_code,
+                    "suggested_code": suggested_code,
+                },
+                deep=True,
+            )
+        ):
+            return True
+        if related_findings and not issue.finding_ids:
+            return True
+        return False
 
     def _build_issue_consistency_batches(
         self,
         issues: list[DebateIssue],
         findings_by_id: dict[str, ReviewFinding],
         *,
-        max_batch_size: int = 2,
+        max_batch_size: int = 4,
     ) -> list[list[dict[str, object]]]:
         grouped: dict[str, list[dict[str, object]]] = {}
         for issue in issues:

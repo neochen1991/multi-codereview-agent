@@ -122,8 +122,9 @@ def test_reviews_queue_sync_prefers_code_repo_clone_url(client, monkeypatch):
 
     captured: dict[str, str] = {}
 
-    def fake_enqueue(repo_url: str, repository_id: str = ""):
+    def fake_enqueue(repo_url: str, repository_id: str = "", project_id: str = ""):
         captured["repo_url"] = repo_url
+        captured["project_id"] = project_id
         return []
 
     monkeypatch.setattr(
@@ -132,7 +133,7 @@ def test_reviews_queue_sync_prefers_code_repo_clone_url(client, monkeypatch):
     )
     monkeypatch.setattr(
         "app.api.routes.reviews.review_service_module.review_service.start_next_pending_review",
-        lambda: None,
+        lambda project_id="": None,
     )
 
     response = client.post("/api/reviews/queue/sync")

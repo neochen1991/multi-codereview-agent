@@ -68,7 +68,9 @@ def test_projects_api_supports_create_select_and_bind_repositories(client):
 
     runtime = client.get("/api/settings/runtime").json()
     assert runtime["default_project_id"] == "pay-core"
-    assert runtime["code_repositories"][0]["repository_id"] == "pay-web-console"
+    pay_core = next(item for item in runtime["projects"] if item["project_id"] == "pay-core")
+    assert pay_core["repositories"][0]["repository_id"] == "pay-web-console"
+    assert runtime["code_repositories"] == []
 
     update_project = client.put(
         "/api/projects/pay-core",
@@ -101,5 +103,9 @@ def test_projects_api_supports_create_select_and_bind_repositories(client):
 
     runtime_after_project_update = client.get("/api/settings/runtime").json()
     assert runtime_after_project_update["default_project_id"] == "pay-core"
-    assert runtime_after_project_update["code_repositories"][0]["repository_id"] == "pay-risk-engine"
-    assert runtime_after_project_update["default_repository_id"] == "pay-risk-engine"
+    pay_core_after_update = next(
+        item for item in runtime_after_project_update["projects"] if item["project_id"] == "pay-core"
+    )
+    assert pay_core_after_update["repositories"][0]["repository_id"] == "pay-risk-engine"
+    assert runtime_after_project_update["code_repositories"] == []
+    assert runtime_after_project_update["default_repository_id"] == ""

@@ -53,7 +53,7 @@ class ReviewWorkspaceService:
         runtime: RuntimeSettings,
     ) -> ReviewWorkspaceResult:
         repository = self.repository_resolver.resolve(runtime, subject)
-        repository_id = str(repository.repository_id or subject.repo_id or runtime.default_repository_id or "default-repository").strip()
+        repository_id = str(repository.repository_id or subject.repo_id or "default-repository").strip()
         base_repo_path = str(repository.local_path or "").strip()
         target_ref = str(subject.target_ref or repository.default_branch or runtime.default_target_branch or "main").strip()
         source_ref = str(subject.source_ref or "").strip()

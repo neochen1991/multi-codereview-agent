@@ -262,6 +262,34 @@ class ReviewRunnerExpertOutputMixin:
         if not uncovered_observations:
             return list(initial_candidates)
 
+        if analysis_mode == "light":
+            fallback_candidates = self._build_forced_observation_candidates(
+                expert=expert,
+                uncovered_observations=uncovered_observations,
+                max_findings=max_findings,
+            )
+            if not fallback_candidates:
+                return list(initial_candidates)
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_observation_followup_skipped",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 轻量模式下已用结构化 observation 生成补漏候选，跳过额外 LLM 复核",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "observation_count": len(uncovered_observations),
+                        "generated_candidate_count": len(fallback_candidates),
+                        "analysis_mode": analysis_mode,
+                    },
+                )
+            )
+            return self._merge_expert_analysis_candidates(
+                initial_candidates,
+                fallback_candidates,
+                max_findings=max_findings,
+            )
+
         batch_files = sorted(
             {
                 str(item.get("file_path") or "").strip()

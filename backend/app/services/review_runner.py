@@ -5199,6 +5199,10 @@ class ReviewRunner(
             prompt_profile_name=effective_prompt_profile_name,
         )
         thorough_review_enabled = self._review_thorough_mode_enabled(runtime_settings, prompt_profile)
+        fast_light_mode = (
+            analysis_mode == "light"
+            and str(os.getenv("REVIEW_LIGHT_EXTRA_LLM_SCANS", "") or "").strip().lower() not in {"1", "true", "yes"}
+        )
         main_prompt_contract = self._build_prompt_contract_metadata(
             stage="expert_main_rule_guided_review" if prompt_profile.require_rule_check_results else "expert_main_legacy_review",
             system_prompt=expert_system_prompt,
@@ -5315,7 +5319,7 @@ class ReviewRunner(
                     contract_errors = []
                 else:
                     contract_errors = repair_errors or contract_errors
-            if contract_valid:
+            if contract_valid and not fast_light_mode:
                 followup_text, followup_metadata = self._maybe_run_context_request_followup(
                     review=review,
                     expert=expert,
@@ -5391,6 +5395,8 @@ class ReviewRunner(
         )
         empty_retry_metadata: dict[str, object] = {}
         if (
+            not fast_light_mode
+            and
             prompt_profile.require_rule_check_results
             and not parsed_candidates
             and self._should_retry_empty_rule_guided_candidate_response(
@@ -5438,19 +5444,23 @@ class ReviewRunner(
             repository_context=repository_context,
             rule_screening=rule_screening or {},
         )
-        custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
-            review=review,
-            expert=expert,
-            runtime_settings=runtime_settings,
-            resolution=llm_resolution,
-            rule_screening=rule_screening or {},
-            normalized_batch_items=normalized_batch_items,
-            repository_context=repository_context,
-            max_rules_per_batch=prompt_profile.max_rules_per_prompt,
-            file_path=file_path,
-            line_start=line_start,
-            timeout_seconds=float(llm_request_options["timeout_seconds"]),
-        )
+        if fast_light_mode:
+            custom_scan_texts: list[str] = []
+            custom_scan_metadata = {"attempted": False, "skipped_reason": "light_mode_fast_path"}
+        else:
+            custom_scan_texts, custom_scan_metadata = self._run_rule_guided_custom_rule_scan_batches(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                rule_screening=rule_screening or {},
+                normalized_batch_items=normalized_batch_items,
+                repository_context=repository_context,
+                max_rules_per_batch=prompt_profile.max_rules_per_prompt,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
         if custom_scan_metadata:
             expert_llm_diagnostics["custom_rule_batch_scan"] = custom_scan_metadata
         for custom_scan_text in custom_scan_texts:
@@ -5472,6 +5482,7 @@ class ReviewRunner(
         general_scan_metadata: dict[str, object] = {}
         if (
             prompt_profile.require_rule_check_results
+            and not fast_light_mode
             and should_scan_review_targets
             and (thorough_review_enabled or not parsed_candidates)
         ):
@@ -6143,7 +6154,27 @@ class ReviewRunner(
             issue_file_path,
             1,
         ) or 1
-        if issue.needs_debate and debate_participants:
+        light_debate_fast_path = (
+            analysis_mode == "light"
+            and str(os.getenv("REVIEW_LIGHT_DEBATE_LLM", "") or "").strip().lower()
+            not in {"1", "true", "yes"}
+        )
+        if issue.needs_debate and debate_participants and light_debate_fast_path:
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="debate_skipped",
+                    phase="debate",
+                    message=f"{issue.title} 在轻量模式下跳过额外辩论 LLM，沿用裁决后的结构化结论",
+                    payload={
+                        "issue_id": issue.issue_id,
+                        "participants": debate_participants,
+                        "analysis_mode": analysis_mode,
+                        "skipped_reason": "light_mode_fast_path",
+                    },
+                )
+            )
+        elif issue.needs_debate and debate_participants:
             self.event_repo.append(
                 ReviewEvent(
                     review_id=review.review_id,

@@ -27,12 +27,14 @@ class RepositoryConfigResolver:
     def resolve(self, runtime: RuntimeSettings, subject: ReviewSubject) -> ResolvedRepository:
         metadata = dict(subject.metadata or {})
         repository_id = str(metadata.get("repository_id") or subject.repo_id or "").strip()
+        project_id = str(subject.project_id or metadata.get("project_id") or metadata.get("project_tenant_id") or "").strip()
         repo = runtime.resolve_repository(
             repository_id=repository_id,
             repo_url=subject.repo_url,
             mr_url=subject.mr_url,
+            project_id=project_id,
         )
-        url_repo = self._resolve_by_url(runtime, repo_url=subject.repo_url, mr_url=subject.mr_url)
+        url_repo = self._resolve_by_url(runtime, repo_url=subject.repo_url, mr_url=subject.mr_url, project_id=project_id)
         if (
             repo is not None
             and url_repo is not None
@@ -43,7 +45,7 @@ class RepositoryConfigResolver:
             repo = url_repo
         if repo is None:
             repo = CodeRepositorySettings(
-                repository_id=repository_id or runtime.default_repository_id or "default-repository",
+                repository_id=repository_id or "default-repository",
                 clone_url=runtime.code_repo_clone_url,
                 local_path=runtime.code_repo_local_path,
                 default_branch=runtime.code_repo_default_branch or runtime.default_target_branch or "main",
@@ -61,11 +63,19 @@ class RepositoryConfigResolver:
             gitnexus_enabled=repo.gitnexus_enabled,
         )
 
-    def _resolve_by_url(self, runtime: RuntimeSettings, *, repo_url: str = "", mr_url: str = "") -> CodeRepositorySettings | None:
+    def _resolve_by_url(
+        self,
+        runtime: RuntimeSettings,
+        *,
+        repo_url: str = "",
+        mr_url: str = "",
+        project_id: str = "",
+    ) -> CodeRepositorySettings | None:
         candidates = [str(repo_url or "").strip(), str(mr_url or "").strip()]
         for value in [item for item in candidates if item]:
             lowered = value.lower()
-            for repo in runtime.code_repositories:
+            repositories = runtime.project_repositories(project_id) if project_id else runtime.all_project_repositories()
+            for repo in repositories:
                 urls = [repo.clone_url, *repo.web_url_prefixes]
                 if any(url and (lowered == url.lower() or lowered.startswith(url.lower().rstrip("/") + "/")) for url in urls):
                     return repo
@@ -84,8 +94,8 @@ class RepositoryConfigResolver:
                 subject
                 or {
                     "subject_type": "branch",
-                    "repo_id": runtime.default_repository_id or "default-repository",
-                    "project_id": "",
+                    "repo_id": "",
+                    "project_id": runtime.default_project_id or "",
                     "source_ref": "",
                     "target_ref": runtime.default_target_branch or "main",
                 }

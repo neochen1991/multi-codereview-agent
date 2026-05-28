@@ -233,16 +233,15 @@ class CodeGraphIndexScheduler:
 
     def _resolve_repository_id(self, runtime: object, repository_id: str = "") -> str:
         normalized = str(repository_id or "").strip()
+        project_id = str(getattr(runtime, "default_project_id", "") or "").strip()
         resolve_repository = getattr(runtime, "resolve_repository", None)
-        repo = resolve_repository(repository_id=normalized) if callable(resolve_repository) else None
+        repo = resolve_repository(repository_id=normalized, project_id=project_id) if callable(resolve_repository) else None
         if repo is not None and str(getattr(repo, "repository_id", "") or "").strip():
             return str(getattr(repo, "repository_id") or "").strip()
         if normalized:
             return normalized
-        default_repository_id = str(getattr(runtime, "default_repository_id", "") or "").strip()
-        if default_repository_id:
-            return default_repository_id
-        repositories = list(getattr(runtime, "code_repositories", []) or [])
+        project_repositories = getattr(runtime, "project_repositories", None)
+        repositories = list(project_repositories(project_id) if callable(project_repositories) else [])
         for item in repositories:
             candidate = str(getattr(item, "repository_id", "") or "").strip()
             if candidate:
@@ -250,11 +249,12 @@ class CodeGraphIndexScheduler:
         return "default-repository"
 
     def _resolve_repo_path(self, runtime: object, repository_id: str = "") -> str:
+        project_id = str(getattr(runtime, "default_project_id", "") or "").strip()
         resolve_repository = getattr(runtime, "resolve_repository", None)
-        repo = resolve_repository(repository_id=str(repository_id or "").strip()) if callable(resolve_repository) else None
+        repo = resolve_repository(repository_id=str(repository_id or "").strip(), project_id=project_id) if callable(resolve_repository) else None
         if repo is not None and str(getattr(repo, "local_path", "") or "").strip():
             return str(getattr(repo, "local_path") or "").strip()
-        return str(getattr(runtime, "code_repo_local_path", "") or "").strip()
+        return ""
 
     def _status_path(self, repository_id: str = "") -> Path:
         normalized = self._safe_repository_id(repository_id or "default-repository")

@@ -9050,7 +9050,7 @@ def test_review_runner_validate_final_issues_with_judge_emits_validation_message
         review=review,
         issues=[issue],
         findings_by_id={"fdg_demo": finding},
-        runtime_settings=runner.runtime_settings_service.get(),
+        runtime_settings=runner.runtime_settings_service.get().model_copy(update={"enable_llm_issue_judge": True}),
         llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
     )
 
@@ -9174,6 +9174,85 @@ def test_review_runner_judge_cleans_internal_fallback_text_from_issue_details(st
     assert validated.remediation_steps == ["恢复批量保存"]
 
 
+def test_review_runner_skips_judge_llm_for_complete_consistent_issue(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_skip_clean_judge",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/bulk-save",
+            target_ref="main",
+            changed_files=["src/main/java/com/example/BulkEnrollmentService.java"],
+        ),
+        status="running",
+        phase="judge",
+    )
+    issue = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_clean_bulk_save",
+        title="批量写入退化为逐条保存",
+        summary="批量报名路径把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。",
+        normalized_issue_type="n_plus_one",
+        file_path="src/main/java/com/example/BulkEnrollmentService.java",
+        line_start=31,
+        status="resolved",
+        severity="high",
+        confidence=0.92,
+        finding_ids=["fdg_clean_bulk_save"],
+        participant_expert_ids=["performance_reliability"],
+        remediation_strategy="恢复批量写入",
+        remediation_suggestion="使用 repository.saveAll(enrollments) 代替循环内逐条 save。",
+        remediation_steps=["构造 enrollments", "调用 saveAll"],
+        current_code="for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+        suggested_code="repository.saveAll(enrollments);",
+    )
+    finding = ReviewFinding(
+        review_id=review.review_id,
+        finding_id="fdg_clean_bulk_save",
+        expert_id="performance_reliability",
+        title=issue.title,
+        summary=issue.summary,
+        file_path=issue.file_path,
+        line_start=issue.line_start,
+        remediation_strategy=issue.remediation_strategy,
+        remediation_suggestion=issue.remediation_suggestion,
+        remediation_steps=issue.remediation_steps,
+        code_excerpt=issue.current_code,
+        suggested_code=issue.suggested_code,
+    )
+
+    def _unexpected_complete_text(**_kwargs):
+        raise AssertionError("clean issue should not call Judge LLM")
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _unexpected_complete_text)
+    monkeypatch.setattr(
+        runner.llm_chat_service,
+        "resolve_main_agent",
+        lambda _runtime: LLMResolution(
+            provider="test",
+            model="test-model",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            api_key="secret",
+        ),
+    )
+
+    validated = runner._validate_final_issues_with_judge(
+        review=review,
+        issues=[issue],
+        findings_by_id={"fdg_clean_bulk_save": finding},
+        runtime_settings=runner.runtime_settings_service.get(),
+        llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
+    )
+
+    assert validated[0].consistency_check_status == "skipped"
+    assert validated[0].summary == issue.summary
+    assert validated[0].suggested_code == issue.suggested_code
+    assert not runner.message_repo.list(review.review_id)
+
+
 def test_review_runner_batches_issue_consistency_validation_by_file(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
@@ -9277,7 +9356,7 @@ def test_review_runner_batches_issue_consistency_validation_by_file(storage_root
         review=review,
         issues=issues,
         findings_by_id=findings_by_id,
-        runtime_settings=runner.runtime_settings_service.get(),
+        runtime_settings=runner.runtime_settings_service.get().model_copy(update={"enable_llm_issue_judge": True}),
         llm_request_options={"timeout_seconds": 30, "max_attempts": 1},
     )
 

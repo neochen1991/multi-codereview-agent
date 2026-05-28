@@ -224,32 +224,84 @@ class RuntimeSettings(BaseModel):
                 break
         self.projects = projects
 
-    def enabled_repositories(self) -> list[CodeRepositorySettings]:
-        return [item for item in self.code_repositories if item.enabled]
+    def current_project(self, project_id: str = "") -> ProjectSettings | None:
+        """返回指定项目；未指定时返回当前默认项目。"""
 
-    def auto_review_repositories(self) -> list[CodeRepositorySettings]:
-        return [item for item in self.enabled_repositories() if item.auto_review_enabled and item.clone_url]
+        normalized_project_id = str(project_id or self.default_project_id or "").strip()
+        if normalized_project_id:
+            for project in self.projects:
+                if project.project_id == normalized_project_id:
+                    return project
+        return self.projects[0] if self.projects else None
 
-    def resolve_repository(self, repository_id: str = "", repo_url: str = "", mr_url: str = "") -> CodeRepositorySettings | None:
-        """按 repository_id / URL 前缀 / clone_url 解析当前审核关联的代码仓。"""
+    def project_repositories(self, project_id: str = "") -> list[CodeRepositorySettings]:
+        """返回项目绑定的代码仓；仅在没有项目仓库时使用旧全局仓库兜底。"""
+
+        project = self.current_project(project_id)
+        if project is not None:
+            repositories = [item for item in project.repositories if item.repository_id or item.clone_url or item.local_path]
+            if repositories:
+                return repositories
+        return [item for item in self.code_repositories if item.repository_id or item.clone_url or item.local_path]
+
+    def all_project_repositories(self) -> list[CodeRepositorySettings]:
+        """返回所有项目仓库，用于 URL 反查，避免依赖全局仓库配置。"""
+
+        repositories: list[CodeRepositorySettings] = []
+        seen: set[tuple[str, str]] = set()
+        for project in self.projects:
+            for repository in project.repositories:
+                key = (str(repository.repository_id or ""), str(repository.clone_url or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                repositories.append(repository)
+        if repositories:
+            return repositories
+        return [item for item in self.code_repositories if item.repository_id or item.clone_url or item.local_path]
+
+    def enabled_repositories(self, project_id: str = "") -> list[CodeRepositorySettings]:
+        return [item for item in self.project_repositories(project_id) if item.enabled]
+
+    def auto_review_repositories(self, project_id: str = "") -> list[CodeRepositorySettings]:
+        return [item for item in self.enabled_repositories(project_id) if item.auto_review_enabled and item.clone_url]
+
+    def resolve_repository(
+        self,
+        repository_id: str = "",
+        repo_url: str = "",
+        mr_url: str = "",
+        project_id: str = "",
+    ) -> CodeRepositorySettings | None:
+        """按 project_id + repository_id / URL 前缀 / clone_url 解析当前审核关联的代码仓。"""
 
         normalized_id = str(repository_id or "").strip()
+        scoped_repositories = self.project_repositories(project_id)
         if normalized_id:
-            for item in self.code_repositories:
+            for item in scoped_repositories:
                 if item.repository_id == normalized_id:
                     return item
+            if not project_id:
+                for item in self.all_project_repositories():
+                    if item.repository_id == normalized_id:
+                        return item
         candidates = [str(repo_url or "").strip(), str(mr_url or "").strip()]
         for value in [item for item in candidates if item]:
             lowered = value.lower()
-            for repo in self.code_repositories:
+            for repo in scoped_repositories:
                 urls = [repo.clone_url, *repo.web_url_prefixes]
                 if any(url and (lowered == url.lower() or lowered.startswith(url.lower().rstrip("/") + "/")) for url in urls):
                     return repo
+            if not project_id:
+                for repo in self.all_project_repositories():
+                    urls = [repo.clone_url, *repo.web_url_prefixes]
+                    if any(url and (lowered == url.lower() or lowered.startswith(url.lower().rstrip("/") + "/")) for url in urls):
+                        return repo
         if self.default_repository_id:
-            for item in self.code_repositories:
+            for item in scoped_repositories:
                 if item.repository_id == self.default_repository_id:
                     return item
-        return self.code_repositories[0] if self.code_repositories else None
+        return scoped_repositories[0] if scoped_repositories else None
 
     def _legacy_repository_id(self) -> str:
         raw = self.code_repo_clone_url.rstrip("/").split("/")[-1] or "default-repository"

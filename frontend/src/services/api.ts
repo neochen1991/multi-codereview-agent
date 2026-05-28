@@ -1068,23 +1068,30 @@ export const reviewApi = {
     const { data } = await api.post("/reviews", payload);
     return data;
   },
-  async list(): Promise<ReviewSummary[]> {
-    const { data } = await api.get("/reviews");
+  async list(projectId = ""): Promise<ReviewSummary[]> {
+    const { data } = await api.get("/reviews", {
+      params: projectId ? { project_id: projectId } : undefined,
+    });
     return data;
   },
-  async listQueue(): Promise<ReviewSummary[]> {
-    const { data } = await api.get("/reviews/queue");
+  async listQueue(projectId = ""): Promise<ReviewSummary[]> {
+    const { data } = await api.get("/reviews/queue", {
+      params: projectId ? { project_id: projectId } : undefined,
+    });
     return data;
   },
-  async syncQueue(): Promise<{
+  async syncQueue(projectId = ""): Promise<{
     enabled: boolean;
+    project_id?: string;
     repo_url: string;
     created_count: number;
     created_review_ids: string[];
     started_review_id: string;
     message?: string;
   }> {
-    const { data } = await api.post("/reviews/queue/sync");
+    const { data } = await api.post("/reviews/queue/sync", undefined, {
+      params: projectId ? { project_id: projectId } : undefined,
+    });
     return data;
   },
   async get(reviewId: string): Promise<ReviewSummary> {

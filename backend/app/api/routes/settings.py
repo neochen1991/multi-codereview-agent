@@ -6,7 +6,7 @@ from typing import Literal
 
 from app.config import settings
 from app.domain.models.review import ReviewSubject
-from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings
+from app.domain.models.runtime_settings import CodeRepositorySettings, PostgresDataSourceSettings, ProjectSettings
 from app.services.code_graph_index_scheduler import CodeGraphIndexScheduler
 from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.gitnexus_index_scheduler import GitNexusIndexScheduler
@@ -33,20 +33,21 @@ def _code_graph_scheduler(request: Request) -> CodeGraphIndexScheduler:
 def _gitnexus_preflight(repository_id: str = "") -> dict[str, object]:
     runtime = review_service_module.review_service.get_runtime_settings()
     normalized_repository_id = str(repository_id or "").strip()
-    repository = runtime.resolve_repository(repository_id=normalized_repository_id)
-    repo_path = str((repository.local_path if repository is not None else "") or runtime.code_repo_local_path or "").strip()
+    project_id = str(runtime.default_project_id or "").strip()
+    repository = runtime.resolve_repository(repository_id=normalized_repository_id, project_id=project_id)
+    repo_path = str(repository.local_path if repository is not None else "").strip()
     subject = ReviewSubject(
         subject_type="mr",
-        repo_id=normalized_repository_id or str(runtime.default_repository_id or ""),
-        project_id="settings",
+        repo_id=normalized_repository_id or str(repository.repository_id if repository is not None else ""),
+        project_id=project_id,
         source_ref="",
-        target_ref=str((repository.default_branch if repository is not None else "") or runtime.code_repo_default_branch or ""),
+        target_ref=str((repository.default_branch if repository is not None else "") or runtime.default_target_branch or ""),
         changed_files=[],
         unified_diff="",
         metadata={"workspace_repo_path": repo_path} if repo_path else {},
     )
     payload = GitNexusImpactService(review_service_module.review_service.storage_root).preflight(subject, runtime)
-    payload["repository_id"] = normalized_repository_id or str(runtime.default_repository_id or "")
+    payload["repository_id"] = normalized_repository_id or str(repository.repository_id if repository is not None else "")
     return payload
 
 
@@ -73,6 +74,8 @@ class RuntimeSettingsRequest(BaseModel):
     auto_review_poll_interval_seconds: int = 120
     default_repository_id: str = ""
     code_repositories: list[CodeRepositorySettings] = Field(default_factory=list)
+    default_project_id: str = ""
+    projects: list[ProjectSettings] = Field(default_factory=list)
     database_sources: list[PostgresDataSourceSettings] = Field(default_factory=list)
     tool_allowlist: list[str] = Field(default_factory=list)
     mcp_allowlist: list[str] = Field(default_factory=list)

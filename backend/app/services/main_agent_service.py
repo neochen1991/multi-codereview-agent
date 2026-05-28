@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -399,6 +400,15 @@ class MainAgentService(MainAgentPromptingMixin):
                 f"主Agent收敛完成：本次共形成 {len(issues)} 个议题，其中 blocker/critical {blocker_count} 个，"
                 f"待人工裁决 {pending_count} 个，审核状态 {review.status}，下一步请优先处理高风险结论。"
             )
+        if (
+            review.analysis_mode == "light"
+            and str(os.getenv("REVIEW_LIGHT_FINAL_SUMMARY_LLM", "") or "").strip().lower()
+            not in {"1", "true", "yes"}
+        ):
+            return fallback_text, {
+                "mode": "deterministic",
+                "skipped_reason": "light_mode_fast_path",
+            }
         resolution = self._llm.resolve_main_agent(runtime_settings)
         user_prompt = (
             f"审核状态: {review.status}\n"
@@ -1233,7 +1243,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

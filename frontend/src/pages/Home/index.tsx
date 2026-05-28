@@ -13,7 +13,7 @@ import {
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
-import { reviewApi, settingsApi, type GitNexusIndexStatus, type ReviewSummary } from "@/services/api";
+import { projectApi, reviewApi, settingsApi, type GitNexusIndexStatus, type ReviewSummary } from "@/services/api";
 import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 type QuickEntry = {
@@ -39,6 +39,7 @@ const HomePage: React.FC = () => {
   const [syncingQueue, setSyncingQueue] = useState(false);
   const [queueStartingId, setQueueStartingId] = useState("");
   const [gitnexusStatus, setGitnexusStatus] = useState<GitNexusIndexStatus | null>(null);
+  const [currentProjectId, setCurrentProjectId] = useState("");
   const initialLoadStartedRef = useRef(false);
 
   const openReviewTab = (reviewId: string, tab: "overview" | "process" | "result") => {
@@ -48,9 +49,12 @@ const HomePage: React.FC = () => {
   const loadReviews = useCallback(async () => {
     setLoading(true);
     try {
+      const projectPayload = await projectApi.list();
+      const projectId = projectPayload.default_project_id || projectPayload.projects?.[0]?.project_id || "";
+      setCurrentProjectId(projectId);
       const [allReviews, queueRows, gitnexus] = await Promise.all([
-        reviewApi.list(),
-        reviewApi.listQueue(),
+        reviewApi.list(projectId),
+        reviewApi.listQueue(projectId),
         settingsApi.getGitNexusIndexStatus().catch(() => null),
       ]);
       setReviews(allReviews);
@@ -69,6 +73,14 @@ const HomePage: React.FC = () => {
     }
     initialLoadStartedRef.current = true;
     void loadReviews();
+  }, [loadReviews]);
+
+  useEffect(() => {
+    const handleProjectChanged = () => {
+      void loadReviews();
+    };
+    window.addEventListener("project-changed", handleProjectChanged);
+    return () => window.removeEventListener("project-changed", handleProjectChanged);
   }, [loadReviews]);
 
   const stats = useMemo(() => {
@@ -234,7 +246,7 @@ const HomePage: React.FC = () => {
                   onClick={async () => {
                     setSyncingQueue(true);
                     try {
-                      const result = await reviewApi.syncQueue();
+                      const result = await reviewApi.syncQueue(currentProjectId);
                       if (result.message) {
                         message.info(result.message);
                       } else {

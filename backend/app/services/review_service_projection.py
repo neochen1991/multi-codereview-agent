@@ -294,7 +294,7 @@ class ReviewServiceProjectionMixin:
             "issue_id": message.issue_id,
             "expert_id": message.expert_id,
             "message_type": message.message_type,
-            "content": self._clip_process_message_content(message.content),
+            "content": "",
             "created_at": message.created_at,
             "metadata": {key: value for key, value in replay_metadata.items() if value is not None},
         }

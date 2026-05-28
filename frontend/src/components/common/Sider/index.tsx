@@ -125,6 +125,7 @@ const AppSider: React.FC = () => {
     try {
       await projectApi.setDefault(projectId);
       await loadProjects();
+      window.dispatchEvent(new CustomEvent("project-changed", { detail: { projectId } }));
       message.success("已切换当前项目");
     } catch (error: any) {
       message.error(error?.message || "切换项目失败");
@@ -142,10 +143,12 @@ const AppSider: React.FC = () => {
       };
       if (editingProject) {
         await projectApi.update(editingProject.project_id, payload);
+        window.dispatchEvent(new CustomEvent("project-changed", { detail: { projectId: editingProject.project_id } }));
         message.success("项目已更新");
       } else {
         await projectApi.create(payload);
         await projectApi.setDefault(payload.project_id);
+        window.dispatchEvent(new CustomEvent("project-changed", { detail: { projectId: payload.project_id } }));
         message.success("项目已创建");
       }
       setProjectModalOpen(false);
@@ -172,6 +175,7 @@ const AppSider: React.FC = () => {
       okButtonProps: { danger: true },
       onOk: async () => {
         await projectApi.remove(editingProject.project_id);
+        window.dispatchEvent(new CustomEvent("project-changed"));
         message.success("项目已删除");
         setProjectModalOpen(false);
         await loadProjects();

@@ -2072,7 +2072,11 @@ class GitNexusImpactService:
         raw = str(metadata.get("repository_id") or getattr(subject, "repo_id", "") or "").strip()
         if raw:
             return raw
-        return str(getattr(runtime, "default_repository_id", "") or "").strip() if runtime is not None else ""
+        if runtime is None:
+            return ""
+        project_id = str(getattr(subject, "project_id", "") or getattr(runtime, "default_project_id", "") or "").strip()
+        repository = runtime.resolve_repository(project_id=project_id)
+        return str(repository.repository_id if repository is not None else "").strip()
 
     def _safe_repository_id(self, repository_id: str) -> str:
         return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(repository_id or "").strip())

@@ -165,6 +165,8 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             if configured_token:
                 payload["access_token"] = configured_token
         subject = self.platform_adapter.normalize(ReviewSubject.model_validate(payload), runtime_settings)
+        if not str(subject.project_id or "").strip():
+            subject.project_id = str(runtime_settings.default_project_id or "").strip()
         incoming_metadata = dict(subject.metadata or {})
         incoming_workspace_repo_path = str(incoming_metadata.get("workspace_repo_path") or "").strip()
         resolved_repository = self.repository_resolver.resolve(runtime_settings, subject)
@@ -430,17 +432,17 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         current = runtime or self.get_runtime_settings()
         return str(current.code_repo_clone_url or current.auto_review_repo_url or "").strip()
 
-    def resolve_auto_review_repositories(self, runtime: RuntimeSettings | None = None):
-        """返回启用自动审核的仓库列表；没有多仓配置时回退到旧单仓。"""
+    def resolve_auto_review_repositories(self, runtime: RuntimeSettings | None = None, project_id: str = ""):
+        """返回指定项目中启用自动审核的仓库列表；旧单仓仅作历史兜底。"""
 
         current = runtime or self.get_runtime_settings()
-        repositories = current.auto_review_repositories()
+        repositories = current.auto_review_repositories(project_id)
         if repositories:
             return repositories
         repo_url = self.resolve_auto_review_repo_url(current)
         if not current.auto_review_enabled or not repo_url:
             return []
-        repo = current.resolve_repository(repo_url=repo_url)
+        repo = current.resolve_repository(repo_url=repo_url, project_id=project_id)
         return [repo] if repo is not None else []
 
     def _mark_failed(self, review_id: str, reason: str) -> ReviewTask:
@@ -486,8 +488,12 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
     def list_reviews(self) -> list[ReviewTask]:
         return [self._ensure_waiting_human_analysis_duration(review) for review in self.review_repo.list()]
 
-    def list_review_summaries(self) -> list[dict[str, object]]:
-        return [self._ensure_waiting_human_summary_duration(item) for item in self.review_repo.list_light()]
+    def list_review_summaries(self, project_id: str = "") -> list[dict[str, object]]:
+        current_project_id = str(project_id or "").strip()
+        rows = self.review_repo.list_light()
+        if current_project_id:
+            rows = [item for item in rows if str(item.get("project_id") or "") == current_project_id]
+        return [self._ensure_waiting_human_summary_duration(item) for item in rows]
 
     def _ensure_waiting_human_analysis_duration(self, review: ReviewTask) -> ReviewTask:
         """历史 waiting_human 任务若缺少耗时，用进入人工门控的事件时间补齐。"""
@@ -646,14 +652,25 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 pass
         return 0.0
 
-    def list_pending_queue_with_diagnostics(self) -> list[dict[str, object]]:
+    def list_pending_queue_with_diagnostics(self, project_id: str = "") -> list[dict[str, object]]:
         """返回待处理队列及每条任务当前未启动的原因说明。"""
 
+        current_project_id = str(project_id or "").strip()
         reviews = self.review_repo.list()
-        pending = [item for item in reviews if item.status == "pending"]
+        pending = [
+            item
+            for item in reviews
+            if item.status == "pending"
+            and (not current_project_id or str(item.subject.project_id or "") == current_project_id)
+        ]
         pending.sort(key=self._pending_sort_key)
         running = sorted(
-            [item for item in reviews if item.status == "running"],
+            [
+                item
+                for item in reviews
+                if item.status == "running"
+                and (not current_project_id or str(item.subject.project_id or "") == current_project_id)
+            ],
             key=lambda item: item.started_at or item.created_at,
         )
         active_running = running[0] if running else None
@@ -685,14 +702,25 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             )
         return response
 
-    def list_pending_queue_light_with_diagnostics(self) -> list[dict[str, object]]:
+    def list_pending_queue_light_with_diagnostics(self, project_id: str = "") -> list[dict[str, object]]:
         """返回首页用轻量队列视图，避免加载完整 review subject。"""
 
+        current_project_id = str(project_id or "").strip()
         reviews = self.review_repo.list_light()
-        pending = [item for item in reviews if item.get("status") == "pending"]
+        pending = [
+            item
+            for item in reviews
+            if item.get("status") == "pending"
+            and (not current_project_id or str(item.get("project_id") or "") == current_project_id)
+        ]
         pending.sort(key=self._pending_sort_key_from_payload)
         running = sorted(
-            [item for item in reviews if item.get("status") == "running"],
+            [
+                item
+                for item in reviews
+                if item.get("status") == "running"
+                and (not current_project_id or str(item.get("project_id") or "") == current_project_id)
+            ],
             key=self._started_at_or_created_at,
         )
         active_running = running[0] if running else None
@@ -724,11 +752,12 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             )
         return response
 
-    def enqueue_open_merge_requests(self, repo_url: str, repository_id: str = "") -> list[ReviewTask]:
+    def enqueue_open_merge_requests(self, repo_url: str, repository_id: str = "", project_id: str = "") -> list[ReviewTask]:
         """拉取仓库开放 MR/PR，并去重后加入待处理队列。"""
 
         runtime = self.get_runtime_settings()
-        repository = runtime.resolve_repository(repository_id=repository_id, repo_url=repo_url)
+        current_project_id = str(project_id or runtime.default_project_id or "").strip()
+        repository = runtime.resolve_repository(repository_id=repository_id, repo_url=repo_url, project_id=current_project_id)
         effective_repo_url = str(repository.clone_url if repository is not None else repo_url).strip()
         token = self._resolve_git_access_token(effective_repo_url, runtime)
         merge_requests = self.platform_adapter.list_open_merge_requests(effective_repo_url, token, runtime)
@@ -739,15 +768,19 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         existing_keys = self._existing_auto_queue_keys()
         created: list[ReviewTask] = []
         for item in merge_requests:
-            queue_key = self._auto_queue_key(item, repository.repository_id if repository is not None else repository_id)
+            queue_key = self._auto_queue_key(
+                item,
+                repository.repository_id if repository is not None else repository_id,
+                current_project_id,
+            )
             if queue_key in existing_keys:
                 continue
             review = self.create_review(
                 {
                     "subject_type": "mr",
                     "analysis_mode": runtime.default_analysis_mode,
-                    "repo_id": "",
-                    "project_id": "",
+                    "repo_id": repository.repository_id if repository is not None else repository_id,
+                    "project_id": current_project_id,
                     "mr_url": item.mr_url,
                     "repo_url": effective_repo_url,
                     "source_ref": item.source_ref or "",
@@ -755,6 +788,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                     "title": item.title,
                     "metadata": {
                         "trigger_source": "auto_scheduler",
+                        "project_id": current_project_id,
                         "auto_queue_key": queue_key,
                         "auto_queue_repo_url": effective_repo_url,
                         "repository_id": repository.repository_id if repository is not None else repository_id,
@@ -776,7 +810,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             )
         return created
 
-    def start_next_pending_review(self) -> ReviewTask | None:
+    def start_next_pending_review(self, project_id: str = "") -> ReviewTask | None:
         """在没有运行中任务时，按队列顺序启动下一条 pending 审核。"""
 
         recovered = self.recover_interrupted_reviews()
@@ -788,7 +822,13 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         reviews = self.review_repo.list()
         if any(item.status == "running" for item in reviews):
             return None
-        pending = [item for item in reviews if item.status == "pending"]
+        current_project_id = str(project_id or "").strip()
+        pending = [
+            item
+            for item in reviews
+            if item.status == "pending"
+            and (not current_project_id or str(item.subject.project_id or "") == current_project_id)
+        ]
         if not pending:
             return None
         pending.sort(key=self._pending_sort_key)
@@ -1483,8 +1523,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 keys.add(f"url:{mr_url}")
         return keys
 
-    def _auto_queue_key(self, merge_request: OpenMergeRequest, repository_id: str = "") -> str:
-        prefix = f"repo:{repository_id}:" if repository_id else ""
+    def _auto_queue_key(self, merge_request: OpenMergeRequest, repository_id: str = "", project_id: str = "") -> str:
+        project_prefix = f"project:{project_id}:" if project_id else ""
+        repo_prefix = f"repo:{repository_id}:" if repository_id else ""
+        prefix = f"{project_prefix}{repo_prefix}"
         if merge_request.head_sha:
             return f"{prefix}url:{merge_request.mr_url}#sha:{merge_request.head_sha}"
         return f"{prefix}url:{merge_request.mr_url}"

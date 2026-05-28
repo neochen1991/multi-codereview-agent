@@ -76,9 +76,6 @@ def update_project(project_id: str, payload: UpsertProjectRequest) -> dict[str, 
         raise HTTPException(status_code=404, detail="project not found")
     update_payload = runtime.model_dump(mode="json")
     update_payload["projects"] = [item.model_dump(mode="json") for item in projects]
-    if normalized_project_id == runtime.default_project_id:
-        update_payload["code_repositories"] = [item.model_dump(mode="json") for item in project.repositories]
-        update_payload["default_repository_id"] = project.repositories[0].repository_id if project.repositories else ""
     updated = review_service_module.review_service.update_runtime_settings(update_payload)
     saved = next(item for item in updated.projects if item.project_id == normalized_project_id)
     return saved.model_dump(mode="json")
@@ -123,9 +120,6 @@ def update_project_repositories(project_id: str, payload: UpdateProjectRepositor
         raise HTTPException(status_code=404, detail="project not found")
     update_payload = runtime.model_dump(mode="json")
     update_payload["projects"] = [item.model_dump(mode="json") for item in projects]
-    if normalized_project_id == runtime.default_project_id:
-        update_payload["code_repositories"] = [item.model_dump(mode="json") for item in payload.repositories]
-        update_payload["default_repository_id"] = payload.repositories[0].repository_id if payload.repositories else ""
     updated = review_service_module.review_service.update_runtime_settings(update_payload)
     saved = next(item for item in updated.projects if item.project_id == normalized_project_id)
     return saved.model_dump(mode="json")
@@ -133,7 +127,7 @@ def update_project_repositories(project_id: str, payload: UpdateProjectRepositor
 
 @router.put("/projects/default/{project_id}")
 def set_default_project(project_id: str) -> dict[str, object]:
-    """设置当前默认项目，并把该项目仓库同步到兼容的全局仓库字段。"""
+    """设置当前默认项目。代码仓始终挂在项目下，不再同步到全局仓库字段。"""
 
     normalized_project_id = _normalize_project_id(project_id)
     runtime = review_service_module.review_service.get_runtime_settings()
@@ -142,8 +136,6 @@ def set_default_project(project_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="project not found")
     update_payload = runtime.model_dump(mode="json")
     update_payload["default_project_id"] = normalized_project_id
-    update_payload["code_repositories"] = [item.model_dump(mode="json") for item in project.repositories]
-    update_payload["default_repository_id"] = project.repositories[0].repository_id if project.repositories else ""
     updated = review_service_module.review_service.update_runtime_settings(update_payload)
     return {
         "default_project_id": updated.default_project_id,

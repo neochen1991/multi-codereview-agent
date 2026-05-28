@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from typing import Literal
 
@@ -64,28 +64,33 @@ def create_review(payload: CreateReviewRequest) -> dict[str, object]:
 
 
 @router.get("/reviews")
-def list_reviews() -> list[dict[str, object]]:
+def list_reviews(project_id: str = Query(default="")) -> list[dict[str, object]]:
     """返回历史审核记录列表。"""
 
-    return review_service_module.review_service.list_review_summaries()
+    return review_service_module.review_service.list_review_summaries(project_id=project_id)
 
 
 @router.get("/reviews/queue")
-def list_pending_queue() -> list[dict[str, object]]:
+def list_pending_queue(project_id: str = Query(default="")) -> list[dict[str, object]]:
     """返回待处理队列（pending），供首页展示自动审核排队情况。"""
 
-    return review_service_module.review_service.list_pending_queue_light_with_diagnostics()
+    return review_service_module.review_service.list_pending_queue_light_with_diagnostics(project_id=project_id)
 
 
 @router.post("/reviews/queue/sync")
-def sync_auto_review_queue() -> dict[str, object]:
+def sync_auto_review_queue(project_id: str = Query(default="")) -> dict[str, object]:
     """手动触发一次开放 MR 同步并尝试启动下一条队列任务。"""
 
     runtime = review_service_module.review_service.get_runtime_settings()
-    repositories = review_service_module.review_service.resolve_auto_review_repositories(runtime)
+    current_project_id = str(project_id or runtime.default_project_id or "").strip()
+    repositories = review_service_module.review_service.resolve_auto_review_repositories(runtime, project_id=current_project_id)
+    auto_review_enabled = runtime.auto_review_enabled or any(
+        item.enabled and item.auto_review_enabled for item in runtime.enabled_repositories(current_project_id)
+    )
     if not repositories:
         return {
-            "enabled": runtime.auto_review_enabled,
+            "enabled": auto_review_enabled,
+            "project_id": current_project_id,
             "repo_url": "",
             "repositories": [],
             "created_count": 0,
@@ -98,6 +103,7 @@ def sync_auto_review_queue() -> dict[str, object]:
         repo_created = review_service_module.review_service.enqueue_open_merge_requests(
             repository.clone_url,
             repository.repository_id,
+            current_project_id,
         )
         created.extend(repo_created)
         repo_payload.append(
@@ -109,9 +115,10 @@ def sync_auto_review_queue() -> dict[str, object]:
                 "created_review_ids": [item.review_id for item in repo_created],
             }
         )
-    started = review_service_module.review_service.start_next_pending_review()
+    started = review_service_module.review_service.start_next_pending_review(project_id=current_project_id)
     return {
-        "enabled": runtime.auto_review_enabled,
+        "enabled": auto_review_enabled,
+        "project_id": current_project_id,
         "repo_url": ",".join(item.clone_url for item in repositories),
         "repositories": repo_payload,
         "created_count": len(created),

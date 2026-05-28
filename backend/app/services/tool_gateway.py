@@ -179,7 +179,9 @@ class ReviewToolGateway:
             "runtime": {
                 "default_target_branch": runtime.default_target_branch,
                 "default_repository_id": runtime.default_repository_id,
-                "code_repositories": [item.model_dump(mode="json") for item in runtime.code_repositories],
+                "code_repositories": [
+                    item.model_dump(mode="json") for item in runtime.project_repositories(subject.project_id)
+                ],
                 "code_repo_clone_url": runtime.code_repo_clone_url,
                 "code_repo_local_path": runtime.code_repo_local_path,
                 "code_repo_default_branch": runtime.code_repo_default_branch,
