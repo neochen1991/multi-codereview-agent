@@ -11,116 +11,13 @@
     "default_api_key": "7b446c97-7172-4c90-a4ef-3f3ff5a8f894"
   },
   "git": {
-    "repo_access_token": "ghp_example",
-    "github_access_token": "ghp_example",
-    "gitlab_access_token": "glpat_example",
-    "codehub_access_token": "codehub_example"
+    "repo_access_token": null,
+    "github_access_token": null,
+    "gitlab_access_token": null,
+    "codehub_access_token": null
   },
-  "code_repo": {
-    "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
-    "local_path": "/Users/neochen/multi-codereview-agent",
-    "default_branch": "main",
-    "auto_sync": false,
-    "auto_review_enabled": false,
-    "auto_review_repo_url": "https://github.com/neochen1991/multi-codereview-agent.git",
-    "auto_review_poll_interval_seconds": 120
-  },
-  "code_repositories": [
-    {
-      "repository_id": "tenant-ui-current-0524-repo",
-      "name": "tenant-ui-current-0524-repo",
-      "provider": "generic",
-      "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
-      "web_url_prefixes": [],
-      "local_path": "/Users/neochen/multi-codereview-agent",
-      "default_branch": "main",
-      "enabled": true,
-      "auto_review_enabled": false,
-      "auto_review_poll_interval_seconds": 120,
-      "auto_sync": false,
-      "gitnexus_enabled": true,
-      "database_source_ids": []
-    }
-  ],
-  "default_repository_id": "tenant-ui-current-0524-repo",
-  "projects": [
-    {
-      "project_id": "default",
-      "name": "默认项目",
-      "description": "由历史全局配置自动生成的默认项目。",
-      "owner_team": "",
-      "status": "active",
-      "repositories": [
-        {
-          "repository_id": "java-ddd-example",
-          "name": "java-ddd-example",
-          "provider": "github",
-          "clone_url": "https://github.com/CodelyTV/java-ddd-example.git",
-          "web_url_prefixes": [
-            "https://github.com/CodelyTV/java-ddd-example.git"
-          ],
-          "local_path": "/tmp/java-ddd-example-review-repo",
-          "default_branch": "main",
-          "enabled": true,
-          "auto_review_enabled": true,
-          "auto_review_poll_interval_seconds": 120,
-          "auto_sync": false,
-          "gitnexus_enabled": true,
-          "database_source_ids": []
-        }
-      ]
-    },
-    {
-      "project_id": "tenant-ui-1779544685904",
-      "name": "租户全流程测试项目",
-      "description": "用于验证项目隔离、仓库绑定和审核任务上下文",
-      "owner_team": "Codex QA 团队",
-      "status": "active",
-      "repositories": [
-        {
-          "repository_id": "tenant-ui-1779544685904-repo",
-          "name": "tenant-ui-1779544685904-repo",
-          "provider": "generic",
-          "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
-          "web_url_prefixes": [],
-          "local_path": "/Users/neochen/multi-codereview-agent",
-          "default_branch": "main",
-          "enabled": true,
-          "auto_review_enabled": false,
-          "auto_review_poll_interval_seconds": 120,
-          "auto_sync": false,
-          "gitnexus_enabled": true,
-          "database_source_ids": []
-        }
-      ]
-    },
-    {
-      "project_id": "tenant-ui-current-0524",
-      "name": "多项目切换验证项目",
-      "description": "验证项目隔离、仓库绑定和创建审核取当前项目",
-      "owner_team": "Codex 多项目验证",
-      "status": "active",
-      "repositories": [
-        {
-          "repository_id": "tenant-ui-current-0524-repo",
-          "name": "tenant-ui-current-0524-repo",
-          "provider": "generic",
-          "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
-          "web_url_prefixes": [],
-          "local_path": "/Users/neochen/multi-codereview-agent",
-          "default_branch": "main",
-          "enabled": true,
-          "auto_review_enabled": false,
-          "auto_review_poll_interval_seconds": 120,
-          "auto_sync": false,
-          "gitnexus_enabled": true,
-          "database_source_ids": []
-        }
-      ]
-    }
-  ],
-  "default_project_id": "tenant-ui-current-0524",
-  "database_sources": [],
+  "projects": [],
+  "default_project_id": "default",
   "runtime": {
     "default_target_branch": "main",
     "default_analysis_mode": "light",
