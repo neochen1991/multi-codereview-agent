@@ -9,7 +9,15 @@ import {
   humanizeSeverity,
 } from "@/utils/displayText";
 import { evidenceContextSourceLabel, evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
-import { cleanUserFacingList, cleanUserFacingText, pickUserFacingText } from "./issueDisplayQuality";
+import {
+  buildReadableFixSummary,
+  buildReadableIssueSummary,
+  buildReadableIssueTitle,
+  cleanUserFacingList,
+  cleanUserFacingText,
+  issueTypeDisplayLabel,
+  pickUserFacingText,
+} from "./issueDisplayQuality";
 
 const { Paragraph } = Typography;
 
@@ -133,10 +141,18 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       alignedFinding?.suggested_code ||
       (alignedFinding?.code_context && Object.keys(alignedFinding.code_context).length > 0),
   );
-  const issueDescription = pickUserFacingText(
-    [issue?.summary, alignedFinding?.summary, issue?.title],
-    "当前问题已定位到代码改动，请结合下方代码锚点和证据处理。",
-  );
+  const issueTitle = issue
+    ? buildReadableIssueTitle({
+        ...issue,
+        summary: issue.summary || alignedFinding?.summary,
+      })
+    : "";
+  const issueDescription = issue
+    ? buildReadableIssueSummary({
+        ...issue,
+        summary: pickUserFacingText([issue.summary, alignedFinding?.summary, issue.title]),
+      })
+    : "";
   const issueStrategy = pickUserFacingText([
     issue?.remediation_strategy,
     aggregatedStrategies[0],
@@ -162,13 +178,25 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const displayEvidence = cleanUserFacingList(issue?.evidence);
   const displayConfidenceRationale = cleanUserFacingText(issue?.confidence_rationale || "");
   const displayGraphSummary = cleanUserFacingText(graphSummary);
+  const evidenceIssueContext = JSON.stringify({ issue, alignedFinding });
   const displayEvidenceChain = graphEvidenceChain
     .map((step, index) => ({
       key: `${index}-${step.step || "evidence"}`,
       label: evidenceStepLabel(step),
-      summary: cleanUserFacingText(evidenceStepSummary(step)),
+      summary: cleanUserFacingText(evidenceStepSummary(step, evidenceIssueContext)),
     }))
     .filter((step) => step.summary);
+  const issueTypeLabel = issue
+    ? issueTypeDisplayLabel(issue.category_label, issue.normalized_issue_type, issue.finding_type)
+    : "-";
+  const fixSummary = issue
+    ? buildReadableFixSummary({
+        ...issue,
+        remediation_strategy: issueStrategy,
+        remediation_suggestion: issueSuggestion,
+        remediation_steps: issueSteps,
+      })
+    : "";
 
   return (
     <Card className="module-card process-sidebar-card process-sidebar-card-md" title="问题详情">
@@ -197,7 +225,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
             ) : null}
             <Descriptions column={1} size="small">
               <Descriptions.Item label="问题标题">
-                {humanizeReviewText(issue.title || "-")}
+                {issueTitle || "-"}
               </Descriptions.Item>
               <Descriptions.Item label="问题说明">
                 <div>
@@ -206,7 +234,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   </Paragraph>
                 </div>
               </Descriptions.Item>
-              <Descriptions.Item label="状态">
+              <Descriptions.Item label="处理状态">
                 <Tag color={issue.status === "needs_human" ? "error" : issue.status === "resolved" ? "success" : "processing"}>
                   {humanizeReviewStatus(issue.status)}
                 </Tag>
@@ -216,12 +244,12 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   {humanizeSeverity(issue.severity)}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="复核路径">
+              <Descriptions.Item label="复核结果">
                 {humanizeReviewStatus(issue.resolution || (issue.needs_human ? "needs_human_review" : "judge_accepted"))}
               </Descriptions.Item>
-              <Descriptions.Item label="是否复核">
+              <Descriptions.Item label="收敛方式">
                 <Tag color={issue.needs_debate ? "processing" : "default"}>
-                  {issue.needs_debate ? "已复核" : "直接收敛"}
+                  {issue.needs_debate ? "多角色复核后确认" : "单角色证据直接确认"}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="问题位置">
@@ -233,20 +261,20 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
               <Descriptions.Item label="参与角色">
                 {participantExperts.map((item) => humanizeExpertId(item)).join("、") || (primaryExpertId ? "仅主责角色参与" : "-")}
               </Descriptions.Item>
-              <Descriptions.Item label="证据">
+              <Descriptions.Item label="主要证据">
                 {displayEvidence.join("、") || "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="关联发现">
+              <Descriptions.Item label="来源发现">
                 {issue.finding_ids.join("、") || "-"}
               </Descriptions.Item>
               <Descriptions.Item label="置信度">
                 {`${(issue.confidence * 100).toFixed(0)}%`}
               </Descriptions.Item>
-              <Descriptions.Item label="问题分类">
-                {issue.category_label || issue.normalized_issue_type || issue.finding_type || "-"}
+              <Descriptions.Item label="问题类型">
+                {issueTypeLabel}
               </Descriptions.Item>
               {findingMatchedRules.length || findingViolatedGuidelines.length || displayFindingRuleReasoning || displayEvidence.length ? (
-                <Descriptions.Item label="规范依据">
+                <Descriptions.Item label="为什么认为这是问题">
                   <div>
                     {findingMatchedRules.length ? (
                       <Space wrap style={{ marginBottom: 6 }}>
@@ -280,7 +308,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                 </Descriptions.Item>
               ) : null}
               {displayConfidenceRationale ? (
-                <Descriptions.Item label="置信度理由">
+                <Descriptions.Item label="判断依据">
                   <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
                     {displayConfidenceRationale}
                   </Paragraph>
@@ -289,7 +317,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
             </Descriptions>
 
             <div style={{ marginTop: 16 }}>
-              <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>证据链</Paragraph>
+              <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>系统核对过的证据</Paragraph>
               {displayEvidenceChain.length ? (
                 <Descriptions column={1} size="small">
                   {displayEvidenceChain.slice(0, 8).map((step) => (
@@ -308,31 +336,31 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                   type="info"
                   showIcon
                   message="暂无结构化证据链"
-                  description="当前问题仍会展示基础证据；后续如果命中 Tree-sitter、工具核验或跨文件关系，会在这里展示 claim、代码锚点、工具核验和置信度变化。"
+                  description="当前先展示基础证据；如果后续补充到调用链、工具核验或跨文件关系，会继续在这里展开。"
                 />
               )}
             </div>
 
             {Object.keys(confidenceBreakdown).length ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>置信度分解</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>可信度来源</Paragraph>
                 <Descriptions column={1} size="small">
                   {"base_weighted_confidence" in confidenceBreakdown ? (
-                    <Descriptions.Item label="基础加权分">
+                    <Descriptions.Item label="基础判断">
                       {String(confidenceBreakdown.base_weighted_confidence)}
                     </Descriptions.Item>
                   ) : null}
                   {"consensus_bonus" in confidenceBreakdown ? (
-                    <Descriptions.Item label="一致性加分">{String(confidenceBreakdown.consensus_bonus)}</Descriptions.Item>
+                    <Descriptions.Item label="多角色一致性">{String(confidenceBreakdown.consensus_bonus)}</Descriptions.Item>
                   ) : null}
                   {"evidence_bonus" in confidenceBreakdown ? (
-                    <Descriptions.Item label="证据加分">{String(confidenceBreakdown.evidence_bonus)}</Descriptions.Item>
+                    <Descriptions.Item label="证据充分度">{String(confidenceBreakdown.evidence_bonus)}</Descriptions.Item>
                   ) : null}
                   {"verification_bonus" in confidenceBreakdown ? (
-                    <Descriptions.Item label="核验加分">{String(confidenceBreakdown.verification_bonus)}</Descriptions.Item>
+                    <Descriptions.Item label="工具核验">{String(confidenceBreakdown.verification_bonus)}</Descriptions.Item>
                   ) : null}
                   {"hypothesis_penalty" in confidenceBreakdown ? (
-                    <Descriptions.Item label="推测扣分">{String(confidenceBreakdown.hypothesis_penalty)}</Descriptions.Item>
+                    <Descriptions.Item label="推测成分扣减">{String(confidenceBreakdown.hypothesis_penalty)}</Descriptions.Item>
                   ) : null}
                 </Descriptions>
               </div>
@@ -340,7 +368,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             {displayAggregatedTitles.length || displayAggregatedSummaries.length ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合子问题</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>合并在一起的相近发现</Paragraph>
                 <Descriptions column={1} size="small">
                   {displayAggregatedTitles.length ? (
                     <Descriptions.Item label="问题标题">
@@ -370,8 +398,13 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             {issueStrategy || issueSuggestion || issueSteps.length ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>聚合修复方案</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>建议怎么改</Paragraph>
                 <Descriptions column={1} size="small">
+                  {fixSummary ? (
+                    <Descriptions.Item label="处理重点">
+                      <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{fixSummary}</Paragraph>
+                    </Descriptions.Item>
+                  ) : null}
                   {issueStrategy ? (
                     <Descriptions.Item label="修复思路">
                       <Paragraph style={{ marginBottom: 0 }}>{issueStrategy}</Paragraph>
@@ -399,34 +432,34 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             {alignedFinding ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>关联代码上下文</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>系统参考的代码上下文</Paragraph>
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="检查角色">{humanizeExpertId(alignedFinding.expert_id)}</Descriptions.Item>
                   {cleanUserFacingText(codeContext?.routing_reason || "") ? (
-                    <Descriptions.Item label="路由原因">
+                    <Descriptions.Item label="为什么由该角色检查">
                       {cleanUserFacingText(codeContext?.routing_reason || "")}
                     </Descriptions.Item>
                   ) : null}
                   {cleanUserFacingText(codeContext?.target_hunk?.hunk_header || "") ? (
-                    <Descriptions.Item label="目标 hunk">
+                    <Descriptions.Item label="命中的代码片段">
                       {cleanUserFacingText(codeContext?.target_hunk?.hunk_header || "")}
                     </Descriptions.Item>
                   ) : null}
                   <Descriptions.Item label="上下文文件">
                     {contextFiles.length ? contextFiles.join("、") : "-"}
                   </Descriptions.Item>
-                  <Descriptions.Item label="关联检索方式">
+                  <Descriptions.Item label="上下文来源">
                     <Tag color={graphContextSource === "tree_sitter" ? "success" : graphContextSource === "keyword_search" ? "gold" : "default"}>
                       {evidenceContextSourceLabel(graphContextSource)}
                     </Tag>
                   </Descriptions.Item>
                   {graphRiskLevel || typeof graphRiskScore === "number" ? (
-                    <Descriptions.Item label="图谱风险">
+                    <Descriptions.Item label="关联影响等级">
                       {[graphRiskLevel || "未分级", typeof graphRiskScore === "number" ? graphRiskScore : ""].filter(Boolean).join(" · ")}
                     </Descriptions.Item>
                   ) : null}
                   {displayGraphSummary ? (
-                    <Descriptions.Item label="图谱摘要">
+                    <Descriptions.Item label="关联影响说明">
                       <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>{displayGraphSummary}</Paragraph>
                     </Descriptions.Item>
                   ) : null}
@@ -442,7 +475,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
                     </Descriptions.Item>
                   ) : null}
                   {graphAffectedFlows.length ? (
-                    <Descriptions.Item label="候选影响流程">
+                    <Descriptions.Item label="可能受影响的流程">
                       <div>
                         {graphAffectedFlows.slice(0, 5).map((item, index) => (
                           <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
@@ -458,7 +491,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
 
             {alignedFinding && (inputCompleteness || reviewInputs) ? (
               <div style={{ marginTop: 16 }}>
-                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>审查输入质量</Paragraph>
+                <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>本次审查使用的输入</Paragraph>
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="专家规范">
                     <Tag color={inputCompleteness?.review_spec_present ? "success" : "error"}>

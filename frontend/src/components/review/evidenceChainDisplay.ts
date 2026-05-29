@@ -1,4 +1,5 @@
 import type { EvidenceChainStep } from "@/services/api";
+import { rewriteUserFacingIssueText } from "./issueDisplayQuality";
 
 const normalizeUnknownList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
@@ -67,12 +68,13 @@ export const evidenceStepLabel = (step: EvidenceChainStep): string => {
   return stepName || "证据";
 };
 
-export const evidenceStepSummary = (step: EvidenceChainStep): string => {
+export const evidenceStepSummary = (step: EvidenceChainStep, issueContext?: string | null): string => {
   const payload = step as EvidenceChainStep & Record<string, unknown>;
   const stepName = String(payload.step || "").trim();
+  const context = [issueContext || "", JSON.stringify(payload)].filter(Boolean).join("\n");
 
   if (stepName === "claim") {
-    const claim = String(payload.claim || payload.summary || "").trim();
+    const claim = rewriteUserFacingIssueText(String(payload.claim || payload.summary || "").trim(), context);
     return claim ? `本条问题认为：${claim}` : statusLabel(payload.status);
   }
 
@@ -82,13 +84,16 @@ export const evidenceStepSummary = (step: EvidenceChainStep): string => {
     const location = filePath ? `${filePath}${lineStart ? `:${lineStart}` : ""}` : "";
     const evidence = normalizeUnknownList(payload.evidence);
     const nodes = normalizeUnknownList(payload.nodes);
-    const details = [...evidence, ...nodes].slice(0, 3).join("；");
+    const details = [...evidence, ...nodes]
+      .map((item) => rewriteUserFacingIssueText(item, context))
+      .slice(0, 3)
+      .join("；");
     return [location ? `已定位到 ${location}` : statusLabel(payload.status), details].filter(Boolean).join("。");
   }
 
   if (stepName === "verifier") {
     const toolName = String(payload.tool_name || "").trim();
-    const summary = String(payload.summary || "").trim();
+    const summary = rewriteUserFacingIssueText(String(payload.summary || "").trim(), context);
     if (summary && !/Static diff signals:\s*none/i.test(summary)) {
       return [toolName ? `工具：${toolName}` : "", summary].filter(Boolean).join("。");
     }
@@ -153,11 +158,11 @@ export const evidenceStepSummary = (step: EvidenceChainStep): string => {
   }
 
   if (stepName === "false_positive_filter") {
-    const reason = String(payload.reason || "").trim();
+    const reason = rewriteUserFacingIssueText(String(payload.reason || "").trim(), context);
     return [statusLabel(payload.verdict || payload.status), reason].filter(Boolean).join("：");
   }
 
-  const explicit = String(payload.summary || payload.claim || payload.reason || payload.verdict || "").trim();
+  const explicit = rewriteUserFacingIssueText(String(payload.summary || payload.claim || payload.reason || payload.verdict || "").trim(), context);
   if (explicit) return explicit;
   const source = String(payload.source || payload.context_source || "").trim();
   const relationship = String(payload.relationship || "").trim();

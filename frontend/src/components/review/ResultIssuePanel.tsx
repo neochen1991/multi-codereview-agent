@@ -3,7 +3,8 @@ import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
-import { humanizeExpertId, humanizeSeverity, stripReviewSupplementSections } from "@/utils/displayText";
+import { humanizeExpertId, humanizeSeverity } from "@/utils/displayText";
+import { cleanUserFacingText, issueTypeDisplayLabel } from "./issueDisplayQuality";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
@@ -61,6 +62,9 @@ const getDesignAlignmentStatus = (relatedFindings: ReviewFinding[]): string | un
 };
 
 const buildIssueTypeLabels = (issue: DebateIssue, findings: ReviewFinding[]): string[] => {
+  const explicitLabels = [issue.category_label, issue.normalized_issue_type, issue.finding_type]
+    .map((item) => issueTypeDisplayLabel(item))
+    .filter((item) => item && item !== "代码风险");
   const values = [
     issue.title,
     issue.summary,
@@ -68,7 +72,8 @@ const buildIssueTypeLabels = (issue: DebateIssue, findings: ReviewFinding[]): st
     ...(issue.aggregated_summaries || []),
     ...findings.flatMap((finding) => [...(finding.matched_rules || []), ...(finding.violated_guidelines || []), finding.title]),
   ];
-  return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
+  const labels = [...explicitLabels, ...values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean)];
+  return Array.from(new Set(labels as string[]));
 };
 
 const INTERNAL_SUMMARY_PATTERNS = [
@@ -90,7 +95,7 @@ const INTERNAL_SUMMARY_PATTERNS = [
 ];
 
 const compactReadableText = (value?: string | null): string => {
-  const text = stripReviewSupplementSections(value || "")
+  const text = cleanUserFacingText(value || "")
     .replace(/^[-*]\s*/gm, "")
     .replace(/^[\s:：,，;；。]+|[\s:：,，;；。]+$/g, "")
     .replace(/\s+/g, " ")

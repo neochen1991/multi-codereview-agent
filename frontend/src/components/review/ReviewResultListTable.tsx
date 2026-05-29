@@ -3,7 +3,8 @@ import { Card, Input, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 import type { IssueFilterDecision } from "@/services/api";
-import { humanizeExpertId, humanizeReviewText, humanizeSeverity, stripReviewSupplementSections } from "@/utils/displayText";
+import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
+import { buildReadableFixSummary, buildReadableIssueSummary, buildReadableIssueTitle, issueTypeDisplayLabel } from "./issueDisplayQuality";
 
 export type ReviewResultListRow = {
   id: string;
@@ -144,6 +145,7 @@ export const classifySpecificIssueType = (text: string): string | null => {
   if (!value) return null;
   if (value.includes("limit") || value.includes("分页") || value.includes("大结果集")) return "SQL分页缺失";
   if (value.includes("n+1")) return "N+1查询风险";
+  if (value.includes("todo") || value.includes("承诺未落地") || value.includes("扣减库存") || value.includes("预占事件")) return "注释承诺未落地";
   if (value.includes("sql") && value.includes("注入")) return "SQL注入风险";
   if (value.includes("like") || value.includes("模糊匹配") || value.includes("查询语义")) return "查询语义变更";
   if (value.includes("命名") || value.includes("chunksTmp".toLowerCase()) || value.includes("常量")) return "命名规范问题";
@@ -164,10 +166,9 @@ export const classifySpecificIssueType = (text: string): string | null => {
 
 const getSpecificFindingTypeLabels = (row: ReviewResultListRow): string[] => {
   if (row.finding_type_labels && row.finding_type_labels.length > 0) {
-    return Array.from(new Set(row.finding_type_labels.filter(Boolean)));
+    return Array.from(new Set(row.finding_type_labels.filter(Boolean).map((item) => issueTypeDisplayLabel(item))));
   }
-  const fallback = findingTypeMeta(row.finding_type).label;
-  return [fallback];
+  return [issueTypeDisplayLabel(row.finding_type, findingTypeMeta(row.finding_type).label)];
 };
 
 const getRowFindingTypes = (row: ReviewResultListRow): string[] =>
@@ -336,16 +337,29 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         width: columnWidths.summary,
         onHeaderCell: () => ({ width: columnWidths.summary, onResize: (delta: number) => resizeColumn("summary", delta) }),
         render: (value: string, item: ReviewResultListRow) => {
-          const titleText = humanizeReviewText(item.title);
-          const summaryText = stripReviewSupplementSections(value);
+          const titleText = buildReadableIssueTitle({
+            ...item,
+            summary: value,
+            normalized_issue_type: item.finding_types?.[0],
+          });
+          const summaryText = buildReadableIssueSummary({
+            ...item,
+            summary: value,
+            normalized_issue_type: item.finding_types?.[0],
+          });
+          const fixText = buildReadableFixSummary({
+            ...item,
+            summary: value,
+            normalized_issue_type: item.finding_types?.[0],
+          });
           return (
             <Tooltip
               placement="topLeft"
               title={
                 <div style={{ maxWidth: 720, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>{titleText}</div>
-                  <div>{summaryText}</div>
-                  {item.metaSummary ? <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>{humanizeReviewText(item.metaSummary)}</div> : null}
+                  <div style={{ fontWeight: 600, marginBottom: 8 }}>问题：{titleText}</div>
+                  <div>说明：{summaryText}</div>
+                  <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>建议：{fixText}</div>
                 </div>
               }
             >
@@ -365,7 +379,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                 >
                   {summaryText}
                 </div>
-                {item.metaSummary ? (
+                {fixText ? (
                   <div
                     className="review-summary-text"
                     style={{
@@ -378,7 +392,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                       WebkitBoxOrient: "vertical",
                     }}
                   >
-                    {humanizeReviewText(item.metaSummary)}
+                    建议：{humanizeReviewText(fixText)}
                   </div>
                 ) : null}
               </div>

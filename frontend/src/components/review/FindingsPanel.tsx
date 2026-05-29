@@ -3,6 +3,7 @@ import { Tag } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewFinding } from "@/services/api";
 import { humanizeExpertId } from "@/utils/displayText";
+import { issueTypeDisplayLabel } from "./issueDisplayQuality";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 type FindingsPanelProps = {
@@ -49,13 +50,20 @@ const hasDesignEvidence = (finding: ReviewFinding): boolean =>
   (finding.design_conflicts?.length || 0) > 0;
 
 const buildFindingTypeLabels = (finding: ReviewFinding): string[] => {
-  const values = [
+  const primaryValues = [
+    finding.normalized_issue_type,
+    finding.category_label,
     finding.title,
-    ...(finding.matched_rules || []),
-    ...(finding.violated_guidelines || []),
     finding.summary,
   ];
-  return Array.from(new Set(values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean) as string[]));
+  const primaryLabels = primaryValues
+    .map((item) => classifySpecificIssueType(String(item || "")) || issueTypeDisplayLabel(item))
+    .filter((item) => item && item !== "代码风险");
+  if (primaryLabels.length) return Array.from(new Set(primaryLabels as string[])).slice(0, 2);
+  const ruleLabels = [...(finding.matched_rules || []), ...(finding.violated_guidelines || [])]
+    .map((item) => classifySpecificIssueType(String(item || "")))
+    .filter(Boolean);
+  return Array.from(new Set(ruleLabels as string[])).slice(0, 2);
 };
 
 const buildConfidenceMetaSummary = (finding: ReviewFinding): string | undefined => {

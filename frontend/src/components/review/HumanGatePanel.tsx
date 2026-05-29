@@ -7,9 +7,16 @@ import {
   humanizeReviewStatus,
   humanizeReviewText,
   humanizeSeverity,
-  stripReviewSupplementSections,
 } from "@/utils/displayText";
 import { evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
+import {
+  buildReadableFixSummary,
+  buildReadableIssueSummary,
+  buildReadableIssueTitle,
+  cleanUserFacingList,
+  cleanUserFacingText,
+  issueTypeDisplayLabel,
+} from "./issueDisplayQuality";
 
 const { Paragraph, Text } = Typography;
 
@@ -45,19 +52,38 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   const canSubmitDecision = Boolean(selectedIssue?.needs_human && selectedIssue?.status !== "resolved");
   const primaryExpertId = String(selectedIssue?.primary_expert_id || selectedIssue?.participant_expert_ids?.[0] || "").trim();
   const participantExperts = uniqueList(selectedIssue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
-  const issueDescription = stripReviewSupplementSections(selectedIssue?.summary || finding?.summary || "-");
-  const issueEvidence = uniqueList(selectedIssue?.evidence?.map((item) => humanizeReviewText(item)));
+  const issueTitle = selectedIssue
+    ? buildReadableIssueTitle({
+        ...selectedIssue,
+        summary: selectedIssue.summary || finding?.summary,
+      })
+    : "";
+  const issueDescription = selectedIssue
+    ? buildReadableIssueSummary({
+        ...selectedIssue,
+        summary: selectedIssue.summary || finding?.summary || selectedIssue.title,
+      })
+    : "";
+  const issueEvidence = cleanUserFacingList(selectedIssue?.evidence);
   const evidenceChain = selectedIssue?.evidence_chain?.length ? selectedIssue.evidence_chain : finding?.evidence_chain || [];
   const aggregatedStrategies = uniqueList(selectedIssue?.aggregated_remediation_strategies);
   const aggregatedSuggestions = uniqueList(selectedIssue?.aggregated_remediation_suggestions);
   const aggregatedSteps = uniqueList(selectedIssue?.aggregated_remediation_steps);
-  const issueStrategy = humanizeReviewText(selectedIssue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "-");
-  const issueSuggestion = humanizeReviewText(selectedIssue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "-");
+  const issueStrategy = cleanUserFacingText(selectedIssue?.remediation_strategy || aggregatedStrategies[0] || finding?.remediation_strategy || "");
+  const issueSuggestion = cleanUserFacingText(selectedIssue?.remediation_suggestion || aggregatedSuggestions[0] || finding?.remediation_suggestion || "");
   const issueSteps = uniqueList(selectedIssue?.remediation_steps).length
     ? uniqueList(selectedIssue?.remediation_steps)
     : aggregatedSteps.length
       ? aggregatedSteps
-      : uniqueList(finding?.remediation_steps);
+      : cleanUserFacingList(finding?.remediation_steps);
+  const fixSummary = selectedIssue
+    ? buildReadableFixSummary({
+        ...selectedIssue,
+        remediation_strategy: issueStrategy,
+        remediation_suggestion: issueSuggestion,
+        remediation_steps: issueSteps,
+      })
+    : "";
   const needsHumanReason = selectedIssue?.needs_human
     ? "该问题置信度、影响面或证据冲突达到人工确认条件，需要人工判断是否进入正式整改。"
     : "该问题当前不需要人工确认。";
@@ -90,7 +116,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
             />
             <div className="human-gate-issue-box">
               <div className="human-gate-issue-head">
-                <Text strong>{humanizeReviewText(selectedIssue.title)}</Text>
+                <Text strong>{issueTitle}</Text>
                 <Space size={4} wrap>
                   {selectedIssue.needs_human ? <Tag color="error">待确认</Tag> : <Tag>常规</Tag>}
                   <Tag color={selectedIssue.severity === "high" || selectedIssue.severity === "critical" ? "error" : "processing"}>
@@ -112,7 +138,7 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
                       {humanizeReviewStatus(selectedIssue.status)}
                     </Tag>
                     <Tag>{humanizeReviewStatus(selectedIssue.resolution || "needs_human_review")}</Tag>
-                    <Tag>{selectedIssue.category_label || selectedIssue.normalized_issue_type || selectedIssue.finding_type || "未分类"}</Tag>
+                    <Tag>{issueTypeDisplayLabel(selectedIssue.category_label, selectedIssue.normalized_issue_type, selectedIssue.finding_type)}</Tag>
                   </Space>
                 </Descriptions.Item>
                 <Descriptions.Item label="检查角色">
@@ -132,30 +158,31 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
                     "-"
                   )}
                 </Descriptions.Item>
-                {selectedIssue.confidence_rationale ? (
-                  <Descriptions.Item label="置信度理由">
+                {cleanUserFacingText(selectedIssue.confidence_rationale) ? (
+                  <Descriptions.Item label="判断依据">
                     <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                      {humanizeReviewText(selectedIssue.confidence_rationale)}
+                      {cleanUserFacingText(selectedIssue.confidence_rationale)}
                     </Paragraph>
                   </Descriptions.Item>
                 ) : null}
                 {evidenceChain.length ? (
-                  <Descriptions.Item label="证据链">
+                  <Descriptions.Item label="系统核对过的证据">
                     <div>
                       {evidenceChain.slice(0, 5).map((step, index) => (
                         <Paragraph key={`${index}-${step.step || "evidence"}`} style={{ marginBottom: 6 }}>
                           <Text strong>{evidenceStepLabel(step)}：</Text>
-                          {humanizeReviewText(evidenceStepSummary(step))}
+                          {cleanUserFacingText(evidenceStepSummary(step, JSON.stringify(selectedIssue)))}
                         </Paragraph>
                       ))}
                     </div>
                   </Descriptions.Item>
                 ) : null}
-                {issueStrategy !== "-" || issueSuggestion !== "-" || issueSteps.length ? (
+                {issueStrategy || issueSuggestion || issueSteps.length || fixSummary ? (
                   <Descriptions.Item label="修复参考">
                     <div>
-                      {issueStrategy !== "-" ? <Paragraph style={{ marginBottom: 6 }}>{issueStrategy}</Paragraph> : null}
-                      {issueSuggestion !== "-" ? <Paragraph style={{ marginBottom: 6 }}>{issueSuggestion}</Paragraph> : null}
+                      {fixSummary ? <Paragraph style={{ marginBottom: 6 }}>{fixSummary}</Paragraph> : null}
+                      {issueStrategy ? <Paragraph style={{ marginBottom: 6 }}>{issueStrategy}</Paragraph> : null}
+                      {issueSuggestion ? <Paragraph style={{ marginBottom: 6 }}>{issueSuggestion}</Paragraph> : null}
                       {issueSteps.slice(0, 4).map((item, index) => (
                         <Paragraph key={`${index}-${item}`} style={{ marginBottom: 6 }}>
                           {index + 1}. {humanizeReviewText(item)}

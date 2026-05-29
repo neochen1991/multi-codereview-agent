@@ -3,6 +3,7 @@ import { Card, Descriptions, Empty, List, Space, Tag, Typography } from "antd";
 
 import type { DebateIssue } from "@/services/api";
 import { humanizeReviewText } from "@/utils/displayText";
+import { rewriteUserFacingIssueText } from "./issueDisplayQuality";
 
 const { Text } = Typography;
 
@@ -30,16 +31,17 @@ const statusColor = (status?: string): string => {
   return "processing";
 };
 
-const stepDescription = (step: NonNullable<DebateIssue["evidence_chain"]>[number]): string => {
-  if (step.step === "claim") return step.claim || "-";
+const stepDescription = (step: NonNullable<DebateIssue["evidence_chain"]>[number], issue?: DebateIssue | null): string => {
+  const context = JSON.stringify({ issue, step });
+  if (step.step === "claim") return rewriteUserFacingIssueText(step.claim || "-", context);
   if (step.step === "anchor") {
     const reasons = (step.reasons || []).slice(0, 3).join(" / ");
     const evidence = (step.evidence || []).slice(0, 2).join(" / ");
-    return [step.file_path || "", step.line_start ? `L${step.line_start}` : "", evidence, reasons].filter(Boolean).join(" · ") || "-";
+    return rewriteUserFacingIssueText([step.file_path || "", step.line_start ? `L${step.line_start}` : "", evidence, reasons].filter(Boolean).join(" · ") || "-", context);
   }
-  if (step.step === "verifier") return [step.tool_name, step.summary].filter(Boolean).join(" · ") || "-";
-  if (step.step === "static_analysis") return (step.signals || []).join(" / ") || "-";
-  if (step.step === "false_positive_filter") return step.reason || step.verdict || "-";
+  if (step.step === "verifier") return rewriteUserFacingIssueText([step.tool_name, step.summary].filter(Boolean).join(" · ") || "-", context);
+  if (step.step === "static_analysis") return rewriteUserFacingIssueText((step.signals || []).join(" / ") || "-", context);
+  if (step.step === "false_positive_filter") return rewriteUserFacingIssueText(step.reason || step.verdict || "-", context);
   if (step.step === "confidence") {
     const delta = typeof step.confidence_delta === "number" ? `${step.confidence_delta >= 0 ? "+" : ""}${step.confidence_delta.toFixed(2)}` : "";
     const final = typeof step.final_confidence === "number" ? `${Math.round(step.final_confidence * 100)}%` : "";
@@ -47,7 +49,7 @@ const stepDescription = (step: NonNullable<DebateIssue["evidence_chain"]>[number
       .filter(Boolean)
       .join(" · ") || "-";
   }
-  return step.summary || step.reason || "-";
+  return rewriteUserFacingIssueText(step.summary || step.reason || "-", context);
 };
 
 // 工具核验卡用于展示某条 issue 的 verifier/tool 结果。
@@ -84,7 +86,7 @@ const ToolAuditPanel: React.FC<ToolAuditPanelProps> = ({ issue }) => {
                         <Tag color="blue">{stepLabel(step.step)}</Tag>
                         <Tag color={statusColor(step.status)}>{humanizeReviewText(step.status || "-")}</Tag>
                       </Space>
-                      <Text type="secondary">{humanizeReviewText(stepDescription(step))}</Text>
+                      <Text type="secondary">{humanizeReviewText(stepDescription(step, issue))}</Text>
                     </Space>
                   </List.Item>
                 )}

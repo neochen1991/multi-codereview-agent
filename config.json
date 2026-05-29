@@ -16,7 +16,34 @@
     "gitlab_access_token": null,
     "codehub_access_token": null
   },
-  "projects": [],
+  "projects": [
+    {
+      "project_id": "default",
+      "name": "默认项目",
+      "description": "系统默认项目。代码仓配置挂在项目下，不再维护全局代码仓。",
+      "owner_team": "",
+      "status": "active",
+      "repositories": [
+        {
+          "repository_id": "multi-codereview-agent",
+          "name": "multi-codereview-agent",
+          "provider": "github",
+          "clone_url": "https://github.com/neochen1991/multi-codereview-agent.git",
+          "web_url_prefixes": [
+            "https://github.com/neochen1991/multi-codereview-agent"
+          ],
+          "local_path": "/Users/neochen/multi-codereview-agent",
+          "default_branch": "main",
+          "enabled": true,
+          "auto_review_enabled": true,
+          "auto_review_poll_interval_seconds": 120,
+          "auto_sync": false,
+          "gitnexus_enabled": true,
+          "database_source_ids": []
+        }
+      ]
+    }
+  ],
   "default_project_id": "default",
   "runtime": {
     "default_target_branch": "main",

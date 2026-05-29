@@ -11,7 +11,16 @@ import type {
 import { humanizeExpertId, humanizeReviewStatus, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
 import { buildIssueCallChainGraph } from "./callChainGraph";
 import { evidenceStepLabel, evidenceStepSummary } from "./evidenceChainDisplay";
-import { cleanUserFacingList, cleanUserFacingText, isConcreteDisplayCode, pickUserFacingText } from "./issueDisplayQuality";
+import {
+  buildReadableFixSummary,
+  buildReadableIssueSummary,
+  buildReadableIssueTitle,
+  cleanUserFacingList,
+  cleanUserFacingText,
+  isConcreteDisplayCode,
+  issueTypeDisplayLabel,
+  pickUserFacingText,
+} from "./issueDisplayQuality";
 import MermaidBlock from "./MermaidBlock";
 
 const { Paragraph } = Typography;
@@ -165,13 +174,35 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const displayConfidence = typeof issue?.confidence === "number" ? issue.confidence : finding.confidence;
   const displayExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || finding.expert_id || "").trim();
   const displayCategory = issue?.category_label || issue?.normalized_issue_type || finding.category_label || finding.normalized_issue_type || finding.finding_type;
-  const issueSummary = pickUserFacingText(
-    [issue?.summary, finding.summary, issue?.title, finding.title],
-    "当前问题已定位到代码改动，请结合下方代码锚点和证据处理。",
-  );
+  const issueTitle = buildReadableIssueTitle({
+    title: issue?.title || finding.title,
+    summary: issue?.summary || finding.summary,
+    file_path: displayFilePath,
+    line_start: displayLineStart,
+    finding_type: finding.finding_type,
+    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
+    category_label: displayCategory,
+  });
+  const issueSummary = buildReadableIssueSummary({
+    title: issue?.title || finding.title,
+    summary: pickUserFacingText([issue?.summary, finding.summary, issue?.title, finding.title]),
+    file_path: displayFilePath,
+    line_start: displayLineStart,
+    finding_type: finding.finding_type,
+    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
+    category_label: displayCategory,
+  });
   const issueStrategy = pickUserFacingText([issue?.remediation_strategy, finding.remediation_strategy]);
   const issueSuggestion = pickUserFacingText([issue?.remediation_suggestion, finding.remediation_suggestion]);
   const issueSteps = cleanUserFacingList(issue?.remediation_steps?.length ? issue.remediation_steps : finding.remediation_steps);
+  const fixSummary = buildReadableFixSummary({
+    remediation_strategy: issueStrategy,
+    remediation_suggestion: issueSuggestion,
+    remediation_steps: issueSteps,
+    finding_type: finding.finding_type,
+    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
+    category_label: displayCategory,
+  });
   const currentCode =
     String(issue?.current_code || "").trim() ||
     finding.code_excerpt ||
@@ -189,6 +220,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       (finding.code_context && Object.keys(finding.code_context).length > 0),
   );
   const evidenceChain = evidenceChainFor(finding, issue);
+  const evidenceIssueContext = JSON.stringify({ finding, issue });
   const callChainGraph = buildIssueCallChainGraph(finding, issue, evidenceChain);
   const displayConfidenceRationale = cleanUserFacingText(finding.confidence_rationale || issue?.confidence_rationale || "");
   const displayMatchedRules = cleanUserFacingList(finding.matched_rules || []);
@@ -202,7 +234,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
     .map((step, index) => ({
       key: `${index}-${step.step || "evidence"}`,
       label: evidenceStepLabel(step),
-      summary: cleanUserFacingText(evidenceStepSummary(step)),
+      summary: cleanUserFacingText(evidenceStepSummary(step, evidenceIssueContext)),
     }))
     .filter((step) => step.summary);
 
@@ -236,6 +268,11 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             children: `${displayFilePath}:${displayLineStart}`,
           },
           {
+            key: "issue_title",
+            label: "问题标题",
+            children: issueTitle,
+          },
+          {
             key: "severity",
             label: "问题级别",
             children: <Tag color={severityColor(displaySeverity)}>{humanizeSeverity(displaySeverity)}</Tag>,
@@ -247,7 +284,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           },
           {
             key: "status",
-            label: "裁决状态",
+            label: "处理状态",
             children: (
               <>
                 {issue ? (
@@ -272,7 +309,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             children: (
               <Space wrap>
                 <Tag color="purple">{getFindingTypeLabel(finding.finding_type)}</Tag>
-                {displayCategory ? <Tag color="cyan">{humanizeReviewText(displayCategory)}</Tag> : null}
+                {displayCategory ? <Tag color="cyan">{issueTypeDisplayLabel(displayCategory)}</Tag> : null}
               </Space>
             ),
           },
@@ -285,7 +322,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             ? [
                 {
                   key: "confidence_rationale",
-                  label: "置信度理由",
+                  label: "判断依据",
                   children: (
                     <Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}>
                       {displayConfidenceRationale}
@@ -308,7 +345,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       />
 
       <div style={{ marginTop: 16 }}>
-        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>证据链</Paragraph>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>系统核对过的证据</Paragraph>
         {displayEvidenceChain.length ? (
           <Descriptions
             column={1}
@@ -328,13 +365,13 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             type="info"
             showIcon
             message="暂无结构化证据链"
-            description="当前问题仍保留基础证据；如果命中 Tree-sitter、工具核验或跨文件关系，会在这里展示问题主张、代码锚点、工具核验和置信度变化。"
+            description="当前先展示基础证据；如果后续补充到调用链、工具核验或跨文件关系，会继续在这里展开。"
           />
         )}
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>调用关系依据</Paragraph>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>相关调用关系</Paragraph>
         {callChainGraph ? (
           <div className="issue-call-chain-panel">
             <MermaidBlock chart={callChainGraph.chart} />
@@ -353,7 +390,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
             type="info"
             showIcon
             message="暂无可视化调用链"
-            description="当前证据尚未形成稳定的上游到下游调用关系；如 Tree-sitter 或 GitNexus 后续命中调用链，会在这里以 Mermaid 图展示。"
+            description="当前没有可展示的稳定调用链；这不影响本条问题本身，后续补到调用关系后会自动展示。"
           />
         )}
       </div>
@@ -364,7 +401,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>命中的规范条款</Paragraph>
+        <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>参考规范</Paragraph>
         <Space wrap>
           {displayMatchedRules.length ? (
             displayMatchedRules.map((rule) => (
@@ -373,14 +410,14 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
               </Tag>
             ))
           ) : (
-            <Tag color="default">未命中具体条款</Tag>
+            <Tag color="default">未匹配到具体条款，按专家通用规则判断</Tag>
           )}
         </Space>
       </div>
 
       {displayViolatedGuidelines.length ? (
         <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>违反的规范要求</Paragraph>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>不符合的规则点</Paragraph>
           <Space wrap>
             {displayViolatedGuidelines.map((rule) => (
               <Tag key={rule} color="volcano">
@@ -393,7 +430,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       {displayRuleBasis ? (
         <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>规范依据</Paragraph>
+          <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>为什么认为这是问题</Paragraph>
           <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
             {displayRuleBasis}
           </Paragraph>
@@ -402,7 +439,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
 
       {ruleScreening && ruleScreening.total_rules > 0 ? (
         <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>规则覆盖报告</Paragraph>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>本次参考的规则</Paragraph>
           <Space wrap style={{ marginBottom: 10 }}>
             <Tag color="purple">{`总规则 ${ruleScreening.total_rules}`}</Tag>
             <Tag>{`启用 ${ruleScreening.enabled_rules || ruleScreening.total_rules}`}</Tag>
@@ -412,7 +449,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           </Space>
           {ruleScreening.matched_rules_for_llm?.length ? (
             <>
-              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>本轮带入审查的规则</Paragraph>
+              <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>参与判断的规则</Paragraph>
               <ul className="review-remediation-steps">
                 {ruleScreening.matched_rules_for_llm.map((item) => (
                   <li key={item.rule_id || item.title}>
@@ -424,14 +461,14 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
               </ul>
             </>
           ) : (
-            <Paragraph style={{ marginBottom: 0 }}>本轮未命中需要带入深审的规则卡。</Paragraph>
+            <Paragraph style={{ marginBottom: 0 }}>本条问题主要由专家通用规则判断，未匹配到专项规则卡。</Paragraph>
           )}
         </div>
       ) : null}
 
       {hasDesignEvidence(finding) ? (
         <div style={{ marginTop: 16 }}>
-          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>详细设计一致性</Paragraph>
+          <Paragraph style={{ marginBottom: 8, fontWeight: 600 }}>设计一致性检查</Paragraph>
           <Space wrap style={{ marginBottom: 10 }}>
             <Tag color={getDesignAlignmentColor(finding.design_alignment_status)}>
               {getDesignAlignmentLabel(finding.design_alignment_status)}
@@ -488,14 +525,14 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修改思路</Paragraph>
         <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-          {issueStrategy || "按当前代码锚点修正问题，并补充覆盖该风险的回归测试。"}
+          {issueStrategy || fixSummary}
         </Paragraph>
       </div>
 
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 6, fontWeight: 600 }}>修复建议</Paragraph>
         <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-          {issueSuggestion || "优先修复问题说明指向的代码片段，避免引入与当前问题无关的改动。"}
+          {issueSuggestion || fixSummary}
         </Paragraph>
       </div>
 
@@ -522,7 +559,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
               {currentCode ? (
                 renderCodeLines(currentCode, displayLineStart, lineRefs)
               ) : (
-                <Alert type="warning" showIcon message="当前代码片段缺失" description="后端未返回稳定代码锚点，本条问题不应直接提交，请先补齐证据。" />
+                <Alert type="warning" showIcon message="当前代码片段暂未展示" description="这条问题已有位置和说明，但详情里暂时没有拿到可展示的代码片段。提交到 CodeHub 前建议先打开对应文件核对。" />
               )}
             </div>
           </Col>
@@ -535,7 +572,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
               {suggestedCode ? (
                 renderSuggestedCode(suggestedCode)
               ) : (
-                <Alert type="warning" showIcon message="建议修改后代码缺失" description="系统没有生成可直接落地的代码片段，本条问题需要回到裁决链路补全后再提交。" />
+                <Alert type="warning" showIcon message="暂无可直接复制的建议代码" description="请先按“修改思路”和“建议修改步骤”处理；如果要提交到 CodeHub，建议补充更具体的代码修改片段。" />
               )}
             </div>
           </Col>
