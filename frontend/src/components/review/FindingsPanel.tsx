@@ -49,6 +49,21 @@ const hasDesignEvidence = (finding: ReviewFinding): boolean =>
   (finding.extra_implementation_points?.length || 0) > 0 ||
   (finding.design_conflicts?.length || 0) > 0;
 
+const normalizePath = (value?: string | null): string =>
+  String(value || "").replace(/\\/g, "/").trim().toLowerCase();
+
+const isSameFindingAnchor = (issue: DebateIssue | undefined, finding: ReviewFinding): boolean => {
+  if (!issue) return false;
+  const issuePath = normalizePath(issue.file_path);
+  const findingPath = normalizePath(finding.file_path);
+  const samePath =
+    Boolean(issuePath && findingPath) &&
+    (issuePath === findingPath || issuePath.endsWith(`/${findingPath}`) || findingPath.endsWith(`/${issuePath}`));
+  const issueLine = Number(issue.line_start || 0);
+  const findingLine = Number(finding.line_start || 0);
+  return samePath && Boolean(issueLine && findingLine) && issueLine === findingLine;
+};
+
 const buildFindingTypeLabels = (finding: ReviewFinding): string[] => {
   const primaryValues = [
     finding.normalized_issue_type,
@@ -105,6 +120,10 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     () =>
       findings.map((finding) => {
         const issue = issueByFindingId.get(finding.finding_id);
+        const sameAnchorIssue = isSameFindingAnchor(issue, finding) ? issue : undefined;
+        const displayTitle = sameAnchorIssue?.title || finding.title;
+        const displaySummary = sameAnchorIssue?.summary || finding.summary;
+        const displayTypeLabel = classifySpecificIssueType(`${displayTitle}\n${displaySummary}`);
         const designMisaligned =
           hasDesignEvidence(finding) &&
           (["misaligned", "partially_aligned"].includes(String(finding.design_alignment_status || "").trim()) ||
@@ -114,11 +133,17 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
           id: finding.finding_id,
           file_path: finding.file_path,
           line_start: finding.line_start,
-          title: finding.title,
-          summary: finding.summary,
+          title: displayTitle,
+          summary: displaySummary,
           metaSummary: buildConfidenceMetaSummary(finding),
           finding_type: finding.finding_type,
-          finding_type_labels: buildFindingTypeLabels(finding),
+          finding_types: [
+            sameAnchorIssue?.normalized_issue_type,
+            sameAnchorIssue?.finding_type,
+            finding.normalized_issue_type,
+            finding.finding_type,
+          ].filter(Boolean) as string[],
+          finding_type_labels: displayTypeLabel ? [displayTypeLabel] : buildFindingTypeLabels(finding),
           severity: finding.severity,
           confidence: finding.confidence,
           expert_labels: finding.expert_id ? [humanizeExpertId(finding.expert_id)] : [],

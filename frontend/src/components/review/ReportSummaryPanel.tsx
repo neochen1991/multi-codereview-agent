@@ -198,11 +198,6 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       if (findingId) thresholdFilteredFindingIds.add(findingId);
     }
   }
-  const pendingFindingCount = findings.filter((item) => {
-    if (issueByFindingId.has(item.finding_id)) return false;
-    if (thresholdFilteredFindingIds.has(item.finding_id)) return false;
-    return true;
-  }).length;
   const promotedFindingCount = findings.filter((item) => issueByFindingId.has(item.finding_id)).length;
   const thresholdFilteredCount = findings.filter((item) => thresholdFilteredFindingIds.has(item.finding_id)).length;
   const verifiedFindingCount = findings.filter((item) => Boolean(issueByFindingId.get(item.finding_id)?.verified)).length;
@@ -266,7 +261,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       </Paragraph>
       <Row gutter={[12, 12]}>
         <Col xs={12} xl={6}>
-          {clickableStatistic("检视发现", pendingFindingCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
+          {clickableStatistic("检视发现", totalCount, onNavigateToGroup ? () => onNavigateToGroup("all") : undefined)}
         </Col>
         <Col xs={12} xl={6}>
           {clickableStatistic("正式问题", formalIssueCount)}

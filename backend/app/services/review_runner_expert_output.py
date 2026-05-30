@@ -188,14 +188,14 @@ class ReviewRunnerExpertOutputMixin:
                     + [f"缺失上下文: {item}" for item in missing_context],
                     "context_files": self._normalize_text_list(item.get("context_files"), []),
                     "why_it_matters": reason or title,
-                    "fix_strategy": str(item.get("fix_strategy") or "按命中的规则修正当前代码。").strip(),
-                    "suggested_fix": str(item.get("suggested_fix") or "请根据规则要求补齐正确实现，并保留必要测试。").strip(),
+                    "fix_strategy": str(item.get("fix_strategy") or "回到当前代码锚点，补齐被规则命中的真实业务逻辑或保护逻辑。").strip(),
+                    "suggested_fix": str(item.get("suggested_fix") or "按当前代码片段补齐缺失实现，并增加能复现该风险的回归测试。").strip(),
                     "change_steps": self._normalize_text_list(
                         item.get("change_steps"),
                         [
-                            "定位候选代码行",
-                            "按命中规则修正实现",
-                            "补充或更新覆盖该规则的测试",
+                            "在当前代码锚点补齐缺失的业务逻辑或保护逻辑",
+                            "用回归用例覆盖本次被命中的风险路径",
+                            "确认修复后问题代码和建议代码不再相同",
                         ],
                     ),
                     "suggested_code": candidate_suggested_code
@@ -205,7 +205,7 @@ class ReviewRunnerExpertOutputMixin:
                     "verification_needed": verification_needed,
                     "verification_plan": ""
                     if not verification_needed
-                    else "需要补充缺失上下文后复核候选是否具备完整规则证据。",
+                    else "复核当前代码锚点、规则证据和建议代码是否一致；不一致时降级为候选发现。",
                     "file_path": str(item.get("file_path") or file_path).strip().replace("\\", "/"),
                     "observation_ids": self._normalize_text_list(item.get("observation_ids"), []),
                     "rule_guided_candidate": True,
@@ -651,11 +651,11 @@ class ReviewRunnerExpertOutputMixin:
                         "observation_ids": [observation_id] if observation_id else [],
                         "fix_strategy": "把循环内逐条外部调用改成批量查询、批量远程接口或先聚合后统一处理。",
                         "suggested_fix": "优先把循环内的仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
-                        "change_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "保留单次结果映射关系"],
+                        "change_steps": ["把循环内逐条调用移到循环外统一处理", "改用批量获取或批量提交", "保留单次结果映射关系"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要结合调用频率、批量规模和外部依赖成本复核后再升级为确定缺陷。",
+                        "verification_plan": "验证重点：核对循环内依赖调用次数、批量输入规模和外部依赖成本，确认是否按批量接口或批量提交修复。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -669,7 +669,7 @@ class ReviewRunnerExpertOutputMixin:
                         "title": "创建路径变更风险",
                         "finding_type": "risk_hypothesis",
                         "normalized_issue_type": "construction_path_changed",
-                        "claim": f"当前变更改变了对象创建路径（{symbol_display}），需要复核原创建入口是否承载不变量校验、领域事件或其他副作用。",
+                        "claim": f"当前变更改变了对象创建路径（{symbol_display}），原创建入口承载的不变量校验、领域事件或其他副作用可能在新路径中丢失。",
                         "severity": "high",
                         "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
                         "violated_guidelines": ["领域对象创建入口变更时必须确认不变量、领域事件和副作用仍被保留"],
@@ -679,13 +679,13 @@ class ReviewRunnerExpertOutputMixin:
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
-                        "fix_strategy": "对比原创建入口与新创建路径，确认不变量校验、领域事件和副作用是否仍然完整。",
+                        "fix_strategy": "对比原创建入口与新创建路径，保留不变量校验、领域事件和副作用。",
                         "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
                         "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认原创建入口是否确实承载不变量校验、领域事件记录或其他副作用。",
+                        "verification_plan": "验证重点：对比原创建入口和新构造路径，检查不变量校验、领域事件记录和副作用是否被保留。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -700,21 +700,21 @@ class ReviewRunnerExpertOutputMixin:
                         "finding_type": "risk_hypothesis",
                         "claim": f"注释、TODO 或方法意图已经承诺了行为（{symbol_display}），但当前实现没有对应动作，调用方会误以为能力已经落地。",
                         "severity": "high",
-                        "matched_rules": [],
-                        "violated_guidelines": [],
-                        "rule_based_reasoning": "注释、接口说明或 TODO 可能表达代码语义承诺；如果仍是有效业务契约且实现中没有对应动作，才应升级为业务正确性问题。",
+                        "matched_rules": ["CORR-JDDD-001", "CORRECTNESS-CONTRACT-001"],
+                        "violated_guidelines": ["注释、TODO 或接口说明承诺的业务行为必须在实现中落地"],
+                        "rule_based_reasoning": "注释、接口说明或 TODO 已经表达代码语义承诺；当实现中没有对应动作时，调用方会按已落地能力使用，容易造成业务结果缺失。",
                         "evidence": evidence[:3] or [summary or "检测到注释、TODO 或方法意图与实现不一致。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
                         "fix_strategy": "要么补齐承诺中的行为，要么删除会误导调用方的注释、TODO 或命名表达。",
-                        "suggested_fix": "先确认该承诺是否仍然成立；如果成立，补齐实现；如果不再成立，删除失效承诺并同步修正文档或方法命名。",
-                        "change_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释/TODO/接口说明"],
+                        "suggested_fix": "如果该行为属于本次交付范围，请补齐对应业务动作并增加测试；如果不属于本次交付范围，应删除或改写会误导调用方的 TODO/注释。",
+                        "change_steps": ["补齐 TODO 或注释承诺的业务动作", "增加覆盖该业务动作的回归测试", "同步更新注释、接口说明和方法命名，避免继续承诺未实现能力"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认注释、TODO 或命名表达是否仍是当前有效业务契约。",
+                        "verification_plan": "验证重点：核对注释、TODO 或命名表达对应的业务动作是否已经在当前实现中落地。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -744,7 +744,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认查询入口是否确实可能返回无界结果集或触发不可接受的查询计划。",
+                        "verification_plan": "验证重点：检查查询入口是否具备分页、LIMIT、批量窗口或等价边界控制。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -774,7 +774,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认批量规模、事务边界和外部副作用是否会在生产数据量下放大。",
+                        "verification_plan": "验证重点：检查批量规模、事务边界和外部副作用是否已通过分片、超时、幂等或补偿机制控制。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -788,23 +788,23 @@ class ReviewRunnerExpertOutputMixin:
                         "title": "入口保护变更风险",
                         "finding_type": "risk_hypothesis",
                         "normalized_issue_type": "security_guard_removed",
-                        "claim": f"当前变更疑似删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），需要确认该校验是否仍由其他层覆盖。",
+                        "claim": f"当前变更删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），如果没有等价保护会放大越权或非法输入风险。",
                         "severity": "high",
                         "matched_rules": [],
                         "violated_guidelines": [],
-                        "rule_based_reasoning": "入口校验和权限判断可能属于安全边界；删除或迁移这类保护时，需要确认是否存在等价保护，避免把合法重构误判为缺陷。",
+                        "rule_based_reasoning": "入口校验和权限判断属于安全边界；删除或迁移这类保护时，应在同一调用链提供等价保护，避免越权或非法输入进入业务层。",
                         "evidence": evidence[:3] or [summary or "检测到入口保护或权限校验被删除。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
-                        "fix_strategy": "确认被删除或迁移的入口保护是否仍由 Controller、Filter、Interceptor、注解或下游服务等价覆盖。",
+                        "fix_strategy": "把被删除或迁移的入口保护落实到 Controller、Filter、Interceptor、注解或下游服务中的等价保护点。",
                         "suggested_fix": "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。",
-                        "change_steps": ["定位原入口保护职责", "确认新路径是否存在等价保护", "补充非法输入或越权路径测试"],
+                        "change_steps": ["定位原入口保护职责", "补齐新路径的等价保护", "补充非法输入或越权路径测试"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.68), 0.8),
                         "verification_needed": True,
-                        "verification_plan": "该问题来自结构化观察信号，需要确认被删除的校验是否属于当前接口的有效安全边界。",
+                        "verification_plan": "验证重点：沿当前接口调用链检查入口校验、权限校验或身份一致性保护是否仍然生效。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -1293,7 +1293,7 @@ class ReviewRunnerExpertOutputMixin:
     def _build_anchor_specific_claim(self, parsed: dict[str, object], file_path: str, line_start: int) -> str:
         title = str(parsed.get("title") or "当前变更存在代码质量问题").strip()
         basename = str(file_path or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
-        return f"当前变更在 {basename}:{int(line_start or 1)} 存在“{title}”，需要按该代码锚点单独修复。"
+        return f"{basename} 第 {int(line_start or 1)} 行定位到“{title}”，修复时应围绕该代码锚点处理，避免把其他位置的问题混入同一条结论。"
 
     def _build_anchor_specific_title(self, title: str, issue_domains: set[str]) -> str:
         cleaned = str(title or "").strip()
@@ -1313,7 +1313,7 @@ class ReviewRunnerExpertOutputMixin:
         if "query_semantics" in issue_domains:
             return "查询语义从精确匹配退化为模糊匹配"
         if "exception" in issue_domains:
-            return "异常被静默吞掉，缺少日志或恢复处理"
+            return "失败被忽略后仍按成功处理"
         if "query_bound" in issue_domains:
             return "查询缺少分页或 LIMIT 边界"
         if "domain_creation" in issue_domains:
@@ -1751,9 +1751,9 @@ class ReviewRunnerExpertOutputMixin:
 
         additions: list[str] = []
         if needs_course_create:
-            additions.append("需要对比原 Course.create 创建入口")
+            additions.append("对比原 Course.create 创建入口")
         if needs_aggregate or needs_factory:
-            additions.append("确认原创建入口是否承载 aggregate/factory 语义或不变量校验")
+            additions.append("核对原创建入口承载的 aggregate/factory 语义或不变量校验")
         if needs_domain_event:
             additions.append("确认 domain event 录制/发布语义是否仍被保留")
         if additions:
@@ -1874,17 +1874,17 @@ class ReviewRunnerExpertOutputMixin:
                 if token in exception_text_blob:
                     exception_names.append(display)
             exception_display = "、".join(exception_names[:2]) if exception_names else "反射异常"
-            swallow_summary = f"{exception_display} 等异常处理被弱化为静默吞掉异常，后续排障、补偿和审计都会变难。"
+            swallow_summary = f"{exception_display} 等异常处理被忽略，后续排障、补偿和审计都会变难。"
             if swallow_summary not in summary_parts:
                 summary_parts.append(swallow_summary)
-            if "静默吞掉" not in claim_blob and "空 catch" not in claim_blob:
-                swallow_phrase = "当前变更还让 catch 块静默吞掉异常"
+            if "静默吞掉" not in claim_blob and "空 catch" not in claim_blob and "忽略" not in claim_blob:
+                swallow_phrase = "当前变更还让 catch 块忽略失败"
                 claim = f"{claim.rstrip('。')}；{swallow_phrase}。".strip("；")
                 if swallow_phrase not in evidence:
                     evidence.append(swallow_phrase)
             if expert_id in {"correctness_business", "performance_reliability"}:
-                if "静默吞掉异常" not in title:
-                    title = f"{title}（静默吞掉异常）" if title else "静默吞掉异常"
+                if "失败被忽略" not in title:
+                    title = f"{title}（失败被忽略）" if title else "失败被忽略"
                 if self._is_rule_backed_exception_swallow(
                     result,
                     evidence=evidence,

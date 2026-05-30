@@ -15,6 +15,7 @@ import {
   buildReadableIssueTitle,
   cleanUserFacingList,
   cleanUserFacingText,
+  issueTextMatchesIssueType,
   issueTypeDisplayLabel,
 } from "./issueDisplayQuality";
 
@@ -52,6 +53,18 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   const canSubmitDecision = Boolean(selectedIssue?.needs_human && selectedIssue?.status !== "resolved");
   const primaryExpertId = String(selectedIssue?.primary_expert_id || selectedIssue?.participant_expert_ids?.[0] || "").trim();
   const participantExperts = uniqueList(selectedIssue?.participant_expert_ids).filter((item) => item !== primaryExpertId);
+  const issueTextType = selectedIssue?.normalized_issue_type || finding?.normalized_issue_type || selectedIssue?.finding_type || finding?.finding_type || selectedIssue?.title || "";
+  const selectedSummaryAligned = issueTextMatchesIssueType(issueTextType, selectedIssue?.summary);
+  const findingSummaryAligned = issueTextMatchesIssueType(
+    issueTextType,
+    [
+      finding?.normalized_issue_type,
+      finding?.finding_type,
+      finding?.title,
+      finding?.summary,
+      finding?.rule_based_reasoning,
+    ].filter(Boolean).join("\n"),
+  );
   const issueTitle = selectedIssue
     ? buildReadableIssueTitle({
         ...selectedIssue,
@@ -61,7 +74,11 @@ const HumanGatePanel: React.FC<HumanGatePanelProps> = ({
   const issueDescription = selectedIssue
     ? buildReadableIssueSummary({
         ...selectedIssue,
-        summary: selectedIssue.summary || finding?.summary || selectedIssue.title,
+        summary:
+          (findingSummaryAligned ? finding?.summary : "") ||
+          (selectedSummaryAligned ? selectedIssue.summary : "") ||
+          finding?.summary ||
+          selectedIssue.title,
       })
     : "";
   const issueEvidence = cleanUserFacingList(selectedIssue?.evidence);

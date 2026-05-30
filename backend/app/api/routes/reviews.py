@@ -134,7 +134,7 @@ def get_review(review_id: str) -> dict[str, object]:
     review = review_service_module.review_service.get_review(review_id)
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
-    return review.model_dump(mode="json")
+    return review_service_module.review_service.build_review_display_payload(review_id)
 
 
 @router.get("/reviews/{review_id}/snapshot")
@@ -239,7 +239,7 @@ def list_findings(
 
     return [
         item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_findings(review_id, since=since, limit=limit)
+        for item in review_service_module.review_service.list_display_findings(review_id, since=since, limit=limit)
     ]
 
 

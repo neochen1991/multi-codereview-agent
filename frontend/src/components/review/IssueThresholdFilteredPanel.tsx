@@ -3,6 +3,12 @@ import { Card, Empty, Table, Tag, Typography } from "antd";
 
 import type { IssueFilterDecision, ReviewFinding } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
+import {
+  buildReadableIssueSummary,
+  buildReadableIssueTitle,
+  cleanUserFacingText,
+  issueTypeDisplayLabel,
+} from "./issueDisplayQuality";
 
 const { Text } = Typography;
 
@@ -12,6 +18,9 @@ type ThresholdFilteredRow = {
   line_start: number;
   title: string;
   summary: string;
+  finding_type?: string;
+  normalized_issue_type?: string;
+  category_label?: string;
   severity: string;
   confidence: number;
   expert_id: string;
@@ -60,6 +69,9 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
           line_start: finding.line_start,
           title: finding.title,
           summary: finding.summary,
+          finding_type: finding.finding_type,
+          normalized_issue_type: finding.normalized_issue_type,
+          category_label: finding.category_label,
           severity: finding.severity,
           confidence: finding.confidence,
           expert_id: finding.expert_id,
@@ -141,29 +153,53 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             title: "问题摘要",
             key: "summary",
             width: 340,
-            render: (_: unknown, row: ThresholdFilteredRow) => (
-              <div className="review-summary-cell">
-                <div className="review-summary-title" title={row.title}>
-                  {row.title}
+            render: (_: unknown, row: ThresholdFilteredRow) => {
+              const issueType = row.normalized_issue_type || row.finding_type || row.category_label;
+              const title = buildReadableIssueTitle({
+                title: row.title,
+                summary: row.summary,
+                file_path: row.file_path,
+                line_start: row.line_start,
+                finding_type: row.finding_type,
+                normalized_issue_type: issueType,
+                category_label: row.category_label,
+              });
+              const summary = buildReadableIssueSummary({
+                title: row.title,
+                summary: row.summary,
+                file_path: row.file_path,
+                line_start: row.line_start,
+                finding_type: row.finding_type,
+                normalized_issue_type: issueType,
+                category_label: row.category_label || issueTypeDisplayLabel(issueType),
+              });
+              return (
+                <div className="review-summary-cell">
+                  <div className="review-summary-title" title={title}>
+                    {title}
+                  </div>
+                  <div className="review-summary-text" title={summary}>
+                    {summary}
+                  </div>
                 </div>
-                <div className="review-summary-text" title={row.summary}>
-                  {row.summary}
-                </div>
-              </div>
-            ),
+              );
+            },
           },
           {
             title: "处理说明",
             dataIndex: "threshold_reason",
             key: "threshold_reason",
             width: 420,
-            render: (value: string) => (
+            render: (value: string) => {
+              const text = cleanUserFacingText(value) || humanizeReviewText(value);
+              return (
               <div className="review-summary-cell">
-                <div className="review-summary-text" title={value}>
-                  {humanizeReviewText(value)}
+                <div className="review-summary-text" title={text}>
+                  {text}
                 </div>
               </div>
-            ),
+              );
+            },
           },
         ]}
         dataSource={rows}

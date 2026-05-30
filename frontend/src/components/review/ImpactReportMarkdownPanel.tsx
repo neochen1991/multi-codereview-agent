@@ -110,7 +110,7 @@ const buildExecutiveSummary = (impactReport: ImpactReport): string => {
         .map((item) => item.scope)
         .join("、")} 的验证`
     : "当前还没有明确的测试范围建议";
-  return [moduleText, entrypointText, testText].filter(Boolean).join("；") || "本次改动的关联影响已生成，请结合下方范围和测试建议评估上线风险。";
+  return [moduleText, entrypointText, testText].filter(Boolean).join("；") || "本次改动的关联影响已生成，优先按下方范围和测试建议评估上线风险。";
 };
 
 const buildAnalysisBasis = (impactReport: ImpactReport): string[] => {
@@ -1699,7 +1699,7 @@ const renderReportHeadline = (impactReport: ImpactReport) => {
     ? impactReport.report_summary.trim()
     : impactReport.recommended_test_scope.length > 0
       ? `本次改动已识别出 ${impactReport.recommended_test_scope.length} 类优先测试范围，建议先围绕高风险影响面执行回归。`
-      : "本次改动已完成影响分析，请结合受影响范围安排后续验证。";
+      : "本次改动已完成影响分析，建议按受影响范围安排后续验证。";
   return (
     <section className="impact-report-hero">
       <div className="impact-report-hero-main">

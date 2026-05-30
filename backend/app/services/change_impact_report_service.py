@@ -865,7 +865,7 @@ class ChangeImpactReportService:
             if related_files:
                 impact_summary_parts.append(f"当前候选受影响文件包括 {', '.join(related_files[:2])}。")
             if not impact_summary_parts:
-                impact_summary_parts.append("当前图谱未给出更深调用链，建议结合代码上下文人工确认该方法的上下游依赖。")
+                impact_summary_parts.append("当前图谱未给出更深调用链，建议人工核对该方法附近的调用方和下游依赖。")
             blocks.append(
                 {
                     "method_signature": method_signature,
@@ -889,7 +889,7 @@ class ChangeImpactReportService:
             "mermaid_chart": "```mermaid\nflowchart LR\n    start[\"暂无可展开的方法\"]\n```",
             "列出 callers，无则显示 “无上游调用”": "无上游调用",
             "列出 callees，无则显示 “无下游调用”": "无下游调用",
-            "基于调用链分析，简要说明该方法变更可能带来的影响": "当前图谱没有返回可展开的调用链，请结合实际代码人工确认。",
+            "基于调用链分析，简要说明该方法变更可能带来的影响": "当前图谱没有返回可展开的调用链，建议人工核对变更方法附近的调用方和下游依赖。",
         }
 
     def _build_call_chain_mermaid(
@@ -1055,7 +1055,7 @@ class ChangeImpactReportService:
         deduped = self._dedupe(hits)
         if deduped:
             return deduped[:6]
-        return ["当前图谱未明确指向 Repository / Mapper / SQL 变更，请结合实际代码确认是否涉及数据访问层。"]
+        return ["当前图谱未明确指向 Repository / Mapper / SQL 变更，测试时可优先核对数据访问层是否被本次改动间接影响。"]
 
     def _derive_transaction_impact(self, report: ImpactReport) -> list[str]:
         hits: list[str] = []
@@ -1066,11 +1066,11 @@ class ChangeImpactReportService:
         for path in report.impact_paths[:8]:
             joined = " ".join(path.path).lower()
             if any(token in joined for token in ("service", "repository", "publisher", "event", "transaction")):
-                hits.append(f"需要确认调用链中的事务边界和提交顺序：{' -> '.join(path.path[:6])}")
+                hits.append(f"调用链中的事务边界和提交顺序需要重点回归：{' -> '.join(path.path[:6])}")
         deduped = self._dedupe(hits)
         if deduped:
             return deduped[:6]
-        return ["当前图谱未明确暴露事务边界变化，请重点人工确认写库、发消息、发事件的先后顺序。"]
+        return ["当前图谱未明确暴露事务边界变化，测试时重点覆盖写库、发消息、发事件的先后顺序。"]
 
     def _derive_integration_impact(self, report: ImpactReport) -> list[str]:
         hits: list[str] = []
@@ -1086,7 +1086,7 @@ class ChangeImpactReportService:
         deduped = self._dedupe(hits)
         if deduped:
             return deduped[:6]
-        return ["当前图谱未明确指向缓存、消息或异步任务，请结合 MQ / Redis / 定时任务链路人工确认。"]
+        return ["当前图谱未明确指向缓存、消息或异步任务，测试时可抽查 MQ / Redis / 定时任务链路是否被本次改动间接影响。"]
 
     def _dedupe(self, items: list[str]) -> list[str]:
         results: list[str] = []
@@ -1170,7 +1170,7 @@ class ChangeImpactReportService:
             recommended_test_scope=[
                 {"scope": "订单创建接口集成测试", "reason": "入口层和应用服务链路同时变更", "paths": ["src/test/java/com/example/order/OrderControllerTest.java"], "priority": "high"},
                 {"scope": "数据访问与事务顺序验证", "reason": "仓储写入和消息发送链路同时受影响", "paths": ["OrderRepository.save", "AuditPublisher.publish"], "priority": "high"},
-                {"scope": "异常回滚与幂等场景回归", "reason": "需要确认失败路径是否保持一致", "paths": ["OrderApplicationService.createOrder"], "priority": "medium"},
+                {"scope": "异常回滚与幂等场景回归", "reason": "失败路径可能影响回滚和幂等语义", "paths": ["OrderApplicationService.createOrder"], "priority": "medium"},
             ],
             manual_verification=[
                 "确认审计消息消费者是否依赖旧字段结构。",

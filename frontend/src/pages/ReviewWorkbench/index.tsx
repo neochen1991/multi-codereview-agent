@@ -1049,13 +1049,13 @@ const ReviewWorkbenchPage: React.FC = () => {
     return Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
   }, [review?.subject?.metadata]);
   const overviewFindingCount = useMemo(
-    () =>
-      Math.max(
-        findings.length,
-        visibleFindings.length,
-        parseFindingCountFromSummary(review?.report_summary),
-        parseFindingCountFromSummary(report?.summary),
-      ),
+    () => {
+      const reportSummaryCount = parseFindingCountFromSummary(report?.summary);
+      if (report || reportSummaryCount > 0) {
+        return Math.max(findings.length, visibleFindings.length, reportSummaryCount);
+      }
+      return Math.max(findings.length, visibleFindings.length, parseFindingCountFromSummary(review?.report_summary));
+    },
     [findings.length, report?.summary, review?.report_summary, visibleFindings.length],
   );
   const reviewInlineSummary = useMemo(() => {

@@ -17,7 +17,9 @@ import {
   buildReadableIssueTitle,
   cleanUserFacingList,
   cleanUserFacingText,
+  hasCrossContextPollution,
   isConcreteDisplayCode,
+  issueTextMatchesIssueType,
   issueTypeDisplayLabel,
   pickUserFacingText,
 } from "./issueDisplayQuality";
@@ -174,6 +176,18 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const displayConfidence = typeof issue?.confidence === "number" ? issue.confidence : finding.confidence;
   const displayExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || finding.expert_id || "").trim();
   const displayCategory = issue?.category_label || issue?.normalized_issue_type || finding.category_label || finding.normalized_issue_type || finding.finding_type;
+  const issueTextType = issue?.normalized_issue_type || finding.normalized_issue_type || issue?.finding_type || finding.finding_type || issue?.title || finding.title;
+  const issueSummaryAligned = issueTextMatchesIssueType(issueTextType, issue?.summary);
+  const findingSummaryAligned = issueTextMatchesIssueType(
+    issueTextType,
+    [
+      finding.normalized_issue_type,
+      finding.finding_type,
+      finding.title,
+      finding.summary,
+      finding.rule_based_reasoning,
+    ].filter(Boolean).join("\n"),
+  );
   const issueTitle = buildReadableIssueTitle({
     title: issue?.title || finding.title,
     summary: issue?.summary || finding.summary,
@@ -185,7 +199,13 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   });
   const issueSummary = buildReadableIssueSummary({
     title: issue?.title || finding.title,
-    summary: pickUserFacingText([issue?.summary, finding.summary, issue?.title, finding.title]),
+    summary: pickUserFacingText([
+      findingSummaryAligned ? finding.summary : "",
+      issueSummaryAligned ? issue?.summary : "",
+      finding.summary,
+      issue?.title,
+      finding.title,
+    ]),
     file_path: displayFilePath,
     line_start: displayLineStart,
     finding_type: finding.finding_type,
@@ -222,14 +242,26 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const evidenceChain = evidenceChainFor(finding, issue);
   const evidenceIssueContext = JSON.stringify({ finding, issue });
   const callChainGraph = buildIssueCallChainGraph(finding, issue, evidenceChain);
-  const displayConfidenceRationale = cleanUserFacingText(finding.confidence_rationale || issue?.confidence_rationale || "");
+  const rawConfidenceRationale = cleanUserFacingText(finding.confidence_rationale || issue?.confidence_rationale || "");
+  const displayConfidenceRationale =
+    rawConfidenceRationale &&
+    !hasCrossContextPollution(rawConfidenceRationale, displayFilePath) &&
+    issueTextMatchesIssueType(issueTextType, rawConfidenceRationale)
+      ? rawConfidenceRationale
+      : "";
   const displayMatchedRules = cleanUserFacingList(finding.matched_rules || []);
   const displayViolatedGuidelines = cleanUserFacingList(finding.violated_guidelines || []);
-  const displayRuleBasis = pickUserFacingText([
+  const rawRuleBasis = pickUserFacingText([
     finding.rule_based_reasoning,
     issue?.evidence?.join("；"),
     issue?.consistency_check_summary,
   ]);
+  const displayRuleBasis =
+    rawRuleBasis &&
+    !hasCrossContextPollution(rawRuleBasis, displayFilePath) &&
+    issueTextMatchesIssueType(issueTextType, rawRuleBasis)
+      ? rawRuleBasis
+      : "";
   const displayEvidenceChain = evidenceChain
     .map((step, index) => ({
       key: `${index}-${step.step || "evidence"}`,
@@ -550,7 +582,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
       <div style={{ marginTop: 16 }}>
         <Paragraph style={{ marginBottom: 10, fontWeight: 600 }}>建议代码修改方案</Paragraph>
         <Row gutter={[16, 16]}>
-          <Col xs={24} xl={12}>
+          <Col xs={24} xl={suggestedCode ? 12 : 24}>
             <div className="review-code-panel">
               <div className="review-code-panel-header">
                 <span>当前代码</span>
@@ -563,19 +595,17 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
               )}
             </div>
           </Col>
-          <Col xs={24} xl={12}>
-            <div className="review-code-panel">
-              <div className="review-code-panel-header">
-                <span>建议修改后代码</span>
-                {finding.suggested_code_language ? <Tag color="blue">{finding.suggested_code_language}</Tag> : null}
+          {suggestedCode ? (
+            <Col xs={24} xl={12}>
+              <div className="review-code-panel">
+                <div className="review-code-panel-header">
+                  <span>建议修改后代码</span>
+                  {finding.suggested_code_language ? <Tag color="blue">{finding.suggested_code_language}</Tag> : null}
+                </div>
+                {renderSuggestedCode(suggestedCode)}
               </div>
-              {suggestedCode ? (
-                renderSuggestedCode(suggestedCode)
-              ) : (
-                <Alert type="warning" showIcon message="暂无可直接复制的建议代码" description="请先按“修改思路”和“建议修改步骤”处理；如果要提交到 CodeHub，建议补充更具体的代码修改片段。" />
-              )}
-            </div>
-          </Col>
+            </Col>
+          ) : null}
         </Row>
       </div>
 

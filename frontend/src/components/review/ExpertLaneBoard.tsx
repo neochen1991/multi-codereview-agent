@@ -3,6 +3,7 @@ import { Button, Card, Empty, Segmented, Space, Tag, Typography } from "antd";
 
 import type { ConversationMessage, ReviewSummary } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
+import { cleanUserFacingText } from "./issueDisplayQuality";
 
 const { Paragraph, Text } = Typography;
 
@@ -66,7 +67,10 @@ const buildLaneEntry = (message: ConversationMessage): LaneEntry => {
   if (Array.isArray(metadata.active_skills) && metadata.active_skills.length > 0) {
     summaryParts.push(`skills: ${metadata.active_skills.map((item) => String(item)).join(", ")}`);
   }
-  summaryParts.push(message.content.trim());
+  const contentSummary = cleanUserFacingText(message.content) || humanizeReviewText(message.content.trim());
+  if (contentSummary) {
+    summaryParts.push(contentSummary);
+  }
   return {
     id: message.message_id,
     expertId: humanizeExpertId(message.expert_id),

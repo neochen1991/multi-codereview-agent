@@ -272,7 +272,7 @@ def _build_confidence_rationale(issue: dict[str, object]) -> str:
     if float(breakdown.get("hypothesis_penalty") or 0.0) > 0:
         reasons.append("仍带推测成分")
     if str(breakdown.get("evidence_source") or "").strip() == "observation_signal":
-        reasons.append("来源为观察信号，需要复核后再作为确定缺陷")
+        reasons.append("来源为观察信号，已按待验证风险处理")
     feedback_profile = breakdown.get("feedback_profile")
     if isinstance(feedback_profile, dict) and feedback_profile.get("applied"):
         if float(feedback_profile.get("confidence_bonus") or 0.0) > 0:
@@ -288,7 +288,7 @@ def _build_confidence_rationale(issue: dict[str, object]) -> str:
             reasons.append(f"LLM Judge 复核结论为 {verdict}")
     status = str(issue.get("status") or "").strip()
     if status == "needs_verification":
-        reasons.append("当前状态需要复核")
+        reasons.append("当前状态为待验证风险")
     elif status == "needs_human":
         reasons.append("当前状态需要人工裁决")
     elif status == "resolved":

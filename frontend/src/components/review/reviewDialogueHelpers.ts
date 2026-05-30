@@ -1,4 +1,5 @@
 import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services/api";
+import { cleanUserFacingText } from "./issueDisplayQuality";
 
 export type StructuredSection = {
   label: string;
@@ -866,6 +867,7 @@ export const mapDialogueMessage = (message: ConversationMessage): ReviewDialogue
   const messageStatus =
     mode === "pending" ? "streaming" : mode === "fallback" ? "error" : "done";
   const detail = buildInvocationDetail(eventType, message.content, metadata);
+  const fallbackSummary = cleanUserFacingText(message.content) || message.content.trim();
   return {
     id: message.message_id,
     timeText: new Date(message.created_at).toLocaleString("zh-CN"),
@@ -877,7 +879,7 @@ export const mapDialogueMessage = (message: ConversationMessage): ReviewDialogue
     phase: String(metadata.phase || (message.expert_id === "judge" ? "judge" : "review")),
     eventType,
     status: messageStatus,
-    summary: summaryParts.join(" · ") || message.content.trim(),
+    summary: summaryParts.join(" · ") || fallbackSummary,
     detail,
     metadata,
     headerNote:

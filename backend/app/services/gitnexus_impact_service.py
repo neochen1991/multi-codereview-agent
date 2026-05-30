@@ -3686,7 +3686,7 @@ class GitNexusImpactService:
             scopes.append(
                 TestScopeRecommendation(
                     scope="已有测试用例回归",
-                    reason="测试文件本身发生变化，需要确认测试仍能稳定复现业务风险。",
+                    reason="测试文件本身发生变化，应回归验证测试仍能稳定复现业务风险。",
                     paths=test_files[:20],
                     priority="medium",
                 )
@@ -3788,7 +3788,7 @@ class GitNexusImpactService:
         if any(self._is_repository_or_sql(path) for path in changed_files):
             items.append("请人工确认 SQL 条件、索引命中、分页/批量上限和事务边界。")
         if not items:
-            items.append("请结合业务场景确认候选测试范围是否覆盖本次 MR 的真实使用路径。")
+            items.append("请人工校验候选测试范围是否覆盖本次 MR 的真实业务入口和核心使用路径。")
         return items
 
     def _risk_level(self, changed_files: list[str], changed_symbols: list[ImpactSymbol]) -> str:

@@ -218,7 +218,7 @@ class JavaQualitySignalExtractor:
                 "observation_stage": (
                     f"已生成 {len(observations)} 个结构化观察点，供专家逐条复核和引用"
                     if observations
-                    else "当前未生成结构化观察点，后续主要依赖规则、上下文和 LLM 深审"
+                    else "未提取到结构化观察点，后续由规则、上下文和 LLM 深审补充判断"
                 ),
                 "llm_stage": "LLM 负责结合规则、源码上下文和 observation 做最终专业判断，而不是重复发现确定性信号",
             },

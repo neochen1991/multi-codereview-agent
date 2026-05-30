@@ -473,11 +473,11 @@ def _build_signature_contract_hint(signature_change: dict[str, object]) -> str:
                 details.append("布尔返回契约发生变化，调用方条件判断可能仍按旧语义执行")
     if old_throws != new_throws:
         if old_throws and not new_throws:
-            details.append("显式异常声明被移除，需要确认调用方是否仍依赖该异常分支做补偿或回滚")
+            details.append("显式异常声明被移除，调用方依赖该异常分支做补偿或回滚时会失效")
         elif not old_throws and new_throws:
-            details.append("新增显式异常声明，需要确认调用方是否补齐异常处理")
+            details.append("新增显式异常声明，调用方未补齐异常处理时会改变失败路径")
         elif old_throws and new_throws:
-            details.append("异常类型声明发生变化，需要确认调用方 catch 分支是否仍能覆盖")
+            details.append("异常类型声明发生变化，调用方 catch 分支可能无法覆盖新异常")
     if not details:
         return ""
     return "签名契约风险：" + "；".join(details)

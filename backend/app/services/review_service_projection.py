@@ -208,18 +208,24 @@ class ReviewServiceProjectionMixin:
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)
-        return self._build_light_review_payload(review)
+        return self._build_review_display_payload(review, light=True)
+
+    def build_review_display_payload(self, review_id: str) -> dict[str, object]:
+        review = self.get_review(review_id)
+        if review is None:
+            raise KeyError(review_id)
+        return self._build_review_display_payload(review, light=False)
 
     def build_replay_bundle(self, review_id: str) -> dict[str, object]:
         review = self.get_review(review_id)
         if review is None:
             raise KeyError(review_id)
         return {
-            "review": self._build_light_review_payload(review),
+            "review": self._build_review_display_payload(review, light=True),
             "events": [item.model_dump(mode="json") for item in self.list_events(review_id)],
             "messages": [self._build_replay_message(item) for item in self.list_all_messages(review_id)],
             "issues": [item.model_dump(mode="json") for item in self.list_issues(review_id)],
-            "findings": [item.model_dump(mode="json") for item in self.list_findings(review_id)],
+            "findings": [item.model_dump(mode="json") for item in self.list_display_findings(review_id)],
             "feedback_labels": [item.model_dump(mode="json") for item in self.list_feedback_labels(review_id)],
             "report": self.build_report(review_id).model_dump(mode="json"),
         }
@@ -235,6 +241,23 @@ class ReviewServiceProjectionMixin:
             metadata = subject.get("metadata")
             if isinstance(metadata, dict):
                 subject["metadata"] = self._build_light_subject_metadata(metadata)
+        return payload
+
+    def _build_review_display_payload(self, review: ReviewTask, *, light: bool) -> dict[str, object]:
+        payload = self._build_light_review_payload(review) if light else review.model_dump(mode="json")
+        try:
+            findings = self.list_display_findings(review.review_id)
+            issues = self.list_issues(review.review_id)
+        except Exception:
+            return payload
+        pending_human_count = len(list(review.pending_human_issue_ids or []))
+        payload["finding_count"] = len(findings)
+        payload["issue_count"] = len(issues)
+        if str(review.status or "").lower() not in {"failed", "closed", "cancelled"} and (findings or issues or review.report_summary):
+            payload["report_summary"] = (
+                f"审核报告已生成，共收敛 {len(findings)} 条检视发现，"
+                f"形成 {len(issues)} 个正式问题，其中 {pending_human_count} 个待人工确认。"
+            )
         return payload
 
     def _build_light_subject_metadata(self, metadata: dict[str, object]) -> dict[str, object]:

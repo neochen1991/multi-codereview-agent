@@ -210,11 +210,11 @@ class SastPreScanService:
     def _why_it_matters(self, *, tool: str, message: str, cwe: str = "", rule_id: str = "") -> str:
         lowered = " ".join([str(message or ""), str(rule_id or ""), str(cwe or "")]).lower()
         if cwe:
-            return f"{tool} 将该命中归类到 {cwe}，需要核对是否存在真实可达的数据流或输入边界。"
+            return f"{tool} 将该命中归类到 {cwe}，应核对是否存在真实可达的数据流或输入边界。"
         if any(token in lowered for token in ["eval", "injection", "sql", "xss", "command"]):
             return "该命中涉及输入进入解释器、查询或命令执行边界，误用时可能形成注入类漏洞。"
         if any(token in lowered for token in ["secret", "password", "token", "credential"]):
-            return "该命中涉及凭证或敏感信息暴露，需要确认日志、配置和提交内容是否泄漏。"
+            return "该命中涉及凭证或敏感信息暴露，应检查日志、配置和提交内容是否泄漏。"
         if tool == "eslint":
             return "该命中来自项目 linter，通常表示代码约束、潜在缺陷或团队规范被破坏。"
         return "该命中来自静态扫描工具，应作为专家复核的候选证据，而不是直接结论。"

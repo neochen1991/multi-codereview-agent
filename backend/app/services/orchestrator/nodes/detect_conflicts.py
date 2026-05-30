@@ -957,6 +957,10 @@ def _build_issue_summary(summaries: list[str], remediation_suggestions: list[str
             not in {
                 "请根据规则要求补齐正确实现，并保留必要测试。",
                 "按命中的规则修正当前代码。",
+                "按命中规则修正实现。",
+                "定位候选代码行。",
+                "代码锚点单独修复。",
+                "按规则命中的代码分支补齐真实实现。",
             }
         ]
         if concrete_suggestions:
@@ -971,14 +975,36 @@ def _sanitize_issue_text(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    internal_markers = (
+        "replace with actual",
+        "placeholder",
+        "当前 issue 来自",
+        "当前问题来自",
+        "当前未生成",
+        "需要特别确认",
+        "需要确认其他条件",
+        "不确定是否",
+        "当前变更在",
+        "代码锚点单独修复",
+        "定位候选代码行",
+        "按命中规则",
+        "按命中的规则",
+    )
+    if any(marker in text.lower() for marker in internal_markers):
+        return ""
     text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
+    text = re.sub(r"建议[:：]\s*(定位候选代码行|按命中的?规则.*?|代码锚点单独修复).*?(?=$|[。；;])", "", text)
     text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
+    if re.search(r"确认.*(依赖类型|目标行为|其他条件|是否|能否)", text):
+        return ""
     lines: list[str] = []
     for raw_line in text.splitlines():
         line = re.sub(r"^[-*]\s*", "", raw_line.strip()).strip()
         if not line or line in {"问题汇总：", "问题汇总:", "修复建议汇总：", "修复建议汇总:"}:
             continue
         if line.startswith(("定向辩论预裁决", "问题汇总", "修复建议汇总")):
+            continue
+        if any(marker in line.lower() for marker in internal_markers):
             continue
         lines.append(line)
     return re.sub(r"\s+", " ", " ".join(lines)).strip("；;，, ")

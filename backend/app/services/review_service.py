@@ -492,8 +492,37 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         current_project_id = str(project_id or "").strip()
         rows = self.review_repo.list_light()
         if current_project_id:
-            rows = [item for item in rows if str(item.get("project_id") or "") == current_project_id]
-        return [self._ensure_waiting_human_summary_duration(item) for item in rows]
+            rows = [
+                item
+                for item in rows
+                if str(item.get("project_id") or item.get("subject", {}).get("project_id") or "") == current_project_id
+            ]
+        rows = [self._ensure_waiting_human_summary_duration(item) for item in rows]
+        if current_project_id or len(rows) <= 3:
+            return [self._apply_display_review_summary(item) for item in rows]
+        return rows
+
+    def _apply_display_review_summary(self, review: dict[str, object]) -> dict[str, object]:
+        review_id = str(review.get("review_id") or "").strip()
+        if not review_id:
+            return review
+        if str(review.get("status") or "").lower() in {"failed", "closed", "cancelled"}:
+            return review
+        try:
+            finding_count = len(self.list_display_findings(review_id))
+            issue_count = len(self.list_issues(review_id))
+        except Exception:
+            return review
+        next_review = dict(review)
+        pending_human_count = len(list(next_review.get("pending_human_issue_ids") or []))
+        next_review["finding_count"] = finding_count
+        next_review["issue_count"] = issue_count
+        if finding_count or issue_count or str(next_review.get("report_summary") or "").strip():
+            next_review["report_summary"] = (
+                f"审核报告已生成，共收敛 {finding_count} 条检视发现，"
+                f"形成 {issue_count} 个正式问题，其中 {pending_human_count} 个待人工确认。"
+            )
+        return next_review
 
     def _ensure_waiting_human_analysis_duration(self, review: ReviewTask) -> ReviewTask:
         """历史 waiting_human 任务若缺少耗时，用进入人工门控的事件时间补齐。"""
@@ -1146,8 +1175,26 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return self.finding_repo.list_since(review_id, since=since_text, limit=(limit or 500))
         return self.finding_repo.list(review_id)
 
+    def list_display_findings(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ReviewFinding]:
+        raw_findings = self.list_findings(review_id, since=since, limit=limit)
+        if str(since or "").strip():
+            return [
+                normalized
+                for normalized in (self._normalize_display_report_finding(finding) for finding in raw_findings)
+                if normalized is not None
+            ]
+        return self._ensure_display_findings_cover_issues(
+            self._build_display_report_findings(raw_findings),
+            self.list_issues(review_id),
+        )
+
     def get_finding(self, review_id: str, finding_id: str) -> ReviewFinding | None:
-        return self.finding_repo.get(review_id, finding_id)
+        finding = self.finding_repo.get(review_id, finding_id)
+        if finding is None:
+            synthetic = self._build_display_finding_for_synthetic_id(review_id, finding_id)
+            return synthetic
+        normalized = self._normalize_display_report_finding(finding)
+        return normalized or finding
 
     def list_issues(self, review_id: str) -> list[DebateIssue]:
         issues = self.issue_repo.list(review_id)
@@ -1156,16 +1203,22 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if self._issues_require_finding_rehydration(issues, findings):
             issues = self._rehydrate_issues_from_findings(review_id, issues, findings)
             display_issues = [issue for issue in issues if _is_formal_issue(issue)]
-            return self._dedupe_display_issues(
-                self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+            return self._hydrate_display_issues_from_findings(
+                self._dedupe_display_issues(
+                    self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+                ),
+                findings,
             )
         display_issues = [
             self._realign_issue_location(issue, finding_by_id)
             for issue in issues
             if _is_formal_issue(issue)
         ]
-        return self._dedupe_display_issues(
-            self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+        return self._hydrate_display_issues_from_findings(
+            self._dedupe_display_issues(
+                self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
+            ),
+            findings,
         )
 
     def _dedupe_display_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
@@ -1287,22 +1340,26 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         compact = text.replace(" ", "")
         if issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}:
             return "course_creation_semantics"
-        if issue_type in {"exception_swallowed", "exception_semantics_weakened"}:
-            return "exception_swallowed"
         if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}:
             return "comment_contract_unimplemented"
         if issue_type in {"lock_guard_removed", "concurrency_guard_removed", "lock_scope_risk"}:
             return "lock_guard_removed"
+        if issue_type in {"exception_swallowed", "exception_semantics_weakened"}:
+            return "exception_swallowed"
         if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
             return "query_bound_removed"
         if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
             return "n_plus_one"
-        if any(token in compact for token in ("异常", "catch", "runtimeexception", "返回成功")):
-            return "exception_swallowed"
         if any(token in compact for token in ("承诺未落地", "todo", "扣减库存", "未实现")):
             return "comment_contract_unimplemented"
-        if any(token in compact for token in ("循环", "逐条", "n+1", "saveall", "repository.save")):
+        if any(token in compact for token in ("锁", "并发保护", "synchronized", "lockregistry", "lockfor")):
+            return "lock_guard_removed"
+        if any(token in compact for token in ("query_bound", "unbounded", "pagerequest", "分页", "limit", "查询边界")):
+            return "query_bound_removed"
+        if any(token in compact for token in ("loop_call_amplification", "循环", "逐条", "n+1", "saveall", "repository.save")):
             return "n_plus_one"
+        if any(token in compact for token in ("异常", "catch", "runtimeexception", "返回成功")):
+            return "exception_swallowed"
         return issue_type
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:

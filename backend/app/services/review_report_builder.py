@@ -244,7 +244,12 @@ def build_issue_summary_from_finding(finding: ReviewFinding) -> str:
     remediation_items = [item for item in remediation_items if item]
     if summary_text and remediation_items:
         return f"{summary_text}\n建议：{remediation_items[0]}"
-    return summary_text or "当前 issue 来自一条有代码证据的检视发现。"
+    if summary_text:
+        return summary_text
+    title = _sanitize_user_facing_issue_text(str(finding.title or "").strip()) or "代码风险"
+    file_name = str(finding.file_path or "").replace("\\", "/").split("/")[-1] or "当前文件"
+    line = f" 第 {finding.line_start} 行" if finding.line_start else ""
+    return f"{file_name}{line} 触发「{title}」，需要按本条建议修正当前改动位置的实现。"
 
 
 def build_light_report_finding(finding: ReviewFinding) -> ReviewFinding:

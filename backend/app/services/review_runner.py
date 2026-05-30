@@ -2266,7 +2266,7 @@ class ReviewRunner(
                 query_shape = self._query_shape_summary(excerpt)
                 summary = "本次 diff 删除了查询的 LIMIT、分页或批量边界保护，数据量放大后可能返回大结果集并拖垮数据库访问路径。"
                 if query_shape:
-                    summary = f"{summary} 新查询形态包含 {query_shape}，需要特别确认是否仍有分页、LIMIT 或精确过滤边界。"
+                    summary = f"{summary} 新查询形态包含 {query_shape}，应补回分页、LIMIT 或精确过滤边界。"
                 finding = ReviewFinding(
                     review_id=review.review_id,
                     expert_id="database_analysis",
@@ -2289,7 +2289,7 @@ class ReviewRunner(
                     remediation_steps=["恢复 LIMIT 或 setMaxResults", "保留批量参数绑定", "补充大数据量消费回归测试"],
                     code_excerpt=excerpt,
                     code_context={"deterministic_signal": "query_bound_removed"},
-                    suggested_code="// TODO: 恢复 LIMIT :chunk / setMaxResults / Pageable 等查询边界，避免无界读取",
+                    suggested_code="",
                     suggested_code_language="java",
                 )
                 self.finding_repo.save(review.review_id, finding)
@@ -2351,7 +2351,7 @@ class ReviewRunner(
                 "rule_based_reasoning": "删除行中出现锁保护，新增行没有同步、锁或幂等替代，属于可由静态 diff 直接确认的并发风险。",
                 "remediation_strategy": "恢复原有锁保护，或补充数据库唯一约束、乐观锁、幂等表、分布式锁等等价并发控制。",
                 "remediation_suggestion": "不要直接删除并发保护；先说明替代机制，并补充并发提交或重复消费回归测试。",
-                "remediation_steps": ["确认被保护的共享资源", "恢复锁或补充等价并发控制", "增加并发场景测试"],
+                "remediation_steps": ["恢复原有锁保护或补上等价并发控制", "补充重复提交和并发提交回归测试", "在代码评审说明中写明替代保护机制"],
                 "confidence": 0.88,
             },
             "loop_call_amplification": {
@@ -2365,7 +2365,7 @@ class ReviewRunner(
                 "rule_based_reasoning": "新增代码中循环体直接调用外部依赖，这类调用放大可由静态 diff 直接确认。",
                 "remediation_strategy": "把循环内逐条外部调用改成批量查询、批量提交或循环外聚合后统一处理。",
                 "remediation_suggestion": "优先收集批量输入后调用批量接口，避免每个元素都触发一次外部依赖访问。",
-                "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
+                "remediation_steps": ["把循环内逐条调用移到循环外统一处理", "改用批量查询、批量保存或固定窗口批处理", "补充大批量输入场景回归测试"],
                 "confidence": 0.86,
             },
             "comment_contract_unimplemented": {
@@ -2379,17 +2379,17 @@ class ReviewRunner(
                 "rule_based_reasoning": "新增代码中存在 TODO 或注释承诺，且当前 hunk 未出现承诺动作的实现，属于可由静态 diff 直接确认的语义缺口。",
                 "remediation_strategy": "补齐注释承诺的业务动作；如果短期不实现，应删除误导性承诺并改成明确的待办跟踪。",
                 "remediation_suggestion": "不要只留下 TODO。要么实现库存扣减、预占事件等承诺动作，要么删除该承诺并把未完成项移到任务系统。",
-                "remediation_steps": ["确认注释承诺的目标行为", "补齐对应业务动作或副作用", "增加覆盖该业务动作的回归测试"],
+                "remediation_steps": ["补齐 TODO 或注释中承诺的业务动作", "如果本轮不交付该动作，删除误导性承诺并拆出任务", "增加覆盖该业务动作的回归测试"],
                 "confidence": 0.84,
             },
             "exception_swallowed": {
                 "expert_id": "correctness_business",
-                "title": "异常被静默吞掉",
+                "title": "失败被忽略后仍按成功处理",
                 "normalized_issue_type": "exception_swallowed",
                 "category_label": "correctness",
                 "summary": "本次 diff 的 catch 分支吞掉 RuntimeException，并在失败路径返回成功结果，调用方会误以为处理已经完成。",
                 "matched_rules": ["CODE-JAVA-002", "REL-JDDD-001"],
-                "violated_guidelines": ["关键链路 catch 分支不得静默吞掉异常或把失败伪装成成功"],
+                "violated_guidelines": ["关键链路 catch 分支不得忽略异常或把失败伪装成成功"],
                 "rule_based_reasoning": "新增代码中 catch 分支包含 ignored/返回 success 等强锚点，异常路径和成功返回直接冲突。",
                 "remediation_strategy": "恢复失败语义：记录必要上下文，并重新抛出异常、返回失败结果或触发补偿，不能在失败路径返回成功。",
                 "remediation_suggestion": "把 catch 中的 success 返回改为抛出或失败结果，并补充支付网关异常的回归测试。",
@@ -2398,7 +2398,7 @@ class ReviewRunner(
             },
             "exception_semantics_weakened": {
                 "expert_id": "correctness_business",
-                "title": "异常被静默吞掉",
+                "title": "失败被包装成成功返回",
                 "normalized_issue_type": "exception_swallowed",
                 "category_label": "correctness",
                 "summary": "本次 diff 的 catch 分支把失败路径包装成成功语义返回，调用方会误以为处理已经完成。",
@@ -2591,8 +2591,8 @@ class ReviewRunner(
                 "rule_based_reasoning": "observation 已明确命中循环体中的外部依赖调用，这类问题可直接从代码结构确认，不需要依赖更多运行时条件。",
                 "remediation_strategy": "把循环内逐条外部调用改成批量查询、批量提交或循环外聚合后统一处理。",
                 "remediation_suggestion": "优先把循环内仓储/远程调用提到循环外，避免每个元素都触发一次外部依赖访问。",
-                "remediation_steps": ["确认循环内调用的依赖类型", "改成批量获取或批量提交", "补充批量场景回归测试"],
-                "suggested_code": "// TODO: 将循环内逐条外部调用改为批量处理，避免调用放大",
+                "remediation_steps": ["把循环内逐条调用移到循环外统一处理", "改用批量查询、批量保存或固定窗口批处理", "补充大批量输入场景回归测试"],
+                "suggested_code": "",
                 "confidence_min": 0.65,
                 "confidence_cap": 0.78,
             },
@@ -2606,7 +2606,7 @@ class ReviewRunner(
                 "rule_based_reasoning": "observation 已明确命中锁保护从 diff 中被删除，且新增代码没有等价并发控制，这类竞态风险可以从代码结构直接确认。",
                 "remediation_strategy": "恢复原有锁保护，或用数据库唯一约束、乐观锁、幂等表、分布式锁等等价机制替代。",
                 "remediation_suggestion": "不要直接删除并发保护；先说明替代机制，再补充并发提交或重复消费场景的回归测试。",
-                "remediation_steps": ["确认被保护的共享资源或业务不变量", "恢复锁或补充等价并发控制", "增加并发/重复提交测试"],
+                "remediation_steps": ["恢复原有锁保护或补上等价并发控制", "补充重复提交和并发提交回归测试", "在代码评审说明中写明替代保护机制"],
                 "suggested_code": "",
                 "confidence_min": 0.68,
                 "confidence_cap": 0.82,
@@ -2620,19 +2620,19 @@ class ReviewRunner(
                 "violated_guidelines": ["注释、TODO、接口说明和方法意图必须与真实实现保持一致"],
                 "rule_based_reasoning": "observation 已明确命中注释或待办承诺与实现不一致，这类语义缺口可以直接从 diff 和上下文判断。",
                 "remediation_strategy": "要么补齐承诺中的行为，要么删除会误导调用方的注释、TODO 或命名表达。",
-                "remediation_suggestion": "先确认该承诺是否仍然成立；如果成立就补齐实现，如果不再成立就删除失效承诺并同步修正文档或命名。",
-                "remediation_steps": ["确认承诺的目标行为", "补齐对应业务动作或副作用", "同步修正注释、TODO 或接口说明"],
-                "suggested_code": "// TODO: 补齐承诺中的业务动作，或删除失效承诺避免误导调用方",
+                "remediation_suggestion": "如果该业务动作属于本次交付范围，就补齐实现；如果不属于本次交付范围，就删除失效承诺并同步修正文档或命名。",
+                "remediation_steps": ["补齐注释或 TODO 承诺的业务动作", "删除不属于本次交付范围的失效承诺", "同步修正注释、TODO 或接口说明"],
+                "suggested_code": "",
                 "confidence_min": 0.65,
                 "confidence_cap": 0.78,
             },
             "error_handling_weakened": {
                 "expert_id": "correctness_business",
-                "title": "异常处理被静默吞掉",
+                "title": "失败被忽略后仍继续处理",
                 "normalized_issue_type": "exception_swallowed",
-                "summary": "当前改动删除或削弱了 catch 分支里的异常处理，失败路径会被静默吞掉，调用方和运维侧难以及时发现真实错误。",
+                "summary": "当前改动删除或削弱了 catch 分支里的异常处理，失败路径会被忽略，调用方和运维侧难以及时发现真实错误。",
                 "matched_rules": ["CODE-JAVA-002"],
-                "violated_guidelines": ["catch 分支不能静默吞掉异常，至少需要日志、重新抛出或明确补偿处理"],
+                "violated_guidelines": ["catch 分支不能忽略异常，至少需要日志、重新抛出或明确补偿处理"],
                 "rule_based_reasoning": "observation 已明确命中 catch 分支为空或原有异常处理被删除，这类错误处理退化可以直接从 diff 和当前代码结构确认。",
                 "remediation_strategy": "恢复异常处理语义，至少记录错误上下文；若该异常应阻断流程，则重新抛出业务异常或让事务回滚。",
                 "remediation_suggestion": "不要保留空 catch。结合当前组件语义选择 logger.error、重新抛出或补偿处理，并补充异常分支回归测试。",
@@ -2685,7 +2685,7 @@ class ReviewRunner(
             elif kind == "error_handling_weakened":
                 claim = (
                     f"当前 catch 分支的异常处理被删除或变成空实现（{symbol_display}），"
-                    "失败路径会被静默吞掉，导致事件消费、补偿或排障链路失去错误信号。"
+                    "失败路径会被忽略，导致事件消费、补偿或排障链路失去错误信号。"
                 )
             finding = ReviewFinding(
                 review_id=review.review_id,
@@ -2984,11 +2984,11 @@ class ReviewRunner(
         if finding is None:
             return False
         if "执行失败后保守保留" in finding.title or "执行失败后" in finding.title:
-            finding.title = f"{expert.name_zh} 规则预检命中：事件消费异常被静默吞掉"
+            finding.title = f"{expert.name_zh} 规则预检命中：事件消费失败被忽略"
         if "专家执行失败" in finding.summary:
             finding.summary = (
                 "结构化规则预检和静态上下文均显示，事件消费链路的 catch 块删除了异常处理语句，"
-                "NoSuchMethodException 等反射异常会被静默吞掉。"
+                "NoSuchMethodException 等反射异常会被忽略，后续处理无法感知消费失败。"
             )
         finding.evidence = [
             item.replace("专家执行失败:", "确定性规则证据:")
@@ -5815,7 +5815,7 @@ class ReviewRunner(
                 if missing_context_values:
                     parsed["verification_plan"] = (
                         str(parsed.get("verification_plan") or "").strip()
-                        or "需要补充缺失上下文后复核候选是否具备完整规则证据。"
+                        or "复核当前代码锚点、规则证据和建议代码是否一致；不一致时降级为候选发现。"
                     )
                     parsed["assumptions"] = self._dedupe_texts(
                         [

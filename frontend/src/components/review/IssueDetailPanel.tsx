@@ -15,8 +15,11 @@ import {
   buildReadableIssueTitle,
   cleanUserFacingList,
   cleanUserFacingText,
+  hasCrossContextPollution,
+  issueTextMatchesIssueType,
   issueTypeDisplayLabel,
   pickUserFacingText,
+  rewriteUserFacingIssueText,
 } from "./issueDisplayQuality";
 
 const { Paragraph } = Typography;
@@ -112,8 +115,20 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const customRuleDetails: FindingRuleAttributionDetail[] = Array.isArray(ruleAttribution.custom_rule_details)
     ? ruleAttribution.custom_rule_details
     : [];
-  const aggregatedTitles = cleanUserFacingList(issue?.aggregated_titles);
-  const aggregatedSummaries = cleanUserFacingList(issue?.aggregated_summaries);
+  const issueDisplayContext = JSON.stringify({
+    title: issue?.title,
+    summary: issue?.summary,
+    file_path: issue?.file_path,
+    current_code: issue?.current_code,
+    finding_title: alignedFinding?.title,
+    finding_summary: alignedFinding?.summary,
+  });
+  const aggregatedTitles = cleanUserFacingList(issue?.aggregated_titles).map((item) =>
+    rewriteUserFacingIssueText(item, issueDisplayContext),
+  );
+  const aggregatedSummaries = cleanUserFacingList(issue?.aggregated_summaries).map((item) =>
+    rewriteUserFacingIssueText(item, issueDisplayContext),
+  );
   const aggregatedStrategies = cleanUserFacingList(issue?.aggregated_remediation_strategies);
   const aggregatedSuggestions = cleanUserFacingList(issue?.aggregated_remediation_suggestions);
   const aggregatedSteps = cleanUserFacingList(issue?.aggregated_remediation_steps);
@@ -147,10 +162,27 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
         summary: issue.summary || alignedFinding?.summary,
       })
     : "";
+  const issueTextType = issue?.normalized_issue_type || issue?.finding_type || issue?.category_label || issue?.title || "";
+  const issueSummaryAligned = issueTextMatchesIssueType(issueTextType, issue?.summary);
+  const findingSummaryAligned = issueTextMatchesIssueType(
+    issueTextType,
+    [
+      alignedFinding?.normalized_issue_type,
+      alignedFinding?.finding_type,
+      alignedFinding?.title,
+      alignedFinding?.summary,
+      alignedFinding?.rule_based_reasoning,
+    ].filter(Boolean).join("\n"),
+  );
   const issueDescription = issue
     ? buildReadableIssueSummary({
         ...issue,
-        summary: pickUserFacingText([issue.summary, alignedFinding?.summary, issue.title]),
+        summary: pickUserFacingText([
+          findingSummaryAligned ? alignedFinding?.summary : "",
+          issueSummaryAligned ? issue.summary : "",
+          alignedFinding?.summary,
+          issue.title,
+        ]),
       })
     : "";
   const issueStrategy = pickUserFacingText([
@@ -175,8 +207,16 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const displayAggregatedSummaries = aggregatedSummaries.filter(
     (summary) => humanizeReviewText(summary) !== humanizeReviewText(issueDescription),
   );
-  const displayEvidence = cleanUserFacingList(issue?.evidence);
-  const displayConfidenceRationale = cleanUserFacingText(issue?.confidence_rationale || "");
+  const displayEvidence = cleanUserFacingList(issue?.evidence).filter(
+    (item) => !hasCrossContextPollution(item, issueFilePath) && issueTextMatchesIssueType(issueTextType, item),
+  );
+  const rawConfidenceRationale = cleanUserFacingText(issue?.confidence_rationale || "");
+  const displayConfidenceRationale =
+    rawConfidenceRationale &&
+    !hasCrossContextPollution(rawConfidenceRationale, issueFilePath) &&
+    issueTextMatchesIssueType(issueTextType, rawConfidenceRationale)
+      ? rawConfidenceRationale
+      : "";
   const displayGraphSummary = cleanUserFacingText(graphSummary);
   const evidenceIssueContext = JSON.stringify({ issue, alignedFinding });
   const displayEvidenceChain = graphEvidenceChain

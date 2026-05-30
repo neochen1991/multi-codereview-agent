@@ -4,7 +4,12 @@ import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
 import { humanizeExpertId, humanizeSeverity } from "@/utils/displayText";
-import { cleanUserFacingText, issueTypeDisplayLabel } from "./issueDisplayQuality";
+import {
+  cleanUserFacingText,
+  hasCrossContextPollution,
+  issueTextMatchesIssueType,
+  issueTypeDisplayLabel,
+} from "./issueDisplayQuality";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
@@ -62,18 +67,22 @@ const getDesignAlignmentStatus = (relatedFindings: ReviewFinding[]): string | un
 };
 
 const buildIssueTypeLabels = (issue: DebateIssue, findings: ReviewFinding[]): string[] => {
-  const explicitLabels = [issue.category_label, issue.normalized_issue_type, issue.finding_type]
+  const explicitLabels = [issue.normalized_issue_type, issue.finding_type, issue.category_label]
     .map((item) => issueTypeDisplayLabel(item))
     .filter((item) => item && item !== "代码风险");
+  if (explicitLabels.length > 0) {
+    return [explicitLabels[0]];
+  }
   const values = [
     issue.title,
     issue.summary,
     ...(issue.aggregated_titles || []),
     ...(issue.aggregated_summaries || []),
-    ...findings.flatMap((finding) => [...(finding.matched_rules || []), ...(finding.violated_guidelines || []), finding.title]),
+    ...findings.flatMap((finding) => [finding.normalized_issue_type, finding.finding_type, finding.title]),
   ];
   const labels = [...explicitLabels, ...values.map((item) => classifySpecificIssueType(String(item || ""))).filter(Boolean)];
-  return Array.from(new Set(labels as string[]));
+  const deduped = Array.from(new Set(labels as string[]));
+  return deduped.slice(0, 1);
 };
 
 const INTERNAL_SUMMARY_PATTERNS = [
@@ -133,14 +142,29 @@ const buildIssueListSummary = (
   filePath: string,
   lineStart?: number,
 ): string => {
+  const issueType = issue.normalized_issue_type || issue.finding_type || issue.category_label || issue.title;
+  const alignedFindings = relatedFindings.filter((finding) =>
+    issueTextMatchesIssueType(
+      issueType,
+      [
+        finding.normalized_issue_type,
+        finding.finding_type,
+        finding.title,
+        finding.summary,
+        finding.rule_based_reasoning,
+      ].filter(Boolean).join("\n"),
+    ),
+  );
   const candidates = [
-    issue.summary,
-    ...(issue.aggregated_summaries || []),
+    ...alignedFindings.map((finding) => finding.summary),
+    ...alignedFindings.map((finding) => finding.rule_based_reasoning),
+    issueTextMatchesIssueType(issueType, issue.summary) ? issue.summary : "",
+    ...(issue.aggregated_summaries || []).filter((summary) => issueTextMatchesIssueType(issueType, summary)),
     ...relatedFindings.map((finding) => finding.summary),
-    ...relatedFindings.map((finding) => finding.rule_based_reasoning),
-    ...(issue.evidence || []),
+    ...(issue.evidence || []).filter((item) => issueTextMatchesIssueType(issueType, item)),
   ];
-  for (const candidate of candidates) {
+  const safeCandidates = candidates.filter((candidate) => !hasCrossContextPollution(candidate, filePath));
+  for (const candidate of safeCandidates) {
     const readable = pickReadableSentence(compactReadableText(candidate));
     if (isReadableIssueSummary(readable)) return clipListSummary(readable);
   }
@@ -326,12 +350,18 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
                   修改建议
                 </Paragraph>
                 <Paragraph style={{ whiteSpace: "pre-wrap" }}>{item.remediation_suggestion}</Paragraph>
-                <Paragraph strong style={{ marginBottom: 8 }}>
-                  修改后代码
-                </Paragraph>
-                <pre className="review-code-block">
-                  <code>{item.patched_code}</code>
-                </pre>
+                {item.patched_code ? (
+                  <>
+                    <Paragraph strong style={{ marginBottom: 8 }}>
+                      修改后代码
+                    </Paragraph>
+                    <pre className="review-code-block">
+                      <code>{item.patched_code}</code>
+                    </pre>
+                  </>
+                ) : (
+                  <Text type="warning">该问题还没有可安全提交的代码补丁，已避免生成占位代码。</Text>
+                )}
                 <Text type="secondary">{item.mock_ticket_url}</Text>
               </div>
             ))}

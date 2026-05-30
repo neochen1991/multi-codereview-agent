@@ -145,7 +145,7 @@ class CodeObservationExtractor:
                 "observation_stage": (
                     f"已生成 {len(observations)} 个通用结构化观察点，供专家逐条复核和引用"
                     if observations
-                    else "当前未生成结构化观察点，后续主要依赖规则、上下文和 LLM 深审"
+                    else "未提取到结构化观察点，后续由规则、上下文和 LLM 深审补充判断"
                 ),
                 "llm_stage": "LLM 负责结合通用 observation、专家职责和源码上下文做最终判断",
             },

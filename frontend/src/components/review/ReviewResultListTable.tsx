@@ -145,12 +145,26 @@ export const classifySpecificIssueType = (text: string): string | null => {
   if (!value) return null;
   if (value.includes("limit") || value.includes("分页") || value.includes("大结果集")) return "SQL分页缺失";
   if (value.includes("n+1")) return "N+1查询风险";
-  if (value.includes("todo") || value.includes("承诺未落地") || value.includes("扣减库存") || value.includes("预占事件")) return "注释承诺未落地";
+  if (
+    value.includes("saveall") ||
+    value.includes("repository.save") ||
+    value.includes("循环逐条") ||
+    value.includes("逐条保存") ||
+    value.includes("批量写入") ||
+    value.includes("批量保存")
+  ) return "循环内逐条写入";
+  if (value.includes("todo") || value.includes("承诺未落地") || value.includes("扣减库存") || value.includes("预占事件")) return "注释承诺未实现";
   if (value.includes("sql") && value.includes("注入")) return "SQL注入风险";
   if (value.includes("like") || value.includes("模糊匹配") || value.includes("查询语义")) return "查询语义变更";
   if (value.includes("命名") || value.includes("chunksTmp".toLowerCase()) || value.includes("常量")) return "命名规范问题";
   if (value.includes("魔法值")) return "魔法值问题";
-  if (value.includes("catch") || value.includes("吞异常") || value.includes("异常") && value.includes("吞")) return "异常处理问题";
+  if (
+    value.includes("catch") ||
+    value.includes("吞异常") ||
+    value.includes("异常") && value.includes("吞") ||
+    value.includes("支付结算失败") ||
+    (value.includes("返回成功") && (value.includes("支付") || value.includes("结算")))
+  ) return "支付失败处理问题";
   if (value.includes("domain event") || value.includes("事件发布") || value.includes("持久化顺序")) return "事件时序问题";
   if (value.includes("factory") || value.includes("工厂") || value.includes("直接构造")) return "DDD工厂绕过";
   if (value.includes("aggregate") || value.includes("聚合")) return "DDD聚合边界问题";
@@ -158,7 +172,7 @@ export const classifySpecificIssueType = (text: string): string | null => {
   if (value.includes("鉴权") || value.includes("权限") || value.includes("authorization") || value.includes("auth")) return "鉴权问题";
   if (value.includes("日志") && (value.includes("泄露") || value.includes("敏感"))) return "日志敏感信息问题";
   if (value.includes("空指针") || value.includes("空参") || value.includes("判空") || value.includes("null")) return "空值校验问题";
-  if (value.includes("并发") || value.includes("锁")) return "并发安全问题";
+  if (value.includes("并发") || value.includes("锁")) return "并发保护风险";
   if (value.includes("缓存")) return "缓存使用问题";
   if (value.includes("测试") || value.includes("断言") || value.includes("用例缺失")) return "测试覆盖问题";
   return null;
@@ -416,12 +430,10 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
         onHeaderCell: () => ({ width: columnWidths.finding_type, onResize: (delta: number) => resizeColumn("finding_type", delta) }),
         render: (_value: string, item: ReviewResultListRow) => {
           const labels = getSpecificFindingTypeLabels(item);
-          if (labels.length <= 1) {
-            return <Tag color="purple">{labels[0]}</Tag>;
-          }
+          if (labels.length <= 1) return <Tag color="purple">{labels[0]}</Tag>;
           return (
             <Tooltip placement="topLeft" title={labels.join(" / ")}>
-              <Tag color="purple">混合问题 {labels.length}</Tag>
+              <Tag color="purple">{labels[0]}</Tag>
             </Tooltip>
           );
         },
