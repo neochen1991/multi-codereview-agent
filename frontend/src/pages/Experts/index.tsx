@@ -22,6 +22,7 @@ import {
 import type { UploadFile } from "antd/es/upload/interface";
 
 import { expertApi, knowledgeApi, type ExpertProfile, type KnowledgeDocument } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -48,6 +49,24 @@ const getManualSkillBindings = (expert: ExpertProfile): string[] =>
 
 const getExtensionSkillBindings = (expert: ExpertProfile): string[] =>
   (Array.isArray(expert.skill_bindings_extension) ? expert.skill_bindings_extension : []).filter(Boolean);
+
+const formatBindingLabel = (value?: string | null) => {
+  const text = String(value || "").trim();
+  return text ? humanizeReviewText(text) : "-";
+};
+
+const renderBindingTags = (
+  values: string[],
+  color: string,
+  keyPrefix: string,
+  prefix?: string,
+  suffix?: string,
+) =>
+  values.map((value) => (
+    <Tag key={`${keyPrefix}_${value}`} color={color}>
+      {[prefix, formatBindingLabel(value), suffix].filter(Boolean).join(" · ")}
+    </Tag>
+  ));
 
 // 专家中心负责管理专家配置、核心规范和绑定文档，是审核能力治理的主入口。
 const ExpertsPage: React.FC = () => {
@@ -158,8 +177,8 @@ const ExpertsPage: React.FC = () => {
                           title={
                             <Space wrap>
                               <span>{item.name_zh}</span>
-                              <Tag color={item.enabled ? "success" : "default"}>{item.enabled ? "enabled" : "disabled"}</Tag>
-                              <Tag color={item.custom ? "gold" : "default"}>{item.custom ? "custom" : "builtin"}</Tag>
+                              <Tag color={item.enabled ? "success" : "default"}>{item.enabled ? "已启用" : "已停用"}</Tag>
+                              <Tag color={item.custom ? "gold" : "default"}>{item.custom ? "自定义" : "内置"}</Tag>
                               <Tag color="geekblue">核心规范 1</Tag>
                               <Tag color="purple">绑定文档 {docCountMap[item.expert_id] || 0}</Tag>
                             </Space>
@@ -179,10 +198,10 @@ const ExpertsPage: React.FC = () => {
                                 Skill 绑定：{mergedSkills.length ? `${mergedSkills.length} 个` : "未绑定"}
                               </div>
                               <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
+                                Extension 绑定：{extensionSkills.length ? extensionSkills.map(formatBindingLabel).join(" / ") : "无"}
                               </div>
                               <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                角色源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                                角色源码绑定：{manualSkills.length ? manualSkills.map(formatBindingLabel).join(" / ") : "无"}
                               </div>
                               <div style={{ marginTop: 8, color: "var(--text-primary)" }}>
                                 必查项：{item.required_checks.length ? item.required_checks.join(" / ") : "未配置"}
@@ -194,40 +213,23 @@ const ExpertsPage: React.FC = () => {
                                 越界限制：{item.out_of_scope.length ? item.out_of_scope.join(" / ") : "未配置"}
                               </div>
                               <div style={{ marginTop: 6 }}>
-                                {item.tool_bindings.map((tool) => (
-                                  <Tag key={`${item.expert_id}_${tool}`} color="blue">
-                                    {tool}
-                                  </Tag>
-                                ))}
-                                {item.mcp_tools.map((tool) => (
-                                  <Tag key={`${item.expert_id}_${tool}`} color="purple">
-                                    {tool}
-                                  </Tag>
-                                ))}
-                                {runtimeTools.map((tool) => (
-                                  <Tag key={`${item.expert_id}_${tool}`} color="gold">
-                                    {tool}
-                                  </Tag>
-                                ))}
-                                {extensionSkills.map((skill) => (
-                                  <Tag key={`${item.expert_id}_${skill}_ext`} color="geekblue">
-                                    {`skill ${skill} · extension`}
-                                  </Tag>
-                                ))}
-                                {manualSkills.map((skill) => (
-                                  <Tag key={`${item.expert_id}_${skill}_manual`} color="default">
-                                    {`skill ${skill} · 源码`}
-                                  </Tag>
-                                ))}
-                                {item.agent_bindings.map((tool) => (
-                                  <Tag key={`${item.expert_id}_${tool}`} color="cyan">
-                                    {tool}
+                                {renderBindingTags(item.tool_bindings, "blue", `${item.expert_id}_tool`)}
+                                {renderBindingTags(item.mcp_tools, "purple", `${item.expert_id}_mcp`)}
+                                {renderBindingTags(runtimeTools, "gold", `${item.expert_id}_runtime`)}
+                                {renderBindingTags(extensionSkills, "geekblue", `${item.expert_id}_ext`, "Skill", "Extension")}
+                                {renderBindingTags(manualSkills, "default", `${item.expert_id}_manual`, "Skill", "源码")}
+                                {item.agent_bindings.map((agent) => (
+                                  <Tag key={`${item.expert_id}_${agent}`} color="cyan">
+                                    {humanizeExpertId(agent)}
                                   </Tag>
                                 ))}
                               </div>
                               {item.system_prompt ? (
-                                <Paragraph style={{ marginTop: 10, marginBottom: 10 }} ellipsis={{ rows: 2 }}>
-                                  {item.system_prompt}
+                                <Paragraph
+                                  style={{ marginTop: 10, marginBottom: 10 }}
+                                  ellipsis={{ rows: 3, expandable: true, symbol: "展开提示词预览" }}
+                                >
+                                  {humanizeReviewText(item.system_prompt)}
                                 </Paragraph>
                               ) : null}
                               <Space style={{ marginBottom: 10 }}>
@@ -393,8 +395,8 @@ const ExpertsPage: React.FC = () => {
                                 title={
                                   <Space wrap>
                                     <span>{item.name_zh}</span>
-                                    <Tag color={item.enabled ? "success" : "default"}>{item.enabled ? "enabled" : "disabled"}</Tag>
-                                    <Tag color="gold">custom</Tag>
+                                    <Tag color={item.enabled ? "success" : "default"}>{item.enabled ? "已启用" : "已停用"}</Tag>
+                                    <Tag color="gold">自定义</Tag>
                                     <Tag color="purple">绑定文档 {docCountMap[item.expert_id] || 0}</Tag>
                                   </Space>
                                 }
@@ -402,32 +404,16 @@ const ExpertsPage: React.FC = () => {
                                   <div>
                                     <div>{`${item.role} · ${item.focus_areas.join(" / ")}`}</div>
                                     <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                      Extension 绑定：{extensionSkills.length ? extensionSkills.join(" / ") : "无"}
+                                      Extension 绑定：{extensionSkills.length ? extensionSkills.map(formatBindingLabel).join(" / ") : "无"}
                                     </div>
                                     <div style={{ marginTop: 6, color: "var(--text-secondary)" }}>
-                                      角色源码绑定：{manualSkills.length ? manualSkills.join(" / ") : "无"}
+                                      角色源码绑定：{manualSkills.length ? manualSkills.map(formatBindingLabel).join(" / ") : "无"}
                                     </div>
                                     <div style={{ marginTop: 6 }}>
-                                      {item.tool_bindings.map((tool) => (
-                                        <Tag key={`${item.expert_id}_${tool}`} color="blue">
-                                          {tool}
-                                        </Tag>
-                                      ))}
-                                      {runtimeTools.map((tool) => (
-                                        <Tag key={`${item.expert_id}_${tool}`} color="gold">
-                                          {tool}
-                                        </Tag>
-                                      ))}
-                                      {extensionSkills.map((skill) => (
-                                        <Tag key={`${item.expert_id}_${skill}_ext`} color="geekblue">
-                                          {`skill ${skill} · extension`}
-                                        </Tag>
-                                      ))}
-                                      {manualSkills.map((skill) => (
-                                        <Tag key={`${item.expert_id}_${skill}_manual`} color="default">
-                                          {`skill ${skill} · 源码`}
-                                        </Tag>
-                                      ))}
+                                      {renderBindingTags(item.tool_bindings, "blue", `${item.expert_id}_tool`)}
+                                      {renderBindingTags(runtimeTools, "gold", `${item.expert_id}_runtime`)}
+                                      {renderBindingTags(extensionSkills, "geekblue", `${item.expert_id}_ext`, "Skill", "Extension")}
+                                      {renderBindingTags(manualSkills, "default", `${item.expert_id}_manual`, "Skill", "源码")}
                                     </div>
                                     <Space style={{ marginTop: 10 }}>
                                       <Button size="small" onClick={() => setDetailTarget(item)}>
@@ -466,7 +452,7 @@ const ExpertsPage: React.FC = () => {
         open={Boolean(uploadTarget)}
         onCancel={closeUploadModal}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form
           form={uploadForm}
@@ -556,7 +542,7 @@ const ExpertsPage: React.FC = () => {
         onCancel={closeDetailModal}
         footer={null}
         width={980}
-        destroyOnClose
+        destroyOnHidden
       >
         {detailTarget ? (
           <Space direction="vertical" style={{ width: "100%" }} size={16}>

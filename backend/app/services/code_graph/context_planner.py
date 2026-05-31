@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class CodeGraphSearchService(Protocol):
-    """Protocol implemented by Tree-sitter backed graph search services."""
+    """Protocol implemented by code-graph search services."""
 
     def search_related_context(
         self,
@@ -26,7 +26,7 @@ class CodeGraphSearchService(Protocol):
 
 
 class CodeGraphContextPlanner:
-    """Build review context with Tree-sitter graph first and keyword fallback."""
+    """Build review context with code graph first and keyword fallback."""
 
     def __init__(self, code_graph_service: CodeGraphSearchService | None = None) -> None:
         self.code_graph_service = code_graph_service
@@ -50,7 +50,7 @@ class CodeGraphContextPlanner:
                 review_id=review_id,
                 event_type="code_graph_context_started",
                 phase="context",
-                message="正在使用 Tree-sitter 代码图谱检索关联上下文",
+                message="正在使用代码结构图谱检索关联上下文",
                 payload={
                     "repository_id": repository_id,
                     "changed_files": normalized_files,
@@ -102,7 +102,7 @@ class CodeGraphContextPlanner:
                     event_type="code_graph_context_ready",
                     phase="context",
                     message=(
-                        "Tree-sitter 已命中关联上下文："
+                        "代码结构图谱已命中关联上下文："
                         f"变更节点 {self._stat(graph_result, 'changed_node_count')} 个，"
                         f"关联片段 {len(graph_contexts)} 个"
                     ),
@@ -140,7 +140,7 @@ class CodeGraphContextPlanner:
                 review_id=review_id,
                 event_type="code_graph_context_fallback",
                 phase="context",
-                message=f"Tree-sitter 未命中有效关联上下文，已退化为关键词搜索：{fallback_reason}",
+                message=f"代码结构图谱未命中有效关联上下文，改用关键词搜索：{fallback_reason}",
                 payload={
                     "repository_id": repository_id,
                     "context_source": "tree_sitter",
@@ -240,7 +240,7 @@ class CodeGraphContextPlanner:
         try:
             from app.services.code_graph.java_tree_sitter_parser import create_java_tree_sitter_parser
         except Exception:
-            return {"ready": False, "contexts": [], "fallback_reason": "Tree-sitter 依赖未安装", "stats": {}}
+            return {"ready": False, "contexts": [], "fallback_reason": "代码结构图谱依赖未安装", "stats": {}}
         local_path = getattr(repository_context_service, "local_path", None)
         if local_path is None:
             return {"ready": False, "contexts": [], "fallback_reason": "目标代码仓上下文不可用", "stats": {}}

@@ -417,6 +417,8 @@ def test_waiting_human_review_duration_is_backfilled_from_human_gate_event(stora
     seeded.completed_at = None
     seeded.duration_seconds = None
     seeded.pending_human_issue_ids = [issue.issue_id]
+    seeded.updated_at = started_at + timedelta(seconds=3)
+    original_updated_at = seeded.updated_at
     service.review_repo.save(seeded)
     service.event_repo.append(
         ReviewEvent(
@@ -436,8 +438,10 @@ def test_waiting_human_review_duration_is_backfilled_from_human_gate_event(stora
     assert hydrated is not None
     assert hydrated.completed_at == human_gate_at
     assert hydrated.duration_seconds == 17
+    assert hydrated.updated_at == original_updated_at
     assert datetime.fromisoformat(str(row["completed_at"]).replace("Z", "+00:00")) == human_gate_at
     assert row["duration_seconds"] == 17
+    assert datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00")) == original_updated_at
 
 
 def test_human_decision_can_continue_with_remaining_pending_issues(storage_root: Path):

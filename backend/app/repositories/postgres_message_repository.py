@@ -118,6 +118,7 @@ class PostgresMessageRepository:
                 rows = cursor.fetchall()
         seen_call_ids: set[str] = set()
         total_calls = 0
+        successful_calls = 0
         prompt_tokens = 0
         completion_tokens = 0
         total_tokens = 0
@@ -132,11 +133,14 @@ class PostgresMessageRepository:
                 continue
             seen_call_ids.add(call_id)
             total_calls += 1
+            if mode == "live" and not str(metadata.get("error") or metadata.get("llm_error") or "").strip():
+                successful_calls += 1
             prompt_tokens += self._safe_int(metadata.get("prompt_tokens"))
             completion_tokens += self._safe_int(metadata.get("completion_tokens"))
             total_tokens += self._safe_int(metadata.get("total_tokens"))
         return {
             "total_calls": total_calls,
+            "successful_calls": successful_calls,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,

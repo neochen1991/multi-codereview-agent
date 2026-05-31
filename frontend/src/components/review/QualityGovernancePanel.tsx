@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Card, Col, Empty, List, Row, Space, Statistic, Tag, Typography } from "antd";
 
 import type { DebateIssue, IssueFilterDecision, ReviewReport, ReviewSummary } from "@/services/api";
-import { humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
+import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
 
 const { Text } = Typography;
 
@@ -21,6 +21,28 @@ const asStringList = (value: unknown): string[] =>
 
 const asNumber = (value: unknown, fallback = 0): number =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
+
+const environmentStatusLabel = (value: string): string => {
+  if (value === "passed") return "通过";
+  if (value === "failed") return "失败";
+  if (value === "degraded") return "部分能力不可用";
+  if (value === "warning") return "有提醒";
+  return humanizeReviewText(value);
+};
+
+const verificationStatusLabel = (value: string): string => {
+  if (!value || value === "unknown") return "证据待核验";
+  if (value === "accepted") return "证据已确认";
+  if (value === "rejected") return "证据未采纳";
+  if (value === "verified") return "工具已核验";
+  return humanizeReviewText(value);
+};
+
+const contextReasonLabel = (value: string): string =>
+  humanizeReviewText(value)
+    .replace(/代码结构图谱降级/g, "已改用轻量上下文")
+    .replace(/代码结构图谱未就绪/g, "代码结构图谱尚未准备好")
+    .replace(/降级/g, "改用备用方案");
 
 const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
   report,
@@ -107,13 +129,13 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
             <Tag color={pathRuleCount ? "blue" : "default"}>{`路径规则 ${pathRuleCount}`}</Tag>
             {environmentStatus ? (
               <Tag color={environmentStatus === "passed" ? "success" : "warning"}>
-                {`环境预检 ${environmentStatus}`}
+                {`环境预检 ${environmentStatusLabel(environmentStatus)}`}
               </Tag>
             ) : null}
             {ruleIds.length ? <Tag color="purple">{`命中规则 ${ruleIds.length}`}</Tag> : null}
             {requiredExperts.map((expertId) => (
               <Tag key={expertId} color="geekblue">
-                {expertId}
+                {humanizeExpertId(expertId)}
               </Tag>
             ))}
           </Space>
@@ -132,7 +154,7 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
               ))}
               {Object.entries(verificationStatusCounts).map(([status, count]) => (
                 <Tag key={status} color={status === "accepted" ? "success" : "warning"}>
-                  {`verification ${status}: ${count}`}
+                  {`${verificationStatusLabel(status)} ${count}`}
                 </Tag>
               ))}
             </Space>
@@ -140,10 +162,10 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
           {degradedContextReasons.length || pathResolutionFailures.length ? (
             <Space direction="vertical" size={4}>
               {degradedContextReasons.length ? (
-                <Text type="secondary">上下文降级：{degradedContextReasons.slice(0, 6).join("、")}</Text>
+                <Text type="secondary">关联上下文提示：{degradedContextReasons.slice(0, 6).map(contextReasonLabel).join("、")}</Text>
               ) : null}
               {pathResolutionFailures.length ? (
-                <Text type="secondary">路径未解析：{pathResolutionFailures.slice(0, 4).join("、")}</Text>
+                <Text type="secondary">未定位到代码路径：{pathResolutionFailures.slice(0, 4).map(contextReasonLabel).join("、")}</Text>
               ) : null}
             </Space>
           ) : null}

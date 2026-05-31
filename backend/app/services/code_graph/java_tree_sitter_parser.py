@@ -17,11 +17,11 @@ JAVA_TREE_SITTER_INSTALL_HINT = (
 
 
 class JavaTreeSitterUnavailableError(RuntimeError):
-    """Raised when the Java Tree-sitter parser cannot be created."""
+    """Raised when the Java code-graph parser cannot be created."""
 
 
 def create_java_tree_sitter_parser() -> Any:
-    """Create and smoke-test a Java Tree-sitter parser."""
+    """Create and smoke-test a Java code-graph parser."""
 
     try:
         from tree_sitter_language_pack import get_parser
@@ -33,7 +33,7 @@ def create_java_tree_sitter_parser() -> Any:
         detail = str(error).strip()
         suffix = f"：{detail}" if detail else ""
         raise JavaTreeSitterUnavailableError(
-            f"Tree-sitter Java parser 不可用（{error.__class__.__name__}{suffix}）。{JAVA_TREE_SITTER_INSTALL_HINT}"
+            f"Java 代码结构图谱解析器不可用（{error.__class__.__name__}{suffix}）。{JAVA_TREE_SITTER_INSTALL_HINT}"
         ) from error
 
 
@@ -54,22 +54,22 @@ def tree_sitter_java_dependency_status() -> dict[str, object]:
         import tree_sitter  # noqa: F401
 
         version = _version("tree-sitter")
-        message = "已安装 tree-sitter Python 包。"
+        message = "已安装代码结构图谱解析依赖。"
         if version:
-            message = f"已安装 tree-sitter Python 包，版本 {version}。"
+            message = f"已安装代码结构图谱解析依赖，版本 {version}。"
         checks.append({"name": "tree_sitter", "status": "passed", "message": message})
     except Exception as error:
         installed = False
         parser_available = False
-        checks.append({"name": "tree_sitter", "status": "failed", "message": f"未安装 tree-sitter：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}"})
+        checks.append({"name": "tree_sitter", "status": "failed", "message": f"未安装代码结构图谱解析依赖：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}"})
 
     try:
         import tree_sitter_language_pack  # noqa: F401
 
         version = _version("tree-sitter-language-pack")
-        message = "已安装 tree-sitter-language-pack。"
+        message = "已安装代码结构图谱语言包。"
         if version:
-            message = f"已安装 tree-sitter-language-pack，版本 {version}。"
+            message = f"已安装代码结构图谱语言包，版本 {version}。"
         checks.append({"name": "tree_sitter_language_pack", "status": "passed", "message": message})
     except Exception as error:
         installed = False
@@ -78,7 +78,7 @@ def tree_sitter_java_dependency_status() -> dict[str, object]:
             {
                 "name": "tree_sitter_language_pack",
                 "status": "failed",
-                "message": f"未安装 tree-sitter-language-pack：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}",
+                "message": f"未安装代码结构图谱语言包：{error.__class__.__name__}。{JAVA_TREE_SITTER_INSTALL_HINT}",
             }
         )
 
@@ -115,7 +115,7 @@ def tree_sitter_java_dependency_status() -> dict[str, object]:
 
 
 class JavaTreeSitterParser:
-    """Extract Java nodes and relationship edges with Tree-sitter."""
+    """Extract Java nodes and relationship edges with the code-graph parser."""
 
     def __init__(self) -> None:
         self.parser = create_java_tree_sitter_parser()

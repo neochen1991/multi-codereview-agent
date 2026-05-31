@@ -30,6 +30,9 @@ const INTERNAL_TEXT_PATTERNS: RegExp[] = [
   /请结合实际/,
   /当前变更在/,
   /代码锚点单独修复/,
+  /当前代码锚点/,
+  /按当前代码片段/,
+  /识别批量输入规模/,
   /按命中的规则修正当前代码/,
   /定位候选代码行/,
   /按命中规则修正实现/,
@@ -65,11 +68,11 @@ export const rewriteUserFacingIssueText = (value?: string | null, context?: stri
   if (/异常被(静默)?吞(掉|没)|异常被忽略|exception.*swallow/i.test(text)) {
     text = paymentFailureAsSuccess
       ? text.replace(/异常被(静默)?吞(掉|没)|异常被忽略|exception.*swallow/gi, "支付结算失败后仍返回成功")
-      : text.replace(/异常被(静默)?吞(掉|没)|异常被忽略|exception.*swallow/gi, "失败被忽略，调用方会误以为处理成功");
+      : text.replace(/异常被(静默)?吞(掉|没)|异常被忽略|exception.*swallow/gi, "失败被当成成功返回，调用方无法感知真实失败");
   }
-  text = text.replace(/异常被吞掉后仍返回成功/g, paymentFailureAsSuccess ? "支付结算失败后仍返回成功" : "失败被忽略后仍按成功处理");
+  text = text.replace(/异常被吞掉后仍返回成功/g, paymentFailureAsSuccess ? "支付结算失败后仍返回成功" : "失败被当成成功返回");
   if (/异常返回语义被弱化|失败语义被弱化|异常.*返回.*成功/.test(text)) {
-    text = paymentFailureAsSuccess ? "支付结算失败后仍返回成功" : "失败被忽略后仍按成功处理";
+    text = paymentFailureAsSuccess ? "支付结算失败后仍返回成功" : "失败被当成成功返回";
   }
   if (/应用服务泄漏支付网关协议/.test(text) && paymentFailureAsSuccess) {
     text = "支付结算失败后仍返回成功";
@@ -153,7 +156,7 @@ const ISSUE_TYPE_LABELS: Record<string, string> = {
   query_boundary_missing: "查询没有分页限制",
   unbounded_query: "查询没有分页限制",
   unbounded_query_risk: "查询结果可能过大",
-  exception_swallowed: "失败被忽略后仍按成功处理",
+  exception_swallowed: "失败被当成成功返回",
   exception_semantics_weakened: "失败处理语义被弱化",
   course_creation_semantics: "领域创建流程有风险",
   aggregate_factory_bypass: "聚合工厂被绕过",
@@ -255,8 +258,8 @@ export const issueTypeDisplayLabel = (...values: Array<string | null | undefined
     if (/注释|comment/.test(raw) && /实现|落地|promise|contract/.test(raw)) return "注释承诺未实现";
     if (/锁|并发|synchronized|lock/i.test(raw)) return "并发保护风险";
     if (/循环|批量/.test(raw) && /查询|调用|性能|保存|写入/.test(raw)) return "循环路径性能风险";
-    if (/catch|ignored|success|异常|exception|失败被忽略|支付结算失败/i.test(raw)) {
-      return /payment|settlement|支付|结算/i.test(context) ? "支付失败被当成成功" : "失败被忽略后仍按成功处理";
+    if (/catch|ignored|success|异常|exception|失败被忽略|失败被当成成功|支付结算失败/i.test(raw)) {
+      return /payment|settlement|支付|结算/i.test(context) ? "支付失败被当成成功" : "失败被当成成功返回";
     }
     if (/event published before persistence|transactional outbox|持久化前.*事件|事件.*持久化/i.test(raw)) return "领域事件发布顺序错误";
     if (/Course\.create|new Course|构造函数|聚合.*工厂|工厂.*聚合|工厂方法|创建路径变更|aggregate|factory/i.test(raw)) return "聚合工厂被绕过";
@@ -334,7 +337,7 @@ export const buildReadableIssueSummary = (source: IssueDisplaySource): string =>
   const meta = firstReadableSentence(rewriteUserFacingIssueText(source.metaSummary, context), 220);
   if (meta && !isGenericTitle(meta)) return meta;
   const label = issueTypeDisplayLabel(source.title, source.summary, source.category_label, source.normalized_issue_type, source.finding_type);
-  if (/支付失败|失败被忽略|异常/.test(label)) {
+  if (/支付失败|失败被忽略|失败被当成成功|异常/.test(label)) {
     return `${location} 的异常处理会把失败路径当成成功返回，调用方无法感知真实失败。`;
   }
   if (/查询缺少边界|分页|LIMIT/i.test(label)) {
@@ -355,7 +358,7 @@ export const buildReadableIssueSummary = (source: IssueDisplaySource): string =>
   if (/领域事件/.test(label)) {
     return `${location} 的领域事件记录或发布路径发生变化，可能影响下游订阅方感知课程创建结果。`;
   }
-  return `${location} 命中「${label}」风险，请按当前代码片段定位具体分支并修复。`;
+  return `${location} 命中「${label}」风险，建议先核对该位置的输入、分支和副作用，再补齐对应保护。`;
 };
 
 export const buildReadableFixSummary = (source: IssueDisplaySource): string => {
@@ -365,7 +368,7 @@ export const buildReadableFixSummary = (source: IssueDisplaySource): string => {
   const steps = cleanUserFacingList(source.remediation_steps).join("；");
   if (steps) return firstReadableSentence(steps, 220);
   const label = issueTypeDisplayLabel(source.title, source.summary, source.category_label, source.normalized_issue_type, source.finding_type);
-  if (/支付失败|失败被忽略|异常/.test(label)) {
+  if (/支付失败|失败被忽略|失败被当成成功|异常/.test(label)) {
     return "不要在 catch 分支返回成功；保留异常上下文，改为抛出异常、返回明确失败结果或进入补偿流程。";
   }
   if (/查询缺少边界|分页|LIMIT/i.test(label)) {
@@ -386,7 +389,7 @@ export const buildReadableFixSummary = (source: IssueDisplaySource): string => {
   if (/领域事件/.test(label)) {
     return "恢复由聚合内部记录领域事件的路径，或补齐等价事件发布逻辑，并增加订阅方可收到事件的回归用例。";
   }
-  return `按「${label}」对应的代码位置补齐修复，并增加能复现该风险的回归测试。`;
+  return `围绕「${label}」对应位置补齐缺失逻辑，并增加能复现该风险的回归测试。`;
 };
 
 export const isConcreteDisplayCode = (value?: string | null): boolean => {

@@ -574,7 +574,7 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
           {issueSteps.length ? (
             issueSteps.map((step, index) => <li key={`${index}-${step}`}>{humanizeReviewText(step)}</li>)
           ) : (
-            <li>先按当前代码锚点修复问题，再补充对应的单元或集成回归测试。</li>
+            <li>先修复本条问题指向的代码位置，再补充对应的单元或集成回归测试。</li>
           )}
         </ol>
       </div>

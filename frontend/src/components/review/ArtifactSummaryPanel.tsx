@@ -2,6 +2,7 @@ import React from "react";
 import { Card, Descriptions, Empty, Tag, Typography } from "antd";
 
 import type { ReviewArtifacts } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 import { getReviewPhaseLabel, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const { Paragraph } = Typography;
@@ -15,6 +16,19 @@ const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }
   const summaryComment = artifacts?.summary_comment;
   const checkRun = artifacts?.check_run;
   const reportSnapshot = artifacts?.report_snapshot;
+  const checkStatusLabel = checkRun ? getReviewStatusLabel(checkRun.status) : "";
+  const checkConclusionLabel = checkRun?.conclusion ? humanizeReviewText(checkRun.conclusion) : "";
+  const snapshotPhaseLabel = reportSnapshot ? getReviewPhaseLabel(reportSnapshot.phase) : "";
+  const snapshotStatusLabel = reportSnapshot ? getReviewStatusLabel(reportSnapshot.status) : "";
+  const artifactStatusLabel =
+    snapshotPhaseLabel && snapshotStatusLabel && snapshotPhaseLabel !== snapshotStatusLabel
+      ? `${snapshotPhaseLabel} · ${snapshotStatusLabel}`
+      : snapshotPhaseLabel || snapshotStatusLabel || "-";
+  const shouldShowConclusion = Boolean(
+    checkConclusionLabel &&
+      checkConclusionLabel !== "-" &&
+      checkConclusionLabel !== checkStatusLabel,
+  );
 
   return (
     <Card className="module-card" title="产物快照">
@@ -24,23 +38,23 @@ const ArtifactSummaryPanel: React.FC<ArtifactSummaryPanelProps> = ({ artifacts }
         <Descriptions column={1} size="small">
           <Descriptions.Item label="摘要评论">
             <Paragraph style={{ marginBottom: 0 }}>
-              {summaryComment?.summary || "-"}
+              {humanizeReviewText(summaryComment?.summary || "-")}
             </Paragraph>
           </Descriptions.Item>
           <Descriptions.Item label="检查状态">
             {checkRun ? (
               <>
                 <Tag color={checkRun.status === "completed" ? "success" : "processing"}>
-                  {checkRun.status}
+                  {checkStatusLabel}
                 </Tag>
-                <Tag>{checkRun.conclusion}</Tag>
+                {shouldShowConclusion ? <Tag>{checkConclusionLabel}</Tag> : null}
               </>
             ) : (
               "-"
             )}
           </Descriptions.Item>
           <Descriptions.Item label="产物状态">
-            {reportSnapshot ? `${getReviewPhaseLabel(reportSnapshot.phase)} · ${getReviewStatusLabel(reportSnapshot.status)}` : "-"}
+            {reportSnapshot ? artifactStatusLabel : "-"}
           </Descriptions.Item>
           <Descriptions.Item label="待人工确认">
             {reportSnapshot?.pending_human_issue_ids?.length || 0}

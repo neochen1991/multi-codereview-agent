@@ -174,11 +174,23 @@ class ReviewRunnerIssueValidationMixin:
         )
         exception_text_claim_signal = (
             any(token in claim_compact for token in ("catch", "runtimeexception", "exception", "异常", "空catch"))
-            and any(token in claim_compact for token in ("静默吞", "吞掉", "返回成功", "success", "未抛出", "空catch"))
+            and any(token in claim_compact for token in ("静默吞", "吞掉", "返回成功", "success", "未抛出", "空catch", "失败被忽略", "忽略失败"))
         )
         non_exception_claim_signal = any(
             (query_claim_signal, loop_claim_signal, lock_claim_signal, course_claim_signal, comment_claim_signal)
         )
+        if "mysqldomaineventsconsumer" in path and (
+            normalized_type in {"query_bound_removed", "query_boundary_missing", "naming_misleading"}
+            or query_claim_signal
+            or any(token in compact for token in ("chunk", "chunks", "chunkstmp", "limit", "批量", "边界"))
+        ):
+            return "event_consumer_batch_boundary"
+        if "mysqldomaineventsconsumer" in path and (
+            normalized_type in {"exception_swallowed", "exception_semantics_weakened", "event_consumer_exception_swallowed"}
+            or exception_text_claim_signal
+            or any(token in compact for token in ("catch", "空catch", "失败被忽略", "忽略失败", "printstacktrace", "exception_swallowed"))
+        ):
+            return "event_consumer_exception_swallowed"
         explicit_family = self._explicit_issue_family_from_type(normalized_type)
         if (
             explicit_family
@@ -439,6 +451,22 @@ class ReviewRunnerIssueValidationMixin:
                 "查询语义",
                 "语义退化",
             ),
+            "event_consumer_batch_boundary": (
+                "chunk",
+                "chunks",
+                "chunkstmp",
+                "limit",
+                "批量",
+                "分页",
+                "边界",
+            ),
+            "event_consumer_exception_swallowed": (
+                "catch",
+                "printstacktrace",
+                "失败被忽略",
+                "异常处理",
+                "exception",
+            ),
         }
         return any(token in compact for token in family_tokens.get(family, ()))
 
@@ -512,6 +540,17 @@ class ReviewRunnerIssueValidationMixin:
             primary.title = primary.aggregated_titles[0]
         primary.summary = self._build_merged_issue_summary(primary.aggregated_summaries, primary.aggregated_remediation_suggestions)
         self._apply_canonical_issue_family_summary(primary)
+        if issue_family == "event_consumer_batch_boundary":
+            boundary_summary = next(
+                (
+                    text
+                    for text in primary.aggregated_summaries
+                    if "limit" in str(text or "").lower() or "边界" in str(text or "")
+                ),
+                "",
+            )
+            if boundary_summary:
+                primary.summary = boundary_summary
         self._repair_cross_context_issue_summary(primary)
         primary.category_label = primary.category_label or self._category_label_for_issue_type(primary.normalized_issue_type)
         if not self._looks_like_concrete_suggested_code(primary.suggested_code, file_path=primary.file_path):
@@ -558,7 +597,7 @@ class ReviewRunnerIssueValidationMixin:
                 normalized.title = "查询语义从精确匹配退化为模糊匹配"
         elif family == "comment_contract_unimplemented":
             normalized.normalized_issue_type = "comment_contract_unimplemented"
-            if "承诺未落地" in normalized.title or "todo" in normalized.title.lower():
+            if not normalized.title.strip():
                 normalized.title = "注释/TODO 承诺未实现"
         elif family == "course_creation_semantics":
             normalized.normalized_issue_type = "course_creation_semantics"
@@ -608,7 +647,7 @@ class ReviewRunnerIssueValidationMixin:
                         issue_id=issue.issue_id,
                         expert_id="judge",
                         message_type="invalid_issue_filtered",
-                        content="该候选问题的问题说明、代码锚点或建议代码仍不一致，已从有效问题清单移除，仅保留为候选发现供追溯。",
+                        content="该候选问题的问题说明、代码位置或建议代码仍不一致，已从有效问题清单移除，仅保留为候选发现供追溯。",
                         metadata={
                             "phase": "judge",
                             "file_path": issue.file_path,
@@ -622,6 +661,174 @@ class ReviewRunnerIssueValidationMixin:
                 continue
             valid_issues.append(issue)
         return valid_issues
+
+    def _make_final_issue_display_texts_distinct(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        """Avoid shipping multiple final issues with identical user-facing summaries.
+
+        Weak models often describe two different code anchors with the same generic
+        sentence. The root problem may be the same family, but the result page must
+        still make it obvious which code each item is talking about.
+        """
+
+        seen: dict[str, list[DebateIssue]] = {}
+        for issue in issues:
+            key = re.sub(r"\s+", "", str(issue.summary or "").strip().lower())
+            if key:
+                seen.setdefault(key, []).append(issue)
+
+        for duplicated in seen.values():
+            anchors = {
+                (
+                    str(issue.file_path or "").strip(),
+                    int(issue.line_start or 1),
+                    re.sub(r"\s+", "", str(issue.current_code or "").strip()),
+                )
+                for issue in duplicated
+            }
+            if len(duplicated) <= 1 or len(anchors) <= 1:
+                continue
+            for issue in duplicated:
+                issue.summary = self._build_anchor_specific_issue_summary(issue)
+                issue.updated_at = datetime.now(UTC)
+                issue.consistency_check_summary = (
+                    f"{str(issue.consistency_check_summary or '').strip()} "
+                    "系统已按具体代码位置补充问题摘要，避免不同问题展示成同一段描述。"
+                ).strip()
+        return issues
+
+    def _finding_can_fallback_to_issue(
+        self,
+        finding: dict[str, object],
+        *,
+        changed_files: list[str] | None = None,
+    ) -> bool:
+        """Only promote a leftover finding to an issue when it is already issue-grade.
+
+        The fallback path exists to avoid losing strong deterministic findings when
+        graph/judge returns no issues. It must not turn vague risk hypotheses into
+        visible "effective issues".
+        """
+
+        if not isinstance(finding, dict):
+            return False
+        finding_type = str(finding.get("finding_type") or "").strip().lower()
+        confidence = self._safe_float(finding.get("confidence"), default=0.0)
+        direct_evidence = bool(
+            finding.get("direct_evidence")
+            or finding.get("tool_verified")
+            or finding.get("sast_cross_validated")
+        )
+        if finding_type != "direct_defect" and not direct_evidence:
+            return False
+        if confidence < 0.78:
+            return False
+        if finding_type == "risk_hypothesis" and confidence < 0.88:
+            return False
+
+        file_path = str(finding.get("file_path") or "").strip()
+        if not file_path:
+            return False
+        if changed_files and not self._path_matches_changed_files(file_path, changed_files):
+            return False
+
+        line_start = self._safe_int(finding.get("line_start"), default=0)
+        evidence_items = [
+            str(item).strip()
+            for item in list(finding.get("evidence") or [])
+            if str(item).strip()
+        ]
+        current_code = str(
+            finding.get("current_code")
+            or finding.get("code_excerpt")
+            or finding.get("target_hunk_excerpt")
+            or ""
+        ).strip()
+        if line_start <= 0 or not (current_code or evidence_items):
+            return False
+
+        title = self._sanitize_user_facing_issue_text(str(finding.get("title") or ""))
+        summary = self._sanitize_user_facing_issue_text(
+            str(finding.get("summary") or finding.get("claim") or "")
+        )
+        if not title or not summary:
+            return False
+        return True
+
+    @staticmethod
+    def _path_matches_changed_files(file_path: str, changed_files: list[str]) -> bool:
+        normalized = file_path.replace("\\", "/").strip().lower()
+        for changed in changed_files:
+            candidate = str(changed or "").replace("\\", "/").strip().lower()
+            if candidate and (normalized == candidate or normalized.endswith(f"/{candidate}") or candidate.endswith(f"/{normalized}")):
+                return True
+        return False
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _build_anchor_specific_issue_summary(self, issue: DebateIssue) -> str:
+        family = self._issue_root_family(issue)
+        file_name = Path(str(issue.file_path or "")).name or "当前文件"
+        line = f"第 {int(issue.line_start or 1)} 行"
+        code_hint = self._extract_issue_code_display_hint(issue.current_code)
+        anchor = f"{file_name} {line}"
+        if code_hint:
+            anchor = f"{anchor} 的 `{code_hint}`"
+
+        if family == "n_plus_one_loop_call":
+            return f"{anchor} 在循环中逐条访问仓储、网关或保存接口，批量输入会被放大为多次外部调用。"
+        if family == "comment_contract_unimplemented":
+            return f"{anchor} 已写明业务承诺或 TODO，但当前实现没有补齐对应逻辑，容易让调用方误以为能力已经落地。"
+        if family == "lock_guard_removed":
+            return f"{anchor} 缺少原有 synchronized、Lock 或等价并发保护，并发执行时可能出现重复处理或状态竞争。"
+        if family == "exception_swallowed":
+            return f"{anchor} 捕获异常后没有把失败结果传递给调用方，后续流程可能按成功继续执行。"
+        if family == "event_consumer_exception_swallowed":
+            return f"{anchor} 捕获事件消费异常后没有记录、标记失败或触发补偿，后续流程会误以为事件已处理。"
+        if family == "query_boundary_missing":
+            return f"{anchor} 查询缺少分页、LIMIT 或固定窗口边界，数据量放大后可能拖慢数据库访问。"
+        if family == "course_creation_semantics":
+            return f"{anchor} 绕过了聚合工厂或原有创建语义，可能丢失不变量校验、领域事件记录或持久化顺序约束。"
+        if family == "query_semantics_regression":
+            return f"{anchor} 改变了查询匹配语义，可能把不应处理的数据也纳入结果集。"
+        original = self._sanitize_user_facing_issue_text(issue.summary)
+        if original:
+            return f"{anchor} 存在问题：{original}"
+        return f"{anchor} 存在需要处理的代码风险，请按当前代码位置修复。"
+
+    @staticmethod
+    def _extract_issue_code_display_hint(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        candidates: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = re.sub(r"^\d+\s*\|\s?", "", line).strip()
+            line = re.sub(r"^[+\-]\s?", "", line).strip()
+            if not line:
+                continue
+            if line.startswith(("//", "/*", "*")) and "todo" not in line.lower() and "fixme" not in line.lower():
+                continue
+            if len(line) > 96:
+                line = f"{line[:93]}..."
+            candidates.append(line)
+        if not candidates:
+            return ""
+        return next(
+            (
+                line
+                for line in candidates
+                if re.search(r"\w+\.\w+\s*\(", line) or re.search(r"\b(save|query|find|get|publish|send)\w*\s*\(", line)
+            ),
+            candidates[0],
+        )
 
     @staticmethod
     def _current_and_suggested_code_are_same(issue: DebateIssue) -> bool:
@@ -649,17 +856,17 @@ class ReviewRunnerIssueValidationMixin:
         if "n_plus_one" in str(issue.normalized_issue_type or "").lower() and "coursecreator" in file_path:
             conflicts.append("n_plus_one 问题不能挂到 CourseCreator 单对象创建方法上。")
         if family == "comment_contract_unimplemented" and "coursecreator" in file_path and "todo" not in text:
-            conflicts.append("注释/承诺未实现问题缺少 TODO 或注释承诺锚点，文件锚点不一致。")
+            conflicts.append("注释/承诺未实现问题缺少 TODO 或注释承诺位置，文件位置不一致。")
         if "comment_contract" in str(issue.normalized_issue_type or "").lower() and "todo" not in text:
-            conflicts.append("注释/承诺未实现问题缺少 TODO 代码锚点。")
+            conflicts.append("注释/承诺未实现问题缺少 TODO 代码位置。")
         if family == "lock_guard_removed" and "bulkenrollmentservice" not in file_path and "synchronized" not in text:
-            conflicts.append("锁/并发保护问题缺少锁相关文件或代码锚点。")
+            conflicts.append("锁/并发保护问题缺少锁相关文件或代码位置。")
         if family == "query_boundary_missing" and not any(token in file_path for token in ("payment", "repository", "converter")):
-            conflicts.append("查询边界问题缺少查询相关文件锚点。")
+            conflicts.append("查询边界问题缺少查询相关文件位置。")
         if family == "exception_swallowed" and "catch" not in text and "exception" not in text:
-            conflicts.append("异常吞掉问题缺少 catch/exception 代码锚点。")
+            conflicts.append("异常处理问题缺少 catch/exception 代码位置。")
         if family == "course_creation_semantics" and "coursecreator" not in file_path:
-            conflicts.append("聚合创建问题被挂到了非 CourseCreator 文件上，文件锚点不一致。")
+            conflicts.append("聚合创建问题被挂到了非 CourseCreator 文件上，文件位置不一致。")
         return conflicts
 
     def _apply_canonical_issue_family_summary(self, issue: DebateIssue) -> None:
@@ -679,13 +886,19 @@ class ReviewRunnerIssueValidationMixin:
             issue.title = "并发保护被移除"
         elif family == "exception_swallowed":
             issue.normalized_issue_type = "exception_swallowed"
-            issue.title = "失败被忽略后仍按成功处理"
+            issue.title = "失败被当成成功返回"
         elif family == "query_boundary_missing":
             issue.normalized_issue_type = "query_bound_removed"
             issue.title = "查询边界缺失"
+        elif family == "event_consumer_exception_swallowed":
+            issue.normalized_issue_type = "event_consumer_exception_swallowed"
+            issue.title = "事件消费失败被忽略"
+            if not issue.summary.strip() or any(token in issue.summary for token in ("静默吞", "吞掉", "异常处理被忽略")):
+                issue.summary = self._canonical_issue_summary_for_family(issue, family)
         elif family == "comment_contract_unimplemented":
             issue.normalized_issue_type = "comment_contract_unimplemented"
-            issue.title = "注释/TODO 承诺未实现"
+            if not issue.title.strip():
+                issue.title = "注释/TODO 承诺未实现"
             if any(token in compact for token in ("权限", "越权", "登录用户")):
                 issue.summary = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有权限过滤逻辑，存在越权读取风险。"
                 issue.needs_human = False
@@ -696,11 +909,11 @@ class ReviewRunnerIssueValidationMixin:
         if family == "query_semantics_regression":
             return "查询语义从精确匹配退化为模糊匹配"
         if family == "comment_contract_unimplemented":
-            return "注释/TODO 承诺未实现"
+            return ""
         if family == "lock_guard_removed":
             return "并发保护被移除"
         if family == "exception_swallowed":
-            return "失败被忽略后仍按成功处理"
+            return "失败被当成成功返回"
         if family == "query_boundary_missing":
             return "查询边界缺失"
         if family == "course_creation_semantics":
@@ -739,6 +952,8 @@ class ReviewRunnerIssueValidationMixin:
 
         family = self._issue_root_family(issue)
         summary = str(issue.summary or "").strip()
+        if family == "comment_contract_unimplemented" and summary and not self._text_mentions_other_changed_context(summary, issue.file_path):
+            return
         if summary and self._issue_text_matches_family(family, summary) and not self._text_mentions_other_changed_context(summary, issue.file_path):
             return
         canonical = self._canonical_issue_summary_for_family(issue, family)
@@ -756,6 +971,8 @@ class ReviewRunnerIssueValidationMixin:
                     "调用方会误以为结算已完成，可能造成账务状态和真实支付结果不一致。"
                 )
             return f"{file_name}{line} 的异常处理没有向调用方暴露失败结果，容易把失败流程当成成功流程继续执行。"
+        if family == "event_consumer_exception_swallowed":
+            return f"{file_name}{line} 的事件消费异常被忽略，缺少日志、失败标记或补偿动作，下游会误以为事件已经处理成功。"
         if family == "comment_contract_unimplemented":
             return f"{file_name}{line} 的注释或 TODO 已承诺要完成某个业务动作，但当前实现没有对应代码，调用方会误以为该能力已经落地。"
         if family == "lock_guard_removed":
@@ -880,11 +1097,14 @@ class ReviewRunnerIssueValidationMixin:
         return ",".join(types[:3])
 
     def _build_merged_issue_summary(self, summaries: list[str], remediation_suggestions: list[str]) -> str:
-        clean_summaries = [
-            text
-            for text in (self._sanitize_user_facing_issue_text(item) for item in summaries)
-            if text
-        ]
+        clean_summaries: list[str] = []
+        for item in summaries:
+            raw = str(item or "").strip()
+            if re.match(r"^\s*修复建议汇总\s*[:：]", raw):
+                continue
+            text = self._sanitize_user_facing_issue_text(raw)
+            if text:
+                clean_summaries.append(text)
         clean_suggestions = [
             text
             for text in (self._sanitize_user_facing_issue_text(item) for item in remediation_suggestions)
@@ -928,6 +1148,10 @@ class ReviewRunnerIssueValidationMixin:
             "根据实际",
             "请结合实际",
             "需要特别确认",
+            "需要确认",
+            "需要复核",
+            "需要对比",
+            "确认原",
             "需要确认其他条件",
             "不确定是否",
             "无法确认",
@@ -1020,11 +1244,11 @@ class ReviewRunnerIssueValidationMixin:
                     payload={
                         "issue_id": issue.issue_id,
                         "status": "passed",
-                        "reason": "字段完整且代码锚点一致，已跳过 LLM 一致性校验。",
+                        "reason": "字段完整且代码位置一致，已跳过 LLM 一致性校验。",
                     },
                 )
                 validated_issue.consistency_check_status = "skipped"
-                validated_issue.consistency_check_summary = "字段完整且代码锚点一致，已跳过 LLM 一致性校验。"
+                validated_issue.consistency_check_summary = "字段完整且代码位置一致，已跳过 LLM 一致性校验。"
                 batch_validated_by_issue_id[issue.issue_id] = validated_issue
                 skipped_count += 1
                 logger.info(

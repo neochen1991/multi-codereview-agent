@@ -1086,9 +1086,17 @@ class ReviewRunner(
             for item in finding_payloads
             if str(item.get("finding_id") or "").strip() not in filtered_finding_ids
         ]
-        if not issues and fallback_candidates:
+        eligible_fallback_candidates = [
+            item
+            for item in fallback_candidates
+            if self._finding_can_fallback_to_issue(
+                item,
+                changed_files=list(review.subject.changed_files or []),
+            )
+        ]
+        if not issues and eligible_fallback_candidates:
             fallback_source = sorted(
-                fallback_candidates,
+                eligible_fallback_candidates,
                 key=lambda item: (
                     {"blocker": 4, "critical": 3, "high": 3, "medium": 2, "low": 1}.get(
                         str(item.get("severity") or "medium").lower(),
@@ -1188,6 +1196,12 @@ class ReviewRunner(
                 fallback_finding_id,
                 needs_human,
             )
+        elif not issues and fallback_candidates:
+            logger.info(
+                "issue fallback skipped because findings are not strong enough review_id=%s finding_count=%s",
+                review_id,
+                len(fallback_candidates),
+            )
         elif not issues and filtered_finding_ids:
             logger.info(
                 "issue fallback skipped because all findings were filtered review_id=%s finding_count=%s filtered_count=%s",
@@ -1243,6 +1257,7 @@ class ReviewRunner(
         else:
             issues = [self._normalize_single_coalesced_issue(issue) for issue in issues]
         issues = self._filter_invalid_final_issues(review_id, issues)
+        issues = self._make_final_issue_display_texts_distinct(issues)
         issues, auto_confirmed_issue_ids = self._auto_confirm_high_confidence_issues(issues)
         if auto_confirmed_issue_ids:
             self.event_repo.append(
@@ -1535,8 +1550,8 @@ class ReviewRunner(
             self._append_review_workspace_graph_message(
                 review.review_id,
                 message_type="review_workspace_code_graph_started",
-                content="Tree-sitter 快照图谱初始化开始，将基于本次 MR 合入快照解析 Java 符号和调用关系。",
-                graph_name="Tree-sitter",
+                content="代码结构图谱初始化开始，将基于本次 MR 合入快照解析 Java 符号和调用关系。",
+                graph_name="代码结构图谱",
                 graph_status="started",
                 payload={"repo_path": result.workspace_path},
             )
@@ -1545,8 +1560,8 @@ class ReviewRunner(
             self._append_review_workspace_graph_message(
                 review.review_id,
                 message_type="review_workspace_code_graph_completed",
-                content=self._workspace_graph_completed_content("Tree-sitter", code_graph_result),
-                graph_name="Tree-sitter",
+                content=self._workspace_graph_completed_content("代码结构图谱", code_graph_result),
+                graph_name="代码结构图谱",
                 graph_status=str(code_graph_result.get("status") or ""),
                 payload=code_graph_result,
             )
@@ -1578,7 +1593,7 @@ class ReviewRunner(
                 event_type="review_workspace_prepared",
                 phase="intake",
                 message=(
-                    "MR 合入快照已准备完成，GitNexus/Tree-sitter 将读取快照代码。"
+                    "MR 合入快照已准备完成，GitNexus/代码结构图谱将读取快照代码。"
                     if result.status == "ready"
                     else f"MR 合入快照未启用：{result.message}"
                 ),
@@ -1710,7 +1725,8 @@ class ReviewRunner(
         status = str(graph_result.get("status") or "unknown")
         message = str(graph_result.get("message") or "").strip()
         graph_path = str(graph_result.get("graph_db_path") or graph_result.get("graph_dir") or "").strip()
-        lines = [f"{graph_name} 快照图谱初始化完成。", f"- 状态：{status}"]
+        title = "代码结构图谱初始化完成。" if graph_name == "代码结构图谱" else f"{graph_name} 快照图谱初始化完成。"
+        lines = [title, f"- 状态：{status}"]
         if graph_path:
             lines.append(f"- 图谱路径：{graph_path}")
         indexed_file_count = graph_result.get("indexed_file_count")
@@ -1746,11 +1762,11 @@ class ReviewRunner(
                 f"- 快照路径：{result.workspace_path}",
                 f"- 快照方式：{result.snapshot_mode}",
                 f"- 快照 commit：{result.snapshot_commit[:12] if result.snapshot_commit else ''}",
-                f"- Tree-sitter 快照图谱：{code_graph_status}",
+                f"- 代码结构图谱：{code_graph_status}",
                 f"- GitNexus 快照图谱：{gitnexus_status}",
             ]
             if graph_db_path:
-                lines.append(f"- Tree-sitter 图谱路径：{graph_db_path}")
+                lines.append(f"- 代码结构图谱路径：{graph_db_path}")
             if gitnexus_graph_dir:
                 lines.append(f"- GitNexus 图谱路径：{gitnexus_graph_dir}")
             lines.append(f"- 说明：{result.message}")
@@ -1768,7 +1784,7 @@ class ReviewRunner(
 
     def _build_review_workspace_code_graph(self, review_id: str, result) -> dict[str, object]:
         if result.status != "ready" or not result.workspace_path:
-            return {"status": "skipped", "message": "MR 快照未就绪，跳过 Tree-sitter 快照建图。"}
+            return {"status": "skipped", "message": "MR 快照未就绪，跳过代码结构图谱建图。"}
         try:
             index_result = CodeGraphIndexService(
                 repo_root=result.workspace_path,
@@ -1779,7 +1795,7 @@ class ReviewRunner(
             logger.exception("review workspace code graph build failed review_id=%s workspace_path=%s", review_id, result.workspace_path)
             return {
                 "status": "failed",
-                "message": f"Tree-sitter 快照建图失败：{error}",
+                "message": f"代码结构图谱建图失败：{error}",
                 "error_type": error.__class__.__name__,
                 "repo_path": result.workspace_path,
             }
@@ -2384,7 +2400,7 @@ class ReviewRunner(
             },
             "exception_swallowed": {
                 "expert_id": "correctness_business",
-                "title": "失败被忽略后仍按成功处理",
+                "title": "失败被当成成功返回",
                 "normalized_issue_type": "exception_swallowed",
                 "category_label": "correctness",
                 "summary": "本次 diff 的 catch 分支吞掉 RuntimeException，并在失败路径返回成功结果，调用方会误以为处理已经完成。",
@@ -2470,7 +2486,7 @@ class ReviewRunner(
                         category_label=str(profile["category_label"]),
                         severity="high",
                         confidence=float(profile["confidence"]),
-                        confidence_rationale="确定性 Java 质量信号；直接代码证据；无需依赖额外条件确认",
+                        confidence_rationale="确定性 Java 质量信号；已基于当前 diff 直接定位代码证据。",
                         file_path=normalized_file_path,
                         line_start=line_start,
                         evidence=evidence,
@@ -5094,7 +5110,7 @@ class ReviewRunner(
                     "3. 不允许输出 legacy {\"findings\":[...]}，不要输出单对象、不要输出 Markdown；\n"
                     "4. 每条 candidate_finding 必须包含 rule_id、title、file_path、line、evidence、confidence；\n"
                     "5. file_path 只能从“本轮批量文件清单”里选择；\n"
-                    "6. 每条 candidate_finding 只能对应一个具体问题和一个主代码锚点，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
+                    "6. 每条 candidate_finding 只能对应一个具体问题和一个主代码位置，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
                     "7. 每条适用 RULE_CARDS 都必须在 rule_check_results 中给出 status、evidence、missing_context、reason；\n"
                     "8. self_check.checked_all_rules 必须反映是否已经逐条检查 RULE_CARDS。\n"
                 )
@@ -5106,7 +5122,7 @@ class ReviewRunner(
                     "3. 每条 finding 都必须同时包含 file_path、line_start、line_end、title、claim、suggested_code；\n"
                     "4. 每条 finding 必须携带 file_path，且只能从“本轮批量文件清单”里选择；\n"
                     "5. 每个文件允许返回多条互不重复的问题，不要只给每个文件 1 条；\n"
-                    "6. 每条 finding 只能对应一个具体问题和一个主代码锚点，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
+                    "6. 每条 finding 只能对应一个具体问题和一个主代码位置，禁止把多个文件、多个风险点、多个修复方向合并成一条；\n"
                     "7. suggested_code 必须是对应文件的具体修改后代码片段，不能写成修复思路、说明文字、占位符或伪代码。\n"
                 )
             user_prompt = (
@@ -5815,7 +5831,7 @@ class ReviewRunner(
                 if missing_context_values:
                     parsed["verification_plan"] = (
                         str(parsed.get("verification_plan") or "").strip()
-                        or "复核当前代码锚点、规则证据和建议代码是否一致；不一致时降级为候选发现。"
+                        or "复核问题位置、规则证据和建议代码是否一致；不一致时降级为候选发现。"
                     )
                     parsed["assumptions"] = self._dedupe_texts(
                         [
@@ -6837,9 +6853,9 @@ class ReviewRunner(
                 "上一轮输出结构合法，但 candidate_findings 为空。当前输入包含实质变更代码，因此必须重新做一次证据聚焦审查。",
                 "本阶段不要复述上一轮结论，不要输出 Markdown。",
                 "如果任一目标 hunk 中存在违反专家职责、专家规范、语言通用规范或 RULE_CARDS 的代码证据，必须输出 candidate_findings。",
-                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；同一 hunk 的多个问题必须拆成多条。",
+                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码位置；同一 hunk 的多个问题必须拆成多条。",
                 "如果仍判断无问题，candidate_findings 可以为空，但 self_check.unverified_assumptions 必须写明逐个 hunk 无问题的具体原因。",
-                "有当前代码锚点但还缺上下文时，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
+                "有当前变更代码位置但还缺上下文时，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
                 f"职责: {expert.role}",
                 f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids or ['GENERAL-EXPERT-CHECKS'], ensure_ascii=False)}",
@@ -7076,9 +7092,9 @@ class ReviewRunner(
                 "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]",
                 "本阶段只按专家画像、专家职责、专家审视规范和代码语言通用规范做通用检视。",
                 "它和专家绑定规范扫描相互补充，最终候选取并集并由收敛层去重。",
-                "如果存在当前代码锚点和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
+                "如果存在当前变更代码位置和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
                 "如果缺少关联上下文但已有当前代码证据，不要静默省略；保留 candidate_findings，并在 context_requests 说明缺什么。",
-                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一问题。",
+                "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码位置；title、evidence、reason、suggested_code 必须互相指向同一问题。",
                 "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 的占位说明，禁止使用不在 TARGET_HUNKS 中的文件。",
                 "不要输出专家绑定规范结论，不要编造产品规则 ID。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
@@ -7284,7 +7300,7 @@ class ReviewRunner(
                     "不要因为主审或规则预筛没有发现问题就跳过本阶段；本阶段以 CUSTOM_RULE_BATCH 为准重新校验。",
                     "如果某条规则不适用，输出 not_applicable；缺上下文输出 insufficient_context；存在当前代码证据时必须保留 candidate_findings 并写 context_requests。",
                     "candidate_findings 的 rule_id 必须来自 CUSTOM_RULE_BATCH；不得输出通用规则结论或编造规则 ID。",
-                    "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；title、evidence、reason、suggested_code 必须互相指向同一个自定义规则违反点。",
+                    "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码位置；title、evidence、reason、suggested_code 必须互相指向同一个自定义规则违反点。",
                     "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 的占位说明，禁止使用不在 TARGET_HUNKS 中的文件。",
                     "输出根结构必须包含 rule_check_results、candidate_findings、context_requests、self_check。",
                     f"BATCH_INDEX: {batch_index}/{len(rule_batches)}",
@@ -7455,13 +7471,17 @@ class ReviewRunner(
         seen: set[str] = set()
         rules: list[dict[str, object]] = []
         source_rules: list[dict[str, object]] = []
-        for key in (
+        primary_rule_keys = (
             "matched_rules_for_llm",
             "must_review_rules",
             "possible_hit_rules",
-            "all_enabled_rules_for_llm",
-        ):
+        )
+        for key in primary_rule_keys:
             for item in list((rule_screening or {}).get(key) or []):
+                if isinstance(item, dict):
+                    source_rules.append(item)
+        if not source_rules:
+            for item in list((rule_screening or {}).get("all_enabled_rules_for_llm") or []):
                 if isinstance(item, dict):
                     source_rules.append(item)
         for item in source_rules:
@@ -7547,12 +7567,6 @@ class ReviewRunner(
         for rule_id in list(required_rule_ids or []):
             if rule_id and rule_id not in checked_rule_ids:
                 errors.append(f"rule_coverage_missing:{rule_id}")
-        if (
-            "self_check_checked_all_rules_not_true" in errors
-            and list(required_rule_ids or [])
-            and all(rule_id in checked_rule_ids for rule_id in required_rule_ids if rule_id)
-        ):
-            errors = [error for error in errors if error != "self_check_checked_all_rules_not_true"]
         allowed_candidate_rule_ids = {
             str(rule_id).strip()
             for rule_id in list(required_rule_ids or [])

@@ -158,12 +158,12 @@ class ReviewRunnerPromptingMixin:
         disallowed_text = " / ".join(disallowed_inference[:5]).strip()
         disallowed_text = disallowed_text.replace(
             "证据不足时不要输出 finding",
-            "没有当前代码锚点时不要输出候选；有当前代码证据但缺上下文时保留 finding 并标记 verification_needed",
+            "没有当前变更代码位置时不要输出候选；有当前代码证据但缺上下文时保留 finding 并标记 verification_needed",
         )
         if not disallowed_text:
             disallowed_text = (
-                "不要把没有当前代码锚点的猜测输出为 finding；"
-                "有当前代码锚点但缺上下文时，保留 finding，设置 verification_needed=true 并写清 verification_plan。"
+                "不要把没有当前变更代码位置的猜测输出为 finding；"
+                "有当前变更代码位置但缺上下文时，保留 finding，设置 verification_needed=true 并写清 verification_plan。"
             )
         if analysis_mode == "light":
             light_sections, light_budget = self._apply_light_prompt_request_budget(
@@ -250,8 +250,8 @@ class ReviewRunnerPromptingMixin:
             f"无附加规则命中时，仍必须按专家通用规范审查真实缺陷；有附加规则命中时，必须逐条核对并只引用本轮提供的真实规则 ID，不要编造产品规则编号。\n"
             f"{'请优先基于目标文件完整 diff 做审查，再结合其他变更文件摘要和代码仓上下文判断影响范围，避免泛泛而谈，不要评论未涉及的文件，不要越过你的职责边界。' if include_target_file_full_diff else '本轮为多文件批量模式，请优先基于“本轮批量文件清单”和每个文件的 hunk 说明逐文件审查，再回到代码仓上下文交叉验证，不要遗漏任何文件。'}\n"
             f"{design_instruction}"
-            f"如果你的结论已有当前代码锚点但缺少关联上下文，请保留该 finding，并设置 verification_needed=true、写清 verification_plan；"
-            f"只有完全没有当前代码锚点、纯靠猜测的结论才不要输出。\n"
+            f"如果你的结论已有当前变更代码位置但缺少关联上下文，请保留该 finding，并设置 verification_needed=true、写清 verification_plan；"
+            f"只有完全没有当前变更代码位置、纯靠猜测的结论才不要输出。\n"
             f"对“结构化观察点”要逐条复核：它们只是主Agent提炼的可疑代码现象，不等于已经确认的问题。你可以否定观察点；若确认其成立并输出 finding，必须把对应 observation_id 写入 observation_ids。\n"
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
@@ -415,7 +415,7 @@ class ReviewRunnerPromptingMixin:
         disallowed_text = " / ".join(disallowed_inference[:5])
         disallowed_text = disallowed_text.replace(
             "证据不足时不要输出 finding",
-            "没有当前代码锚点时不要输出候选；有当前代码证据但缺上下文时写 context_requests",
+            "没有当前变更代码位置时不要输出候选；有当前代码证据但缺上下文时写 context_requests",
         )
         lines = [
             "[SYSTEM RULES]",
@@ -426,7 +426,7 @@ class ReviewRunnerPromptingMixin:
             "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
             "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
             "candidate_findings 的 file_path/line/target_id 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 中的占位说明或主任务默认文件。",
-            "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码锚点；不要把多个文件、多个风险点或多个修复方向合并成一条。",
+            "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码位置；不要把多个文件、多个风险点或多个修复方向合并成一条。",
             "如果同一 hunk 存在多个问题，请拆成多条 candidate_findings；每条的 title、evidence、reason、suggested_code 必须互相指向同一问题。",
             "如果缺少上下文但存在可疑代码证据，必须同时输出 candidate_findings 和 context_requests，不要静默省略。",
             "禁止输出 legacy {\"findings\":[...]}；缺少 rule_check_results 或 candidate_findings 会被系统拒收。",
@@ -439,7 +439,7 @@ class ReviewRunnerPromptingMixin:
             f"目标行号: {line_start}",
             f"主Agent派工理由: {str(repository_context.get('routing_reason') or '').strip() or '未提供'}",
             f"必查项: {' / '.join(expected_checks[:5]) or expert.role}",
-            f"候选边界: {disallowed_text or '不要把没有当前代码锚点的猜测输出为候选；有当前代码证据但缺上下文时，保留 candidate_findings 并写 context_requests。'}",
+            f"候选边界: {disallowed_text or '不要把没有当前变更代码位置的猜测输出为候选；有当前代码证据但缺上下文时，保留 candidate_findings 并写 context_requests。'}",
             "",
             "[EXPERT_PROFILE]",
             f"专家职责说明:\n{expert_scope_summary}",
@@ -1472,7 +1472,7 @@ class ReviewRunnerPromptingMixin:
                     "- 重点检查 Controller/ApplicationService 入口是否完成参数校验、权限校验、租户隔离和敏感字段脱敏。",
                     "- 重点检查 Repository/SQL/Mapper 是否存在拼接查询、越权查询、批量更新越边界、日志泄漏敏感信息。",
                     "- 有当前代码证据但缺少鉴权、租户或输入校验上下文时，保留 candidate_findings，设置 verification_needed=true，并在 context_requests 写清需要补充的上下文。",
-                    "- 只有完全没有当前代码锚点、也无法指出具体安全边界被削弱的猜测，才不要输出候选。",
+                    "- 只有完全没有当前变更代码位置、也无法指出具体安全边界被削弱的猜测，才不要输出候选。",
                 ]
             )
         elif expert_id == "performance_reliability":
@@ -1567,7 +1567,7 @@ class ReviewRunnerPromptingMixin:
                 "必须输出 rule_check_results、candidate_findings、context_requests、self_check。\n"
                 "禁止输出 legacy findings 根结构；只输出 JSON，不输出 Markdown 或额外解释。\n"
                 "规则分层：专家绑定规范、RULE_CARDS、专家画像和专家审视规范都参与检视；"
-                "绑定规范负责产品/仓库特有约束，专家画像负责该专家通用职责，两部分候选取并集并由收敛层去重。\n\n"
+                "附加产品/仓库规则负责产品或仓库特有约束，专家画像负责该专家通用职责，两部分候选取并集并由收敛层去重。\n\n"
                 "《审视规范文档》开始\n"
                 f"{review_spec_text or '未提供额外规范文档，请至少遵守专家职责与证据优先原则。'}\n"
                 "《审视规范文档》结束\n\n"
@@ -1584,7 +1584,7 @@ class ReviewRunnerPromptingMixin:
                 "《规则遍历结果摘要》结束\n\n"
                 "结构化审查步骤：\n"
                 "1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 candidate_findings。\n"
-                "2. 对每个候选问题先找代码锚点：file_path、line、当前代码片段、相关调用链或配置证据。\n"
+                "2. 对每个候选问题先找代码位置：file_path、line、当前代码片段、相关调用链或配置证据。\n"
                 "3. 目标 hunk 中 `| +` 是修改后的当前代码，`| -` 是旧代码，只能作为对比证据。\n"
                 "4. 如果旧代码里的问题已经被新代码修复，必须返回空 candidate_findings；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
                 "5. 缺少关联上下文但已有当前代码证据时，保留 candidate_findings 并写 context_requests。\n\n"
@@ -1625,14 +1625,14 @@ class ReviewRunnerPromptingMixin:
             f"引用附加规则时只能引用本轮规则遍历结果里的真实 rule_id。\n\n"
             f"结构化审查步骤：\n"
             f"1. 先判断本轮改动是否落在你的职责范围内；不在范围内时返回空 findings，不要顺手评论其他专家负责的问题。\n"
-            f"2. 对每个候选问题先找代码锚点：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"
+            f"2. 对每个候选问题先找代码位置：file_path、line_start/line_end、当前代码片段、相关调用链或配置证据。\n"
             f"3. 再判断问题是否由本次 diff 引入或暴露；目标 hunk 中 `| +` 是修改后的当前代码，`| -` 是旧代码，只能作为对比证据，不能作为问题主张本身。\n"
             f"4. 如果旧代码里的问题已经被 `| +` 新代码修复，必须返回空 findings；只针对已删除代码、历史旧代码或未变更代码下结论的 finding 必须丢弃。\n"
             f"5. 如果结论依赖“调用方可能传空、配置可能缺失、线上流量可能很大”等外部条件，必须降级为 needs_verification，不能写成确定 issue。\n"
             f"6. 最后输出修复建议：说明为什么错、怎么改、改完后的关键代码形态。\n\n"
             f"置信度口径：\n"
             f"- 0.90-1.00: diff 中有直接代码证据，且不依赖外部条件。\n"
-            f"- 0.75-0.89: 有明确代码锚点，但需要少量上下文补充。\n"
+            f"- 0.75-0.89: 有明确代码位置和代码片段，但需要少量上下文补充。\n"
             f"- 0.50-0.74: 只是合理风险假设，应标记 needs_verification。\n"
             f"- 低于 0.50: 不要输出为 issue。\n\n"
             f"反例约束：\n"

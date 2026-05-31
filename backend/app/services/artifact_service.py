@@ -18,8 +18,8 @@ def build_report_summary(
     """生成产物快照和结果页都会复用的报告摘要文案。"""
 
     summary = (
-        f"审核报告已生成，共收敛 {finding_count} 条 findings，"
-        f"形成 {issue_count} 个议题，其中 {pending_human_count} 个待人工裁决。"
+        f"审核报告已生成，共收敛 {finding_count} 条检视发现，"
+        f"形成 {issue_count} 个正式问题，其中 {pending_human_count} 个待人工确认。"
     )
     if partial_failure_count > 0:
         summary += f" 本轮另有 {partial_failure_count} 个专家任务执行失败，已保留其余审查结果。"

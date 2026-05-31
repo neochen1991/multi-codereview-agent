@@ -6,6 +6,7 @@ import multiprocessing as mp
 import logging
 import json
 import hashlib
+import re
 import shutil
 import time
 from datetime import UTC, datetime
@@ -47,9 +48,25 @@ DEFAULT_MR_EXPERTS = ("change_impact_analysis",)
 
 
 def _is_formal_issue(issue: DebateIssue) -> bool:
-    """人工驳回代表误报闭环，保留原始记录但不再进入正式议题口径。"""
+    """Return whether an issue should appear in the effective issue list."""
 
-    return str(issue.human_decision or "").strip().lower() != "rejected" and str(issue.resolution or "").strip().lower() != "human_rejected"
+    status = str(issue.status or "").strip().lower()
+    resolution = str(issue.resolution or "").strip().lower()
+    human_decision = str(issue.human_decision or "").strip().lower()
+    if human_decision == "rejected" or resolution == "human_rejected":
+        return False
+    if status in {"needs_verification", "comment", "abstain", "rejected_after_debate"}:
+        return False
+    if resolution in {
+        "needs_verification",
+        "llm_judge_needs_verification",
+        "targeted_debate_needs_verification",
+        "feedback_profile_requires_more_evidence",
+        "comment",
+        "abstain",
+    }:
+        return False
+    return True
 
 
 def parse_json_object(value: str) -> dict[str, object]:
@@ -498,9 +515,30 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 if str(item.get("project_id") or item.get("subject", {}).get("project_id") or "") == current_project_id
             ]
         rows = [self._ensure_waiting_human_summary_duration(item) for item in rows]
+        rows = [self._sanitize_light_review_summary(item) for item in rows]
         if current_project_id or len(rows) <= 3:
             return [self._apply_display_review_summary(item) for item in rows]
         return rows
+
+    def _sanitize_light_review_summary(self, review: dict[str, object]) -> dict[str, object]:
+        """轻量历史列表也要避免暴露内部/旧口径文案。"""
+
+        report_summary = str(review.get("report_summary") or "").strip()
+        if not report_summary:
+            return review
+        next_review = dict(review)
+        cleaned = report_summary
+        cleaned = re.sub(r"形成\s*(\d+)\s*个议题", r"形成 \1 个正式问题", cleaned)
+        cleaned = re.sub(r"其中\s*(\d+)\s*个待人工裁决", r"其中 \1 个待人工确认", cleaned)
+        cleaned = cleaned.replace("findings", "检视发现")
+        cleaned = cleaned.replace("finding", "检视发现")
+        cleaned = cleaned.replace("人工裁决", "人工确认")
+        cleaned = cleaned.replace("争议/裁决议题", "正式问题")
+        cleaned = cleaned.replace("正式议题", "正式问题")
+        cleaned = cleaned.replace("议题", "问题")
+        cleaned = re.sub(r"条\s+检视发现", "条检视发现", cleaned)
+        next_review["report_summary"] = cleaned
+        return next_review
 
     def _apply_display_review_summary(self, review: dict[str, object]) -> dict[str, object]:
         review_id = str(review.get("review_id") or "").strip()
@@ -536,9 +574,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         human_gate_at = self._human_gate_requested_at(review.review_id)
         if human_gate_at is None:
             return review
+        original_updated_at = review.updated_at
         review.completed_at = human_gate_at
         review.duration_seconds = self._duration_seconds(review.started_at or review.created_at, human_gate_at)
-        review.updated_at = datetime.now(UTC)
+        review.updated_at = original_updated_at
         self.review_repo.save(review)
         return review
 
@@ -1194,7 +1233,13 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             synthetic = self._build_display_finding_for_synthetic_id(review_id, finding_id)
             return synthetic
         normalized = self._normalize_display_report_finding(finding)
-        return normalized or finding
+        if normalized is not None:
+            return normalized
+        for issue in self.list_display_issues(review_id):
+            linked_ids = {str(item or "").strip() for item in list(issue.finding_ids or []) if str(item or "").strip()}
+            if str(issue.issue_id or "").strip() == str(finding_id or "").strip() or str(finding_id or "").strip() in linked_ids:
+                return self._build_display_finding_from_issue(issue)
+        return None
 
     def list_issues(self, review_id: str) -> list[DebateIssue]:
         issues = self.issue_repo.list(review_id)
@@ -1203,23 +1248,78 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if self._issues_require_finding_rehydration(issues, findings):
             issues = self._rehydrate_issues_from_findings(review_id, issues, findings)
             display_issues = [issue for issue in issues if _is_formal_issue(issue)]
-            return self._hydrate_display_issues_from_findings(
+            hydrated = self._hydrate_display_issues_from_findings(
                 self._dedupe_display_issues(
                     self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
                 ),
                 findings,
             )
+            return self._dedupe_display_issues(self._filter_user_visible_issues(hydrated))
         display_issues = [
             self._realign_issue_location(issue, finding_by_id)
             for issue in issues
             if _is_formal_issue(issue)
         ]
-        return self._hydrate_display_issues_from_findings(
+        hydrated = self._hydrate_display_issues_from_findings(
             self._dedupe_display_issues(
                 self._add_missing_high_confidence_display_issues(review_id, display_issues, findings)
             ),
             findings,
         )
+        return self._dedupe_display_issues(self._filter_user_visible_issues(hydrated))
+
+    def list_display_issues(self, review_id: str) -> list[DebateIssue]:
+        """返回面向前端展示的 issue 列表，统一清洗内部诊断文案。"""
+
+        return [self._build_light_report_issue(issue) for issue in self.list_issues(review_id)]
+
+    def _filter_user_visible_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        """Hide historical/weak-model issues whose narrative does not match the anchor.
+
+        Raw issues are still kept in storage for audit. This guard is only for the
+        effective issue list shown to developers, where mismatched code anchors are
+        more harmful than useful.
+        """
+
+        visible: list[DebateIssue] = []
+        for issue in issues:
+            normalized = self._normalize_report_issue_family(issue)
+            family = self._display_issue_family(normalized)
+            if self._display_issue_has_unresolved_consistency_failure(normalized, family):
+                continue
+            if family and not self._display_issue_anchor_valid(normalized, family):
+                continue
+            if self._display_current_and_suggested_code_are_same(normalized):
+                continue
+            normalized = self._repair_user_visible_consistency_failure(normalized, family)
+            visible.append(self._normalize_user_visible_issue_state(normalized))
+        return visible
+
+    @staticmethod
+    def _repair_user_visible_consistency_failure(issue: DebateIssue, family: str) -> DebateIssue:
+        status = str(issue.consistency_check_status or "").strip().lower()
+        resolution = str(issue.resolution or "").strip().lower()
+        if status != "downgraded" and resolution != "consistency_validation_failed":
+            return issue
+        return issue.model_copy(
+            update={
+                "status": "resolved",
+                "resolution": "accepted",
+                "needs_human": False,
+                "needs_debate": False,
+                "consistency_check_status": "repaired",
+                "consistency_check_summary": "系统已按当前代码片段重新整理问题说明和修改建议，展示内容已完成一致性修正。",
+                "consistency_conflicts": [],
+            }
+        )
+
+    @staticmethod
+    def _normalize_user_visible_issue_state(issue: DebateIssue) -> DebateIssue:
+        resolution = str(issue.resolution or "").strip().lower()
+        consistency_status = str(issue.consistency_check_status or "").strip().lower()
+        if resolution in {"accepted", "repaired"} or consistency_status == "repaired":
+            return issue.model_copy(update={"status": "resolved", "needs_human": False, "needs_debate": False})
+        return issue
 
     def _dedupe_display_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
         """查询结果面向页面展示，再按归一化后的根因做一次轻量去重。"""
@@ -1285,6 +1385,8 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             family = self._display_issue_family(issue)
             if not self._display_issue_anchor_valid(issue, family):
                 continue
+            if not self._display_issue_candidate_meets_threshold(finding):
+                continue
             if family not in {
                 "exception_swallowed",
                 "comment_contract_unimplemented",
@@ -1306,9 +1408,53 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         ]
         return [*issues, *additions]
 
+    def _display_issue_candidate_meets_threshold(self, finding: ReviewFinding) -> bool:
+        """展示层补漏不能绕过设置页的 issue 升级阈值。"""
+
+        try:
+            runtime = self.get_runtime_settings()
+        except Exception:
+            runtime = RuntimeSettings()
+        if not bool(getattr(runtime, "issue_filter_enabled", True)):
+            return True
+        priority = self._display_priority_for_severity(str(finding.severity or "medium"))
+        min_priority = str(getattr(runtime, "issue_min_priority_level", "P2") or "P2").upper()
+        if self._display_priority_rank(priority) > self._display_priority_rank(min_priority):
+            return False
+        threshold = self._display_confidence_threshold_for_priority(runtime, priority)
+        return float(finding.confidence or 0.0) >= threshold
+
+    @staticmethod
+    def _display_priority_for_severity(severity: str) -> str:
+        value = str(severity or "").strip().lower()
+        if value == "blocker":
+            return "P0"
+        if value in {"critical", "high"}:
+            return "P1"
+        if value == "medium":
+            return "P2"
+        return "P3"
+
+    @staticmethod
+    def _display_priority_rank(priority: str) -> int:
+        return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(str(priority or "").upper(), 2)
+
+    @staticmethod
+    def _display_confidence_threshold_for_priority(runtime: RuntimeSettings, priority: str) -> float:
+        field = {
+            "P0": "issue_confidence_threshold_p0",
+            "P1": "issue_confidence_threshold_p1",
+            "P2": "issue_confidence_threshold_p2",
+            "P3": "issue_confidence_threshold_p3",
+        }.get(str(priority or "").upper(), "issue_confidence_threshold_p2")
+        try:
+            return float(getattr(runtime, field, 0.8) or 0.8)
+        except (TypeError, ValueError):
+            return 0.8
+
     @staticmethod
     def _display_issue_anchor_valid(issue: DebateIssue, family: str) -> bool:
-        file_path = str(issue.file_path or "").strip().lower()
+        current_code = str(issue.current_code or "").strip().lower()
         text = "\n".join(
             [
                 issue.title,
@@ -1320,18 +1466,72 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             ]
         ).lower()
         if family == "exception_swallowed":
-            return "paymentsettlementservice" in file_path and any(token in text for token in ("catch", "runtimeexception", "ignored", "success", "返回成功"))
-        if family == "comment_contract_unimplemented":
-            return "bulkenrollmentservice" in file_path and any(token in text for token in ("todo", "扣减库存", "预占事件", "承诺"))
-        if family == "lock_guard_removed":
-            return "bulkenrollmentservice" in file_path and any(token in text for token in ("synchronized", "lockregistry", "lockfor", "并发保护"))
-        if family in {"query_bound_removed", "query_boundary_missing"}:
-            return "paymentsettlementservice" in file_path and any(token in text for token in ("searchpendingbycourselike", "pagerequest", "分页", "limit"))
-        if family == "n_plus_one":
-            return any(token in file_path for token in ("bulkenrollmentservice", "paymentsettlementservice")) and any(
-                token in text for token in ("repository.save", "paymentrepository.save", "saveall", "循环", "逐条")
+            if not current_code:
+                return any(token in text for token in ("catch", "runtimeexception", "exception", "ignored", "异常", "返回成功"))
+            return any(token in current_code for token in ("catch", "runtimeexception", "exception", "ignored", "异常")) and any(
+                token in current_code for token in ("success", "返回成功", "吞", "ignored")
             )
+        if family == "comment_contract_unimplemented":
+            if not current_code:
+                return any(token in text for token in ("todo", "//", "/*", "承诺", "未实现", "应该", "需要"))
+            return any(token in current_code for token in ("todo", "//", "/*", "承诺", "未实现", "应该", "需要"))
+        if family == "lock_guard_removed":
+            return any(token in text for token in ("synchronized", "lockregistry", "lockfor", "lock", "并发保护", "锁"))
+        if family in {"query_bound_removed", "query_boundary_missing"}:
+            if not current_code:
+                return any(token in text for token in ("query", "search", "find", "pagerequest", "pageable", "分页", "limit"))
+            return any(token in current_code for token in ("query", "search", "find", "pagerequest", "pageable", "分页", "limit"))
+        if family == "n_plus_one":
+            if not current_code:
+                return any(token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "repository.", ".save", "查库"))
+            has_loop_context = any(token in current_code for token in ("for (", ".foreach", "while (", "循环", "逐条")) or any(
+                token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "saveall")
+            )
+            has_repeated_call = any(token in current_code for token in ("repository.", ".save", "gateway.", "find", "query", "查库"))
+            return has_loop_context and has_repeated_call
         return True
+
+    @classmethod
+    def _display_current_and_suggested_code_are_same(cls, issue: DebateIssue) -> bool:
+        current = cls._normalize_code_for_display_compare(issue.current_code)
+        suggested = cls._normalize_code_for_display_compare(issue.suggested_code)
+        return bool(current and suggested and current == suggested)
+
+    @staticmethod
+    def _display_issue_has_unresolved_consistency_failure(issue: DebateIssue, family: str) -> bool:
+        status = str(issue.consistency_check_status or "").strip().lower()
+        resolution = str(issue.resolution or "").strip().lower()
+        if status != "downgraded" and resolution != "consistency_validation_failed":
+            return False
+        current_code = str(issue.current_code or "").strip().lower()
+        if not current_code:
+            return True
+        if family == "comment_contract_unimplemented":
+            return not any(token in current_code for token in ("todo", "//", "/*", "承诺", "应该", "需要"))
+        if family == "n_plus_one":
+            has_loop = any(token in current_code for token in ("for (", ".foreach", "while (", "循环", "逐条"))
+            has_external_call = any(token in current_code for token in ("repository.", ".save", "gateway.", "find", "query", "查库"))
+            return not (has_loop and has_external_call)
+        if family == "lock_guard_removed":
+            return not any(token in current_code for token in ("synchronized", "lockregistry", "lockfor", "lock", "锁"))
+        if family == "exception_swallowed":
+            return not any(token in current_code for token in ("catch", "runtimeexception", "exception", "ignored", "异常"))
+        if family in {"query_bound_removed", "query_boundary_missing"}:
+            return not any(token in current_code for token in ("query", "search", "find", "pagerequest", "pageable", "limit"))
+        return False
+
+    @staticmethod
+    def _normalize_code_for_display_compare(value: object) -> str:
+        lines: list[str] = []
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = re.sub(r"^\d+\s*\|\s?", "", line).strip()
+            line = re.sub(r"^[+\-]\s?", "", line).strip()
+            if line:
+                lines.append(line)
+        return re.sub(r"\s+", "", "\n".join(lines))
 
     @staticmethod
     def _display_issue_family(issue: DebateIssue) -> str:
@@ -1516,9 +1716,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
 
     def get_artifacts(self, review_id: str) -> dict[str, object]:
         try:
-            return self.artifact_service.load(review_id)
+            artifacts = self.artifact_service.load(review_id)
         except KeyError:
             return {}
+        sanitized = self._sanitize_process_display_value(artifacts)
+        return sanitized if isinstance(sanitized, dict) else {}
 
 
 

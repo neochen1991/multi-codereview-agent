@@ -135,14 +135,14 @@ def test_review_runner_records_code_graph_context_events_in_process_flow(storage
                 review_id=review_id,
                 event_type="code_graph_context_started",
                 phase="context",
-                message="正在使用 Tree-sitter 代码图谱检索关联上下文",
+                message="正在使用代码结构图谱检索关联上下文",
                 payload={"context_source": "tree_sitter"},
             ),
             review_runner_module.ReviewEvent(
                 review_id=review_id,
                 event_type="code_graph_context_fallback",
                 phase="context",
-                message="Tree-sitter 未命中有效关联上下文，已退化为关键词搜索：图谱未建",
+                message="代码结构图谱未命中有效关联上下文，已退化为关键词搜索：图谱未建",
                 payload={"context_source": "tree_sitter", "fallback_source": "keyword_search"},
             ),
         ],
@@ -154,7 +154,7 @@ def test_review_runner_records_code_graph_context_events_in_process_flow(storage
     messages = runner.message_repo.list(review_id)
     assert any(event.event_type == "code_graph_context_fallback" for event in events)
     assert any(message.message_type == "code_graph_context_fallback" for message in messages)
-    assert any("Tree-sitter" in message.content and "关键词搜索" in message.content for message in messages)
+    assert any("代码结构图谱" in message.content and "关键词搜索" in message.content for message in messages)
 
 
 def test_review_runner_prefers_workspace_code_graph_db_from_review_metadata(storage_root: Path, tmp_path: Path):
@@ -201,7 +201,7 @@ def test_review_runner_workspace_message_shows_snapshot_graph_status(storage_roo
         {"status": "ready", "graph_dir": str(workspace / ".gitnexus")},
     )
 
-    assert "Tree-sitter 快照图谱：ready" in content
+    assert "代码结构图谱：ready" in content
     assert "GitNexus 快照图谱：ready" in content
     assert str(workspace / ".code-review-graph" / "graph.db") in content
     assert str(workspace / ".gitnexus") in content
@@ -250,7 +250,7 @@ def test_review_runner_records_workspace_graph_initialization_messages(storage_r
     assert "review_workspace_code_graph_completed" in message_types
     assert "review_workspace_gitnexus_graph_started" in message_types
     assert "review_workspace_gitnexus_graph_completed" in message_types
-    assert any("Tree-sitter 快照图谱初始化完成" in message.content for message in messages)
+    assert any("代码结构图谱初始化完成" in message.content for message in messages)
     assert any("GitNexus 快照图谱初始化完成" in message.content for message in messages)
 
 
@@ -3937,7 +3937,7 @@ def test_review_runner_enriches_java_quality_signal_language(storage_root: Path)
     )
 
     assert "CHUNKS -> chunksTmp" in str(stabilized["claim"])
-    assert "静默吞掉异常" in str(stabilized["claim"])
+    assert "失败被忽略" in str(stabilized["claim"])
 
 
 def test_review_runner_enriches_query_semantics_signal_language(storage_root: Path):
@@ -4023,7 +4023,7 @@ def test_review_runner_enriches_naming_and_exception_signals_into_summary(storag
     assert "命名规范" in str(stabilized["title"])
     assert "CHUNKS" in str(stabilized["summary"])
     assert "chunksTmp" in str(stabilized["summary"])
-    assert "静默吞掉异常" in str(stabilized["summary"])
+    assert "异常处理被忽略" in str(stabilized["summary"])
 
 
 def test_review_runner_stabilize_expert_analysis_reanchors_line_start_to_target_hunk(storage_root: Path):
@@ -4382,8 +4382,8 @@ def test_review_runner_keeps_exception_swallowed_as_risk_hypothesis(storage_root
     assert result["direct_evidence"] is False
     assert result["severity"] == "high"
     assert float(result["confidence"]) <= 0.8
-    assert "静默吞掉异常" in str(result["title"])
-    assert any("静默吞掉异常" in item for item in list(result["evidence"]))
+    assert "失败被忽略" in str(result["title"])
+    assert any("失败被忽略" in item or "异常处理" in item for item in list(result["evidence"]))
 
 
 def test_review_runner_promotes_rule_backed_empty_catch_to_direct_defect(storage_root: Path):
@@ -7385,7 +7385,7 @@ def test_review_runner_prompt_includes_input_completeness_summary(storage_root: 
     assert "语言通用规范提示: 已提供" in prompt
     assert "绑定规则: 1 条命中 / 2 条启用" in prompt
     assert "关联源码上下文: 1 段" in prompt
-    assert "遵循 Java / Spring 通用代码规范" in prompt
+    assert "阿里巴巴 Java 开发手册" in prompt
 
 
 def test_review_runner_build_expert_prompt_requests_comment_and_implementation_consistency_check(storage_root: Path):
@@ -8085,7 +8085,7 @@ def test_review_runner_sanitizes_mixed_issue_candidate_to_current_anchor(storage
     assert "发现多个" not in sanitized["claim"]
     assert "CourseCreator" not in "\n".join(sanitized["evidence"])
     assert "26-28" not in "\n".join(sanitized["evidence"])
-    assert sanitized["fix_strategy"] == "修正常量命名与使用方式，使当前代码锚点只表达一个具体问题。"
+    assert sanitized["fix_strategy"] == "修正常量命名与使用方式，使当前变更行只表达一个具体问题。"
     assert sanitized["suggested_fix"] == "将当前变更行恢复为符合命名、不可变性和实际使用语义的常量写法。"
 
 
@@ -8475,6 +8475,9 @@ def test_review_runner_coalesces_duplicate_event_consumer_exception_issues(stora
 
     assert len(issues) == 1
     assert issues[0].normalized_issue_type == "event_consumer_exception_swallowed"
+    assert issues[0].title == "事件消费失败被忽略"
+    assert "事件消费异常被忽略" in issues[0].summary
+    assert "静默吞" not in issues[0].summary
     assert set(issues[0].finding_ids) == {"fdg_empty_catch", "fdg_reflection_exception"}
     assert set(issues[0].participant_expert_ids) == {"correctness_business", "performance_reliability"}
 
@@ -9131,6 +9134,43 @@ def test_review_runner_judge_does_not_overwrite_confirmed_issue_details_with_dri
     assert metadata["updated_fields"] == []
 
 
+def test_review_runner_final_issue_summaries_are_distinct_for_different_code_anchors(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    shared_summary = "当前实现会把批量输入放大为多次外部调用。"
+    issues = [
+        DebateIssue(
+            review_id="rev_distinct_summary",
+            issue_id="iss_db_loop",
+            title="循环内逐条查库",
+            summary=shared_summary,
+            normalized_issue_type="n_plus_one",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=42,
+            current_code="for (Long id : ids) {\n    orderRepository.findById(id);\n}",
+            suggested_code="orderRepository.findAllById(ids);",
+        ),
+        DebateIssue(
+            review_id="rev_distinct_summary",
+            issue_id="iss_rpc_loop",
+            title="循环内逐条远程调用",
+            summary=shared_summary,
+            normalized_issue_type="n_plus_one",
+            file_path="src/main/java/com/example/OrderService.java",
+            line_start=58,
+            current_code="for (Long id : ids) {\n    rpcClient.query(id);\n}",
+            suggested_code="rpcClient.batchQuery(ids);",
+        ),
+    ]
+
+    normalized = runner._make_final_issue_display_texts_distinct(issues)
+
+    assert normalized[0].summary != normalized[1].summary
+    assert "第 42 行" in normalized[0].summary
+    assert "orderRepository.findById" in normalized[0].summary
+    assert "第 58 行" in normalized[1].summary
+    assert "rpcClient.query" in normalized[1].summary
+
+
 def test_review_runner_judge_cleans_internal_fallback_text_from_issue_details(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     issue = DebateIssue(
@@ -9146,7 +9186,7 @@ def test_review_runner_judge_cleans_internal_fallback_text_from_issue_details(st
         confidence=0.9,
         remediation_strategy="当前未返回明确修复思路",
         remediation_suggestion="请结合审核结论补充修复方案。",
-        remediation_steps=["根据实际情况处理", "恢复批量保存"],
+        remediation_steps=["根据实际情况处理", "需要确认跨文件调用链上的性能影响", "恢复批量保存"],
         current_code="for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
     )
     baseline = {
@@ -9172,6 +9212,37 @@ def test_review_runner_judge_cleans_internal_fallback_text_from_issue_details(st
     assert validated.remediation_strategy == "恢复批量写入"
     assert validated.remediation_suggestion == "使用 repository.saveAll(enrollments) 代替循环内逐条 save。"
     assert validated.remediation_steps == ["恢复批量保存"]
+
+
+def test_review_runner_allows_only_issue_grade_finding_fallback(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    strong_finding = {
+        "finding_type": "direct_defect",
+        "title": "批量写入退化为逐条保存",
+        "summary": "BulkEnrollmentService 第 31 行把 saveAll 改成循环内逐条 repository.save，会放大数据库写入次数。",
+        "confidence": 0.91,
+        "file_path": "src/main/java/com/example/BulkEnrollmentService.java",
+        "line_start": 31,
+        "current_code": "for (CourseEnrollment enrollment : enrollments) {\n    repository.save(enrollment);\n}",
+        "evidence": ["repository.save 位于循环内"],
+    }
+    weak_finding = {
+        **strong_finding,
+        "finding_type": "risk_hypothesis",
+        "summary": "需要确认跨文件调用链上的性能影响。",
+        "confidence": 0.86,
+        "direct_evidence": False,
+    }
+
+    assert runner._finding_can_fallback_to_issue(
+        strong_finding,
+        changed_files=["src/main/java/com/example/BulkEnrollmentService.java"],
+    )
+    assert not runner._finding_can_fallback_to_issue(
+        weak_finding,
+        changed_files=["src/main/java/com/example/BulkEnrollmentService.java"],
+    )
 
 
 def test_review_runner_skips_judge_llm_for_complete_consistent_issue(storage_root: Path, monkeypatch):

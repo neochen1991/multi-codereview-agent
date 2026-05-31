@@ -7,7 +7,7 @@ from typing import Iterable
 def build_prompt_graph_facts(repository_context: dict[str, object]) -> dict[str, list[str]]:
     """Build a compact, prompt-safe graph fact package.
 
-    The full Tree-sitter/GitNexus payload can contain large nested dicts and
+    The full code graph/GitNexus payload can contain large nested dicts and
     speculative traversal details. Expert prompts should receive short,
     auditable facts instead of raw impact objects.
     """
@@ -24,7 +24,7 @@ def build_prompt_graph_facts(repository_context: dict[str, object]) -> dict[str,
 
     graph_summary = str(minimal.get("summary") or impact.get("summary") or "").strip()
     if graph_summary:
-        confirmed.append(f"Tree-sitter 摘要: {_clip(graph_summary, 180)}")
+        confirmed.append(f"代码结构图谱摘要: {_clip(graph_summary, 180)}")
     risk_level = str(minimal.get("risk_level") or impact.get("risk_level") or impact_report.get("risk_level") or "").strip()
     risk_score = minimal.get("risk_score") or impact.get("risk_score")
     if risk_level:
@@ -90,7 +90,7 @@ def build_prompt_graph_facts(repository_context: dict[str, object]) -> dict[str,
     if graph_status and graph_status.lower() not in {"ready", "passed", "success", "ok", "available"}:
         degraded.append(f"GitNexus 图谱状态: {graph_status}")
     if bool(impact.get("degraded")):
-        degraded.append("Tree-sitter 影响分析处于降级状态")
+        degraded.append("代码结构图谱影响分析处于降级状态")
 
     return {
         "confirmed_facts": _dedupe(confirmed)[:8],

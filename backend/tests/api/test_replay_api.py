@@ -106,7 +106,7 @@ def test_replay_endpoint_returns_refreshed_summary_after_human_decision(client):
     assert payload["feedback_labels"]
 
 
-def test_replay_endpoint_exposes_analysis_content_and_candidate_verification(client):
+def test_replay_endpoint_exposes_sanitized_diagnostics_and_candidate_verification(client):
     import app.services.review_service as review_service_module
 
     created = client.post(
@@ -151,11 +151,12 @@ def test_replay_endpoint_exposes_analysis_content_and_candidate_verification(cli
     payload = client.get(f"/api/reviews/{created['review_id']}/replay").json()
     diagnostic = next(item for item in payload["messages"] if item["issue_id"] == "fdg_diag")
 
-    assert "rule_check_results" in diagnostic["content"]
+    assert diagnostic["content"] == ""
     assert diagnostic["metadata"]["candidate_verification"]["status"] == "accepted"
     assert diagnostic["metadata"]["prompt_snapshot_summary"]["contains_rule_cards"] is True
-    assert "ARCH-JDDD-002" in diagnostic["metadata"]["prompt_snapshot_full"]
-    assert "candidate_findings" in diagnostic["metadata"]["model_raw_response_full"]
+    assert "prompt_snapshot_full" not in diagnostic["metadata"]
+    assert "model_raw_response_full" not in diagnostic["metadata"]
+    assert "ARCH-JDDD-002" in diagnostic["metadata"]["model_raw_response_excerpt"]
     assert diagnostic["metadata"]["rule_check_results"][0]["status"] == "violated"
     assert diagnostic["metadata"]["candidate_findings"][0]["title"] == "factory bypass"
     assert diagnostic["metadata"]["rule_coverage"]["checked_rule_count"] == 1

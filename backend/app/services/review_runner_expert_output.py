@@ -188,12 +188,12 @@ class ReviewRunnerExpertOutputMixin:
                     + [f"缺失上下文: {item}" for item in missing_context],
                     "context_files": self._normalize_text_list(item.get("context_files"), []),
                     "why_it_matters": reason or title,
-                    "fix_strategy": str(item.get("fix_strategy") or "回到当前代码锚点，补齐被规则命中的真实业务逻辑或保护逻辑。").strip(),
-                    "suggested_fix": str(item.get("suggested_fix") or "按当前代码片段补齐缺失实现，并增加能复现该风险的回归测试。").strip(),
+                    "fix_strategy": str(item.get("fix_strategy") or "围绕本条问题指向的位置，补齐缺失的业务逻辑或保护逻辑。").strip(),
+                    "suggested_fix": str(item.get("suggested_fix") or "补齐缺失实现，并增加能复现该风险的回归测试。").strip(),
                     "change_steps": self._normalize_text_list(
                         item.get("change_steps"),
                         [
-                            "在当前代码锚点补齐缺失的业务逻辑或保护逻辑",
+                            "补齐缺失的业务逻辑或保护逻辑",
                             "用回归用例覆盖本次被命中的风险路径",
                             "确认修复后问题代码和建议代码不再相同",
                         ],
@@ -205,7 +205,7 @@ class ReviewRunnerExpertOutputMixin:
                     "verification_needed": verification_needed,
                     "verification_plan": ""
                     if not verification_needed
-                    else "复核当前代码锚点、规则证据和建议代码是否一致；不一致时降级为候选发现。",
+                    else "复核问题位置、规则证据和建议代码是否一致；不一致时降级为候选发现。",
                     "file_path": str(item.get("file_path") or file_path).strip().replace("\\", "/"),
                     "observation_ids": self._normalize_text_list(item.get("observation_ids"), []),
                     "rule_guided_candidate": True,
@@ -770,7 +770,7 @@ class ReviewRunnerExpertOutputMixin:
                         "observation_ids": [observation_id] if observation_id else [],
                         "fix_strategy": "把副作用移出事务边界，或改成批量、异步、带超时和幂等保护的处理方式。",
                         "suggested_fix": "为批处理增加分片、限流、超时和失败补偿；事务内不要直接做远程调用或消息发送。",
-                        "change_steps": ["识别批量输入规模", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
+                        "change_steps": ["评估批量输入上限和调用频次", "拆分事务与外部副作用", "补充超时/幂等/重试保护"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.65), 0.78),
                         "verification_needed": True,
@@ -1293,12 +1293,12 @@ class ReviewRunnerExpertOutputMixin:
     def _build_anchor_specific_claim(self, parsed: dict[str, object], file_path: str, line_start: int) -> str:
         title = str(parsed.get("title") or "当前变更存在代码质量问题").strip()
         basename = str(file_path or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
-        return f"{basename} 第 {int(line_start or 1)} 行定位到“{title}”，修复时应围绕该代码锚点处理，避免把其他位置的问题混入同一条结论。"
+        return f"{basename}:{int(line_start or 1)} 定位到“{title}”，修复时应围绕该问题位置处理，避免把其他位置的问题混入同一条结论。"
 
     def _build_anchor_specific_title(self, title: str, issue_domains: set[str]) -> str:
         cleaned = str(title or "").strip()
         unrelated_markers = {
-            "exception": ("（静默吞掉异常）", "(静默吞掉异常)", "（异常处理）", "(异常处理)"),
+            "exception": ("（异常处理被忽略）", "(异常处理被忽略)", "（静默吞掉异常）", "(静默吞掉异常)", "（异常处理）", "(异常处理)"),
             "query_semantics": ("（查询语义退化）", "(查询语义退化)"),
             "query_bound": ("（查询边界缺失）", "(查询边界缺失)"),
             "domain_creation": ("（领域事件缺失）", "(领域事件缺失)"),
@@ -1313,7 +1313,7 @@ class ReviewRunnerExpertOutputMixin:
         if "query_semantics" in issue_domains:
             return "查询语义从精确匹配退化为模糊匹配"
         if "exception" in issue_domains:
-            return "失败被忽略后仍按成功处理"
+            return "失败被当成成功返回"
         if "query_bound" in issue_domains:
             return "查询缺少分页或 LIMIT 边界"
         if "domain_creation" in issue_domains:
@@ -1428,7 +1428,7 @@ class ReviewRunnerExpertOutputMixin:
     ) -> str:
         if "naming" in issue_domains:
             if text_key == "fix_strategy":
-                return "修正常量命名与使用方式，使当前代码锚点只表达一个具体问题。"
+                return "修正常量命名与使用方式，使当前变更行只表达一个具体问题。"
             return "将当前变更行恢复为符合命名、不可变性和实际使用语义的常量写法。"
         if "exception" in issue_domains:
             return "只围绕当前 catch 块补齐日志、异常传播或补偿处理，不混入其它变更点。"
@@ -1439,7 +1439,7 @@ class ReviewRunnerExpertOutputMixin:
         if "domain_creation" in issue_domains:
             return "只围绕当前聚合创建路径恢复领域工厂和领域事件语义。"
         title = str(parsed.get("title") or "当前问题").strip()
-        return f"只修复“{title}”对应的当前代码锚点，不混入其它文件或其它问题。"
+        return f"只修复“{title}”对应的问题位置，不混入其它文件或其它问题。"
 
     def _build_anchor_specific_steps(self, issue_domains: set[str]) -> list[str]:
         if "naming" in issue_domains:
@@ -1878,7 +1878,7 @@ class ReviewRunnerExpertOutputMixin:
             if swallow_summary not in summary_parts:
                 summary_parts.append(swallow_summary)
             if "静默吞掉" not in claim_blob and "空 catch" not in claim_blob and "忽略" not in claim_blob:
-                swallow_phrase = "当前变更还让 catch 块忽略失败"
+                swallow_phrase = "当前变更还让 catch 块里的失败被忽略"
                 claim = f"{claim.rstrip('。')}；{swallow_phrase}。".strip("；")
                 if swallow_phrase not in evidence:
                     evidence.append(swallow_phrase)
@@ -1909,7 +1909,7 @@ class ReviewRunnerExpertOutputMixin:
         if "exception_semantics_weakened" in signal_set and "伪装成成功" not in claim_blob and "返回语义" not in claim_blob:
             semantics_terms = [term for term in list(signal_terms.get("exception_semantics_weakened") or []) if term]
             semantics_display = " / ".join(semantics_terms[:2]) if semantics_terms else "fallback_return"
-            semantics_phrase = f"当前异常路径把失败语义弱化成成功或兜底返回（{semantics_display}）"
+            semantics_phrase = f"当前异常路径把失败语义弱化成成功返回（{semantics_display}）"
             semantics_summary = "异常被吞掉后继续返回默认值、空值或成功态，会让上游误以为流程成功，补偿和回滚判断也会失真。"
             if "返回语义" not in title and "伪装成成功" not in title:
                 title = f"{title}（异常返回语义被弱化）" if title else "异常返回语义被弱化"
@@ -2198,7 +2198,7 @@ class ReviewRunnerExpertOutputMixin:
 
         excerpt = str(target_hunk.get("excerpt") or "")
         if not excerpt:
-            return line_candidates
+            return {line_no: self._merge_unique(values) for line_no, values in line_candidates.items()}
         for raw_line in excerpt.splitlines():
             formatted_match = re.match(r"^\s*(\d+)\s*\|\s*\+\s*(.*)$", raw_line)
             if formatted_match:
@@ -2212,7 +2212,7 @@ class ReviewRunnerExpertOutputMixin:
             if raw_line[:1] in {"+", "-"} and not raw_line.startswith("+++") and not raw_line.startswith("---")
         ]
         if not relevant_lines:
-            return line_candidates
+            return {line_no: self._merge_unique(values) for line_no, values in line_candidates.items()}
 
         changed_index = 0
         for index, raw_line in enumerate(relevant_lines):
@@ -2223,7 +2223,7 @@ class ReviewRunnerExpertOutputMixin:
                 changed_index += 1
             elif raw_line.startswith("-") and (not next_line.startswith("+")) and changed_index < len(changed_lines) - 1:
                 changed_index += 1
-        return line_candidates
+        return {line_no: self._merge_unique(values) for line_no, values in line_candidates.items()}
 
     def _normalize_changed_line_values(self, values: object) -> list[int]:
         normalized: list[int] = []

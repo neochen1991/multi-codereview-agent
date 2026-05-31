@@ -22,10 +22,10 @@ const getPriority = (finding: ReviewFinding): string => {
 };
 
 const getMergeImpact = (issue: DebateIssue | undefined, finding: ReviewFinding): string => {
-  if (!issue) return "Finding only";
-  if (issue.needs_human && issue.status !== "resolved") return "Blocking";
-  if (["blocker", "critical", "high"].includes(finding.severity)) return "Should fix before merge";
-  return "Non-blocking";
+  if (!issue) return "仅保留为审核发现";
+  if (issue.needs_human && issue.status !== "resolved") return "阻塞合并，等待人工确认";
+  if (["blocker", "critical", "high"].includes(finding.severity)) return "建议合并前修复";
+  return "不阻塞合并";
 };
 
 const buildRecommendedAction = (issue: DebateIssue | undefined, finding: ReviewFinding): string => {

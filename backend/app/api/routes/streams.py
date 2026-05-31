@@ -20,10 +20,7 @@ def list_events(
 ) -> list[dict[str, object]]:
     """返回某次审核当前已落盘的事件列表。"""
 
-    return [
-        item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_events(review_id, since=since, limit=limit)
-    ]
+    return review_service_module.review_service.build_process_events(review_id, since=since, limit=limit)
 
 
 @router.get("/reviews/{review_id}/events/stream")
@@ -69,7 +66,7 @@ async def stream_events(review_id: str, request: Request) -> StreamingResponse:
             if new_events:
                 for event in new_events:
                     seen_event_ids.add(event.event_id)
-                    yield encode_sse_event(event)
+                    yield encode_sse_event(review_service_module.review_service._build_process_event_model(event))
                 event_since = str(new_events[-1].created_at)
                 emitted = True
 

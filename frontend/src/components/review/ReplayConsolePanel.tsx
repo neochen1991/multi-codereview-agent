@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Card, Empty, List, Slider, Space, Tag, Typography } from "antd";
 
 import type { ReviewEvent, ReviewReplayBundle } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text } = Typography;
 
@@ -74,7 +75,7 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
             <Tag color="processing">events: {visibleEvents.length}</Tag>
             <Tag color="blue">messages: {visibleMessages.length}</Tag>
             <Tag color={replay.review.status === "completed" ? "success" : "error"}>
-              {replay.review.status}
+              {humanizeReviewText(replay.review.status)}
             </Tag>
           </Space>
           <div className="replay-list-scroll">
@@ -86,8 +87,8 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
                   <List.Item.Meta
                     title={
                       <div className="review-event-title">
-                        <Tag color="geekblue">{item.phase}</Tag>
-                        <span>{item.message}</span>
+                        <Tag color="geekblue">{humanizeReviewText(item.phase)}</Tag>
+                        <span>{humanizeReviewText(item.message)}</span>
                       </div>
                     }
                     description={
@@ -119,21 +120,21 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
                   <List.Item>
                     <Space direction="vertical" size={6} style={{ width: "100%" }}>
                       <Space wrap>
-                        <Tag color="geekblue">{message.expert_id}</Tag>
-                        <Tag>{message.message_type}</Tag>
-                        {metadata.mode ? <Tag color="blue">{String(metadata.mode)}</Tag> : null}
+                        <Tag color="geekblue">{humanizeExpertId(message.expert_id)}</Tag>
+                        <Tag>{humanizeReviewText(message.message_type)}</Tag>
+                        {metadata.mode ? <Tag color="blue">{humanizeReviewText(String(metadata.mode))}</Tag> : null}
                         {metadata.model ? <Tag color="processing">{String(metadata.model)}</Tag> : null}
-                        {metadata.prompt_profile ? <Tag color="purple">{String(metadata.prompt_profile)}</Tag> : null}
+                        {metadata.prompt_profile ? <Tag color="purple">{humanizeReviewText(String(metadata.prompt_profile))}</Tag> : null}
                         {metadata.environment_status ? (
                           <Tag color={metadata.environment_status === "passed" ? "success" : "warning"}>
-                            env {String(metadata.environment_status)}
+                            环境 {humanizeReviewText(String(metadata.environment_status))}
                           </Tag>
                         ) : null}
                       </Space>
                       {Object.keys(promptSummary).length ? (
                         <Text type="secondary">
-                          prompt {String(promptSummary.prompt_chars || 0)} chars · rules{" "}
-                          {String(ruleCoverage.checked_rule_count || ruleChecks.length)} · candidates{" "}
+                          提示词 {String(promptSummary.prompt_chars || 0)} 字符 · 规则{" "}
+                          {String(ruleCoverage.checked_rule_count || ruleChecks.length)} · 候选发现{" "}
                           {String(ruleCoverage.candidate_count || candidates.length)}
                         </Text>
                       ) : null}
@@ -148,14 +149,14 @@ const ReplayConsolePanel: React.FC<ReplayConsolePanelProps> = ({ replay }) => {
                         <Space wrap>
                           {contextGaps.slice(0, 6).map((item) => (
                             <Tag key={item} color="warning">
-                              {item}
+                              {humanizeReviewText(item)}
                             </Tag>
                           ))}
                         </Space>
                       ) : null}
                       {rawFull ? (
                         <Paragraph ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}>
-                          {rawFull}
+                          {humanizeReviewText(rawFull)}
                         </Paragraph>
                       ) : null}
                     </Space>

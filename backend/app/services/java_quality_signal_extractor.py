@@ -1018,7 +1018,7 @@ class JavaQualitySignalExtractor:
         code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
         implementation_blob = self._implementation_only_blob(context_lines, comment_lines)
         contract_pairs = [
-            (["审计事件", "审计日志", "audit event", "audit log", "audit"], ["audit", "auditlogger", "recordaudit", "appendaudit"]),
+            (["审计事件", "审计日志", "audit event", "audit log", "audit"], ["audit", "auditlogger", "recordaudit", "appendaudit", "writeaudit"]),
             (["操作日志", "行为日志", "operation log"], ["operationlog", "audit", "logger", "logservice"]),
             (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
             (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),

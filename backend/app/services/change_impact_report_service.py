@@ -145,8 +145,8 @@ class ChangeImpactReportService:
             report.queried_targets and not report.successful_context_targets and not report.successful_impact_targets
         ):
             summary = (
-                "GitNexus 图谱事实不足，本次关联影响分析已降级为候选范围；"
-                "请优先执行建议测试，并人工确认真实调用链。"
+                "GitNexus 图谱证据不足，本次关联影响分析按候选影响范围展示；"
+                "请优先执行建议测试，并结合代码核对真实调用链。"
             )
             markdown = ""
         updated = report.model_copy(
@@ -160,7 +160,7 @@ class ChangeImpactReportService:
                 "limitations": self._dedupe(
                     [
                         *(
-                            [f"LLM 影响报告生成失败，已降级使用 GitNexus 图谱事实生成确定性报告：{llm_failure_reason}"]
+                            [f"LLM 影响报告生成失败，已改用 GitNexus 图谱事实生成确定性报告：{llm_failure_reason}"]
                             if llm_failure_reason
                             else []
                         ),
@@ -981,7 +981,7 @@ class ChangeImpactReportService:
             elif related:
                 medium.append(f"{signature} 存在上下游依赖，建议联动验证调用方与下游实现。")
             else:
-                low.append(f"{signature} 当前未识别出明显扩散链路，更多影响需结合代码人工确认。")
+                low.append(f"{signature} 当前未识别出明显扩散链路，更多影响需结合代码进一步核对。")
         if not high and report.risk_level.lower() == "medium":
             medium.extend(key_impact_points[:2])
         if not low:

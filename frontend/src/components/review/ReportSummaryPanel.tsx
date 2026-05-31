@@ -1,8 +1,8 @@
 import React from "react";
-import { Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Descriptions, Row, Space, Statistic, Tag, Typography } from "antd";
 
-import type { DebateIssue, IssueFilterDecision, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
-import { humanizeReviewText } from "@/utils/displayText";
+import type { DebateIssue, IssueFilterDecision, ReviewArtifacts, ReviewFinding, ReviewReport, ReviewSummary } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
 
 const { Paragraph } = Typography;
 
@@ -10,6 +10,7 @@ type ReportSummaryPanelProps = {
   report: ReviewReport | null;
   findings: ReviewFinding[];
   issues: DebateIssue[];
+  artifacts?: ReviewArtifacts | null;
   issueFilterDecisions?: IssueFilterDecision[];
   review?: ReviewSummary | null;
   className?: string;
@@ -65,6 +66,13 @@ const getOverallPriority = (findings: ReviewFinding[]): string => {
   return "无";
 };
 
+const parseFindingCountFromArtifactSummary = (value?: string | null): number => {
+  const match = String(value || "").match(/(?:共收敛|收敛)\s*(\d+)\s*条\s*(?:findings?|发现|检视发现)/i);
+  if (!match) return 0;
+  const count = Number(match[1]);
+  return Number.isFinite(count) ? count : 0;
+};
+
 const getHumanReviewTone = (status: string): { color: string; label: string } => {
   if (status === "requested") return { color: "error", label: "等待人工确认" };
   if (status === "approved") return { color: "success", label: "人工已批准" };
@@ -86,22 +94,51 @@ const getPriority = (finding: ReviewFinding): string => {
   return "P3";
 };
 
-const getFindingMergeImpact = (finding: ReviewFinding, needsHumanCount: number): string => {
-  if (needsHumanCount > 0 && ["blocker", "critical", "high"].includes(finding.severity)) return "Blocking";
-  if (["blocker", "critical", "high"].includes(finding.severity)) return "Should fix before merge";
-  return "Non-blocking";
+const getFindingMergeImpact = (finding: ReviewFinding, issue?: DebateIssue | null): string => {
+  if (issue?.needs_human && issue.status !== "resolved") return "阻塞合并，等待人工确认";
+  if (["blocker", "critical", "high"].includes(finding.severity)) return "建议合并前修复";
+  return "不阻塞合并";
 };
 
-const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[]) => {
+const collectPendingHumanIssueIds = (
+  report: ReviewReport | null,
+  artifacts?: ReviewArtifacts | null,
+  review?: ReviewSummary | null,
+): Set<string> =>
+  new Set(
+    [
+      ...(review?.pending_human_issue_ids || []),
+      ...(artifacts?.report_snapshot?.pending_human_issue_ids || []),
+      ...(((report as ReviewReport & { pending_human_issue_ids?: string[] } | null)?.pending_human_issue_ids) || []),
+    ]
+      .map((item) => String(item || "").trim())
+      .filter(Boolean),
+  );
+
+const isPendingHumanIssue = (issue: DebateIssue, pendingHumanIssueIds: Set<string>): boolean => {
+  const candidateIds = [issue.issue_id, issue.canonical_issue_id, ...(issue.finding_ids || [])]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (candidateIds.some((item) => pendingHumanIssueIds.has(item))) return true;
+  return Boolean(issue.needs_human && issue.status !== "resolved");
+};
+
+const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[], issues: DebateIssue[]) => {
   const mergeDecision = getMergeDecision(report, findings);
   const priority = getOverallPriority(findings);
+  const issueByFindingId = new Map<string, DebateIssue>();
+  for (const issue of issues) {
+    for (const findingId of issue.finding_ids || []) {
+      issueByFindingId.set(findingId, issue);
+    }
+  }
   const blockingFindings = findings.filter((finding) =>
-    getFindingMergeImpact(finding, report.confidence_summary.needs_human_count).includes("Blocking"),
+    getFindingMergeImpact(finding, issueByFindingId.get(finding.finding_id)).includes("阻塞合并"),
   );
   const shouldFixFindings = findings.filter(
     (finding) =>
       !blockingFindings.includes(finding) &&
-      getFindingMergeImpact(finding, report.confidence_summary.needs_human_count).includes("Should fix"),
+      getFindingMergeImpact(finding, issueByFindingId.get(finding.finding_id)).includes("合并前修复"),
   );
   const nonBlockingFindings = findings.filter(
     (finding) =>
@@ -111,10 +148,10 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
   const renderFindingBlock = (finding: ReviewFinding, index: number) => [
     `### ${index + 1}. ${finding.title}`,
     `- 文件: ${finding.file_path}:${finding.line_start}`,
-    `- 级别: ${finding.severity}`,
+    `- 级别: ${humanizeSeverity(finding.severity)}`,
     `- 优先级: ${getPriority(finding)}`,
-    `- 合并影响: ${getFindingMergeImpact(finding, report.confidence_summary.needs_human_count)}`,
-    `- 检查角色: ${finding.expert_id}`,
+    `- 合并影响: ${getFindingMergeImpact(finding, issueByFindingId.get(finding.finding_id))}`,
+    `- 检查角色: ${humanizeExpertId(finding.expert_id)}`,
     `- 问题分类: ${finding.category_label || finding.normalized_issue_type || finding.finding_type || "未分类"}`,
     `- 置信度: ${(finding.confidence * 100).toFixed(0)}%`,
     `- 置信度理由: ${finding.confidence_rationale || "未提供"}`,
@@ -129,24 +166,24 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[])
   const lines = [
     `# 代码检视报告 - ${report.review_id}`,
     "",
-    `- 状态: ${report.status}`,
-    `- 阶段: ${report.phase}`,
+    `- 状态: ${humanizeReviewText(report.status)}`,
+    `- 阶段: ${humanizeReviewText(report.phase)}`,
     `- 合并建议: ${mergeDecision}`,
     `- 建议优先级: ${priority}`,
-    `- 人工确认状态: ${report.human_review_status}`,
+    `- 人工确认状态: ${humanizeReviewText(report.human_review_status)}`,
     "",
     "## 摘要",
     report.summary,
     "",
-    "## Blocking",
+    "## 需要人工确认的问题",
     ...(blockingFindings.length
       ? blockingFindings.flatMap((finding, index) => renderFindingBlock(finding, index))
       : ["- 无", ""]),
-    "## Should Fix Before Merge",
+    "## 建议合并前修复的问题",
     ...(shouldFixFindings.length
       ? shouldFixFindings.flatMap((finding, index) => renderFindingBlock(finding, index))
       : ["- 无", ""]),
-    "## Non-blocking",
+    "## 不阻塞合并的问题",
     ...(nonBlockingFindings.length
       ? nonBlockingFindings.flatMap((finding, index) => renderFindingBlock(finding, index))
       : ["- 无", ""]),
@@ -176,13 +213,20 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
   report,
   findings,
   issues,
+  artifacts,
   issueFilterDecisions = [],
   review,
   className,
   onNavigateToGroup,
 }) => {
-  const totalCount = findings.length;
-  const formalIssueCount = issues.length;
+  const artifactIssueCount = Math.max(
+    artifacts?.summary_comment?.issue_count || 0,
+    artifacts?.check_run?.issues?.length || 0,
+  );
+  const artifactFindingCount = parseFindingCountFromArtifactSummary(artifacts?.summary_comment?.summary);
+  const detailsMissing = artifactIssueCount > issues.length && issues.length === 0;
+  const totalCount = detailsMissing ? Math.max(findings.length, artifactFindingCount) : findings.length;
+  const formalIssueCount = detailsMissing ? artifactIssueCount : issues.length;
   const fileCount = new Set(findings.map((item) => item.file_path).filter(Boolean)).size;
   const criticalCount = findings.filter((item) => ["blocker", "critical", "high"].includes(item.severity)).length;
   const issueByFindingId = new Map<string, DebateIssue>();
@@ -201,31 +245,55 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
   const promotedFindingCount = findings.filter((item) => issueByFindingId.has(item.finding_id)).length;
   const thresholdFilteredCount = findings.filter((item) => thresholdFilteredFindingIds.has(item.finding_id)).length;
   const verifiedFindingCount = findings.filter((item) => Boolean(issueByFindingId.get(item.finding_id)?.verified)).length;
-  const blockingCount = report
-    ? findings.filter((item) =>
-        getFindingMergeImpact(item, report.confidence_summary.needs_human_count).includes("Blocking"),
-      ).length
-    : 0;
-  const shouldFixCount = report
-    ? findings.filter((item) =>
-        getFindingMergeImpact(item, report.confidence_summary.needs_human_count).includes("Should fix"),
-      ).length
-    : 0;
+  const formalIssues = issues.filter(
+    (issue) =>
+      String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
+      !["needs_verification", "comment", "abstain", "rejected_after_debate"].includes(
+        String(issue.status || "").trim().toLowerCase(),
+      ) &&
+      ![
+        "human_rejected",
+        "needs_verification",
+        "llm_judge_needs_verification",
+        "targeted_debate_needs_verification",
+        "feedback_profile_requires_more_evidence",
+        "comment",
+        "abstain",
+      ].includes(String(issue.resolution || "").trim().toLowerCase()),
+  );
+  const pendingHumanIssueIds = collectPendingHumanIssueIds(report, artifacts, review);
+  const blockingCount = formalIssues.filter((issue) => isPendingHumanIssue(issue, pendingHumanIssueIds)).length;
+  const shouldFixCount = formalIssues.filter(
+    (issue) =>
+      !isPendingHumanIssue(issue, pendingHumanIssueIds) &&
+      ["blocker", "critical", "high"].includes(issue.severity),
+  ).length;
+  const nonBlockingCount = Math.max(formalIssueCount - blockingCount - shouldFixCount, 0);
   const topFinding = findings[0] || null;
-  const mergeDecision = getMergeDecision(report, findings, review);
-  const overallPriority = getOverallPriority(findings);
-  const verdict = getVerdict(report, findings, review);
-  const humanReview = getHumanReviewTone(report?.human_review_status || "not_required");
-  const pendingHumanCount = report?.confidence_summary.needs_human_count || 0;
+  const mergeDecision = detailsMissing ? "结果明细未恢复，不能作为合并结论" : getMergeDecision(report, findings, review);
+  const overallPriority = detailsMissing ? "待恢复" : getOverallPriority(findings);
+  const verdict = detailsMissing ? { label: "需恢复", color: "warning" } : getVerdict(report, findings, review);
+  const humanReviewStatus = report?.human_review_status || artifacts?.summary_comment?.human_review_status || "not_required";
+  const humanReview = getHumanReviewTone(humanReviewStatus);
+  const pendingHumanCount = Math.max(
+    report?.confidence_summary.needs_human_count || 0,
+    review?.pending_human_issue_ids?.length || 0,
+    artifacts?.report_snapshot?.pending_human_issue_ids?.length || 0,
+    blockingCount,
+  );
   const llmUsage = report?.llm_usage_summary || {
     total_calls: 0,
+    successful_calls: 0,
     prompt_tokens: 0,
     completion_tokens: 0,
     total_tokens: 0,
   };
+  const successfulLlmCalls = llmUsage.successful_calls ?? 0;
   const expertExecution = review?.subject?.metadata?.expert_execution as { failed_experts?: unknown[] } | undefined;
   const failedExpertCount = Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
-  const computedSummary = report
+  const computedSummary = detailsMissing
+    ? `外部产物记录本次审核形成 ${artifactIssueCount} 个正式问题，但当前任务没有恢复出问题明细。为避免误导，页面不会把它展示成 0 个问题；请重新生成结果或恢复问题明细后再处理。`
+    : report
     ? `审核报告已生成，共收敛 ${totalCount} 条检视发现，形成 ${formalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${
         failedExpertCount
           ? ` 本轮另有 ${failedExpertCount} 个检查角色执行失败，已保留其余检视结果。`
@@ -240,6 +308,15 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
 
   return (
     <Card className={`module-card ${className || ""}`.trim()} title="代码检视摘要">
+      {detailsMissing ? (
+        <Alert
+          showIcon
+          type="warning"
+          style={{ marginBottom: 16 }}
+          message="结果明细没有恢复出来"
+          description={`产物快照里记录了 ${artifactIssueCount} 个正式问题，但当前接口没有返回问题详情。这里不会按 0 个问题给出合并建议，请先重新生成或恢复该任务的结果明细。`}
+        />
+      ) : null}
       <Space style={{ marginBottom: 16 }} wrap>
         <Tag color={verdict.color} style={{ fontSize: 13, paddingInline: 10, borderRadius: 999 }}>
           {verdict.label}
@@ -250,7 +327,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
         <Tag color="purple">{`建议优先级 ${overallPriority}`}</Tag>
         <Tag color={humanReview.color}>{humanReview.label}</Tag>
         <Tag color={pendingHumanCount > 0 ? "error" : "default"}>{`待确认 ${pendingHumanCount}`}</Tag>
-        <Button size="small" onClick={() => report && downloadMarkdownReport(report, findings)} disabled={!report}>
+        <Button size="small" onClick={() => report && downloadMarkdownReport(report, findings, issues)} disabled={!report}>
           导出检视报告
         </Button>
       </Space>
@@ -272,7 +349,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
         <Col xs={12} xl={6}>
           {clickableStatistic(
             "待人工确认",
-            report?.confidence_summary.needs_human_count || 0,
+            pendingHumanCount,
             onNavigateToGroup ? () => onNavigateToGroup("blocking") : undefined,
           )}
         </Col>
@@ -282,11 +359,12 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
       </Row>
       <Space wrap style={{ marginTop: 16 }}>
         <Tag color="default">{`发现总数 ${totalCount}`}</Tag>
-        <Tag color={promotedFindingCount > 0 ? "processing" : "default"}>{`进入正式问题 ${promotedFindingCount}`}</Tag>
+        <Tag color={formalIssueCount > 0 ? "processing" : "default"}>{`正式问题 ${formalIssueCount}`}</Tag>
+        <Tag color={promotedFindingCount > 0 ? "blue" : "default"}>{`关联发现 ${promotedFindingCount}`}</Tag>
         <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`保留观察 ${thresholdFilteredCount}`}</Tag>
         <Tag color={blockingCount > 0 ? "error" : "default"}>{`阻塞合并 ${blockingCount}`}</Tag>
         <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`建议先修 ${shouldFixCount}`}</Tag>
-        <Tag color="success">{`非阻塞 ${Math.max(totalCount - blockingCount - shouldFixCount, 0)}`}</Tag>
+        <Tag color="success">{`非阻塞 ${nonBlockingCount}`}</Tag>
         {Object.entries(typeCounts).map(([key, count]) => (
           <Tag key={key}>{`${findingTypeLabel(key)} ${count}`}</Tag>
         ))}
@@ -344,6 +422,11 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
             children: llmUsage.total_calls,
           },
           {
+            key: "llm_successful_calls",
+            label: "模型调用成功次数",
+            children: successfulLlmCalls,
+          },
+          {
             key: "llm_tokens",
             label: "模型总用量",
             children: llmUsage.total_tokens,
@@ -352,7 +435,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
             key: "top",
             label: "首要问题",
             children: topFinding
-              ? `${topFinding.file_path}:${topFinding.line_start} · ${topFinding.expert_id}`
+              ? `${topFinding.file_path}:${topFinding.line_start} · ${humanizeExpertId(topFinding.expert_id)}`
               : "尚无问题",
           },
           {

@@ -129,7 +129,7 @@ class ReviewRunnerRenderingMixin:
                 risk_score = code_graph_minimal.get("risk_score")
                 if graph_summary:
                     risk_part = f"；风险 {risk_level}/{risk_score}" if risk_level else ""
-                    lines.append(f"- Tree-sitter 图谱摘要: {graph_summary}{risk_part}")
+                    lines.append(f"- 代码结构图谱摘要: {graph_summary}{risk_part}")
                 key_entities = [
                     str(item).strip()
                     for item in list(code_graph_minimal.get("key_entities") or [])

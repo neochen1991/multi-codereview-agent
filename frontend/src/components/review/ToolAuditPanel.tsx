@@ -14,7 +14,7 @@ type ToolAuditPanelProps = {
 const stepLabel = (step: string): string => {
   const labels: Record<string, string> = {
     claim: "主张",
-    anchor: "代码锚点",
+    anchor: "代码位置",
     verifier: "工具核验",
     static_analysis: "静态信号",
     false_positive_filter: "误报过滤",

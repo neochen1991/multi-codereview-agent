@@ -1211,8 +1211,8 @@ def _classify_issue_candidate(
     if all_need_verification and not (strong_direct_code_issue or verification_supported_issue):
         return {
             "rule_code": "conditional_conclusion",
-            "rule_label": "待验证结论保留为 finding",
-            "reason": "当前问题仍依赖额外条件或上下文确认，暂不升级为有效 issue，仅保留为 finding。",
+            "rule_label": "证据未闭环，保留为观察项",
+            "reason": "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。",
             "severity": highest_severity,
         }
 

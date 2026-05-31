@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
+import { Alert, App as AntdApp, Button, Modal, Space, Tag, Typography } from "antd";
 
 import type { CodehubExportResponse, DebateIssue, ReviewFinding } from "@/services/api";
 import { reviewApi } from "@/services/api";
@@ -19,6 +19,7 @@ type ResultIssuePanelProps = {
   issues: DebateIssue[];
   findings: ReviewFinding[];
   selectedIssueId?: string;
+  expectedIssueCount?: number;
   onSelectIssue?: (issueId: string) => void;
 };
 
@@ -30,9 +31,9 @@ const getPriority = (severity: string): string => {
 };
 
 const getMergeImpact = (issue: DebateIssue): string => {
-  if (issue.needs_human && issue.status !== "resolved") return "Blocking";
-  if (["blocker", "critical", "high"].includes(issue.severity)) return "Should fix before merge";
-  return "Non-blocking";
+  if (issue.needs_human && issue.status !== "resolved") return "阻塞合并，等待人工确认";
+  if (["blocker", "critical", "high"].includes(issue.severity)) return "建议合并前修复";
+  return "不阻塞合并";
 };
 
 const buildRecommendedAction = (issue: DebateIssue): string => {
@@ -178,6 +179,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
   issues,
   findings,
   selectedIssueId,
+  expectedIssueCount = 0,
   onSelectIssue,
 }) => {
   const { message } = AntdApp.useApp();
@@ -199,7 +201,18 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
       issues.filter(
         (issue) =>
           String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
-          String(issue.resolution || "").trim().toLowerCase() !== "human_rejected",
+          !["needs_verification", "comment", "abstain", "rejected_after_debate"].includes(
+            String(issue.status || "").trim().toLowerCase(),
+          ) &&
+          ![
+            "human_rejected",
+            "needs_verification",
+            "llm_judge_needs_verification",
+            "targeted_debate_needs_verification",
+            "feedback_profile_requires_more_evidence",
+            "comment",
+            "abstain",
+          ].includes(String(issue.resolution || "").trim().toLowerCase()),
       ),
     [issues],
   );
@@ -295,13 +308,23 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
   };
 
   const selectedCount = selectedIssueIds.length;
+  const detailsMissing = expectedIssueCount > formalIssues.length && formalIssues.length === 0;
 
   return (
     <>
+      {detailsMissing ? (
+        <Alert
+          showIcon
+          type="warning"
+          style={{ marginBottom: 12 }}
+          message="问题明细没有恢复出来"
+          description={`产物快照里记录了 ${expectedIssueCount} 个有效问题，但当前任务没有返回每个问题的详情。为避免误导，这里不会展示成“没有正式问题”，也暂不允许提交到缺陷平台。`}
+        />
+      ) : null}
       <ReviewResultListTable
         cardClassName="review-result-issue-card"
-        title={`有效问题清单 (${formalIssues.length})`}
-        extra={<Text type="secondary">这里只展示已确认需要进入处理流程的问题</Text>}
+        title={detailsMissing ? `有效问题清单 (${expectedIssueCount}，明细待恢复)` : `有效问题清单 (${formalIssues.length})`}
+        extra={<Text type="secondary">{detailsMissing ? "当前只恢复到数量，尚未恢复每条问题的详情" : "这里只展示已确认需要进入处理流程的问题"}</Text>}
         toolbarExtra={
           <Space wrap>
             <Tag color={selectedCount > 0 ? "processing" : "default"}>{selectedCount > 0 ? `已选 ${selectedCount} 条` : "未选择问题"}</Tag>
@@ -311,7 +334,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
             <Button onClick={() => setSelectedIssueIds([])} disabled={selectedCount === 0}>
               清空选择
             </Button>
-            <Button type="primary" onClick={() => void submitSelectedIssues()} disabled={selectedCount === 0 || !reviewId} loading={submitting}>
+            <Button type="primary" onClick={() => void submitSelectedIssues()} disabled={selectedCount === 0 || !reviewId || detailsMissing} loading={submitting}>
               提交到缺陷平台
             </Button>
           </Space>
@@ -321,7 +344,11 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         onSelectRow={onSelectIssue}
         selectedRowIds={selectedIssueIds}
         onSelectedRowIdsChange={setSelectedIssueIds}
-        emptyText="当前没有正式问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
+        emptyText={
+          detailsMissing
+            ? "产物快照显示本次审核有有效问题，但问题详情没有恢复出来。请重新生成结果或恢复明细文件后再查看。"
+            : "当前没有正式问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
+        }
         disableHorizontalScroll
       />
       <Modal
@@ -359,9 +386,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
                       <code>{item.patched_code}</code>
                     </pre>
                   </>
-                ) : (
-                  <Text type="warning">该问题还没有可安全提交的代码补丁，已避免生成占位代码。</Text>
-                )}
+                ) : null}
                 <Text type="secondary">{item.mock_ticket_url}</Text>
               </div>
             ))}

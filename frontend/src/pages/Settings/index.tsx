@@ -20,6 +20,7 @@ import {
   type ReviewWorkspaceCleanupResult,
   type RuntimeSettings,
 } from "@/services/api";
+import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Title } = Typography;
 
@@ -232,6 +233,7 @@ const SettingsPage: React.FC = () => {
   const [impactTemplateAnalysis, setImpactTemplateAnalysis] = React.useState<ImpactReportTemplateAnalysis | null>(null);
   const [reviewWorkspaceCleanupRunning, setReviewWorkspaceCleanupRunning] = React.useState(false);
   const [reviewWorkspaceCleanupResult, setReviewWorkspaceCleanupResult] = React.useState<ReviewWorkspaceCleanupResult | null>(null);
+  const [runtimeSnapshot, setRuntimeSnapshot] = React.useState<RuntimeSettings | null>(null);
 
   const refreshRepositoryGitNexusStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
     const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
@@ -305,7 +307,7 @@ const SettingsPage: React.FC = () => {
             {
               repository_id: repositoryId,
               state: "failed",
-              message: error?.message || "读取 Tree-sitter 图谱状态失败",
+              message: error?.message || "读取代码结构图谱状态失败",
             } satisfies CodeGraphIndexStatus,
           ] as const;
         }
@@ -333,6 +335,7 @@ const SettingsPage: React.FC = () => {
         code_repositories: projectRepositories,
         default_repository_id: "",
       });
+      setRuntimeSnapshot(runtime);
       void refreshRepositoryGitNexusStatuses(projectRepositories);
       void refreshRepositoryCodeGraphStatuses(projectRepositories);
       setExperts(expertList);
@@ -444,15 +447,15 @@ const SettingsPage: React.FC = () => {
       const status = await settingsApi.runRepositoryCodeGraphIndex(id);
       setRepositoryCodeGraphStatuses((prev) => ({ ...prev, [id]: status }));
       if (status.state === "blocked") {
-        message.warning(status.message || `Tree-sitter 当前正在处理其他仓库，${id} 暂未启动`);
+        message.warning(humanizeReviewText(status.message || `代码结构图谱当前正在处理其他仓库，${id} 暂未启动`));
       } else {
-        message.success(`Tree-sitter 图谱建图任务已触发：${id}`);
+        message.success(`代码结构图谱建图任务已触发：${id}`);
       }
       window.setTimeout(() => {
         void handleRefreshRepositoryCodeGraphStatus(id);
       }, 1500);
     } catch (error: any) {
-      message.error(error?.message || `触发 ${id} Tree-sitter 图谱建图失败`);
+      message.error(humanizeReviewText(error?.message || `触发 ${id} 代码结构图谱建图失败`));
     } finally {
       setRepositoryCodeGraphRunning((prev) => ({ ...prev, [id]: false }));
     }
@@ -582,45 +585,41 @@ const SettingsPage: React.FC = () => {
     </Form.Item>
   );
 
-  const runtimeOverview = (
-    <Form.Item noStyle shouldUpdate>
-      {() => {
-        const mode = String(form.getFieldValue("default_analysis_mode") || "standard");
-        const targetBranch = String(form.getFieldValue("default_target_branch") || "main");
-        const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
-        const enabledRepositoryCount = repositories.filter((repo) => repo?.enabled !== false).length;
-        const autoReviewEnabled = Boolean(form.getFieldValue("auto_review_enabled"));
-        const priorityThreshold = String(form.getFieldValue("issue_min_priority_level") || "P2");
-        const currentProjectId = String(form.getFieldValue("default_project_id") || "").trim();
-        return (
-          <div className="settings-summary-grid">
-            <div className="settings-summary-card">
-              <span className="settings-summary-label">默认审核模式</span>
-              <strong>{mode === "light" ? "轻量模式" : "标准模式"}</strong>
-              <span className="settings-summary-meta">{`目标分支 ${targetBranch}`}</span>
-            </div>
-            <div className="settings-summary-card">
-              <span className="settings-summary-label">当前项目代码仓</span>
-              <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : "未配置"}</strong>
-              <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || "当前项目尚未绑定代码仓"}>
-                {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || `项目 ${currentProjectId || "-"} 尚未绑定代码仓`}
-              </span>
-            </div>
-            <div className="settings-summary-card">
-              <span className="settings-summary-label">自动审核</span>
-              <strong>{autoReviewEnabled ? "已启用" : "未启用"}</strong>
-              <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
-            </div>
-            <div className="settings-summary-card">
-              <span className="settings-summary-label">正式问题阈值</span>
-              <strong>{priorityThreshold}</strong>
-              <span className="settings-summary-meta">低于该级别只保留为检视发现</span>
-            </div>
-          </div>
-        );
-      }}
-    </Form.Item>
-  );
+  const runtimeOverview = (() => {
+    const mode = String(runtimeSnapshot?.default_analysis_mode || "standard");
+    const targetBranch = String(runtimeSnapshot?.default_target_branch || "main");
+    const repositories = currentProjectRepositories(runtimeSnapshot);
+    const enabledRepositoryCount = repositories.filter((repo) => repo?.enabled !== false).length;
+    const autoReviewEnabled = Boolean(runtimeSnapshot?.auto_review_enabled);
+    const priorityThreshold = String(runtimeSnapshot?.issue_min_priority_level || "P2");
+    const currentProjectId = String(runtimeSnapshot?.default_project_id || "").trim();
+    return (
+      <div className="settings-summary-grid">
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">默认审核模式</span>
+          <strong>{mode === "light" ? "轻量模式" : "标准模式"}</strong>
+          <span className="settings-summary-meta">{`目标分支 ${targetBranch}`}</span>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">当前项目代码仓</span>
+          <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : "未配置"}</strong>
+          <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || "当前项目尚未绑定代码仓"}>
+            {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || `项目 ${currentProjectId || "-"} 尚未绑定代码仓`}
+          </span>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">自动审核</span>
+          <strong>{autoReviewEnabled ? "已启用" : "未启用"}</strong>
+          <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">正式问题阈值</span>
+          <strong>{priorityThreshold}</strong>
+          <span className="settings-summary-meta">低于该级别只保留为检视发现</span>
+        </div>
+      </div>
+    );
+  })();
 
   const gitnexusStateColor = (state?: string) => {
     if (state === "ready") return "success";
@@ -647,7 +646,7 @@ const SettingsPage: React.FC = () => {
       <Space direction="vertical" size={4}>
         {checks.map((check) => (
           <Tag key={check.name} color={gitnexusDiagnosticColor(check.status)} style={{ whiteSpace: "normal", lineHeight: 1.6 }}>
-            {check.message}
+            {humanizeReviewText(check.message)}
           </Tag>
         ))}
       </Space>
@@ -723,18 +722,14 @@ const SettingsPage: React.FC = () => {
             <code>config.json</code>
             ，设置页治理项会持久化到当前存储后端，并在运行时与系统配置合并生效。
           </Paragraph>
-          <Form.Item noStyle shouldUpdate>
-            {() =>
-              form.getFieldValue("config_path") ? (
-                <Alert
-                  type="info"
-                  showIcon
-                  message={`当前统一配置文件：${String(form.getFieldValue("config_path"))}`}
-                  description="默认模型、平台凭据、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准。"
-                />
-              ) : null
-            }
-          </Form.Item>
+          {runtimeSnapshot?.config_path ? (
+            <Alert
+              type="info"
+              showIcon
+              message={`当前统一配置文件：${String(runtimeSnapshot.config_path)}`}
+              description="默认模型、平台凭据、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准。"
+            />
+          ) : null}
           {runtimeOverview}
           {(() => {
             const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
@@ -767,7 +762,7 @@ const SettingsPage: React.FC = () => {
 
       <Card
         className="module-card"
-        title="Tree-sitter 代码图谱"
+        title="代码结构图谱"
         style={{ marginTop: 16 }}
         extra={
           <Button onClick={() => void refreshRepositoryCodeGraphStatuses()}>刷新当前项目仓库状态</Button>
@@ -777,15 +772,14 @@ const SettingsPage: React.FC = () => {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Tree-sitter 图谱用于代码检视前的结构化上下文检索"
-          description="首次使用或代码仓变更较多时，请先建立图谱。建图会在目标仓库生成 .code-review-graph/graph.db；检视 Java 变更时会优先使用该图谱提取调用关系、影响文件、测试缺口和最小审查上下文，未命中时再退化为关键词搜索。"
+          message="代码结构图谱用于代码检视前的结构化上下文检索"
+          description="首次使用或代码仓变更较多时，请先建立图谱。建图会在目标仓库生成 .code-review-graph/graph.db；检视 Java 变更时会优先使用该图谱提取调用关系、影响文件、测试缺口和最小审查上下文，未命中时再使用关键词搜索。"
         />
-        <Form.Item noStyle shouldUpdate>
-          {() => {
-            const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
+        {(() => {
+            const repositories = currentProjectRepositories(runtimeSnapshot);
             if (!repositories.length) {
               return (
-                <Alert type="warning" showIcon message="当前项目还没有绑定代码仓" description="请先在下方“当前项目代码仓设置”里新增代码仓，再建立 Tree-sitter 图谱。" />
+                <Alert type="warning" showIcon message="当前项目还没有绑定代码仓" description="请先在下方“当前项目代码仓设置”里新增代码仓，再建立代码结构图谱。" />
               );
             }
             return (
@@ -827,7 +821,7 @@ const SettingsPage: React.FC = () => {
                         <Descriptions.Item label="状态">
                           <Space wrap>
                             <Tag color={gitnexusStateColor(status?.state)}>{status?.state || "idle"}</Tag>
-                            <span>{status?.message || "尚未读取该仓库的 Tree-sitter 图谱状态。"}</span>
+                            <span>{humanizeReviewText(status?.message || "尚未读取该仓库的代码结构图谱状态。")}</span>
                           </Space>
                         </Descriptions.Item>
                         <Descriptions.Item label="依赖检查">{renderCodeGraphDependencyChecks(status)}</Descriptions.Item>
@@ -853,8 +847,7 @@ const SettingsPage: React.FC = () => {
                 })}
               </div>
             );
-          }}
-        </Form.Item>
+          })()}
       </Card>
 
       <Card
@@ -885,9 +878,8 @@ const SettingsPage: React.FC = () => {
             </Descriptions>
           );
         })()}
-        <Form.Item noStyle shouldUpdate>
-          {() => {
-            const repositories = normalizeCodeRepositories(form.getFieldValue("code_repositories"));
+        {(() => {
+            const repositories = currentProjectRepositories(runtimeSnapshot);
             if (!repositories.length) {
               return (
                 <Alert type="warning" showIcon message="当前项目还没有绑定代码仓" description="请先在下方“当前项目代码仓设置”里新增代码仓，再建立 GitNexus 图谱。" />
@@ -962,8 +954,7 @@ const SettingsPage: React.FC = () => {
                 })}
               </div>
             );
-          }}
-        </Form.Item>
+          })()}
       </Card>
 
       <Card
@@ -981,7 +972,7 @@ const SettingsPage: React.FC = () => {
           showIcon
           style={{ marginBottom: 12 }}
           message="MR 检视会先生成合入后的临时代码快照"
-          description="Tree-sitter 和 GitNexus 会分析这个快照，避免只看本地目标分支导致问题代码不在 MR 变更范围内。快照保存在系统存储目录下，可定期清理，清理动作不会修改真实代码仓。"
+          description="代码结构图谱和 GitNexus 会分析这个快照，避免只看本地目标分支导致问题代码不在 MR 变更范围内。快照保存在系统存储目录下，可定期清理，清理动作不会修改真实代码仓。"
         />
         <Descriptions column={1} size="small">
           <Descriptions.Item label="保留策略">默认复用同一 MR 的最新快照，手工清理只删除 7 天前的临时目录。</Descriptions.Item>
@@ -1249,6 +1240,7 @@ const SettingsPage: React.FC = () => {
               });
               message.success("运行时设置已更新");
               const projectRepositories = currentProjectRepositories(updatedRuntime);
+              setRuntimeSnapshot(updatedRuntime);
               form.setFieldsValue({
                 ...updatedRuntime,
                 code_repositories: projectRepositories,
@@ -1295,7 +1287,7 @@ const SettingsPage: React.FC = () => {
                           showIcon
                           style={{ marginBottom: 16 }}
                           message="代码仓信息跟随当前项目保存"
-                          description="新增、删除或调整代码仓时，只会修改当前项目的 repositories；MR 队列、源码上下文、GitNexus 和 Tree-sitter 图谱都会按项目内仓库取数。"
+                          description="新增、删除或调整代码仓时，只会修改当前项目的 repositories；MR 队列、源码上下文、GitNexus 和代码结构图谱都会按项目内仓库取数。"
                         />
                       </Col>
                       <Col xs={24} xl={12}>
@@ -1764,7 +1756,7 @@ const SettingsPage: React.FC = () => {
                           name="enable_review_workspace_realtime_graph"
                           label="启用 MR 快照实时图谱"
                           valuePropName="checked"
-                          extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有 Tree-sitter/GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
+                          extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有代码结构图谱和 GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
                         >
                           <Switch />
                         </Form.Item>
@@ -1844,14 +1836,14 @@ const SettingsPage: React.FC = () => {
                           label="轻量模式上下文用量上限"
                           extra="智能压缩会以这个上限为准，超过时优先保留规则、变更代码和关键上下文。"
                         >
-                          <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
+                          <InputNumber min={16000} step={1000} style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="light_llm_max_prompt_chars"
                           label="轻量模式提示字符上限"
-                          extra="作为字符级兜底上限，防止混合中英文场景下提示过长。"
+                          extra="作为字符级安全上限，防止混合中英文场景下提示过长。"
                         >
                           <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
                         </Form.Item>
@@ -1996,7 +1988,7 @@ const SettingsPage: React.FC = () => {
               <div className="settings-expert-header">
                 <div className="settings-expert-title">
                   <strong>{expert.name_zh}</strong>
-                  <span>{`角色标识：${expert.expert_id}`}</span>
+                  <span title={expert.expert_id}>{`角色标识：${humanizeExpertId(expert.expert_id)}`}</span>
                 </div>
                 <Space wrap size={[8, 8]}>
                   <Tag>{`知识 ${expert.knowledge_sources.length}`}</Tag>
@@ -2067,6 +2059,7 @@ const SettingsPage: React.FC = () => {
             {
               key: "skills",
               label: "扩展能力编辑",
+              forceRender: true,
               children: (
                 <Form
                   form={skillForm}
@@ -2165,6 +2158,7 @@ const SettingsPage: React.FC = () => {
             {
               key: "tools",
               label: "工具编辑",
+              forceRender: true,
               children: (
                 <Form
                   form={toolForm}

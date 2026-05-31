@@ -90,9 +90,9 @@ export const RuntimeOverview: React.FC<{ form: FormInstance<RuntimeSettings> }> 
             <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
           </div>
           <div className="settings-summary-card">
-            <span className="settings-summary-label">Issue 阈值</span>
+            <span className="settings-summary-label">正式问题阈值</span>
             <strong>{priorityThreshold}</strong>
-            <span className="settings-summary-meta">低于该级别只保留为 finding</span>
+            <span className="settings-summary-meta">低于该级别只保留为审核发现</span>
           </div>
         </div>
       );
@@ -107,7 +107,7 @@ export const CurrentImplementationStatusCard: React.FC = () => (
       <Descriptions.Item label="知识检索">按专家绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
       <Descriptions.Item label="运行时工具调用">每个专家按 runtime_tool_bindings 真实调用本地 review tool gateway</Descriptions.Item>
       <Descriptions.Item label="代码仓上下文">所有专家可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
-      <Descriptions.Item label="Issue 治理">低风险、提示性、常见建议类问题可只保留在 findings，不升级为 issue / debate</Descriptions.Item>
+      <Descriptions.Item label="问题升级治理">低风险、提示性、常见建议类问题可只保留在审核发现，不升级为正式问题</Descriptions.Item>
     </Descriptions>
   </Card>
 );
@@ -301,17 +301,17 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="Issue 过滤治理说明"
-          description="这组开关只影响问题是否升级为 issue，不会丢掉原始 findings。现在支持按 P 级阈值和每个 P 级单独置信度阈值控制 issue 升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为 LLM 语义筛选。"
+          message="问题升级治理说明"
+          description="这组开关只影响审核发现是否升级为正式问题，不会丢掉原始发现。现在支持按 P 级阈值和每个 P 级单独置信度阈值控制正式问题升级，并自动过滤“业务背景不清晰/需求未说明”这类不属于代码检视的问题。规则筛选也支持切换为模型语义筛选。"
         />
         <Row gutter={[16, 0]}>
           <Col xs={24} xl={8}>
-            <Form.Item name="issue_filter_enabled" label="启用 Issue 过滤治理" valuePropName="checked">
+            <Form.Item name="issue_filter_enabled" label="启用问题升级治理" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="issue_min_priority_level" label="Issue 升级最低 P 级阈值" extra="只有达到该优先级及以上的问题才进入 issue / debate。">
+            <Form.Item name="issue_min_priority_level" label="正式问题最低 P 级" extra="只有达到该优先级及以上的问题才进入正式问题流程。">
               <Select
                 options={[
                   { label: "P0（仅 blocker）", value: "P0" },
@@ -328,22 +328,22 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
             </Form.Item>
           </Col>
           <Col xs={24} xl={6}>
-            <Form.Item name="issue_confidence_threshold_p0" label="P0 Issue 置信度阈值" extra="blocker 级问题至少达到该置信度才升级为 issue。">
+            <Form.Item name="issue_confidence_threshold_p0" label="P0 正式问题置信度" extra="blocker 级问题至少达到该置信度才升级为正式问题。">
               <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={6}>
-            <Form.Item name="issue_confidence_threshold_p1" label="P1 Issue 置信度阈值" extra="high / critical 级问题至少达到该置信度才升级为 issue。">
+            <Form.Item name="issue_confidence_threshold_p1" label="P1 正式问题置信度" extra="high / critical 级问题至少达到该置信度才升级为正式问题。">
               <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={6}>
-            <Form.Item name="issue_confidence_threshold_p2" label="P2 Issue 置信度阈值" extra="medium 级问题至少达到该置信度才升级为 issue。">
+            <Form.Item name="issue_confidence_threshold_p2" label="P2 正式问题置信度" extra="medium 级问题至少达到该置信度才升级为正式问题。">
               <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={6}>
-            <Form.Item name="issue_confidence_threshold_p3" label="P3 Issue 置信度阈值" extra="low 级问题至少达到该置信度才升级为 issue。">
+            <Form.Item name="issue_confidence_threshold_p3" label="P3 正式问题置信度" extra="low 级问题至少达到该置信度才升级为正式问题。">
               <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -353,12 +353,12 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="hint_issue_confidence_threshold" label="提示类 Issue 置信度阈值">
+            <Form.Item name="hint_issue_confidence_threshold" label="提示类问题置信度">
               <InputNumber min={0.1} max={1} step={0.01} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="hint_issue_evidence_cap" label="提示类 Issue 最大证据条数">
+            <Form.Item name="hint_issue_evidence_cap" label="提示类问题最大证据条数">
               <InputNumber min={0} max={10} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -387,7 +387,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               name="enable_llm_issue_judge"
               label="启用模型问题复核"
               valuePropName="checked"
-              extra="开启后，低置信或薄证据 issue 会在收敛阶段再次判定；失败自动回退本地规则。"
+              extra="开启后，低置信或薄证据正式问题会在收敛阶段再次判定；失败自动回退本地规则。"
             >
               <Switch />
             </Form.Item>
@@ -447,7 +447,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               name="enable_review_workspace_realtime_graph"
               label="启用 MR 快照实时图谱"
               valuePropName="checked"
-              extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有 Tree-sitter/GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
+              extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有代码结构图谱和 GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
             >
               <Switch />
             </Form.Item>
@@ -523,11 +523,11 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           </Col>
           <Col xs={24} xl={8}>
             <Form.Item name="light_llm_max_input_tokens" label="轻量模式上下文用量上限" extra="智能压缩会以这个上限为准，超过时优先保留规则、变更代码和关键上下文。">
-              <InputNumber min={16000} max={120000} step={1000} style={{ width: "100%" }} />
+              <InputNumber min={16000} step={1000} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
           <Col xs={24} xl={8}>
-            <Form.Item name="light_llm_max_prompt_chars" label="轻量模式提示字符上限" extra="作为字符级兜底上限，防止混合中英文场景下提示过长。">
+            <Form.Item name="light_llm_max_prompt_chars" label="轻量模式提示字符上限" extra="作为字符级安全上限，防止混合中英文场景下提示过长。">
               <InputNumber min={12000} max={200000} step={1000} style={{ width: "100%" }} />
             </Form.Item>
           </Col>
@@ -592,7 +592,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           </Col>
           <Col xs={24} xl={12}>
             <Form.Item name="agent_allowlist" label="Agent 白名单" getValueProps={(value) => ({ value: stringifyList(value as string[]) })}>
-              <Input placeholder="judge, main_agent" />
+              <Input placeholder="通常无需手动填写，留空使用系统默认" />
             </Form.Item>
           </Col>
           <Col xs={24} xl={4}>

@@ -45,7 +45,7 @@ export const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null
   const bannerTone = summary.system_added_experts.length > 0 ? "warning" : hasAdjustments ? "info" : "default";
   const heading =
     summary.system_added_experts.length > 0
-      ? "检查角色与代码不完全匹配，系统已自动补入兜底角色继续检视"
+      ? "检查角色与代码不完全匹配，系统已自动补入必要检查角色继续检视"
       : hasAdjustments
         ? "部分已选择角色与当前变更相关性较低，系统已自动跳过"
         : "本轮检查角色匹配已完成";
@@ -94,7 +94,7 @@ export const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummar
                 <Tag color="blue">{`候选 ${item.rule_screening.possible_hit_count}`}</Tag>
                 {item.rule_screening.batch_count ? <Tag>{`批次 ${item.rule_screening.batch_count}`}</Tag> : null}
                 {item.rule_screening.screening_mode ? <Tag>{humanizeReviewText(item.rule_screening.screening_mode)}</Tag> : null}
-                {item.rule_screening.screening_fallback_used ? <Tag color="orange">备用流程</Tag> : null}
+                {item.rule_screening.screening_fallback_used ? <Tag color="orange">保守筛选</Tag> : null}
               </Space>
               {item.rule_screening.matched_rules_for_llm?.length ? (
                 <Space wrap>

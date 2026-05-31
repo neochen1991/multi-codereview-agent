@@ -558,7 +558,7 @@ class LLMChatService:
         configured = int(getattr(runtime_settings, "light_llm_max_input_tokens", 0) or 0) if runtime_settings else 0
         # 保守留出输出和协议冗余，默认输入上限 110k token。
         budget = configured if configured > 0 else 110000
-        return max(16000, min(120000, budget))
+        return max(16000, budget)
 
     def _estimate_tokens(self, text: str) -> int:
         if not text:

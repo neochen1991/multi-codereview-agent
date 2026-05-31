@@ -14,6 +14,7 @@ import {
   type ReviewSummary,
   type TestScopeRecommendation,
 } from "@/services/api";
+import { humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -50,10 +51,10 @@ const confidenceLabelColor = (value?: string): string => {
 const graphStatusLabel = (value?: string): string => {
   if (value === "ready") return "GitNexus 图谱已命中";
   if (value === "running") return "GitNexus 建图中";
-  if (value === "degraded") return "GitNexus 降级候选";
+  if (value === "degraded") return "GitNexus 图谱信息不完整";
   if (value === "missing") return "GitNexus 图谱未命中";
   if (value === "failed") return "GitNexus 图谱不可用";
-  return value || "状态未知";
+  return value || "状态待确认";
 };
 
 const countTestActionItems = (impactReport: ImpactReport): number =>
@@ -94,12 +95,22 @@ const formatTime = (value?: string): string => {
   return date.toLocaleString("zh-CN");
 };
 
-const joinOrFallback = (items: string[], fallback = "暂无"): string => (items.length ? items.join("、") : fallback);
+const cleanImpactReportText = (value?: string | null): string =>
+  humanizeReviewText(value || "")
+    .replace(/已降级为候选范围/g, "按候选影响范围展示")
+    .replace(/报告已降级为候选影响分析/g, "报告按候选影响范围展示")
+    .replace(/未确认可用仓库/g, "暂未拿到可用仓库")
+    .replace(/人工确认真实调用链/g, "结合代码核对真实调用链")
+    .replace(/更多影响需结合代码人工确认/g, "更多影响需结合代码进一步核对")
+    .replace(/降级/g, "改用备用方案")
+    .replace(/未确认/g, "待核对");
 
-const dedupeStrings = (items: string[]): string[] => Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+const joinOrFallback = (items: string[], fallback = "暂无"): string => (items.length ? items.map(cleanImpactReportText).join("、") : fallback);
+
+const dedupeStrings = (items: string[]): string[] => Array.from(new Set(items.map(cleanImpactReportText).map((item) => item.trim()).filter(Boolean)));
 
 const buildExecutiveSummary = (impactReport: ImpactReport): string => {
-  if (impactReport.report_summary?.trim()) return impactReport.report_summary.trim();
+  if (impactReport.report_summary?.trim()) return cleanImpactReportText(impactReport.report_summary).trim();
   const moduleText = impactReport.impacted_modules.length ? `重点波及 ${impactReport.impacted_modules.join("、")}` : "";
   const entrypointText = impactReport.external_entrypoints.length
     ? `需要重点关注入口 ${impactReport.external_entrypoints.slice(0, 3).join("、")}`
@@ -119,7 +130,7 @@ const buildAnalysisBasis = (impactReport: ImpactReport): string[] => {
     "再调用 detect_changes(repo, scope=all) 识别本次改动的受影响文件、模块和候选测试范围。",
     "最后对关键变更符号调用 impact(repo, target)，补充调用链和 blast radius。",
   ];
-  return [...items, ...impactReport.limitations];
+  return [...items, ...impactReport.limitations.map(cleanImpactReportText)];
 };
 
 const buildRelationshipInsights = (impactReport: ImpactReport): string[] => {
@@ -152,32 +163,32 @@ const buildTargetDiagnostics = (
 ): Array<{ title: string; items: string[]; tone: "default" | "success" | "warning" }> => [
   {
     title: "已请求查询目标",
-    items: impactReport.queried_targets || [],
+    items: (impactReport.queried_targets || []).map(cleanImpactReportText),
     tone: "default",
   },
   {
     title: "Context 命中目标",
-    items: impactReport.successful_context_targets || [],
+    items: (impactReport.successful_context_targets || []).map(cleanImpactReportText),
     tone: "success",
   },
   {
     title: "Impact 命中目标",
-    items: impactReport.successful_impact_targets || [],
+    items: (impactReport.successful_impact_targets || []).map(cleanImpactReportText),
     tone: "success",
   },
   {
     title: "过滤的无效目标",
-    items: impactReport.skipped_invalid_targets || [],
+    items: (impactReport.skipped_invalid_targets || []).map(cleanImpactReportText),
     tone: "warning",
   },
   {
     title: "Context 跳过目标",
-    items: impactReport.skipped_missing_context_targets || [],
+    items: (impactReport.skipped_missing_context_targets || []).map(cleanImpactReportText),
     tone: "warning",
   },
   {
     title: "Impact 跳过目标",
-    items: impactReport.skipped_missing_impact_targets || [],
+    items: (impactReport.skipped_missing_impact_targets || []).map(cleanImpactReportText),
     tone: "warning",
   },
 ];
@@ -308,17 +319,17 @@ const buildImpactQualitySummary = (impactReport: ImpactReport): ImpactQualitySum
   ]).slice(0, 3);
   const verdict =
     impactReport.graph_status !== "ready" || hitRate === 0
-      ? "图谱未完全可用，影响结论需要人工兜底确认。"
+      ? "图谱未完全可用，影响结论需要人工补充确认。"
       : highRiskCount > 0
         ? "已命中高风险影响面，合并前应优先跑完核心回归。"
         : executableTestCount > 0
           ? "影响范围可执行，建议按建议测试项完成验证后再合并。"
-          : "当前影响面较轻，但仍需确认报告边界。";
+          : "当前影响面较轻，但仍需确认报告覆盖范围。";
   return {
     verdict,
     graphTone,
     hitRate,
-  hitLabel: hitBase > 0 ? `${hitRate}%` : impactReport.changed_symbols.length ? `符号 ${impactReport.changed_symbols.length}` : "暂无",
+    hitLabel: hitBase > 0 ? `${hitRate}%` : impactReport.changed_symbols.length ? `符号 ${impactReport.changed_symbols.length}` : "暂无",
     skippedCount,
     highRiskCount,
     executableTestCount,
@@ -337,19 +348,19 @@ const buildExecutionChecklistItems = (
       .slice()
       .sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority))
       .map((item) => ({
-        title: item.scope,
-        detail: item.reason || "补充相关测试验证。",
+        title: cleanImpactReportText(item.scope),
+        detail: cleanImpactReportText(item.reason || "补充相关测试验证。"),
         kind: priorityLabel(item.priority),
       })),
     ...commands.slice(0, 4).map((item) => ({
-      title: item,
+      title: cleanImpactReportText(item),
       detail: "建议纳入本次回归执行集。",
       kind: "执行命令",
     })),
     ...manualVerification.slice(0, 3).map((item) => ({
-      title: item,
-      detail: "这部分需要研发或测试人工补判断。",
-      kind: "人工确认",
+      title: cleanImpactReportText(item),
+      detail: "这部分需要研发或测试补充核对。",
+      kind: "补充核对",
     })),
   ].slice(0, 8);
 
@@ -1125,7 +1136,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
   const impactReport = review?.impact_report;
   if (!review || !impactReport) return "";
   if (impactReport.llm_markdown?.trim() && !hasUnresolvedTemplateVariables(impactReport.llm_markdown)) {
-    return impactReport.llm_markdown.trim();
+    return cleanImpactReportText(impactReport.llm_markdown).trim();
   }
   const sections: string[] = [
     `# 影响范围报告 - ${review.review_id}`,
@@ -1190,7 +1201,7 @@ const buildImpactReportMarkdown = (review: ReviewReport | null): string => {
     "## 分析依据与边界",
     ...buildAnalysisBasis(impactReport).map((item) => `- ${item}`),
   ];
-  return sections.join("\n");
+  return cleanImpactReportText(sections.join("\n"));
 };
 
 const buildExecutionChecklistMarkdown = (
@@ -1244,7 +1255,7 @@ const renderListSection = (title: string, items: string[], emptyText: string) =>
         {items.map((item) => (
           <div key={`${title}-${item}`} className="impact-report-bullet-item">
             <span className="impact-report-bullet-dot" />
-            <Text>{item}</Text>
+            <Text>{cleanImpactReportText(item)}</Text>
           </div>
         ))}
       </div>
@@ -1270,7 +1281,7 @@ const renderMiniStats = (title: string, items: Array<{ label: string; count: num
 
 const formatImpactSymbol = (item: ImpactSymbol): string => {
   const symbol = [item.container, item.symbol].filter(Boolean).join(".");
-  return symbol || item.file_path || "unknown";
+  return symbol || item.file_path || "未识别符号";
 };
 
 const renderChangedSymbols = (items: ImpactSymbol[]) => (
@@ -1696,7 +1707,7 @@ const renderExecutionChecklist = (checklist: ImpactChecklistItem[], onCopy?: () 
 
 const renderReportHeadline = (impactReport: ImpactReport) => {
   const headline = impactReport.report_summary?.trim()
-    ? impactReport.report_summary.trim()
+    ? cleanImpactReportText(impactReport.report_summary).trim()
     : impactReport.recommended_test_scope.length > 0
       ? `本次改动已识别出 ${impactReport.recommended_test_scope.length} 类优先测试范围，建议先围绕高风险影响面执行回归。`
       : "本次改动已完成影响分析，建议按受影响范围安排后续验证。";
@@ -1872,7 +1883,7 @@ const ImpactReportMarkdownPanel: React.FC<ImpactReportMarkdownPanelProps> = ({ r
               />
             ) : null}
             {renderExecutionChecklist(executionChecklist, copyExecutionChecklist)}
-            <div className="template-preview-rendered">{renderTemplateMarkdown(impactReport.llm_markdown)}</div>
+            <div className="template-preview-rendered">{renderTemplateMarkdown(markdown)}</div>
             {renderCollapsibleTargetDiagnostics(impactReport)}
             {renderImpactPaths(impactReport.impact_paths.slice(0, 5), submitImpactFeedback, impactFeedbackState)}
             {renderImpactedFiles(impactReport.impacted_files.slice(0, 6), submitImpactFeedback, impactFeedbackState)}

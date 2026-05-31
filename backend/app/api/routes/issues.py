@@ -52,8 +52,15 @@ def _sanitize_export_text(value: object) -> str:
     }
     if text in replacements:
         return replacements[text]
-    if "结算异常被静默吞掉后仍返回成功状态" in text:
+    if "结算异常被静默吞掉后仍返回成功状态" in text or "异常被静默吞掉后仍返回成功状态" in text:
         return "支付结算失败后仍返回成功"
+    text = text.replace("等等价", "等价")
+    text = text.replace("异常被静默吞没", "异常处理被忽略")
+    text = text.replace("异常被静默吞掉", "异常处理被忽略")
+    text = text.replace("异常被静默忽略", "异常处理被忽略")
+    text = text.replace("静默忽略", "忽略")
+    text = text.replace("兜底返回", "成功返回")
+    text = text.replace("吞掉异常", "忽略异常")
     text = text.replace(
         "异常被静默吞掉后仍返回成功状态，无日志、无指标、无补偿动作",
         "catch 分支把支付网关异常转换成成功返回，缺少失败结果、日志或补偿动作。",
@@ -119,6 +126,46 @@ def _is_concrete_export_code(value: object) -> bool:
     return bool(lines) and not all(line.startswith(("//", "#", "*")) for line in lines)
 
 
+def _export_code_matches_family(issue: object, family: str, value: object) -> bool:
+    """提交到缺陷平台前，再确认建议代码和问题类型一致，避免把错问题的代码带出去。"""
+
+    if not _is_concrete_export_code(value):
+        return False
+    code = str(value or "").lower()
+    summary = str(getattr(issue, "summary", "") or "").lower()
+    current_code = str(getattr(issue, "current_code", "") or "").lower()
+    if family == "comment":
+        promised_inventory = any(token in summary + current_code for token in ("库存", "inventory", "预占", "reserve"))
+        if promised_inventory and not any(token in code for token in ("inventory", "stock", "reserve", "库存", "预占")):
+            return False
+        if "todo" in code:
+            return False
+        return True
+    if family == "loop":
+        has_batch_call = any(token in code for token in ("saveall", "batch", "批量"))
+        has_loop_save = any(token in code for token in ("for (", ".foreach", "while (")) and ".save(" in code
+        return has_batch_call and not has_loop_save
+    if family == "lock":
+        return any(token in code for token in ("synchronized", "lock", "idempot", "unique", "幂等", "唯一"))
+    if family == "exception":
+        returns_success = any(token in code for token in ("settlementresult.success", ".success(", "return success"))
+        return any(token in code for token in ("catch", "exception", "throw", "failure", "failed", "补偿")) and not returns_success
+    if family == "query_boundary":
+        return any(token in code for token in ("limit", "page", "pageable", "pagesize", "分页"))
+    if family == "course_creation":
+        return "course.create" in code or ".create(" in code
+    return True
+
+
+def _build_export_patched_code(issue: object, related_findings: list[object], family: str) -> str:
+    candidates = [getattr(issue, "suggested_code", "")]
+    candidates.extend(getattr(finding, "suggested_code", "") for finding in related_findings)
+    for candidate in candidates:
+        if _export_code_matches_family(issue, family, candidate):
+            return str(candidate).strip()
+    return ""
+
+
 def _mentions_other_export_context(value: object, file_path: object) -> bool:
     text = str(value or "").strip().lower()
     path = str(file_path or "").strip().lower()
@@ -160,7 +207,7 @@ def _export_issue_family(issue: object) -> str:
         return "query_boundary"
     if any(token in semantic_text for token in ("n_plus_one", "loop_call_amplification", "repository.save", "saveall", "循环", "逐条", "批量保存")):
         return "loop"
-    if exception_code_signal or any(token in issue_type for token in ("exception", "swallowed")) or any(token in title for token in ("异常", "失败")):
+    if exception_code_signal or any(token in issue_type for token in ("exception", "swallowed")) or any(token in title for token in ("异常", "吞掉", "静默")):
         return "exception"
     return ""
 
@@ -191,9 +238,111 @@ def _safe_family_export_text(family: str, value: object, file_path: object = "")
             "lock": "补充并发提交或重复消费场景的回归测试。",
             "course_creation": "补充聚合创建、领域事件记录和发布顺序的回归测试。",
         }.get(family, "")
+    if _is_export_test_suggestion(text) and _test_suggestion_matches_family(family, text):
+        return text
     if text and _text_matches_export_family(family, text):
         return text
     return ""
+
+
+def _export_text_key(value: str) -> str:
+    text = str(value or "").lower()
+    text = re.sub(r"第\s*\d+\s*行", "", text)
+    text = re.sub(r"\b\w+\.java\b", "", text)
+    text = re.sub(r"[\s，,。；;：:、/()（）·\"'`]+", "", text)
+    return text
+
+
+def _dedupe_export_texts(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _sanitize_export_text(value)
+        if not text:
+            continue
+        key = _export_text_key(text)
+        if not key or key in seen:
+            continue
+        if any(key in existing or existing in key for existing in seen if min(len(existing), len(key)) >= 12):
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _is_export_test_suggestion(value: str) -> bool:
+    text = str(value or "").strip()
+    return (
+        any(token in text for token in ("测试", "用例", "回归"))
+        and not any(token in text for token in ("恢复", "补上", "改为", "调整", "删除", "补齐", "不要返回"))
+    )
+
+
+def _test_suggestion_matches_family(family: str, value: str) -> bool:
+    text = str(value or "")
+    tokens: dict[str, tuple[str, ...]] = {
+        "exception": ("异常", "失败", "成功", "catch", "补偿"),
+        "loop": ("批量", "调用次数", "耗时", "循环", "N 次"),
+        "query_boundary": ("查询", "数据量", "分页", "LIMIT", "边界"),
+        "comment": ("TODO", "注释", "业务动作", "承诺"),
+        "lock": ("并发", "重复", "锁", "幂等"),
+        "course_creation": ("聚合", "领域事件", "工厂", "发布顺序"),
+    }
+    return any(token in text for token in tokens.get(family, ()))
+
+
+def _canonical_export_test_suggestion(family: str) -> str:
+    return {
+        "exception": "补充异常分支不能返回成功的回归测试。",
+        "loop": "补充大批量输入下的调用次数和耗时回归测试。",
+        "query_boundary": "补充大数据量查询场景的回归测试。",
+        "comment": "补充 TODO 或注释承诺业务动作的回归测试。",
+        "lock": "补充并发提交或重复消费场景的回归测试。",
+        "course_creation": "补充聚合创建、领域事件记录和发布顺序的回归测试。",
+    }.get(family, "")
+
+
+def _should_keep_export_remediation_supplement(family: str, value: str) -> bool:
+    if _is_export_test_suggestion(value):
+        return _test_suggestion_matches_family(family, value)
+    return not _text_matches_export_family(family, value)
+
+
+def _build_export_remediation(issue: object, family: str, suggestion_parts: list[str]) -> str:
+    canonical = _canonical_export_remediation(issue, family)
+    ordered = [canonical] if canonical else []
+    ordered.extend(suggestion_parts)
+    deduped = _dedupe_export_texts(ordered)
+    if not canonical:
+        return "\n".join(deduped[:4])
+
+    primary = deduped[0] if deduped else canonical
+    supplements = [
+        item
+        for item in deduped[1:]
+        if _should_keep_export_remediation_supplement(family, item)
+    ]
+    supplements = [
+        _canonical_export_test_suggestion(family) if _is_export_test_suggestion(item) else item
+        for item in supplements
+    ]
+    supplements = _dedupe_export_texts(supplements)
+    return "\n".join([primary, *supplements[:1]])
+
+
+def _build_export_problem_description(
+    issue_summary: str,
+    aggregated_titles: list[str],
+    related_evidence: list[str],
+) -> str:
+    lines = [issue_summary]
+    extra_titles = _dedupe_export_texts(aggregated_titles)
+    extra_evidence = _dedupe_export_texts([item for item in related_evidence if item != issue_summary])
+    if extra_titles:
+        lines.append("其他专家补充：\n" + "\n".join(f"- {item}" for item in extra_titles[:3]))
+    if extra_evidence:
+        lines.append("关联证据：\n" + "\n".join(f"- {item}" for item in extra_evidence[:3]))
+    return "\n\n".join(part for part in lines if part)
 
 
 def _canonical_export_summary(issue: object, family: str) -> str:
@@ -241,11 +390,11 @@ def _canonical_export_title(issue: object, family: str) -> str:
     current_code = str(getattr(issue, "current_code", "") or "").lower()
     file_path = str(getattr(issue, "file_path", "") or "").lower()
     if family == "exception":
-        return "支付结算失败后仍返回成功" if "payment" in file_path else "异常被吞掉后仍按成功处理"
+        return "支付结算失败后仍返回成功" if "payment" in file_path else "失败被当成成功返回"
     if family == "comment":
         return "TODO 里的库存扣减未实现" if "库存" in str(getattr(issue, "summary", "") or "") or "inventory" in current_code else "注释承诺未实现"
     if family == "lock":
-        return "并发保护被移除"
+        return "批量报名的锁保护被移除"
     if family == "query_boundary":
         return "查询没有分页限制"
     if family == "loop":
@@ -312,7 +461,7 @@ def list_issues(review_id: str) -> list[dict[str, object]]:
 
     return [
         item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_issues(review_id)
+        for item in review_service_module.review_service.list_display_issues(review_id)
     ]
 
 
@@ -320,10 +469,7 @@ def list_issues(review_id: str) -> list[dict[str, object]]:
 def list_issue_messages(review_id: str, issue_id: str) -> list[dict[str, object]]:
     """返回某个 issue 关联的消息流。"""
 
-    return [
-        item.model_dump(mode="json")
-        for item in review_service_module.review_service.list_issue_messages(review_id, issue_id)
-    ]
+    return review_service_module.review_service.build_issue_messages(review_id, issue_id)
 
 
 @router.post("/reviews/{review_id}/human-decisions", status_code=status.HTTP_202_ACCEPTED)
@@ -380,7 +526,7 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
     if review is None:
         raise HTTPException(status_code=404, detail="review not found")
 
-    issues = review_service_module.review_service.list_issues(review_id)
+    issues = review_service_module.review_service.list_display_issues(review_id)
     findings = review_service_module.review_service.list_display_findings(review_id)
     finding_by_id = {item.finding_id: item for item in findings}
     selected_issue_ids = [item for item in payload.issue_ids if item]
@@ -392,7 +538,6 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
         related_findings = [finding_by_id[item] for item in issue.finding_ids if item in finding_by_id]
         issue_family = _export_issue_family(issue)
         suggestion_parts: list[str] = []
-        patched_code = ""
         for finding in related_findings:
             if finding.remediation_strategy:
                 suggestion_parts.append(_safe_family_export_text(issue_family, finding.remediation_strategy, issue.file_path))
@@ -401,8 +546,6 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
             for step in finding.remediation_steps or []:
                 if step:
                     suggestion_parts.append(_safe_family_export_text(issue_family, step, issue.file_path))
-            if not patched_code and _is_concrete_export_code(finding.suggested_code):
-                patched_code = finding.suggested_code
         if not suggestion_parts:
             suggestion_parts.extend(_safe_family_export_text(issue_family, item, issue.file_path) for item in (issue.aggregated_remediation_suggestions or []))
             suggestion_parts.extend(_safe_family_export_text(issue_family, item, issue.file_path) for item in (issue.aggregated_remediation_steps or []))
@@ -414,12 +557,7 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
             if step:
                 suggestion_parts.append(_safe_family_export_text(issue_family, step, issue.file_path))
         suggestion_parts = [item for item in suggestion_parts if item]
-        if not suggestion_parts:
-            canonical_remediation = _canonical_export_remediation(issue, issue_family)
-            if canonical_remediation:
-                suggestion_parts.append(canonical_remediation)
-        if _is_concrete_export_code(issue.suggested_code):
-            patched_code = issue.suggested_code
+        patched_code = _build_export_patched_code(issue, related_findings, issue_family)
 
         issue_summary = _safe_family_export_text(issue_family, issue.summary, issue.file_path)
         if not _export_summary_agrees_with_code(issue, issue_family, issue_summary):
@@ -443,19 +581,14 @@ def export_issues_to_codehub(review_id: str, payload: ExportIssuesToCodehubReque
             for item in dict.fromkeys(aggregated_titles)
             if item and item.strip() != canonical_title.strip()
         ]
-        description_parts = [issue_summary]
-        if aggregated_titles:
-            description_parts.extend(["其他专家补充：", *aggregated_titles[:4]])
-        if related_evidence:
-            description_parts.extend(["关联证据：", *related_evidence[:4]])
-        problem_description = "\n\n".join(part for part in description_parts if part)
+        problem_description = _build_export_problem_description(issue_summary, aggregated_titles, related_evidence)
         exported_items.append(
             {
                 "issue_id": issue.issue_id,
                 "title": _canonical_export_title(issue, issue_family),
                 "severity": issue.severity,
                 "problem_description": problem_description,
-                "remediation_suggestion": "\n".join(dict.fromkeys(suggestion_parts)),
+                "remediation_suggestion": _build_export_remediation(issue, issue_family, suggestion_parts),
                 "patched_code": patched_code,
                 "mock_ticket_url": f"mock://codehub/issues/{issue.issue_id}",
                 "finding_ids": issue.finding_ids,

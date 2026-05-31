@@ -37,6 +37,7 @@ class LlmUsageSummary(BaseModel):
     """审核任务内的大模型调用与 token 汇总。"""
 
     total_calls: int = 0
+    successful_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

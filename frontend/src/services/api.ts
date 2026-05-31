@@ -415,6 +415,7 @@ export interface ConfidenceSummary {
 
 export interface LlmUsageSummary {
   total_calls: number;
+  successful_calls?: number;
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;

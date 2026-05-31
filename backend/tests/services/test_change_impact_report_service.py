@@ -273,7 +273,7 @@ def test_change_impact_report_service_degrades_to_fact_report_when_llm_times_out
         review_id="rev_test",
     )
 
-    assert captured["timeout_seconds"] == 120.0
+    assert captured["timeout_seconds"] == 45.0
     assert llm_result is not None
     assert llm_result.mode == "fallback"
     assert "request_timeout" in llm_result.error
@@ -281,7 +281,7 @@ def test_change_impact_report_service_degrades_to_fact_report_when_llm_times_out
     assert updated.llm_markdown
     assert "feature/order-impact -> main" in updated.llm_markdown
     assert "OrderController -> OrderApplicationService -> OrderRepository" in updated.llm_markdown
-    assert any("LLM" in item and "降级" in item for item in updated.limitations)
+    assert any("LLM" in item and "已改用" in item for item in updated.limitations)
 
 
 def test_change_impact_report_service_supports_schema_driven_custom_placeholder():

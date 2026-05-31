@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.expert_registry import ExpertRegistry
 from app.services.llm_chat_service import LLMChatService
 from app.services.runtime_settings_service import RuntimeSettingsService
@@ -945,6 +946,13 @@ def test_llm_chat_uses_configured_light_prompt_budget(monkeypatch, tmp_path: Pat
     request_user = str((messages[1] or {}).get("content") or "")
     assert service._estimate_tokens(request_system) + service._estimate_tokens(request_user) <= 40000
     assert len(request_system) + len(request_user) <= 30000
+
+
+def test_llm_chat_does_not_cap_configured_light_input_budget():
+    service = LLMChatService()
+    runtime = RuntimeSettings(light_llm_max_input_tokens=1_200_000)
+
+    assert service._resolve_light_input_token_budget(runtime) == 1_200_000
 
 
 def test_light_prompt_compression_keeps_security_relevant_context():

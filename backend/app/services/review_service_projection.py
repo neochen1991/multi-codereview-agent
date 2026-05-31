@@ -4,12 +4,22 @@ import json
 import os
 import re
 
+from app.domain.models.event import ReviewEvent
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewTask
 
 
 class ReviewServiceProjectionMixin:
     """Metrics, replay bundles and lightweight process-message projections."""
+
+    _PROCESS_METADATA_HIDDEN_KEYS = {
+        "prompt_snapshot_full",
+        "model_raw_response_full",
+        "raw_response_full",
+        "schema_contract",
+        "schema_errors",
+        "schema_repair",
+    }
 
     def build_quality_metrics(self) -> dict[str, float | int]:
         reviews = self.list_reviews()
@@ -222,16 +232,22 @@ class ReviewServiceProjectionMixin:
             raise KeyError(review_id)
         return {
             "review": self._build_review_display_payload(review, light=True),
-            "events": [item.model_dump(mode="json") for item in self.list_events(review_id)],
+            "events": [self._build_process_event(item) for item in self.list_events(review_id)],
             "messages": [self._build_replay_message(item) for item in self.list_all_messages(review_id)],
-            "issues": [item.model_dump(mode="json") for item in self.list_issues(review_id)],
+            "issues": [item.model_dump(mode="json") for item in self.list_display_issues(review_id)],
             "findings": [item.model_dump(mode="json") for item in self.list_display_findings(review_id)],
             "feedback_labels": [item.model_dump(mode="json") for item in self.list_feedback_labels(review_id)],
             "report": self.build_report(review_id).model_dump(mode="json"),
         }
 
+    def build_process_events(self, review_id: str, *, since: str = "", limit: int = 0) -> list[dict[str, object]]:
+        return [self._build_process_event(item) for item in self.list_events(review_id, since=since, limit=limit)]
+
     def build_process_messages(self, review_id: str, *, since: str = "", limit: int = 0) -> list[dict[str, object]]:
         return [self._build_process_message(item) for item in self.list_all_messages(review_id, since=since, limit=limit)]
+
+    def build_issue_messages(self, review_id: str, issue_id: str) -> list[dict[str, object]]:
+        return [self._build_process_message(item) for item in self.list_issue_messages(review_id, issue_id)]
 
     def _build_light_review_payload(self, review: ReviewTask) -> dict[str, object]:
         payload = review.model_dump(mode="json")
@@ -245,6 +261,11 @@ class ReviewServiceProjectionMixin:
 
     def _build_review_display_payload(self, review: ReviewTask, *, light: bool) -> dict[str, object]:
         payload = self._build_light_review_payload(review) if light else review.model_dump(mode="json")
+        subject = payload.get("subject")
+        if isinstance(subject, dict):
+            metadata = subject.get("metadata")
+            if isinstance(metadata, dict):
+                subject["metadata"] = self._build_light_subject_metadata(metadata)
         try:
             findings = self.list_display_findings(review.review_id)
             issues = self.list_issues(review.review_id)
@@ -261,7 +282,9 @@ class ReviewServiceProjectionMixin:
         return payload
 
     def _build_light_subject_metadata(self, metadata: dict[str, object]) -> dict[str, object]:
-        payload = dict(metadata or {})
+        payload = self._sanitize_process_display_value(dict(metadata or {}))
+        if not isinstance(payload, dict):
+            payload = {}
         design_docs = payload.get("design_docs")
         if isinstance(design_docs, list):
             payload["design_docs"] = [
@@ -285,17 +308,12 @@ class ReviewServiceProjectionMixin:
             "rule_attribution": metadata.get("rule_attribution"),
             "prompt_profile": metadata.get("prompt_profile"),
             "prompt_snapshot_summary": metadata.get("prompt_snapshot_summary"),
-            "prompt_snapshot_full": metadata.get("prompt_snapshot_full"),
             "model_raw_response_excerpt": metadata.get("model_raw_response_excerpt"),
-            "model_raw_response_full": metadata.get("model_raw_response_full"),
             "rule_check_results": metadata.get("rule_check_results"),
             "candidate_findings": metadata.get("candidate_findings"),
             "context_requests": metadata.get("context_requests"),
             "self_check": metadata.get("self_check"),
             "rule_check_prepass": metadata.get("rule_check_prepass"),
-            "schema_contract": metadata.get("schema_contract"),
-            "schema_errors": metadata.get("schema_errors"),
-            "schema_repair": metadata.get("schema_repair"),
             "rule_coverage": metadata.get("rule_coverage"),
             "context_gaps": metadata.get("context_gaps"),
             "environment_status": metadata.get("environment_status"),
@@ -319,8 +337,27 @@ class ReviewServiceProjectionMixin:
             "message_type": message.message_type,
             "content": "",
             "created_at": message.created_at,
-            "metadata": {key: value for key, value in replay_metadata.items() if value is not None},
+            "metadata": {
+                key: self._sanitize_process_display_value(value)
+                for key, value in replay_metadata.items()
+                if value is not None
+            },
         }
+
+    def _build_process_event(self, event: ReviewEvent) -> dict[str, object]:
+        return {
+            "event_id": event.event_id,
+            "review_id": event.review_id,
+            "event_type": event.event_type,
+            "phase": event.phase,
+            "message": self._sanitize_process_display_text(event.message),
+            "created_at": event.created_at,
+            "payload": self._sanitize_process_display_value(dict(event.payload or {})),
+        }
+
+    def _build_process_event_model(self, event: ReviewEvent) -> ReviewEvent:
+        payload = self._build_process_event(event)
+        return ReviewEvent.model_validate(payload)
 
     def _build_process_message(self, message: ConversationMessage) -> dict[str, object]:
         allowed_metadata_keys = {
@@ -361,13 +398,11 @@ class ReviewServiceProjectionMixin:
             "llm_error",
             "matched_rules",
             "model_raw_response_excerpt",
-            "model_raw_response_full",
             "minimal_context",
             "mode",
             "model",
             "phase",
             "path_resolution_failures",
-            "prompt_snapshot_full",
             "platform_kind",
             "prompt_snapshot_summary",
             "rule_check_results",
@@ -375,9 +410,6 @@ class ReviewServiceProjectionMixin:
             "context_requests",
             "self_check",
             "rule_check_prepass",
-            "schema_contract",
-            "schema_errors",
-            "schema_repair",
             "rule_coverage",
             "provider",
             "related_contexts",
@@ -405,11 +437,13 @@ class ReviewServiceProjectionMixin:
         }
         metadata = dict(message.metadata or {})
         compact_metadata = {
-            key: metadata.get(key)
+            key: self._sanitize_process_metadata_value(key, metadata.get(key))
             for key in allowed_metadata_keys
             if metadata.get(key) is not None
         }
-        content = self._clip_process_message_content(message.content)
+        content = self._clip_process_message_content(
+            self._sanitize_process_display_text(message.content)
+        )
         return {
             "message_id": message.message_id,
             "review_id": message.review_id,
@@ -420,6 +454,100 @@ class ReviewServiceProjectionMixin:
             "created_at": message.created_at,
             "metadata": compact_metadata,
         }
+
+    def _sanitize_process_display_value(self, value: object) -> object:
+        if isinstance(value, str):
+            return self._sanitize_process_display_text(value)
+        if isinstance(value, list):
+            return [self._sanitize_process_display_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): self._sanitize_process_display_value(item)
+                for key, item in value.items()
+                if not any(hidden in str(key) for hidden in self._PROCESS_METADATA_HIDDEN_KEYS)
+            }
+        return value
+
+    def _sanitize_process_metadata_value(self, key: str, value: object) -> object:
+        structural_string_keys = {
+            "analysis_mode",
+            "context_source",
+            "decision",
+            "fallback_source",
+            "message_type",
+            "mode",
+            "model",
+            "phase",
+            "platform_kind",
+            "provider",
+            "status",
+        }
+        if isinstance(value, str):
+            if key in structural_string_keys:
+                return value
+            return self._sanitize_process_display_text(value)
+        if isinstance(value, list):
+            return [self._sanitize_process_metadata_value(key, item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(child_key): self._sanitize_process_metadata_value(str(child_key), child_value)
+                for child_key, child_value in value.items()
+                if not any(hidden in str(child_key) for hidden in self._PROCESS_METADATA_HIDDEN_KEYS)
+            }
+        return value
+
+    def _sanitize_process_display_text(self, value: object) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        try:
+            sanitized = self._sanitize_user_facing_issue_text(text)
+        except Exception:
+            sanitized = text
+        cleaned = sanitized or text
+        # prompt/metadata 中可能包含规则说明，不能因为命中内部词就整段丢失。
+        replacements = (
+            ("代码锚点", "代码位置"),
+            ("target_hunk_excerpt", "目标代码片段"),
+            ("related_findings", "关联发现"),
+            ("Static diff signals", "静态分析命中"),
+            ("RULE_CHECK_PREPASS_ONLY", "规则预检"),
+            ("candidate_findings_missing_or_not_list", "候选发现格式不完整"),
+            ("candidate_findings", "候选发现"),
+            ("schema_errors", "格式校验提示"),
+            ("raw_response_full", "完整原始响应"),
+            ("raw_response", "原始响应"),
+            ("loop_call_amplification", "循环内逐条调用风险"),
+            ("lock_guard_removed", "并发保护被移除"),
+            ("兜底返回", "成功返回"),
+            ("静默吞掉", "忽略异常"),
+            ("Tree-sitter", "代码结构图谱"),
+            ("tree-sitter", "代码结构图谱"),
+            ("tree_sitter", "代码结构图谱"),
+            ("主Agent", "审核调度"),
+            ("主 Agent", "审核调度"),
+            ("findings", "检视发现"),
+            ("finding", "检视发现"),
+            ("争议/裁决议题", "正式问题"),
+            ("议题", "问题"),
+            ("人工裁决", "人工确认"),
+            ("blocker/critical", "阻断/严重"),
+            ("blocker", "阻断"),
+            ("critical", "严重"),
+            ("waiting_human", "待人工确认"),
+            ("needs_human_review", "需要人工确认"),
+            ("judge_accepted", "已确认有效"),
+            ("judge_rejected", "已确认无效"),
+            ("action_required", "需要处理"),
+            ("human_gate", "人工确认"),
+            ("completed", "已完成"),
+            ("running", "运行中"),
+            ("pending", "等待开始"),
+            ("failed", "执行失败"),
+        )
+        for source, target in replacements:
+            cleaned = cleaned.replace(source, target)
+        return cleaned
 
     def _clip_process_message_content(self, content: str) -> str:
         text = str(content or "")

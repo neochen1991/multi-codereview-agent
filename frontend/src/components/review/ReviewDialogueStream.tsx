@@ -3,6 +3,7 @@ import { Avatar, Button, Empty, Segmented, Select, Space, Tag, Typography } from
 
 import type { ConversationMessage, ReviewEvent, ReviewSummary } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
+import { cleanUserFacingText } from "./issueDisplayQuality";
 
 const { Paragraph, Text } = Typography;
 
@@ -127,16 +128,37 @@ const buildCompactDetail = (value: string): { text: string; truncated: boolean }
   return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
 };
 
+const CONDITIONAL_FILTER_LABEL = "证据未闭环，保留为观察项";
+const CONDITIONAL_FILTER_REASON =
+  "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。";
+
+const sanitizeDialogueValue = (value: unknown): string => {
+  const raw = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!raw) return "";
+  const humanized = humanizeReviewText(raw).trim();
+  return cleanUserFacingText(humanized) || humanized;
+};
+
+const normalizeIssueFilterLabel = (ruleCode: string, value: unknown): string => {
+  if (ruleCode === "conditional_conclusion") return CONDITIONAL_FILTER_LABEL;
+  return sanitizeDialogueValue(value);
+};
+
+const normalizeIssueFilterReason = (ruleCode: string, value: unknown): string => {
+  if (ruleCode === "conditional_conclusion") return CONDITIONAL_FILTER_REASON;
+  return sanitizeDialogueValue(value);
+};
+
 const normalizeValueList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => {
-      if (typeof item === "string") return item.trim();
+      if (typeof item === "string") return sanitizeDialogueValue(item);
       if (item == null) return "";
       try {
-        return JSON.stringify(item);
+        return sanitizeDialogueValue(JSON.stringify(item));
       } catch {
-        return String(item);
+        return sanitizeDialogueValue(item);
       }
     })
     .filter(Boolean);
@@ -148,7 +170,7 @@ const limitValueList = (values: string[], maxItems = 12): string[] => {
 };
 
 const normalizeSingleValue = (value: unknown): string[] => {
-  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (typeof value === "string" && value.trim()) return [sanitizeDialogueValue(value)];
   return [];
 };
 
@@ -221,8 +243,9 @@ const normalizeAffectedFlowValueList = (value: unknown): string[] => {
 
 const getCodeContextSourceLabel = (value: unknown): string => {
   const source = String(value || "").trim();
-  if (source === "tree_sitter") return "Tree-sitter 结构化检索";
+  if (source === "tree_sitter") return "代码结构关系检索";
   if (source === "keyword_search") return "关键词搜索";
+  if (source === "fallback") return "关键词补充检索";
   return source || "未标明";
 };
 
@@ -326,12 +349,13 @@ const normalizeIssueFilterDecisionEntries = (value: unknown): IssueFilterDecisio
     .map((item) => {
       if (!item || typeof item !== "object") return null;
       const payload = item as Record<string, unknown>;
+      const ruleCode = String(payload.rule_code || "").trim();
       return {
-        topic: String(payload.topic || "").trim(),
-        ruleCode: String(payload.rule_code || "").trim(),
-        ruleLabel: String(payload.rule_label || "").trim(),
-        reason: String(payload.reason || "").trim(),
-        severity: String(payload.severity || "").trim(),
+        topic: sanitizeDialogueValue(payload.topic),
+        ruleCode,
+        ruleLabel: normalizeIssueFilterLabel(ruleCode, payload.rule_label),
+        reason: normalizeIssueFilterReason(ruleCode, payload.reason),
+        severity: sanitizeDialogueValue(payload.severity),
         findingTitles: normalizeValueList(payload.finding_titles),
         expertIds: normalizeValueList(payload.expert_ids),
       };
@@ -468,14 +492,14 @@ const buildRuleScreeningGroup = (value: unknown): StructuredGroup | null => {
           `候选 ${possibleHitCount}`,
           `带入审查 ${matchedRuleCount}`,
           screeningMode ? `筛选模式 ${screeningMode}` : "",
-          fallbackUsed ? "已回退到启发式" : "",
+          fallbackUsed ? "未命中明确规则，已按保守方式继续筛选" : "",
         ].filter(Boolean),
       },
       {
         label: "命中规则",
         values: rules.map((item) => {
           const priority = item.priority ? `[${item.priority}] ` : "";
-          const title = item.title || item.ruleId;
+          const title = humanizeReviewText(item.title || item.ruleId);
           const decision = item.decision ? ` · ${item.decision}` : "";
           return `${priority}${title}${decision}`;
         }),
@@ -483,15 +507,15 @@ const buildRuleScreeningGroup = (value: unknown): StructuredGroup | null => {
       {
         label: "命中原因",
         values: rules.map((item) => {
-          const title = item.title || item.ruleId;
-          const reason = item.reason || "命中规则信号";
+          const title = humanizeReviewText(item.title || item.ruleId);
+          const reason = humanizeReviewText(item.reason || "命中规则信号");
           return `${title} · ${reason}`;
         }),
       },
       {
         label: "命中关键词",
         values: rules.flatMap((item) =>
-          item.matchedTerms.map((term) => `${item.title || item.ruleId} · ${term}`),
+          item.matchedTerms.map((term) => `${humanizeReviewText(item.title || item.ruleId)} · ${humanizeReviewText(term)}`),
         ),
       },
     ].filter((section) => section.values.length > 0),
@@ -552,7 +576,7 @@ const buildRuleScreeningBatchGroup = (value: unknown): StructuredGroup | null =>
           .map((item) => {
             if (!item || typeof item !== "object") return "";
             const entry = item as Record<string, unknown>;
-            const title = String(entry.title || entry.rule_id || "").trim();
+            const title = humanizeReviewText(String(entry.title || entry.rule_id || "").trim());
             const priority = String(entry.priority || "").trim();
             return `${priority ? `[${priority}] ` : ""}${title}`;
           })
@@ -561,7 +585,7 @@ const buildRuleScreeningBatchGroup = (value: unknown): StructuredGroup | null =>
       {
         label: "筛选结果",
         values: rules.map((item) => {
-          const title = item.title || item.ruleId;
+          const title = humanizeReviewText(item.title || item.ruleId);
           const priority = item.priority ? `[${item.priority}] ` : "";
           const decision = item.decision ? ` · ${item.decision}` : "";
           return `${priority}${title}${decision}`;
@@ -569,12 +593,12 @@ const buildRuleScreeningBatchGroup = (value: unknown): StructuredGroup | null =>
       },
       {
         label: "筛选原因",
-        values: rules.map((item) => `${item.title || item.ruleId} · ${item.reason || "命中本批规则信号"}`),
+        values: rules.map((item) => `${humanizeReviewText(item.title || item.ruleId)} · ${humanizeReviewText(item.reason || "命中本批规则信号")}`),
       },
       {
         label: "命中关键词",
         values: rules.flatMap((item) =>
-          item.matchedTerms.map((term) => `${item.title || item.ruleId} · ${term}`),
+          item.matchedTerms.map((term) => `${humanizeReviewText(item.title || item.ruleId)} · ${humanizeReviewText(term)}`),
         ),
       },
       {
@@ -841,19 +865,19 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   } else if (eventType === "main_agent_routing_ready") {
     summaryParts.push("审核调度已完成派工规划，准备下发检查任务");
   } else if (eventType === "review_workspace_code_graph_started") {
-    summaryParts.push("Tree-sitter 快照图谱正在初始化");
+    summaryParts.push("代码结构图谱正在初始化");
   } else if (eventType === "review_workspace_code_graph_completed") {
-    summaryParts.push(`Tree-sitter 快照图谱初始化完成：${String(metadata.graph_status || "unknown")}`);
+    summaryParts.push(`代码结构图谱初始化完成：${sanitizeDialogueValue(metadata.graph_status || "unknown")}`);
   } else if (eventType === "review_workspace_gitnexus_graph_started") {
     summaryParts.push("GitNexus 快照图谱正在初始化");
   } else if (eventType === "review_workspace_gitnexus_graph_completed") {
-    summaryParts.push(`GitNexus 快照图谱初始化完成：${String(metadata.graph_status || "unknown")}`);
+    summaryParts.push(`GitNexus 快照图谱初始化完成：${sanitizeDialogueValue(metadata.graph_status || "unknown")}`);
   } else if (eventType === "code_graph_context_started") {
-    summaryParts.push("正在用 Tree-sitter 查找代码关联上下文");
+    summaryParts.push("正在查找代码关联上下文");
   } else if (eventType === "code_graph_context_ready") {
-    summaryParts.push(`Tree-sitter 已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
+    summaryParts.push(`已找到 ${String(metadata.context_count ?? 0)} 条代码关联上下文`);
   } else if (eventType === "code_graph_context_fallback") {
-    summaryParts.push(`Tree-sitter 未命中，改用关键词搜索：${String(metadata.fallback_reason || "未找到符号关系")}`);
+    summaryParts.push(`结构化关系未命中，改用关键词搜索：${String(metadata.fallback_reason || "未找到符号关系")}`);
   } else if (eventType === "keyword_context_ready") {
     summaryParts.push(`关键词搜索已找到 ${String(metadata.context_count ?? 0)} 条关联上下文`);
   } else if (eventType === "main_agent_expert_execution_completed") {
@@ -866,7 +890,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     summaryParts.push("系统已生成关联影响报告");
   }
   if (activeSkills.length > 0) summaryParts.push(`激活技能：${activeSkills.join(" / ")}`);
-  if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · 备用流程" : ""}`);
+  if (model) summaryParts.push(`模型：${model}${mode === "fallback" ? " · 保守处理" : ""}`);
   if (filePath) summaryParts.push(`定位：${filePath}${lineStart ? `:${lineStart}` : ""}`);
   if (hunkHeader) summaryParts.push(`Hunk：${hunkHeader}`);
   const messageStatus =
@@ -918,20 +942,23 @@ const buildInvocationDetail = (
 };
 
 const formatInvocationDetail = (label: string, summary: string, result: unknown): string => {
-  const lines = [summary];
+  const lines = [sanitizeDialogueValue(summary)];
   if (result && typeof result === "object") {
     const payload = result as Record<string, unknown>;
     Object.entries(payload).forEach(([key, value]) => {
       if (key === "summary" || value == null) return;
       if (typeof value === "string") {
-        lines.push(`${key}: ${value}`);
+        const cleaned = sanitizeDialogueValue(value);
+        if (cleaned) lines.push(`${key}: ${cleaned}`);
         return;
       }
       if (Array.isArray(value)) {
-        lines.push(`${key}: ${value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(" | ")}`);
+        const cleanedItems = normalizeValueList(value);
+        if (cleanedItems.length) lines.push(`${key}: ${cleanedItems.join(" | ")}`);
         return;
       }
-      lines.push(`${key}: ${JSON.stringify(value)}`);
+      const cleaned = sanitizeDialogueValue(JSON.stringify(value));
+      if (cleaned) lines.push(`${key}: ${cleaned}`);
     });
   }
   return `${label}\n${lines.join("\n")}`;
@@ -1258,7 +1285,7 @@ const buildStructuredGroups = (
         label: "命中数量",
         values: typeof metadata.context_count === "number" ? [String(metadata.context_count)] : [],
       },
-      { label: "退化原因", values: normalizeSingleValue(metadata.fallback_reason) },
+      { label: "备用原因", values: normalizeSingleValue(metadata.fallback_reason) },
       { label: "命中片段", values: limitValueList(normalizeContextValueList(metadata.related_contexts), 8) },
     ].filter((section) => section.values.length > 0);
     return {
@@ -1664,7 +1691,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
           ? row.metadata.violated_guidelines.map((item) => String(item)).filter(Boolean)
           : [];
         const ruleBasedReasoning =
-          typeof row.metadata.rule_based_reasoning === "string" ? row.metadata.rule_based_reasoning : "";
+          typeof row.metadata.rule_based_reasoning === "string" ? sanitizeDialogueValue(row.metadata.rule_based_reasoning) : "";
         const activeSkills = Array.isArray(row.metadata.active_skills)
           ? row.metadata.active_skills.map((item) => String(item)).filter(Boolean)
           : [];
@@ -1743,7 +1770,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 <div className="dialogue-rule-strip">
                   {matchedRules.slice(0, 3).map((rule) => (
                     <Tag key={`${row.id}-matched-${rule}`} color="blue">
-                      {rule}
+                      {humanizeReviewText(rule)}
                     </Tag>
                   ))}
                 </div>
@@ -1752,7 +1779,7 @@ const ReviewDialogueStream: React.FC<Props> = ({ messages, review, events = [] }
                 <div className="dialogue-rule-strip">
                   {violatedGuidelines.slice(0, 3).map((rule) => (
                     <Tag key={`${row.id}-violated-${rule}`} color="volcano">
-                      {rule}
+                      {humanizeReviewText(rule)}
                     </Tag>
                   ))}
                 </div>

@@ -304,7 +304,8 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
   );
 
   const columns = useMemo<ColumnsType<ReviewResultListRow>>(
-    () => [
+    () => {
+      const nextColumns: ColumnsType<ReviewResultListRow> = [
       {
         title: "代码文件",
         dataIndex: "file_path",
@@ -378,8 +379,22 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
               }
             >
               <div className="review-summary-cell">
-                <div className="review-summary-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {titleText}
+                <div className="review-summary-title-row">
+                  <div className="review-summary-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {titleText}
+                  </div>
+                  {onSelectRow ? (
+                    <button
+                      type="button"
+                      className="review-detail-link"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectRow(item.id);
+                      }}
+                    >
+                      查看详情
+                    </button>
+                  ) : null}
                 </div>
                 <div
                   className="review-summary-text"
@@ -518,8 +533,12 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             <span style={{ color: "var(--text-tertiary)" }}>-</span>
           ),
       },
-    ],
-    [columnWidths, onSelectRow],
+      ];
+      return rows.some((item) => item.hasDesignEvidence)
+        ? nextColumns
+        : nextColumns.filter((column) => column.key !== "design_alignment_status");
+    },
+    [columnWidths, onSelectRow, rows],
   );
 
   return (

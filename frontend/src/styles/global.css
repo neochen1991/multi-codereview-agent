@@ -2634,6 +2634,13 @@ body {
   min-width: 0;
 }
 
+.review-summary-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .review-summary-title {
   min-width: 0;
   overflow: hidden;
@@ -2641,6 +2648,25 @@ body {
   white-space: nowrap;
   font-weight: 600;
   color: #0f172a;
+  flex: 1;
+}
+
+.review-detail-link {
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 9px;
+}
+
+.review-detail-link:hover {
+  background: #dbeafe;
+  color: #1e3a8a;
 }
 
 .review-summary-text {

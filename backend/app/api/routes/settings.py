@@ -278,28 +278,28 @@ def run_repository_gitnexus_index(repository_id: str, request: Request) -> dict[
 
 @router.get("/settings/code-graph/index/status")
 def get_code_graph_index_status(request: Request) -> dict[str, object]:
-    """返回默认代码仓最近一次 Tree-sitter 代码图谱状态。"""
+    """返回默认代码仓最近一次代码结构图谱状态。"""
 
     return _code_graph_scheduler(request).status()
 
 
 @router.get("/settings/repositories/{repository_id}/code-graph/status")
 def get_repository_code_graph_index_status(repository_id: str, request: Request) -> dict[str, object]:
-    """返回指定代码仓最近一次 Tree-sitter 代码图谱状态。"""
+    """返回指定代码仓最近一次代码结构图谱状态。"""
 
     return _code_graph_scheduler(request).status(repository_id)
 
 
 @router.post("/settings/code-graph/index/run", status_code=status.HTTP_202_ACCEPTED)
 def run_code_graph_index(request: Request) -> dict[str, object]:
-    """手动触发默认代码仓的 Tree-sitter 代码图谱建图。"""
+    """手动触发默认代码仓的代码结构图谱建图。"""
 
     return _code_graph_scheduler(request).trigger_manual_index()
 
 
 @router.post("/settings/repositories/{repository_id}/code-graph/index/run", status_code=status.HTTP_202_ACCEPTED)
 def run_repository_code_graph_index(repository_id: str, request: Request) -> dict[str, object]:
-    """手动触发指定代码仓的 Tree-sitter 代码图谱建图。"""
+    """手动触发指定代码仓的代码结构图谱建图。"""
 
     return _code_graph_scheduler(request).trigger_manual_index(repository_id)
 

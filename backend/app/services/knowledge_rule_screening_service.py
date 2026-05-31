@@ -1004,7 +1004,7 @@ class KnowledgeRuleScreeningService:
                     "score": max(float(item.get("score") or 0.0), 8.0),
                     "matched_terms": (matched_terms + ["catch", "exception", "printStackTrace"])[:10],
                     "matched_signals": (matched_signals + ["java_quality:exception_swallowed"])[:10],
-                    "reason": "命中静默吞异常强信号，需按专家绑定异常处理规则逐条深审",
+                    "reason": "命中异常处理被忽略的强信号，需按专家绑定异常处理规则逐条深审",
                 }
             return item
         return item

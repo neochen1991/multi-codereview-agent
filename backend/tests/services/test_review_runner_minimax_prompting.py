@@ -76,7 +76,7 @@ def test_minimax_expert_prompt_uses_short_rule_guided_contract(storage_root: Pat
     assert "专家审视规范摘要" in prompt
     assert "这是一段很长的专家规范正文" in prompt
     assert "语言通用规范" in prompt
-    assert "只能描述一个具体问题、一个主文件和一个主代码锚点" in prompt
+    assert "只能描述一个具体问题、一个主文件和一个主代码位置" in prompt
     assert "每条 finding 的 JSON 字段要求" not in prompt
 
 
@@ -327,7 +327,7 @@ def test_legacy_expert_prompt_keeps_evidenced_uncertain_findings_instead_of_sile
 
     assert "证据不足时不要输出 finding" not in prompt
     assert "请直接不输出该条 finding" not in prompt
-    assert "有当前代码锚点但缺上下文" in prompt
+    assert "有当前变更代码位置但缺上下文" in prompt
     assert "verification_needed" in prompt
 
 

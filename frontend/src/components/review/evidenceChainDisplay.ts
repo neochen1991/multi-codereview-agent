@@ -23,7 +23,7 @@ const normalizeUnknownList = (value: unknown): string[] => {
 
 export const evidenceContextSourceLabel = (value: unknown): string => {
   const source = String(value || "").trim();
-  if (source === "tree_sitter") return "Tree-sitter 结构化检索";
+  if (source === "tree_sitter") return "代码结构关系检索";
   if (source === "keyword_search") return "关键词搜索";
   if (source === "repository_context") return "仓库源码检索";
   if (source === "diff") return "本次 diff";
@@ -34,7 +34,7 @@ const statusLabel = (value: unknown): string => {
   const status = String(value || "").trim();
   if (status === "present") return "已提取到问题主张";
   if (status === "anchored") return "已定位到具体代码位置";
-  if (status === "weak") return "代码锚点较弱，需要人工复核";
+  if (status === "weak") return "代码位置证据较弱，需要人工复核";
   if (status === "verified") return "工具核验已通过";
   if (status === "not_verified") return "工具未能自动确认";
   if (status === "signal_matched" || status === "matched") return "已命中相关证据";
@@ -131,7 +131,7 @@ export const evidenceStepSummary = (step: EvidenceChainStep, issueContext?: stri
     const source = payload.primary_source || payload.context_source || payload.status;
     const fallbackReason = String(payload.fallback_reason || "").trim();
     return fallbackReason
-      ? `${evidenceContextSourceLabel(source)}，退化原因：${fallbackReason}`
+      ? `${evidenceContextSourceLabel(source)}，备用原因：${fallbackReason}`
       : `本条证据主要来自：${evidenceContextSourceLabel(source)}`;
   }
 
@@ -144,7 +144,7 @@ export const evidenceStepSummary = (step: EvidenceChainStep, issueContext?: stri
 
   if (stepName === "graph_relationship" || stepName === "related_contexts") {
     const contexts = normalizeUnknownList(payload.contexts || payload.related_contexts);
-    return contexts.length ? `Tree-sitter 找到相关调用/引用关系：${contexts.slice(0, 4).join("；")}` : statusLabel(payload.status);
+    return contexts.length ? `代码结构检索找到相关调用/引用关系：${contexts.slice(0, 4).join("；")}` : statusLabel(payload.status);
   }
 
   if (stepName === "review_priority") {

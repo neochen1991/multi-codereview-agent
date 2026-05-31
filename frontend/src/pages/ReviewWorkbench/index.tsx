@@ -311,7 +311,7 @@ const THRESHOLD_RULE_CODES = new Set([
 
 const parseFindingCountFromSummary = (value?: string | null): number => {
   const text = String(value || "");
-  const match = text.match(/(?:共收敛|收敛)\s*(\d+)\s*条\s*(?:发现|findings?|检视发现)/i);
+  const match = text.match(/(?:共收敛|收敛)\s*(\d+)\s*条\s*(?:有效发现|检视发现|发现|findings?)/i);
   if (!match) return 0;
   const count = Number(match[1]);
   return Number.isFinite(count) ? count : 0;
@@ -319,7 +319,18 @@ const parseFindingCountFromSummary = (value?: string | null): number => {
 
 const isFormalIssueForDisplay = (issue: DebateIssue): boolean =>
   String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
-  String(issue.resolution || "").trim().toLowerCase() !== "human_rejected";
+  !["needs_verification", "comment", "abstain", "rejected_after_debate"].includes(
+    String(issue.status || "").trim().toLowerCase(),
+  ) &&
+  ![
+    "human_rejected",
+    "needs_verification",
+    "llm_judge_needs_verification",
+    "targeted_debate_needs_verification",
+    "feedback_profile_requires_more_evidence",
+    "comment",
+    "abstain",
+  ].includes(String(issue.resolution || "").trim().toLowerCase());
 
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
@@ -366,7 +377,7 @@ const ExpertRoutingPanel: React.FC<{ summary: ExpertRoutingSummary | null }> = (
   const bannerTone = summary.system_added_experts.length > 0 ? "warning" : hasAdjustments ? "info" : "default";
   const heading =
     summary.system_added_experts.length > 0
-      ? "检查角色与代码不完全匹配，系统已自动补入兜底角色继续检视"
+      ? "检查角色与代码不完全匹配，系统已自动补入必要检查角色继续检视"
       : hasAdjustments
         ? "部分已选择角色与当前变更相关性较低，系统已自动跳过"
         : "本轮检查角色匹配已完成";
@@ -415,7 +426,7 @@ const ExpertRuleCoveragePanel: React.FC<{ items: ExpertRuleCoverageSummary[] }> 
                 <Tag color="blue">{`候选 ${item.rule_screening.possible_hit_count}`}</Tag>
                 {item.rule_screening.batch_count ? <Tag>{`批次 ${item.rule_screening.batch_count}`}</Tag> : null}
                 {item.rule_screening.screening_mode ? <Tag>{humanizeReviewText(item.rule_screening.screening_mode)}</Tag> : null}
-                {item.rule_screening.screening_fallback_used ? <Tag color="orange">备用流程</Tag> : null}
+                {item.rule_screening.screening_fallback_used ? <Tag color="orange">保守筛选</Tag> : null}
               </Space>
               {item.rule_screening.matched_rules_for_llm?.length ? (
                 <Space wrap>
@@ -691,7 +702,7 @@ const ReviewWorkbenchPage: React.FC = () => {
   };
 
   const loadResultBundle = async (targetReviewId: string, loadKey?: string) => {
-    const [nextReport, artifactBundle] = await Promise.all([
+    const [nextReport, artifactBundle, fallbackIssues, fallbackFindings] = await Promise.all([
       reviewApi.getReport(targetReviewId, {
         findings_limit: 800,
         findings_offset: 0,
@@ -699,19 +710,33 @@ const ReviewWorkbenchPage: React.FC = () => {
         issues_offset: 0,
       }),
       reviewApi.getArtifacts(targetReviewId).catch(() => null),
+      reviewApi.listIssues(targetReviewId).catch(() => []),
+      reviewApi.listFindings(targetReviewId, { limit: 800 }).catch(() => []),
     ]);
     if (loadKey && !isWorkspaceLoadCurrent(loadKey)) {
       return { report: nextReport, artifacts: artifactBundle };
     }
 
-    setReport(nextReport);
-    setIssues(nextReport.issues || []);
-    replaceFindings(nextReport.findings || []);
+    const reportIssues = nextReport.issues || [];
+    const reportFindings = nextReport.findings || [];
+    const nextIssues = reportIssues.length ? reportIssues : fallbackIssues;
+    const nextFindings = reportFindings.length ? reportFindings : fallbackFindings;
+    const displayReport =
+      nextIssues === reportIssues && nextFindings === reportFindings
+        ? nextReport
+        : {
+            ...nextReport,
+            issues: nextIssues,
+            findings: nextFindings,
+          };
+    setReport(displayReport);
+    setIssues(nextIssues);
+    replaceFindings(nextFindings);
     setArtifacts(artifactBundle);
     setResultFindingDetailCache({});
     setResultFindingDetailsLoading(false);
     setResultFindingDetailsError("");
-    return { report: nextReport, artifacts: artifactBundle };
+    return { report: displayReport, artifacts: artifactBundle };
   };
 
   const loadImpactBundle = async (targetReviewId: string, loadKey?: string) => {
@@ -1044,6 +1069,13 @@ const ReviewWorkbenchPage: React.FC = () => {
     [findings, issueByFindingId, issueFilterDecisionByFindingId],
   );
   const formalIssueCount = useMemo(() => issues.filter(isFormalIssueForDisplay).length, [issues]);
+  const artifactIssueCount = useMemo(
+    () => Math.max(artifacts?.summary_comment?.issue_count || 0, artifacts?.check_run?.issues?.length || 0),
+    [artifacts?.check_run?.issues?.length, artifacts?.summary_comment?.issue_count],
+  );
+  const resultDetailsMissing = artifactIssueCount > formalIssueCount && formalIssueCount === 0;
+  const reportIssueCount = Number(report?.issue_count || 0);
+  const displayFormalIssueCount = resultDetailsMissing ? artifactIssueCount : Math.max(formalIssueCount, reportIssueCount);
   const failedExpertCount = useMemo(() => {
     const expertExecution = review?.subject?.metadata?.expert_execution as { failed_experts?: unknown[] } | undefined;
     return Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
@@ -1064,13 +1096,18 @@ const ReviewWorkbenchPage: React.FC = () => {
     const failedExpertSuffix = failedExpertCount
       ? ` 本轮另有 ${failedExpertCount} 个检查角色执行失败，已保留其余检视结果。`
       : "";
-    return `审核报告已生成，共收敛 ${overviewFindingCount} 条检视发现，形成 ${formalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${failedExpertSuffix}`;
+    if (resultDetailsMissing) {
+      return `审核报告已生成，产物快照记录形成 ${artifactIssueCount} 个正式问题，但当前没有恢复出每条问题的详情。请先恢复或重新生成结果，再处理问题清单。${failedExpertSuffix}`;
+    }
+    return `审核报告已生成，共收敛 ${overviewFindingCount} 条检视发现，形成 ${displayFormalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${failedExpertSuffix}`;
   }, [
+    artifactIssueCount,
+    displayFormalIssueCount,
     failedExpertCount,
-    formalIssueCount,
     overviewFindingCount,
     report?.confidence_summary?.needs_human_count,
     report?.summary,
+    resultDetailsMissing,
     review?.pending_human_issue_ids?.length,
     review?.report_summary,
   ]);
@@ -1526,7 +1563,7 @@ const ReviewWorkbenchPage: React.FC = () => {
               form.selected_experts.length
             }
             findingCount={overviewFindingCount}
-            issueCount={formalIssueCount}
+            issueCount={displayFormalIssueCount}
             humanGateCount={review?.pending_human_issue_ids?.length || 0}
             onStatusClick={focusProcessDialogue}
             onPhaseClick={focusProcessDialogue}
@@ -1712,7 +1749,13 @@ const ReviewWorkbenchPage: React.FC = () => {
           </Space>
         )}
 
-        {activeStep === "result" && (
+        {activeStep === "result" && loading ? (
+          <div style={{ marginTop: 16 }}>
+            <WorkbenchPanelFallback description="检视结果加载中..." />
+          </div>
+        ) : null}
+
+        {activeStep === "result" && !loading && (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {impactFailureSummary?.state === "failed" ? (
               <Alert
@@ -1730,6 +1773,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                     report={report}
                     findings={findings}
                     issues={issues}
+                    artifacts={artifacts}
                     issueFilterDecisions={issueFilterDecisions}
                     review={review}
                     onNavigateToGroup={focusResultGroup}
@@ -1816,6 +1860,7 @@ const ReviewWorkbenchPage: React.FC = () => {
                           reviewId={reviewId}
                           issues={issues}
                           findings={findings}
+                          expectedIssueCount={displayFormalIssueCount}
                           selectedIssueId={selectedIssueId}
                           onSelectIssue={(issueId) => {
                             setSelectedIssueId(issueId);

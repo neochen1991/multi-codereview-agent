@@ -67,7 +67,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "light_max_parallel_experts": 1,
             "light_max_debate_rounds": 1,
             "light_llm_max_prompt_chars": 88000,
-            "light_llm_max_input_tokens": 98000,
+            "light_llm_max_input_tokens": 1500000,
             "default_llm_provider": "dashscope-openai-compatible",
             "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
             "default_llm_model": "kimi-k2.5",
@@ -126,7 +126,7 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["light_max_parallel_experts"] == 1
     assert payload["light_max_debate_rounds"] == 1
     assert payload["light_llm_max_prompt_chars"] == 88000
-    assert payload["light_llm_max_input_tokens"] == 98000
+    assert payload["light_llm_max_input_tokens"] == 1500000
     assert "schema_diff" in payload["tool_allowlist"]
     assert "frontend-design" in payload["runtime_tool_allowlist"]
     assert payload["default_llm_model"] == "kimi-k2.5"

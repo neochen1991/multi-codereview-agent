@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Popconfirm, Select, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
 import { useNavigate } from "react-router-dom";
 
-import { reviewApi, type ReviewSummary } from "@/services/api";
+import { projectApi, reviewApi, type ReviewSummary } from "@/services/api";
 import { getReviewPhaseLabel, getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
 
 const buildReviewLabel = (record: ReviewSummary) =>
@@ -12,6 +12,26 @@ const buildReviewLabel = (record: ReviewSummary) =>
 
 const formatDateTime = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN") : "-";
+
+const getLastUpdatedAt = (record: ReviewSummary) =>
+  record.updated_at || record.completed_at || record.started_at || record.created_at || "";
+
+const getLastUpdatedTime = (record: ReviewSummary) => {
+  const timestamp = new Date(getLastUpdatedAt(record) || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const sortByLastUpdatedDesc = (left: ReviewSummary, right: ReviewSummary) => {
+  const diff = getLastUpdatedTime(right) - getLastUpdatedTime(left);
+  if (diff !== 0) return diff;
+  return String(right.review_id || "").localeCompare(String(left.review_id || ""));
+};
+
+const compareByLastUpdatedAsc = (left: ReviewSummary, right: ReviewSummary) => {
+  const diff = getLastUpdatedTime(left) - getLastUpdatedTime(right);
+  if (diff !== 0) return diff;
+  return String(left.review_id || "").localeCompare(String(right.review_id || ""));
+};
 
 const formatDuration = (seconds?: number | null) => {
   if (seconds == null) return "-";
@@ -82,11 +102,28 @@ const impactRiskColor = (riskLevel: string) => {
   return "default";
 };
 
+const impactRiskLabel = (riskLevel: string) => {
+  if (riskLevel === "critical") return "严重风险";
+  if (riskLevel === "high") return "高风险";
+  if (riskLevel === "medium") return "中风险";
+  if (riskLevel === "low") return "低风险";
+  return "风险待确认";
+};
+
 const impactGraphColor = (graphStatus: string) => {
   if (graphStatus === "ready") return "success";
-  if (graphStatus === "fallback") return "warning";
+  if (graphStatus === "fallback" || graphStatus === "degraded") return "warning";
   if (graphStatus === "failed" || graphStatus === "missing") return "error";
   return "default";
+};
+
+const impactGraphLabel = (graphStatus: string) => {
+  if (graphStatus === "ready") return "图谱已就绪";
+  if (graphStatus === "fallback") return "使用备用分析";
+  if (graphStatus === "degraded") return "图谱信息不完整";
+  if (graphStatus === "failed") return "图谱分析失败";
+  if (graphStatus === "missing") return "未找到图谱";
+  return "图谱状态待确认";
 };
 
 const MISSING_REPOSITORY_VALUE = "__missing_repository__";
@@ -100,7 +137,7 @@ const getRepositoryLabel = (value: string) => (value === MISSING_REPOSITORY_VALU
 
 const lifecyclePhaseOptions = [
   { value: "status:pending", status: "pending", label: "排队中" },
-  { value: "status:running", status: "running", label: "运行s中" },
+  { value: "status:running", status: "running", label: "运行中" },
   { value: "status:waiting_human", status: "waiting_human", label: "待人工确认" },
 ];
 
@@ -115,6 +152,8 @@ const HistoryPage: React.FC = () => {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [currentProjectId, setCurrentProjectId] = useState("");
+  const [projectFilter, setProjectFilter] = useState<string>();
   const [repositoryFilter, setRepositoryFilter] = useState<string>();
   const [phaseFilter, setPhaseFilter] = useState<string>();
 
@@ -122,20 +161,15 @@ const HistoryPage: React.FC = () => {
     navigate(`/review/${reviewId}?tab=${tab}`);
   };
 
-  const loadReviews = async () => {
+  const loadReviews = useCallback(async () => {
     setLoading(true);
     try {
+      const projectPayload = await projectApi.list();
+      const projectId = projectPayload.default_project_id || projectPayload.projects?.[0]?.project_id || "";
+      setCurrentProjectId(projectId);
       const rows = await reviewApi.list();
       setLoadError("");
-      setReviews(
-        rows
-          .slice()
-          .sort(
-            (left, right) =>
-              new Date(right.updated_at || right.created_at || 0).getTime() -
-              new Date(left.updated_at || left.created_at || 0).getTime(),
-          ),
-      );
+      setReviews(rows.slice().sort(sortByLastUpdatedDesc));
     } catch (error: any) {
       const detail = error?.response?.data?.detail || error?.message || "加载历史记录失败";
       setLoadError(String(detail));
@@ -143,11 +177,28 @@ const HistoryPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void loadReviews();
-  }, []);
+  }, [loadReviews]);
+
+  useEffect(() => {
+    const handleProjectChanged = () => {
+      setSelectedRowKeys([]);
+      void loadReviews();
+    };
+    window.addEventListener("project-changed", handleProjectChanged);
+    return () => window.removeEventListener("project-changed", handleProjectChanged);
+  }, [loadReviews]);
+
+  const projectOptions = useMemo(
+    () =>
+      Array.from(new Set(reviews.map((record) => String(record.subject.project_id || "").trim()).filter(Boolean)))
+        .sort((left, right) => left.localeCompare(right, "zh-CN"))
+        .map((value) => ({ value, label: value === currentProjectId ? `${value}（当前）` : value })),
+    [currentProjectId, reviews],
+  );
 
   const repositoryOptions = useMemo(
     () =>
@@ -173,6 +224,9 @@ const HistoryPage: React.FC = () => {
   const filteredReviews = useMemo(
     () =>
       reviews.filter((record) => {
+        if (projectFilter && String(record.subject.project_id || "").trim() !== projectFilter) {
+          return false;
+        }
         if (repositoryFilter && getRepositoryFilterValue(record) !== repositoryFilter) {
           return false;
         }
@@ -186,10 +240,11 @@ const HistoryPage: React.FC = () => {
         }
         return true;
       }),
-    [phaseFilter, repositoryFilter, reviews],
+    [phaseFilter, projectFilter, repositoryFilter, reviews],
   );
 
   const resetFilters = () => {
+    setProjectFilter(undefined);
     setRepositoryFilter(undefined);
     setPhaseFilter(undefined);
     setSelectedRowKeys([]);
@@ -236,8 +291,8 @@ const HistoryPage: React.FC = () => {
               {quality.qualityFilteredIssueCount ? <Tag color="blue">{`保留观察 ${quality.qualityFilteredIssueCount}`}</Tag> : null}
               {hasImpact ? (
                 <>
-                  <Tag color={impactGraphColor(impact.graphStatus)}>{impact.graphStatus || "impact"}</Tag>
-                  {impact.riskLevel ? <Tag color={impactRiskColor(impact.riskLevel)}>{impact.riskLevel}</Tag> : null}
+                  <Tag color={impactGraphColor(impact.graphStatus)}>{impactGraphLabel(impact.graphStatus)}</Tag>
+                  {impact.riskLevel ? <Tag color={impactRiskColor(impact.riskLevel)}>{impactRiskLabel(impact.riskLevel)}</Tag> : null}
                   <Tag>{`影响 ${impact.impactedFileCount}`}</Tag>
                 </>
               ) : null}
@@ -335,8 +390,8 @@ const HistoryPage: React.FC = () => {
         }
         return (
           <Space size={4} wrap>
-            <Tag color={impactGraphColor(summary.graphStatus)}>{summary.graphStatus || "unknown"}</Tag>
-            {summary.riskLevel ? <Tag color={impactRiskColor(summary.riskLevel)}>{summary.riskLevel}</Tag> : null}
+            <Tag color={impactGraphColor(summary.graphStatus)}>{impactGraphLabel(summary.graphStatus)}</Tag>
+            {summary.riskLevel ? <Tag color={impactRiskColor(summary.riskLevel)}>{impactRiskLabel(summary.riskLevel)}</Tag> : null}
             <Tag>{`影响文件 ${summary.impactedFileCount}`}</Tag>
             <Tag>{`测试 ${summary.recommendedTestScopeCount}`}</Tag>
             <Tag>{`命中 ${summary.successfulImpactTargetCount}`}</Tag>
@@ -354,6 +409,14 @@ const HistoryPage: React.FC = () => {
           {value === "requested" ? "待人工确认" : value === "approved" ? "人工已批准" : value === "rejected" ? "人工已驳回" : "无需人工"}
         </Tag>
       ),
+    },
+    {
+      title: "最近更新",
+      key: "updated_at",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: compareByLastUpdatedAsc,
+      render: (_, record) => formatDateTime(getLastUpdatedAt(record)),
     },
     {
       title: "开始时间",
@@ -520,6 +583,19 @@ const HistoryPage: React.FC = () => {
           <Select
             allowClear
             showSearch
+            value={projectFilter}
+            placeholder="筛选项目"
+            optionFilterProp="label"
+            style={{ minWidth: 200 }}
+            options={projectOptions}
+            onChange={(value) => {
+              setProjectFilter(value);
+              setSelectedRowKeys([]);
+            }}
+          />
+          <Select
+            allowClear
+            showSearch
             value={repositoryFilter}
             placeholder="筛选代码仓"
             optionFilterProp="label"
@@ -541,11 +617,11 @@ const HistoryPage: React.FC = () => {
               setSelectedRowKeys([]);
             }}
           />
-          <Button onClick={resetFilters} disabled={!repositoryFilter && !phaseFilter}>
+          <Button onClick={resetFilters} disabled={!projectFilter && !repositoryFilter && !phaseFilter}>
             清空筛选
           </Button>
           <span className="review-history-filter-summary">
-            {`显示 ${filteredReviews.length} / ${reviews.length} 条`}
+            {`当前项目 ${currentProjectId || "-"} · 显示 ${filteredReviews.length} / ${reviews.length} 条`}
           </span>
         </Space>
       </div>
@@ -556,7 +632,7 @@ const HistoryPage: React.FC = () => {
         columns={columns}
         dataSource={filteredReviews}
         loading={loading}
-        scroll={{ x: 2270 }}
+        scroll={{ x: 2450 }}
       />
     </Card>
   );

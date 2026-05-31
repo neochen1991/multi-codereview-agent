@@ -535,6 +535,7 @@ def test_build_report_aggregates_llm_calls_and_tokens_without_double_counting(tm
     report = service.build_report(review.review_id)
 
     assert report.llm_usage_summary.total_calls == 2
+    assert report.llm_usage_summary.successful_calls == 1
     assert report.llm_usage_summary.prompt_tokens == 400
     assert report.llm_usage_summary.completion_tokens == 60
     assert report.llm_usage_summary.total_tokens == 460
@@ -693,6 +694,121 @@ def test_build_process_messages_keeps_ui_fields_and_drops_unused_metadata(tmp_pa
     }
 
 
+def test_build_process_messages_hides_raw_prompts_and_sanitizes_internal_terms(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_process_sanitize",
+            "project_id": "proj_process_sanitize",
+            "source_ref": "feature/process-sanitize",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/113",
+            "title": "process sanitize review",
+        }
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="issue-1",
+            expert_id="judge",
+            message_type="judge_consistency_validation",
+            content=(
+                "issue.current_code 和 issue.suggested_code 为空，已从 baseline 和 related_findings 补齐。"
+                "target_hunk_excerpt 提供了原始正确实现。"
+            ),
+            metadata={
+                "model_raw_response_excerpt": "catch 块将 RuntimeException 静默吞掉后返回 success。",
+                "model_raw_response_full": "完整原始响应不应进入过程页。",
+                "rule_check_prepass": {
+                    "prompt_snapshot_full": "完整 prompt 不应进入过程页。",
+                    "rule_check_results": [
+                        {
+                            "reason": "Static diff signals: loop_call_amplification",
+                        }
+                    ],
+                },
+                "schema_contract": {
+                    "repair_prompt_snapshot_full": "修复 prompt 也不应进入过程页。",
+                },
+                "candidate_findings": [
+                    {
+                        "summary": "当前变更在 A.java:10 存在问题，需要按该代码锚点单独修复。",
+                    }
+                ],
+            },
+        )
+    )
+
+    messages = service.build_process_messages(review.review_id)
+
+    assert len(messages) == 1
+    payload_text = str(messages[0])
+    assert "model_raw_response_full" not in payload_text
+    assert "prompt_snapshot_full" not in payload_text
+    assert "repair_prompt_snapshot_full" not in payload_text
+    assert "target_hunk_excerpt" not in payload_text
+    assert "related_findings" not in payload_text
+    assert "Static diff signals" not in payload_text
+    assert "loop_call_amplification" not in payload_text
+    assert "静默吞掉" not in payload_text
+    assert "代码锚点" not in payload_text
+    assert "展示内容已完成一致性修正" in payload_text
+    assert "静态分析命中" in payload_text
+
+
+def test_process_events_and_issue_messages_use_display_safe_projection(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_projection_sanitize",
+            "project_id": "proj_projection_sanitize",
+            "source_ref": "feature/projection-sanitize",
+            "target_ref": "main",
+            "mr_url": "https://github.com/example/repo/pull/114",
+            "title": "projection sanitize review",
+        }
+    )
+    service.event_repo.append(
+        ReviewEvent(
+            review_id=review.review_id,
+            event_type="debate_issue_created",
+            phase="debate",
+            message="异常被静默吞掉 已进入议题池",
+            payload={"reason": "Static diff signals: lock_guard_removed"},
+        )
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="issue-1",
+            expert_id="judge",
+            message_type="judge_consistency_validation",
+            content="target_hunk_excerpt 和 related_findings 已用于修复当前代码锚点。",
+            metadata={
+                "model_raw_response_full": "完整原始响应不应进入问题详情。",
+                "schema_contract": {"repair_prompt_snapshot_full": "完整 prompt 不应进入问题详情。"},
+                "model_raw_response_excerpt": "Static diff signals: loop_call_amplification",
+            },
+        )
+    )
+
+    events = service.build_process_events(review.review_id)
+    issue_messages = service.build_issue_messages(review.review_id, "issue-1")
+    payload_text = str({"events": events, "issue_messages": issue_messages})
+
+    assert "静默吞掉" not in payload_text
+    assert "target_hunk_excerpt" not in payload_text
+    assert "related_findings" not in payload_text
+    assert "Static diff signals" not in payload_text
+    assert "loop_call_amplification" not in payload_text
+    assert "lock_guard_removed" not in payload_text
+    assert "model_raw_response_full" not in payload_text
+    assert "prompt_snapshot_full" not in payload_text
+    assert "静态分析命中" in payload_text
+
+
 def test_build_process_messages_keeps_code_graph_context_fields(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     review = service.create_review(
@@ -780,6 +896,35 @@ def test_list_review_summaries_returns_lightweight_subject_payload(tmp_path: Pat
     assert row["subject"]["unified_diff"] == ""
     assert row["subject"]["changed_files"] == ["src/Main.java"]
     assert row["subject"]["metadata"] == {"trigger_source": "auto_scheduler"}
+
+
+def test_list_review_summaries_sanitizes_lightweight_report_summary_when_many_rows(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review_ids: list[str] = []
+    for index in range(4):
+        review = service.create_review(
+            {
+                "subject_type": "mr",
+                "repo_id": "repo_history",
+                "project_id": "proj_history",
+                "source_ref": f"feature/history-{index}",
+                "target_ref": "main",
+                "title": f"history review {index}",
+                "changed_files": ["src/Main.java"],
+            }
+        )
+        review.report_summary = "审核报告已生成，共收敛 2 条 findings，形成 1 个议题，其中 0 个待人工裁决。"
+        service.review_repo.save(review)
+        review_ids.append(review.review_id)
+
+    rows = service.list_review_summaries()
+    summaries = [str(item.get("report_summary") or "") for item in rows if item["review_id"] in review_ids]
+
+    assert summaries
+    assert all("findings" not in item for item in summaries)
+    assert all("议题" not in item for item in summaries)
+    assert all("人工裁决" not in item for item in summaries)
+    assert all("检视发现" in item and "正式问题" in item and "待人工确认" in item for item in summaries)
 
 
 def test_list_pending_queue_light_with_diagnostics_preserves_queue_fields(tmp_path: Path):

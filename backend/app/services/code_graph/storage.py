@@ -727,7 +727,7 @@ class CodeGraphStorage:
         risk_score: float,
     ) -> str:
         return (
-            f"Tree-sitter 图谱识别 {changed_node_count} 个变更节点，"
+            f"代码结构图谱识别 {changed_node_count} 个变更节点，"
             f"{impacted_file_count} 个候选受影响文件，"
             f"{test_gap_count} 个测试覆盖缺口，"
             f"风险评分 {risk_score:.2f}。"

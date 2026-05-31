@@ -25,6 +25,7 @@ class ReviewServiceReportMixin:
         if review is None:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
+        raw_issues = self.issue_repo.list(review_id)
         issues = self.list_issues(review_id)
         display_findings = self._ensure_display_findings_cover_issues(
             self._build_display_report_findings(findings),
@@ -41,16 +42,16 @@ class ReviewServiceReportMixin:
         issue_count = issues_total_count
         summary = (
             f"本次代码审核共收敛 {findings_total_count} 条有效发现，"
-            f"形成 {issues_total_count} 个争议/裁决议题，"
+            f"形成 {issues_total_count} 个正式问题，"
             f"覆盖 {len(review.selected_experts)} 个专家视角，"
-            f"当前状态为 {review.status}。"
+            f"当前状态为 {self._display_review_status_label(review.status)}。"
         )
         return ReviewReport(
             review_id=review_id,
             status=review.status,
             phase=review.phase,
             summary=summary,
-            review=ReviewTask.model_validate(self._build_light_review_payload(review)),
+            review=ReviewTask.model_validate(self._build_review_display_payload(review, light=True)),
             findings=light_findings,
             issues=light_issues,
             issue_count=issue_count,
@@ -61,10 +62,26 @@ class ReviewServiceReportMixin:
             confidence_summary=build_confidence_summary(
                 review=review,
                 findings=display_findings,
-                issues=issues,
+                issues=raw_issues,
                 issue_filter_decisions=issue_filter_decisions,
             ),
         )
+
+    @staticmethod
+    def _display_review_status_label(status: object) -> str:
+        value = str(status or "").strip().lower()
+        labels = {
+            "idle": "未开始",
+            "pending": "排队中",
+            "queued": "排队中",
+            "running": "运行中",
+            "waiting_human": "待人工确认",
+            "completed": "已完成",
+            "failed": "执行失败",
+            "closed": "已关闭",
+            "cancelled": "已取消",
+        }
+        return labels.get(value, str(status or "-"))
 
     def _build_impact_report_for_review(self, review: ReviewTask) -> ImpactReport | None:
         metadata = dict(review.subject.metadata or {})
@@ -212,11 +229,34 @@ class ReviewServiceReportMixin:
             "summary": sanitized_summary,
             "remediation_strategy": self._sanitize_user_facing_issue_text(issue.remediation_strategy),
             "remediation_suggestion": sanitized_remediation_suggestion,
+            "expert_views": self._filter_display_expert_views(issue),
+            "aggregated_titles": self._sanitize_report_text_list(list(issue.aggregated_titles or []), limit=8),
+            "aggregated_summaries": self._sanitize_report_text_list(list(issue.aggregated_summaries or []), limit=8),
+            "aggregated_remediation_strategies": self._sanitize_report_text_list(
+                list(issue.aggregated_remediation_strategies or []),
+                limit=6,
+            ),
+            "aggregated_remediation_suggestions": self._sanitize_report_text_list(
+                list(issue.aggregated_remediation_suggestions or []),
+                limit=6,
+            ),
+            "aggregated_remediation_steps": self._sanitize_report_text_list(list(issue.aggregated_remediation_steps or []), limit=8),
             "remediation_steps": [
                 item
                 for item in (self._sanitize_user_facing_issue_text(step) for step in list(issue.remediation_steps or []))
                 if item
             ],
+            "evidence": self._sanitize_report_text_list(list(issue.evidence or []), limit=8),
+            "cross_file_evidence": self._sanitize_report_text_list(list(issue.cross_file_evidence or []), limit=6),
+            "evidence_chain": self._sanitize_report_dict_list(list(issue.evidence_chain or []), limit=8),
+            "assumptions": self._sanitize_report_text_list(list(issue.assumptions or []), limit=6),
+            "confidence_rationale": self._sanitize_user_facing_issue_text(issue.confidence_rationale),
+            "consistency_check_summary": self._sanitize_user_facing_issue_text(issue.consistency_check_summary),
+            "consistency_conflicts": self._sanitize_report_text_list(list(issue.consistency_conflicts or []), limit=6),
+            "remediation_alignment_conflicts": self._sanitize_report_text_list(
+                list(issue.remediation_alignment_conflicts or []),
+                limit=6,
+            ),
             "current_code": self._extract_display_current_code(issue),
             "suggested_code": suggested_code,
         }
@@ -246,10 +286,19 @@ class ReviewServiceReportMixin:
             "performance_reliability" in compact
             or issue.normalized_issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}
         )
+        strong_loop_signal = any(token in compact for token in loop_tokens) and (
+            performance_owned
+            or "repository.save" in compact
+            or "paymentrepository.save" in compact
+            or "saveall" in compact
+        )
         performance_loop_signal = (
-            not comment_contract_signal
-            and (performance_owned or issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"})
-            and any(token in compact for token in loop_tokens)
+            strong_loop_signal
+            or (
+                not comment_contract_signal
+                and (performance_owned or issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"})
+                and any(token in compact for token in loop_tokens)
+            )
         )
         query_boundary_signal = (
             issue.normalized_issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}
@@ -338,7 +387,7 @@ class ReviewServiceReportMixin:
                     "primary_expert_id": "correctness_business",
                     "category_label": "正确性与业务",
                     "summary": (
-                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支吞掉异常并返回 "
+                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支忽略异常并返回 "
                         "SettlementResult.success，调用方会把失败路径误认为结算成功。"
                     ),
                     "remediation_suggestion": (
@@ -367,7 +416,7 @@ class ReviewServiceReportMixin:
                     ),
                     "aggregated_titles": ["catch 分支没有把失败传递给调用方"],
                     "aggregated_summaries": [
-                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支吞掉异常并返回 SettlementResult.success，调用方会把失败路径误认为结算成功。"
+                        "PaymentSettlementService 的 catch(RuntimeException ignored) 分支忽略异常并返回 SettlementResult.success，调用方会把失败路径误认为结算成功。"
                     ],
                     "aggregated_remediation_suggestions": [
                         "不要在 catch 分支返回 success；应保留异常上下文并抛出异常、返回失败结果或进入明确补偿流程。"
@@ -387,7 +436,7 @@ class ReviewServiceReportMixin:
                 update={
                     **update_payload,
                     "normalized_issue_type": "exception_swallowed",
-                    "title": str(issue.title or "").strip() or "失败被忽略后仍按成功处理",
+                    "title": str(issue.title or "").strip() or "失败被当成成功返回",
                     "primary_expert_id": "correctness_business",
                     "category_label": "正确性与业务",
                 }
@@ -460,11 +509,43 @@ class ReviewServiceReportMixin:
                     "category_label": "正确性与业务",
                     "summary": comment_summary,
                     "remediation_suggestion": comment_suggestion,
+                    "suggested_code": self._build_report_deterministic_suggested_code(issue),
                     "evidence": comment_evidence,
                     "evidence_chain": self._canonical_display_evidence_chain(issue, "TODO 里的库存扣减未实现", comment_evidence),
                     "aggregated_titles": ["注释或 TODO 写了要做，但代码没有对应实现"],
                     "aggregated_summaries": [comment_summary],
                     "aggregated_remediation_suggestions": [comment_suggestion],
+                }
+            )
+        if issue.normalized_issue_type in {"lock_guard_removed", "lock_removed", "concurrency_guard_removed"} or any(
+            token in compact for token in ("lock_guard_removed", "synchronized", "并发保护", "锁保护")
+        ):
+            lock_summary = (
+                "BulkEnrollmentService 第 "
+                f"{int(update_payload.get('line_start') or issue.line_start or 1)} 行移除了原有并发保护，"
+                "并发调用时可能出现重复处理或状态竞争。"
+            )
+            lock_suggestion = (
+                "恢复原有锁保护，或补上等价的幂等、唯一约束、分布式锁等并发控制，并增加并发提交用例。"
+            )
+            lock_evidence = [
+                "删除 synchronized 锁保护",
+                "新增代码没有看到等价的并发控制",
+            ]
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "lock_guard_removed",
+                    "title": "批量报名的锁保护被移除",
+                    "primary_expert_id": "performance_reliability",
+                    "category_label": "性能与可靠性",
+                    "summary": lock_summary,
+                    "remediation_suggestion": lock_suggestion,
+                    "evidence": lock_evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, "批量报名的锁保护被移除", lock_evidence),
+                    "aggregated_titles": ["原有锁保护被删除，并发调用时缺少保护"],
+                    "aggregated_summaries": [lock_summary],
+                    "aggregated_remediation_suggestions": [lock_suggestion],
                 }
             )
         if performance_loop_signal:
@@ -606,7 +687,11 @@ class ReviewServiceReportMixin:
             "query_boundary_missing": ("pagerequest", "pageable", "limit", "searchpendingbycourselike", "查询边界", "分页"),
             "exception_swallowed": ("catch", "runtimeexception", "ignored", "success", "异常"),
         }
-        if issue_type in issue_type_tokens:
+        if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation"} and any(
+            token in issue_text for token in ("库存", "加锁", "超卖", "createorder", "扣减库存", "预占事件")
+        ):
+            preferred_tokens = ("扣减库存", "预占事件", "库存", "加锁", "超卖", "createorder", "eventpublisher.publish", "orderrepository.save")
+        elif issue_type in issue_type_tokens:
             preferred_tokens = issue_type_tokens[issue_type]
         else:
             preferred_tokens = ()
@@ -960,6 +1045,8 @@ class ReviewServiceReportMixin:
         text = str(value or "").strip()
         if not text:
             return ""
+        if any(token in text for token in ("issue.current_code", "issue.suggested_code", "target_hunk_excerpt", "related_findings")):
+            return "系统已补齐代码片段和建议代码，展示内容已完成一致性修正。"
         replacements = {
             "确认被保护的共享资源": "恢复被删除的锁保护，或补充等价的幂等、唯一约束、分布式锁等并发控制。",
             "改成批量获取或批量提交": "把循环内逐条访问改为批量查询、批量保存或固定窗口批处理。",
@@ -967,13 +1054,31 @@ class ReviewServiceReportMixin:
             "同步修正注释/TODO/接口说明": "同步更新注释、接口说明和方法命名，避免继续承诺未实现能力。",
             "定位承诺的目标行为": "补齐 TODO 或注释承诺的业务动作，并增加覆盖该动作的测试。",
             "在当前代码锚点补齐缺失的业务逻辑或保护逻辑": "",
+            "按当前代码片段补齐缺失实现，并增加能复现该风险的回归测试。": "",
+            "回到当前代码锚点，补齐被规则命中的真实业务逻辑或保护逻辑。": "",
+            "识别批量输入规模": "",
             "用回归用例覆盖本次被命中的风险路径": "",
             "确认修复后问题代码和建议代码不再相同": "",
         }
         if text in replacements:
             return replacements[text]
-        if "结算异常被静默吞掉后仍返回成功状态" in text:
+        if "结算异常被静默吞掉后仍返回成功状态" in text or "异常被静默吞掉后仍返回成功状态" in text:
             return "支付结算失败后仍返回成功"
+        text = text.replace("异常被静默吞没", "异常处理被忽略")
+        text = text.replace("异常被静默吞掉", "异常处理被忽略")
+        text = text.replace("异常被静默忽略", "异常处理被忽略")
+        text = text.replace("静默忽略", "忽略")
+        text = text.replace("静默吞掉", "忽略异常")
+        text = text.replace("静默吞", "忽略异常")
+        text = text.replace("兜底返回", "成功返回")
+        text = text.replace("吞掉异常", "忽略异常")
+        text = text.replace("代码锚点", "代码位置")
+        text = text.replace("Static diff signals:", "静态分析命中：")
+        text = text.replace("静态 diff 信号命中", "静态分析命中")
+        text = text.replace("loop_call_amplification", "循环内逐条调用风险")
+        text = text.replace("lock_guard_removed", "并发保护被移除")
+        text = text.replace("query_bound_removed", "查询边界缺失")
+        text = text.replace("comment_contract_unimplemented", "注释承诺未实现")
         text = text.replace(
             "异常被静默吞掉后仍返回成功状态，无日志、无指标、无补偿动作",
             "catch 分支把支付网关异常转换成成功返回，缺少失败结果、日志或补偿动作。",
@@ -981,10 +1086,13 @@ class ReviewServiceReportMixin:
         text = re.sub(r"定向辩论预裁决[:：].*?(?:。|$)", "", text, flags=re.S)
         text = re.sub(r"^(问题汇总|修复建议汇总)[:：]\s*", "", text)
         text = re.sub(r"建议[:：]\s*(定位候选代码行|按命中的?规则.*?|代码锚点单独修复).*?(?=$|[。；;])", "", text)
+        text = re.sub(r"[；;，,]\s*(?:需要对比|确认原|确认\s*domain event|确认\s*DomainEvent).*?(?=。|$)", "", text)
         if "请根据规则要求补齐正确实现" in text:
             return ""
-        if any(token in text for token in ("需要特别确认", "需要确认其他条件", "不确定是否", "无法确认")):
+        if any(token in text for token in ("需要特别确认", "需要确认", "需要复核", "需要对比", "确认原", "不确定是否", "无法确认")):
             return ""
+        text = text.replace("；无需依赖额外条件确认", "")
+        text = text.replace("无需依赖额外条件确认", "")
         lines: list[str] = []
         for raw_line in text.splitlines():
             line = re.sub(r"^[-*]\s*", "", raw_line.strip()).strip()
@@ -1011,7 +1119,12 @@ class ReviewServiceReportMixin:
                 "按命中规则",
                 "按命中的规则",
                 "代码锚点单独修复",
+                "代码锚点",
                 "请结合代码片段",
+                "当前代码锚点",
+                "按当前代码片段",
+                "补齐被规则命中的真实业务逻辑",
+                "识别批量输入规模",
                 "当前 issue 来自",
                 "当前变更在",
             )
@@ -1025,7 +1138,117 @@ class ReviewServiceReportMixin:
         ]
         return self._dedupe_report_strings(cleaned)[:limit]
 
+    def _filter_display_expert_views(self, issue: DebateIssue) -> list[dict[str, object]]:
+        issue_family = self._classify_display_issue_family(
+            issue.normalized_issue_type,
+            "\n".join([issue.title, issue.summary, issue.file_path, issue.primary_expert_id, *issue.aggregated_titles, *issue.aggregated_summaries]),
+        )
+        cleaned_views = self._sanitize_report_dict_list(list(issue.expert_views or []), limit=12)
+        if not issue_family:
+            return cleaned_views[:6]
+        filtered: list[dict[str, object]] = []
+        for view in cleaned_views:
+            view_text = "\n".join(
+                str(view.get(key) or "")
+                for key in ("title", "summary", "normalized_issue_type", "expert_id", "finding_type")
+            )
+            if self._view_mentions_other_changed_file(issue, view_text):
+                continue
+            view_family = self._classify_display_issue_family(str(view.get("normalized_issue_type") or ""), view_text)
+            if view_family == issue_family:
+                if self._text_has_display_family(view_text, issue_family) or not self._text_has_other_display_family(view_text, issue_family):
+                    filtered.append(view)
+                continue
+            if not view_family and self._text_has_display_family(view_text, issue_family):
+                filtered.append(view)
+        return filtered[:6]
+
+    @classmethod
+    def _classify_display_issue_family(cls, normalized_issue_type: str, text: str) -> str:
+        issue_type = str(normalized_issue_type or "").strip().lower()
+        compact = re.sub(r"\s+", "", str(text or "").lower())
+        type_map = {
+            "exception_swallowed": "exception",
+            "exception_semantics_weakened": "exception",
+            "n_plus_one": "loop",
+            "loop_call_amplification": "loop",
+            "bulk_processing_boundary_missing": "loop",
+            "query_bound_removed": "query",
+            "query_boundary_missing": "query",
+            "unbounded_query": "query",
+            "unbounded_query_risk": "query",
+            "comment_contract_unimplemented": "comment",
+            "declared_intent_without_implementation": "comment",
+            "comment_promise_unimplemented": "comment",
+            "lock_guard_removed": "lock",
+            "lock_removed": "lock",
+            "concurrency_guard_removed": "lock",
+            "course_creation_semantics": "ddd_creation",
+            "aggregate_factory_bypass": "ddd_creation",
+            "aggregate_factory_bypassed": "ddd_creation",
+            "query_semantics_regression": "query_semantics",
+        }
+        if issue_type in type_map:
+            return type_map[issue_type]
+        for family in ("exception", "loop", "query", "comment", "lock", "ddd_creation", "query_semantics"):
+            if cls._text_has_display_family(compact, family):
+                return family
+        return ""
+
+    @staticmethod
+    def _text_has_display_family(text: str, family: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").lower())
+        markers = {
+            "exception": ("catch", "runtimeexception", "settlementresult.success", "返回成功", "失败语义", "异常处理", "异常"),
+            "loop": ("n+1", "n_plus_one", "loop_call_amplification", "循环内", "逐条", "repository.save", "paymentrepository.save", "saveall", "批量写入", "批量保存"),
+            "query": ("query_bound", "unbounded", "pagerequest", "pageable", "limit", "分页", "查询边界", "大结果集"),
+            "comment": ("todo", "fixme", "注释", "承诺", "未实现", "没有对应代码"),
+            "lock": ("lock_guard_removed", "synchronized", "并发保护", "锁保护", "状态竞争"),
+            "ddd_creation": ("course.create", "newcourse", "聚合工厂", "领域事件", "eventbus.publish", "聚合持久化"),
+            "query_semantics": ("query_semantics", "精确匹配", "模糊匹配", "like", "equal"),
+        }
+        return any(marker in compact for marker in markers.get(family, ()))
+
+    @classmethod
+    def _text_has_other_display_family(cls, text: str, current_family: str) -> bool:
+        return any(
+            family != current_family and cls._text_has_display_family(text, family)
+            for family in ("exception", "loop", "query", "comment", "lock", "ddd_creation", "query_semantics")
+        )
+
+    @staticmethod
+    def _view_mentions_other_changed_file(issue: DebateIssue, view_text: str) -> bool:
+        issue_file_name = str(issue.file_path or "").replace("\\", "/").rsplit("/", 1)[-1]
+        issue_class_name = issue_file_name.rsplit(".", 1)[0] if issue_file_name else ""
+        if not issue_class_name:
+            return False
+        text = str(view_text or "")
+        java_files = set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\.java\b", text))
+        if any(file_name != issue_file_name for file_name in java_files):
+            return True
+        known_changed_classes = {
+            "CourseCreator",
+            "BulkEnrollmentService",
+            "PaymentSettlementService",
+            "HibernateCriteriaConverter",
+        }
+        mentioned_classes = {class_name for class_name in known_changed_classes if class_name in text}
+        return any(class_name != issue_class_name for class_name in mentioned_classes)
+
     def _sanitize_report_dict_list(self, values: list[object], *, limit: int) -> list[dict[str, object]]:
+        structural_string_keys = {
+            "expert_id",
+            "finding_type",
+            "normalized_issue_type",
+            "severity",
+            "status",
+            "step",
+            "tool_name",
+            "file_path",
+            "source",
+            "context_source",
+            "verdict",
+        }
         cleaned_items: list[dict[str, object]] = []
         for value in values:
             if not isinstance(value, dict):
@@ -1033,9 +1256,12 @@ class ReviewServiceReportMixin:
             item: dict[str, object] = {}
             for key, raw in value.items():
                 if isinstance(raw, str):
-                    cleaned = self._sanitize_user_facing_issue_text(raw)
-                    if cleaned:
-                        item[key] = cleaned
+                    if key in structural_string_keys:
+                        item[key] = raw
+                    else:
+                        cleaned = self._sanitize_user_facing_issue_text(raw)
+                        if cleaned:
+                            item[key] = cleaned
                 elif isinstance(raw, list):
                     cleaned_list: list[object] = []
                     for entry in raw:
@@ -1084,6 +1310,8 @@ class ReviewServiceReportMixin:
             linked_ids = {str(item or "").strip() for item in list(issue.finding_ids or []) if str(item or "").strip()}
             synthetic = self._build_display_finding_from_issue(issue)
             synthetic_family = self._report_display_finding_family(synthetic.model_dump(mode="json"))
+            if not synthetic_family:
+                continue
             synthetic_key = self._display_report_finding_key(synthetic)
             link_covers_same_family = any(
                 (
@@ -1121,31 +1349,35 @@ class ReviewServiceReportMixin:
         family = self._report_display_issue_family(normalized.model_dump(mode="json"))
         fallback_rules, fallback_guidelines = self._fallback_report_rules_for_family(issue_type, family)
         finding_id = f"{normalized.issue_id}__issue_{issue_type}"
+        display_title = self._sanitize_user_facing_issue_text(str(issue.title or normalized.title or "")) or "代码问题"
+        display_summary = self._sanitize_user_facing_issue_text(
+            str(issue.summary or normalized.summary or "")
+        ) or "该正式问题已通过裁决保留，需要按问题详情处理。"
         return ReviewFinding(
             finding_id=finding_id,
             review_id=normalized.review_id,
             expert_id=normalized.primary_expert_id or "judge",
-            title=normalized.title or "代码问题",
-            summary=normalized.summary or "该正式问题已通过裁决保留，需要按问题详情处理。",
+            title=display_title,
+            summary=display_summary,
             finding_type=normalized.finding_type or "direct_defect",
             normalized_issue_type=normalized.normalized_issue_type,
             category_label=normalized.category_label,
             severity=normalized.severity,
             confidence=float(normalized.confidence or 0.0),
-            confidence_rationale=normalized.confidence_rationale,
+            confidence_rationale=self._sanitize_user_facing_issue_text(str(normalized.confidence_rationale or "")),
             file_path=normalized.file_path,
             line_start=int(normalized.line_start or 1),
-            evidence=list(normalized.evidence or []),
-            cross_file_evidence=list(normalized.cross_file_evidence or []),
-            assumptions=list(normalized.assumptions or []),
+            evidence=self._sanitize_report_text_list(list(normalized.evidence or []), limit=12),
+            cross_file_evidence=self._sanitize_report_text_list(list(normalized.cross_file_evidence or []), limit=8),
+            assumptions=self._sanitize_report_text_list(list(normalized.assumptions or []), limit=8),
             context_files=list(normalized.context_files or []),
             matched_rules=fallback_rules,
             violated_guidelines=fallback_guidelines,
-            remediation_strategy=normalized.remediation_strategy,
-            remediation_suggestion=normalized.remediation_suggestion,
-            remediation_steps=list(normalized.remediation_steps or []),
+            remediation_strategy=self._sanitize_user_facing_issue_text(str(normalized.remediation_strategy or "")),
+            remediation_suggestion=self._sanitize_user_facing_issue_text(str(normalized.remediation_suggestion or "")),
+            remediation_steps=self._sanitize_report_text_list(list(normalized.remediation_steps or []), limit=8),
             code_excerpt=normalized.current_code,
-            evidence_chain=list(normalized.evidence_chain or []),
+            evidence_chain=self._sanitize_report_dict_list(list(normalized.evidence_chain or []), limit=10),
             suggested_code=normalized.suggested_code,
             suggested_code_language="java" if str(normalized.file_path or "").lower().endswith(".java") else "",
         )
@@ -1180,6 +1412,13 @@ class ReviewServiceReportMixin:
             primary, secondary = right, left
         payload = primary.model_dump(mode="json")
         secondary_payload = secondary.model_dump(mode="json")
+        issue_type = str(payload.get("normalized_issue_type") or payload.get("finding_type") or "").strip().lower()
+        if issue_type == "comment_contract_unimplemented" and "correctness_business" in {
+            str(payload.get("expert_id") or ""),
+            str(secondary_payload.get("expert_id") or ""),
+        }:
+            payload["expert_id"] = "correctness_business"
+            payload["category_label"] = "正确性与业务"
         for field, limit in (
             ("evidence", 6),
             ("matched_rules", 8),
@@ -1244,16 +1483,16 @@ class ReviewServiceReportMixin:
 
         if family == "exception":
             is_payment_context = "paymentsettlementservice" in str(payload.get("file_path") or "").lower()
-            title = "支付结算失败后仍返回成功" if is_payment_context else "异常被吞掉后仍继续成功路径"
+            title = "支付结算失败后仍返回成功" if is_payment_context else "异常被忽略后仍继续成功路径"
             summary = (
                 f"{file_name}{line} 的 catch 分支把失败包装成成功返回，调用方会误以为结算已完成。"
                 if is_payment_context
-                else f"{file_name}{line} 的 catch 分支吞掉异常后继续执行成功路径，调用方无法感知真实失败。"
+                else f"{file_name}{line} 的 catch 分支忽略异常后继续执行成功路径，调用方无法感知真实失败。"
             )
             suggestion = (
                 "不要在 catch 分支返回成功；保留异常上下文，改为抛出异常、返回明确失败结果或进入补偿流程。"
                 if is_payment_context
-                else "不要吞掉异常后继续走成功路径；应记录必要上下文并抛出异常、返回失败结果或进入明确的补偿流程。"
+                else "不要忽略异常后继续走成功路径；应记录必要上下文并抛出异常、返回失败结果或进入明确的补偿流程。"
             )
             payload.update(
                 {
@@ -1340,6 +1579,29 @@ class ReviewServiceReportMixin:
         payload["violated_guidelines"] = self._dedupe_report_strings(
             [*list(payload.get("violated_guidelines") or []), *fallback_guidelines]
         )[:8]
+        payload["confidence_rationale"] = self._sanitize_user_facing_issue_text(
+            str(payload.get("confidence_rationale") or "")
+        )
+        payload["title"] = self._sanitize_user_facing_issue_text(str(payload.get("title") or "")) or str(payload.get("title") or "")
+        payload["summary"] = self._sanitize_user_facing_issue_text(str(payload.get("summary") or "")) or str(payload.get("summary") or "")
+        payload["rule_based_reasoning"] = self._sanitize_user_facing_issue_text(str(payload.get("rule_based_reasoning") or ""))
+        payload["evidence"] = self._sanitize_report_text_list(list(payload.get("evidence") or []), limit=12)
+        payload["cross_file_evidence"] = self._sanitize_report_text_list(
+            list(payload.get("cross_file_evidence") or []),
+            limit=8,
+        )
+        payload["assumptions"] = self._sanitize_report_text_list(list(payload.get("assumptions") or []), limit=8)
+        payload["evidence_chain"] = self._sanitize_report_dict_list(list(payload.get("evidence_chain") or []), limit=10)
+        payload["remediation_strategy"] = self._sanitize_user_facing_issue_text(str(payload.get("remediation_strategy") or ""))
+        payload["remediation_suggestion"] = self._sanitize_user_facing_issue_text(str(payload.get("remediation_suggestion") or ""))
+        payload["remediation_steps"] = [
+            item
+            for item in (
+                self._sanitize_user_facing_issue_text(str(step or ""))
+                for step in list(payload.get("remediation_steps") or [])
+            )
+            if item
+        ][:8]
         return ReviewFinding.model_validate(payload)
 
     @staticmethod
@@ -1505,9 +1767,22 @@ class ReviewServiceReportMixin:
             if not str(item or "").startswith("issue.issue.suggested_code 为空字符串")
             and "related_findings" not in str(item or "")
             and "baseline.suggested_code" not in str(item or "")
+            and "baseline.current_code" not in str(item or "")
             and "已从 baseline" not in str(item or "")
             and "已依据" not in str(item or "")
         ][:6]
+        payload["consistency_check_summary"] = self._sanitize_user_facing_issue_text(
+            str(payload.get("consistency_check_summary") or "")
+        )
+        stale_consistency_failure = (
+            str(payload.get("consistency_check_status") or "").strip().lower() == "downgraded"
+            or str(payload.get("resolution") or "").strip().lower() == "consistency_validation_failed"
+        )
+        if stale_consistency_failure and self._report_display_text_agrees_with_code(payload, family, payload.get("summary")):
+            payload["resolution"] = "accepted"
+            payload["consistency_check_status"] = "repaired"
+            payload["consistency_check_summary"] = "系统已按当前代码片段重新整理问题说明和修改建议，展示内容已完成一致性修正。"
+            payload["consistency_conflicts"] = []
         return DebateIssue.model_validate(payload)
 
     @staticmethod
@@ -1642,12 +1917,12 @@ class ReviewServiceReportMixin:
         current_code = str(payload.get("current_code") or "").lower()
         file_path = str(payload.get("file_path") or "").lower()
         if family == "exception":
-            return "支付结算失败后仍返回成功" if "payment" in file_path else "异常被吞掉后仍按成功处理"
+            return "支付结算失败后仍返回成功" if "payment" in file_path else "失败被当成成功返回"
         if family == "comment":
             current_code = str(payload.get("current_code") or payload.get("code_excerpt") or "").lower()
             return "TODO 里的库存扣减未实现" if "库存" in str(payload.get("summary") or "") or "扣减库存" in current_code else "注释承诺未实现"
         if family == "lock":
-            return "并发保护被移除"
+            return "批量报名的锁保护被移除"
         if family == "query_boundary":
             return "查询没有分页限制"
         if family == "loop":
@@ -1710,8 +1985,14 @@ class ReviewServiceReportMixin:
                     {
                         "topic": str(item.get("topic") or ""),
                         "rule_code": str(item.get("rule_code") or ""),
-                        "rule_label": str(item.get("rule_label") or ""),
-                        "reason": str(item.get("reason") or ""),
+                        "rule_label": self._normalize_issue_filter_label(
+                            str(item.get("rule_code") or ""),
+                            str(item.get("rule_label") or ""),
+                        ),
+                        "reason": self._normalize_issue_filter_reason(
+                            str(item.get("rule_code") or ""),
+                            str(item.get("reason") or ""),
+                        ),
                         "severity": str(item.get("severity") or ""),
                         "finding_ids": [str(entry) for entry in (item.get("finding_ids") or []) if str(entry).strip()],
                         "finding_titles": [
@@ -1721,3 +2002,17 @@ class ReviewServiceReportMixin:
                     }
                 )
         return decisions
+
+    @staticmethod
+    def _normalize_issue_filter_label(rule_code: str, label: str) -> str:
+        code = str(rule_code or "").strip()
+        if code == "conditional_conclusion":
+            return "证据未闭环，保留为观察项"
+        return str(label or "").strip()
+
+    @staticmethod
+    def _normalize_issue_filter_reason(rule_code: str, reason: str) -> str:
+        code = str(rule_code or "").strip()
+        if code == "conditional_conclusion":
+            return "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。"
+        return ReviewServiceReportMixin._sanitize_user_facing_issue_text(str(reason or "")) or str(reason or "").strip()

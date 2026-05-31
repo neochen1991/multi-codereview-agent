@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class CodeGraphIndexScheduler:
-    """Manual Tree-sitter code graph builder used by the settings page."""
+    """Manual code graph builder used by the settings page."""
 
     def __init__(self, review_service: ReviewService) -> None:
         self._review_service = review_service
@@ -43,10 +43,10 @@ class CodeGraphIndexScheduler:
                 status["dependency_checks"] = dependency_status["checks"]
                 if str(status.get("state") or "") == "running" and not self._is_running(resolved_repository_id):
                     status["state"] = "unknown"
-                    status["message"] = "上次 Tree-sitter 建图任务未确认完成状态，请刷新或重新建立图谱。"
+                    status["message"] = "上次代码结构图谱建图任务未确认完成状态，请刷新或重新建立图谱。"
                 if str(status.get("state") or "") == "ready" and status.get("graph_db_exists") is False:
                     status["state"] = "unknown"
-                    status["message"] = "未在当前代码仓路径发现 Tree-sitter 图谱，请重新建立图谱。"
+                    status["message"] = "未在当前代码仓路径发现代码结构图谱，请重新建立图谱。"
                 return status
             except Exception:
                 logger.exception("code graph status load failed path=%s", status_path)
@@ -54,7 +54,7 @@ class CodeGraphIndexScheduler:
         if not repo_path:
             return self._status(
                 "skipped",
-                "未配置本地代码仓路径，无法建立 Tree-sitter 代码图谱。",
+                "未配置本地代码仓路径，无法建立代码结构图谱。",
                 repository_id=resolved_repository_id,
                 tree_sitter_installed=dependency_status["installed"],
                 tree_sitter_parser_available=dependency_status["parser_available"],
@@ -64,7 +64,7 @@ class CodeGraphIndexScheduler:
         if details.get("graph_db_exists"):
             return self._status(
                 "ready",
-                "已发现 Tree-sitter 本地代码图谱。",
+                "已发现本地代码结构图谱。",
                 repository_id=resolved_repository_id,
                 repo_path=repo_path,
                 repo_name=Path(repo_path).name,
@@ -75,7 +75,7 @@ class CodeGraphIndexScheduler:
                 **details,
             )
         state = "idle" if dependency_status["parser_available"] else "skipped"
-        message = "尚未建立 Tree-sitter 代码图谱。" if state == "idle" else self._dependency_unavailable_message(dependency_status)
+        message = "尚未建立代码结构图谱。" if state == "idle" else self._dependency_unavailable_message(dependency_status)
         return self._status(
             state,
             message,
@@ -99,7 +99,7 @@ class CodeGraphIndexScheduler:
                     blocked.update(
                         {
                             "state": "blocked",
-                            "message": f"Tree-sitter 正在为仓库 {running_repository_id} 建图，当前仓库 {resolved_repository_id} 尚未启动。请等待当前任务结束后重试。",
+                            "message": f"代码结构图谱正在为仓库 {running_repository_id} 建图，当前仓库 {resolved_repository_id} 尚未启动。请等待当前任务结束后重试。",
                             "trigger": "manual",
                             "blocked_by_repository_id": running_repository_id,
                         }
@@ -112,7 +112,7 @@ class CodeGraphIndexScheduler:
             thread = threading.Thread(
                 target=self._run_manual_index,
                 args=(resolved_repository_id,),
-                name=f"tree-sitter-code-graph-index-{resolved_repository_id or 'default'}",
+                name=f"code-graph-index-{resolved_repository_id or 'default'}",
                 daemon=True,
             )
             self._manual_thread = thread
@@ -128,7 +128,7 @@ class CodeGraphIndexScheduler:
         if not repo_path:
             status = self._status(
                 "skipped",
-                "未配置本地代码仓路径，无法建立 Tree-sitter 代码图谱。",
+                "未配置本地代码仓路径，无法建立代码结构图谱。",
                 repository_id=resolved_repository_id,
                 trigger=trigger,
                 tree_sitter_installed=dependency_status["installed"],
@@ -169,7 +169,7 @@ class CodeGraphIndexScheduler:
             skipped = int(result.get("skipped_unchanged_file_count") or 0)
             failed = int(result.get("failed_file_count") or 0)
             state = str(result.get("state") or "ready")
-            message = f"Tree-sitter 代码图谱建立完成：本次索引 {indexed} 个文件，跳过 {skipped} 个未变更文件。"
+            message = f"代码结构图谱建立完成：本次索引 {indexed} 个文件，跳过 {skipped} 个未变更文件。"
             if failed:
                 message += f" 其中 {failed} 个文件解析失败，已保留可用图谱。"
             status = self._status(
@@ -191,7 +191,7 @@ class CodeGraphIndexScheduler:
             logger.exception("tree_sitter code graph index failed repository_id=%s repo_path=%s", resolved_repository_id, repo_dir)
             status = self._status(
                 "failed",
-                f"Tree-sitter 代码图谱建立失败：{error}",
+                f"代码结构图谱建立失败：{error}",
                 error_type=error.__class__.__name__,
                 **base_payload,
             )
@@ -213,7 +213,7 @@ class CodeGraphIndexScheduler:
         dependency_status = self._dependency_status()
         return self._status(
             "running",
-            "Tree-sitter 代码图谱建图任务已触发，后台正在解析 Java 代码。",
+            "代码结构图谱建图任务已触发，后台正在解析 Java 代码。",
             repository_id=repository_id,
             repo_path=repo_path,
             repo_name=Path(repo_path).name if repo_path else "",
@@ -300,11 +300,11 @@ class CodeGraphIndexScheduler:
         checks = list(dependency_status.get("checks") or [])
         for check in checks:
             if str(check.get("status") or "") == "failed" and str(check.get("name") or "") == "tree_sitter_java":
-                return f"Tree-sitter Java 解析依赖不可用：{check.get('message')}"
+                return f"代码结构图谱的 Java 解析依赖不可用：{check.get('message')}"
         for check in checks:
             if str(check.get("status") or "") == "failed":
-                return f"Tree-sitter 代码图谱依赖不可用：{check.get('message')}"
-        return "Tree-sitter Java 解析依赖不可用，请先安装 code-graph 依赖。"
+                return f"代码结构图谱依赖不可用：{check.get('message')}"
+        return "代码结构图谱的 Java 解析依赖不可用，请先安装 code-graph 依赖。"
 
     def _status(self, state: str, message: str, **kwargs: object) -> dict[str, object]:
         payload: dict[str, object] = {
