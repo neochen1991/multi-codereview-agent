@@ -29,10 +29,15 @@ class DebateIssue(BaseModel):
     finding_type: str = "risk_hypothesis"
     normalized_issue_type: str = ""
     category_label: str = ""
+    risk_domain: str = ""
     primary_expert_id: str = ""
     aggregated_finding_types: list[str] = Field(default_factory=list)
     file_path: str = ""
     line_start: int = 1
+    method_name: str = ""
+    code_anchor: str = ""
+    evidence_anchor_status: str = "unchecked"
+    evidence_anchor_reason: str = ""
     status: str = "open"
     severity: str = "medium"
     confidence: float = 0.72

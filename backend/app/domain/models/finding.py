@@ -29,11 +29,16 @@ class ReviewFinding(BaseModel):
     finding_type: str = "risk_hypothesis"
     normalized_issue_type: str = ""
     category_label: str = ""
+    risk_domain: str = ""
     severity: str = "medium"
     confidence: float = 0.72
     confidence_rationale: str = ""
     file_path: str = "src/example.ts"
     line_start: int = 1
+    method_name: str = ""
+    code_anchor: str = ""
+    evidence_anchor_status: str = "unchecked"
+    evidence_anchor_reason: str = ""
     evidence: list[str] = Field(default_factory=list)
     cross_file_evidence: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -70,12 +75,15 @@ class ExpertFindingPayload(BaseModel):
     finding_type: str
     normalized_issue_type: str = ""
     category_label: str = ""
+    risk_domain: str = ""
     severity: str
     confidence: float = 0.0
     confidence_rationale: str = ""
     file_path: str = ""
     line_start: int = 1
     line_end: int | None = None
+    method_name: str = ""
+    code_anchor: str = ""
     evidence: list[str] = Field(default_factory=list)
     cross_file_evidence: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)

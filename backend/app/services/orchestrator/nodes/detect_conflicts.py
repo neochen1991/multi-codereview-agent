@@ -878,9 +878,15 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "summary": issue_summary,
                 "finding_type": _select_primary_finding_type(eligible_items),
                 "normalized_issue_type": normalized_issue_type,
+                "risk_domain": str(first.get("risk_domain") or _risk_domain_for_issue_type(normalized_issue_type, responsible_expert_id)),
                 "aggregated_finding_types": aggregated_finding_types,
                 "file_path": first.get("file_path"),
                 "line_start": first.get("line_start"),
+                "method_name": str(first.get("method_name") or ""),
+                "code_anchor": str(first.get("code_anchor") or first.get("code_excerpt") or ""),
+                "current_code": str(first.get("code_excerpt") or ""),
+                "evidence_anchor_status": str(first.get("evidence_anchor_status") or "unchecked"),
+                "evidence_anchor_reason": str(first.get("evidence_anchor_reason") or ""),
                 "finding_ids": [item.get("finding_id") for item in eligible_items],
                 "participant_expert_ids": list(
                     dict.fromkeys(
@@ -924,6 +930,33 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
     next_state["conflicts"] = conflicts
     next_state["issue_filter_decisions"] = issue_filter_decisions
     return next_state
+
+
+def _risk_domain_for_issue_type(issue_type: str, expert_id: str) -> str:
+    normalized_type = str(issue_type or "").strip().lower()
+    if normalized_type in {
+        "missing_auth_check",
+        "sql_injection_risk",
+        "sensitive_data_exposure",
+        "query_authorization_scope_broadened",
+        "input_validation_missing",
+    }:
+        return "security"
+    if normalized_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "query_semantics_regression"}:
+        return "database"
+    if normalized_type in {"loop_call_amplification", "n_plus_one", "lock_guard_removed", "lock_scope_risk"}:
+        return "performance"
+    if normalized_type in {"comment_contract_unimplemented", "business_rule_broken", "transaction_boundary_broken"}:
+        return "business"
+    if str(expert_id or "") == "security_compliance":
+        return "security"
+    if str(expert_id or "") == "database_analysis":
+        return "database"
+    if str(expert_id or "") == "performance_reliability":
+        return "performance"
+    if str(expert_id or "") == "correctness_business":
+        return "business"
+    return ""
 
 
 def _group_findings_for_issue_conversion(state: ReviewState, findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:

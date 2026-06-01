@@ -673,3 +673,85 @@ def test_judge_uses_feedback_profile_to_expand_llm_judge_trigger(monkeypatch):
     assert "feedback_profile" in issue["llm_judge_result"]["trigger_reason"]
     assert issue["status"] == "needs_verification"
     assert issue["resolution"] == "llm_judge_needs_verification"
+
+
+def test_judge_filters_issue_when_anchor_points_to_deleted_code():
+    state = {
+        "changed_files": ["src/main/java/app/OrderRepository.java"],
+        "unified_diff": """
+diff --git a/src/main/java/app/OrderRepository.java b/src/main/java/app/OrderRepository.java
+@@ -10,7 +10,6 @@ public class OrderRepository {
+-    List<Order> findAllWithoutLimit();
++    List<Order> findRecent(Pageable pageable);
+}
+""",
+        "issues": [
+            {
+                "issue_id": "iss_deleted_code",
+                "title": "查询边界缺失",
+                "summary": "删除分页限制后可能全表查询。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_boundary_missing",
+                "severity": "high",
+                "confidence": 0.92,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "file_path": "src/main/java/app/OrderRepository.java",
+                "line_start": 10,
+                "current_code": "   - |     List<Order> findAllWithoutLimit();",
+                "evidence": ["删除了分页查询"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    assert result["issues"] == []
+    assert result["issue_filter_decisions"][0]["rule_code"] == "deleted_code_only"
+    assert result["issue_filter_decisions"][0]["rule_label"] == "证据锚点校验未通过"
+
+
+def test_judge_marks_missing_code_anchor_as_needs_verification():
+    state = {
+        "changed_files": ["src/main/java/app/OrderService.java"],
+        "unified_diff": """
+diff --git a/src/main/java/app/OrderService.java b/src/main/java/app/OrderService.java
+@@ -20,6 +20,8 @@ public class OrderService {
++    public void save(Order order) {
++        orderRepository.save(order);
++    }
+""",
+        "issues": [
+            {
+                "issue_id": "iss_no_anchor",
+                "title": "订单保存缺少幂等保护",
+                "summary": "新增保存入口需要确认幂等保护。",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.86,
+                "verified": True,
+                "tool_verified": True,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "file_path": "src/main/java/app/OrderService.java",
+                "line_start": 21,
+                "current_code": "",
+                "evidence": ["新增保存入口"],
+                "cross_file_evidence": ["controller -> service"],
+                "context_files": ["OrderController.java"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["evidence_anchor_status"] == "warning"
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "evidence_anchor_needs_verification"

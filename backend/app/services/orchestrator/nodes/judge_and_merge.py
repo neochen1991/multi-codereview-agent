@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.domain.models.runtime_settings import RuntimeSettings
+from app.services.issue_evidence_anchor_service import IssueEvidenceAnchorService
 from app.services.issue_judge_service import IssueJudgeService
 from app.services.orchestrator.state import ReviewState
 
@@ -13,6 +14,8 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
     quality_profiles = dict(next_state.get("feedback_quality_profiles") or {})
     runtime_settings = _coerce_runtime_settings(next_state.get("runtime_settings"))
     issue_judge = IssueJudgeService()
+    anchor_validator = IssueEvidenceAnchorService()
+    anchor_gate_enabled = bool(next_state.get("changed_files") or str(next_state.get("unified_diff") or "").strip())
     pending_human_issue_ids: list[str] = []
     merged_issues: list[dict[str, object]] = []
     issue_filter_decisions = [
@@ -24,6 +27,30 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         next_issue = dict(issue)
         if str(issue.get("status") or "") == "rejected_after_debate":
             continue
+        if anchor_gate_enabled:
+            anchor_result = anchor_validator.validate_issue(
+                next_issue,
+                changed_files=[str(item) for item in list(next_state.get("changed_files") or [])],
+                unified_diff=str(next_state.get("unified_diff") or ""),
+            )
+            next_issue["evidence_anchor_status"] = str(anchor_result.get("status") or "unchecked")
+            next_issue["evidence_anchor_reason"] = str(anchor_result.get("reason") or "")
+            next_issue.setdefault("confidence_breakdown", {})
+            next_issue["confidence_breakdown"]["evidence_anchor"] = anchor_result
+            if str(anchor_result.get("status") or "") == "failed":
+                issue_filter_decisions.append(_build_rule_filter_decision(
+                    next_issue,
+                    rule_code=str(anchor_result.get("reason_code") or "evidence_anchor_failed"),
+                    rule_label="证据锚点校验未通过",
+                    reason=str(anchor_result.get("reason") or "问题无法锚定到当前 MR 的有效代码。"),
+                ))
+                continue
+            if str(anchor_result.get("status") or "") == "warning":
+                next_issue["verified"] = False
+                next_issue["tool_verified"] = False
+                next_issue["status"] = "needs_verification"
+                next_issue["resolution"] = "evidence_anchor_needs_verification"
+                next_issue["needs_human"] = False
         text_blob = "\n".join(
             [
                 str(issue.get("title") or ""),
@@ -83,6 +110,7 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
         ]
         evidence_strength = len(cross_file_evidence) + len(context_files) + len(evidence)
         speculative_issue = bool(assumptions) and not direct_evidence
+        anchor_warning = str(next_issue.get("evidence_anchor_status") or "") == "warning"
         verification_result = _lightweight_verify_issue(
             next_issue,
             evidence_strength=evidence_strength,
@@ -131,7 +159,11 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
                 continue
         prefer_needs_verification = bool(feedback_adjustment.get("prefer_needs_verification")) if feedback_adjustment else False
         tightened_human_confidence = float(feedback_adjustment.get("needs_human_confidence") or 0.8) if feedback_adjustment else 0.8
-        if issue.get("needs_human"):
+        if anchor_warning:
+            next_issue["status"] = "needs_verification"
+            next_issue["resolution"] = "evidence_anchor_needs_verification"
+            next_issue["needs_human"] = False
+        elif issue.get("needs_human"):
             next_issue["status"] = "needs_human"
             next_issue["resolution"] = next_issue.get("resolution") or "needs_human_review"
             next_issue["needs_human"] = True
@@ -288,7 +320,7 @@ def _build_confidence_rationale(issue: dict[str, object]) -> str:
             reasons.append(f"LLM Judge 复核结论为 {verdict}")
     status = str(issue.get("status") or "").strip()
     if status == "needs_verification":
-        reasons.append("当前状态为待验证风险")
+        reasons.append("当前状态为待验证风险，需要复核")
     elif status == "needs_human":
         reasons.append("当前状态需要人工裁决")
     elif status == "resolved":
