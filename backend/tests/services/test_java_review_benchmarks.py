@@ -429,6 +429,10 @@ def test_submit_case_can_attach_windows_quality_gate_result(tmp_path: Path, monk
     assert result["windows_quality_gate"]["passed"] is True
     assert result["windows_quality_gate"]["executed_experts"] == ["correctness_business", "security_compliance"]
     assert result["windows_quality_gate"]["prompt_profile"] == "rule-guided-compact"
+    assert result["quality_eval"]["required_recall"] == 1.0
+    assert result["quality_eval"]["precision"] == 1.0
+    assert result["quality_eval"]["anchor_accuracy"] == 1.0
+    assert result["quality_eval"]["display_quality_rate"] == 1.0
 
 
 def test_benchmark_exit_code_fails_when_windows_quality_gate_fails() -> None:

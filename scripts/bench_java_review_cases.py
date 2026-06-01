@@ -26,6 +26,7 @@ DEFAULT_API_BASE = "http://127.0.0.1:8011/api"
 FIXTURE_MARKER_FILE = ".codereview-fixture.json"
 FIXTURE_VERSION = 3
 
+from eval_review_quality import evaluate_case as evaluate_quality_case  # noqa: E402
 from validate_windows_review_quality import build_windows_review_quality_report  # noqa: E402
 
 
@@ -172,6 +173,36 @@ def _build_score_summary(score: BenchmarkScore) -> str:
     if score.missing_input_sections:
         parts.append(f"missing_inputs={','.join(score.missing_input_sections[:3])}")
     return " | ".join(parts)
+
+
+def _quality_eval_case_from_benchmark(case: JavaReviewCase) -> dict[str, object]:
+    expected_findings: list[dict[str, object]] = []
+    for index, marker in enumerate(case.expected.problem_markers):
+        if not isinstance(marker, dict):
+            continue
+        keywords = [str(item) for item in list(marker.get("keywords") or []) if str(item).strip()]
+        expected_findings.append(
+            {
+                "id": str(marker.get("id") or f"marker-{index + 1}"),
+                "severity": str(marker.get("severity") or "P1"),
+                "file_path": str(marker.get("file_path") or ""),
+                "keywords": keywords,
+            }
+        )
+    if not expected_findings:
+        expected_findings = [
+            {
+                "id": f"keyword-{index + 1}",
+                "severity": "P1",
+                "keywords": [keyword],
+            }
+            for index, keyword in enumerate(case.expected.finding_keywords)
+            if str(keyword).strip()
+        ]
+    return {
+        "case_id": case.case_id,
+        "expected_findings": expected_findings,
+    }
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -1108,6 +1139,10 @@ def submit_case(
     review_status = str(latest_review.get("status") or "")
     review_phase = str(latest_review.get("phase") or "")
     score = evaluate_case_result(materialized.case, report if isinstance(report, dict) else {}, replay if isinstance(replay, dict) else {})
+    quality_eval = evaluate_quality_case(
+        _quality_eval_case_from_benchmark(materialized.case),
+        report if isinstance(report, dict) else {},
+    )
     windows_quality_report: dict[str, object] | None = None
     if windows_quality_gate:
         windows_quality_report = build_windows_review_quality_report(
@@ -1181,6 +1216,19 @@ def submit_case(
             "incomplete": score.incomplete,
             "review_status": score.review_status,
             "review_phase": score.review_phase,
+        },
+        "quality_eval": {
+            "required_recall": quality_eval["required_recall"],
+            "critical_recall": quality_eval["critical_recall"],
+            "precision": quality_eval["precision"],
+            "blocking_precision": quality_eval["blocking_precision"],
+            "anchor_accuracy": quality_eval["anchor_accuracy"],
+            "display_quality_rate": quality_eval["display_quality_rate"],
+            "duplicate_rate": quality_eval["duplicate_rate"],
+            "false_positive_rate": quality_eval["false_positive_rate"],
+            "runtime_seconds_per_review": quality_eval["runtime_seconds_per_review"],
+            "missing_required": list(quality_eval["missing_required"]),
+            "matched_expected_ids": list(quality_eval["matched_expected_ids"]),
         },
         "score_summary": _build_score_summary(score),
     }
