@@ -52,13 +52,14 @@ class MainAgentPromptingMixin:
             "5. 输出必须使用提供的 candidate_id 或 file_path+line_start 对应真实候选 hunk；"
             "6. 同一类问题尽量只派给一个主责专家，不要把高度重叠的问题同时派给多个相近专家。"
             "主责划分参考："
-            "业务规则、状态流转、注释或接口承诺未实现 -> correctness_business；"
+            "业务规则、交易金额/库存/支付/退款/订单状态、状态流转、注释或接口承诺未实现 -> correctness_business；"
             "聚合边界、应用服务职责、依赖方向、分层边界 -> ddd_architecture；"
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
-            "权限、鉴权、SQL注入、敏感数据泄露、日志脱敏 -> security_compliance；"
-            "SQL、事务、schema、索引 -> database_analysis；"
-            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+            "权限、鉴权、SQL注入、敏感数据泄露、日志脱敏、Web入口、租户隔离、资源级鉴权、输入校验、SQL/Like注入 -> security_compliance；"
+            "Repository/JPA/MyBatis/SQL、事务、schema、索引、查询语义和查询边界 -> database_analysis；"
+            "批处理、循环内I/O、锁竞争、并发竞态、超时重试、故障放大 -> performance_reliability；"
+            "高风险交易路径、权限边界、异常回滚、幂等和批量场景的回归保护 -> test_verification；"
             "影响范围、调用链、测试范围 -> change_impact_analysis。"
         )
 
@@ -69,19 +70,21 @@ class MainAgentPromptingMixin:
             "请只输出 JSON，不要输出解释。"
             "选择原则：1. 必须依据真实变更内容和专家职责边界选择；"
             "2. 专家数量应尽量精简，只保留真正相关的专家；"
-            "3. 非前端改动不要选择前端专家；非安全线索不要强行选择安全专家；"
-            "4. 变更涉及跨文件契约、业务逻辑、结构设计时，应优先保留正确性/架构/可维护性等通用专家；"
+            "3. 非前端改动不要选择前端专家；安全专家不只看 security 目录，凡是新增/放宽 Web 入口、权限、租户、用户资源、外部输入、回调验签、敏感日志或查询范围，都应选择安全专家；"
+            "4. Java Web 交易系统中，订单/支付/退款/库存/账户/优惠/结算等链路变化，默认至少考虑正确性与业务、数据库、性能可靠性、安全、测试中的相关专家；"
             "5. 如果某专家不需要参与，写入 skipped_experts 并说明原因；"
             "6. selected_experts 至少返回 1 个；"
-            "7. 对高度重叠的问题类别，只保留一个主责专家，避免把同类问题同时分给多个相近专家。"
+            "7. 对高度重叠的问题类别，只保留一个主责专家，避免把同类问题同时分给多个相近专家；"
+            "8. change_impact_analysis 是每个 MR 的默认参与专家，除非系统未提供该专家画像。"
             "主责划分参考："
-            "业务规则、状态流转、注释或接口承诺未实现 -> correctness_business；"
+            "业务规则、交易金额/库存/支付/退款/订单状态、状态流转、注释或接口承诺未实现 -> correctness_business；"
             "聚合边界、应用服务职责、依赖方向、分层边界 -> ddd_architecture；"
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
-            "权限、鉴权、SQL注入、敏感数据泄露、日志脱敏 -> security_compliance；"
-            "SQL、事务、schema、索引 -> database_analysis；"
-            "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
+            "Web入口、权限、租户隔离、资源级鉴权、输入校验、SQL/Like注入、敏感数据泄露、日志脱敏 -> security_compliance；"
+            "Repository/JPA/MyBatis/SQL、事务、schema、索引、查询语义和查询边界 -> database_analysis；"
+            "批处理、循环内I/O、锁竞争、并发竞态、超时重试、故障放大 -> performance_reliability；"
+            "高风险交易路径、权限边界、异常回滚、幂等和批量场景的回归保护 -> test_verification；"
             "影响范围、调用链、测试范围 -> change_impact_analysis。"
         )
 
@@ -201,13 +204,14 @@ class MainAgentPromptingMixin:
             f"变更源码与关联上下文:\n{source_context_summary}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
             "主责专家速查：\n"
-            "- correctness_business: 业务规则、状态流转、注释或接口承诺未实现\n"
+            "- correctness_business: 业务规则、状态流转、交易金额/库存/支付/退款/订单状态、注释或接口承诺未实现\n"
             "- ddd_architecture: 聚合边界、应用服务职责、依赖方向、分层边界\n"
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
-            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏\n"
-            "- database_analysis: SQL、事务、schema、索引\n"
-            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏、Web入口、租户隔离、资源级鉴权、输入校验、SQL/Like注入\n"
+            "- database_analysis: Repository/JPA/MyBatis/SQL、事务、schema、索引、查询语义和查询边界\n"
+            "- performance_reliability: 批处理、循环内I/O、锁竞争、并发竞态、超时重试、故障放大\n"
+            "- test_verification: 高风险交易路径、权限边界、异常回滚、幂等和批量场景的回归保护\n"
             "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
             f"可用专家:\n{chr(10).join(expert_sections)}\n\n"
             f"候选 hunk:\n{chr(10).join(candidate_sections)}\n\n"
@@ -279,13 +283,14 @@ class MainAgentPromptingMixin:
             f"跨文件影响提示:\n{chr(10).join(f'- {item}' for item in selection_cross_file_hints) or '- 当前未识别到明确的跨文件传播线索'}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
             "主责专家速查：\n"
-            "- correctness_business: 业务规则、状态流转、注释或接口承诺未实现\n"
+            "- correctness_business: 业务规则、状态流转、交易金额/库存/支付/退款/订单状态、注释或接口承诺未实现\n"
             "- ddd_architecture: 聚合边界、应用服务职责、依赖方向、分层边界\n"
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
-            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏\n"
-            "- database_analysis: SQL、事务、schema、索引\n"
-            "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
+            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏、Web入口、租户隔离、资源级鉴权、输入校验、SQL/Like注入\n"
+            "- database_analysis: Repository/JPA/MyBatis/SQL、事务、schema、索引、查询语义和查询边界\n"
+            "- performance_reliability: 批处理、循环内I/O、锁竞争、并发竞态、超时重试、故障放大\n"
+            "- test_verification: 高风险交易路径、权限边界、异常回滚、幂等和批量场景的回归保护\n"
             "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
             f"可用专家画像:\n{chr(10).join(expert_sections)}\n\n"
             "请输出 JSON，格式为：\n"
@@ -638,12 +643,26 @@ class MainAgentPromptingMixin:
                 0.8,
             )
 
-        maintainability_signals = _primary_signals(
-            "maintainability_code_health",
+        coding_standard_signals = _primary_signals(
+            "architecture_design",
             {
                 "naming_convention_violation",
                 "magic_value_literal",
+            },
+        )
+        if coding_standard_signals:
+            _add_if_requested(
+                "architecture_design",
+                "检测到命名规范或魔法值等通用 Java 编码规范信号，系统补入通用编码规范专家复核。",
+                0.72,
+            )
+
+        maintainability_signals = _primary_signals(
+            "maintainability_code_health",
+            {
                 "comment_contract_unimplemented",
+                "naming_convention_violation",
+                "magic_value_literal",
                 "python_mutable_default_arg",
                 "go_unchecked_error_return",
                 "typescript_any_type",
@@ -653,7 +672,7 @@ class MainAgentPromptingMixin:
         if maintainability_signals:
             _add_if_requested(
                 "maintainability_code_health",
-                "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
+                "检测到承诺落地或语言层风险可能造成长期维护问题，系统补入可维护性与代码健康专家复核结构性影响。",
                 0.72,
             )
 

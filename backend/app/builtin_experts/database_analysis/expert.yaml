@@ -13,6 +13,17 @@ activation_hints:
   - db
   - dao
   - repository
+  - mapper
+  - jpa
+  - mybatis
+  - criteria
+  - entitymanager
+  - query
+  - transactional
+  - transaction
+  - lockmode
+  - save
+  - find
   - migration
   - schema
 required_checks:
@@ -20,6 +31,7 @@ required_checks:
   - 事务、锁和回滚边界是否完整
   - schema 变更是否向前向后兼容
   - 索引、默认值和约束是否支撑线上流量
+  - Java Web 交易系统中的订单/支付/库存等核心表读写是否保持事务一致性、幂等约束和查询边界
 out_of_scope:
   - 不要代替 DDD 专家评论领域模型纯度
   - 不要代替前端专家评论界面交互

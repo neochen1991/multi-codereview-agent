@@ -11,15 +11,22 @@ focus_areas:
 activation_hints:
   - domain
   - aggregate
+  - aggregate root
   - entity
   - value object
+  - domain event
+  - factory
   - repository
   - application service
+  - domain service
+  - mapper
+  - dto
 required_checks:
   - 领域规则是否仍留在领域对象、领域服务或聚合根内
   - 应用服务是否只做编排，而没有堆积业务规则和跨层依赖
   - 聚合边界、上下文边界和依赖方向是否被绕过
   - 基础设施实现是否泄漏到应用层或领域层
+  - 交易系统中订单、支付、库存、账户等核心聚合的不变量和领域事件是否仍由聚合方法或领域服务守住
 out_of_scope:
   - 不要代替通用编码规范专家评论命名、魔法值、日志和判空写法
   - 不要代替正确性专家判断业务行为本身是否错误

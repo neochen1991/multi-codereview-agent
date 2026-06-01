@@ -19,8 +19,8 @@ SIGNAL_EXPERT_PRIMARY = {
     "exception_semantics_weakened": "correctness_business",
     "configuration_behavior_coupling": "correctness_business",
     "exception_swallowed": "correctness_business",
-    "naming_convention_violation": "maintainability_code_health",
-    "magic_value_literal": "maintainability_code_health",
+    "naming_convention_violation": "architecture_design",
+    "magic_value_literal": "architecture_design",
 }
 
 
@@ -207,14 +207,30 @@ def apply_java_signal_expert_retention(
             0.76,
         )
 
+    coding_standard_signals = _primary_signals(
+        "architecture_design",
+        {"naming_convention_violation", "magic_value_literal"},
+    )
+    if coding_standard_signals:
+        _add_if_requested(
+            "architecture_design",
+            "检测到命名规范或魔法值等通用 Java 编码规范信号，系统补入通用编码规范专家复核。",
+            0.72,
+        )
+
     maintainability_signals = _primary_signals(
         "maintainability_code_health",
-        {"naming_convention_violation", "magic_value_literal", "exception_swallowed", "comment_contract_unimplemented"},
+        {
+            "exception_swallowed",
+            "comment_contract_unimplemented",
+            "naming_convention_violation",
+            "magic_value_literal",
+        },
     )
     if maintainability_signals:
         _add_if_requested(
             "maintainability_code_health",
-            "检测到命名规范、魔法值或异常处理质量退化，系统补入可维护性与代码健康专家复核语言层质量问题。",
+            "检测到异常处理质量或承诺落地问题可能造成长期维护风险，系统补入可维护性与代码健康专家复核结构性影响。",
             0.72,
         )
 

@@ -13,14 +13,23 @@ activation_hints:
   - kafka
   - rocketmq
   - rabbit
+  - eventbus
+  - event bus
   - queue
   - consumer
   - producer
+  - listener
+  - publish
+  - send
+  - ack
+  - retry
+  - deadletter
 required_checks:
   - 生产和消费是否具备幂等与去重
   - 顺序、重试、补偿和死信处理是否正确
   - ack、超时和异常路径是否可能丢消息或重复消费
   - 堆积治理和监控语义是否被破坏
+  - 交易事件、支付回调、库存预占、订单状态同步等消息是否具备业务幂等键和失败补偿路径
 out_of_scope:
   - 不要代替数据库专家评估 SQL/索引
   - 不要代替前端专家评论 UI 交互

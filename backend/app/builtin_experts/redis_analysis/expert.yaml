@@ -14,11 +14,20 @@ activation_hints:
   - ttl
   - lua
   - lock
+  - redisson
+  - stringredis
+  - setifabsent
+  - expire
+  - evict
+  - cacheable
+  - cacheput
+  - cacheevict
 required_checks:
   - 缓存读写是否会导致脏读、穿透、击穿或雪崩
   - key 设计、TTL 和失效策略是否合理
   - Lua、多 key 和事务是否破坏原子性
   - 热点 key 和序列化开销是否会形成隐患
+  - 订单、支付、库存、用户会话等交易缓存是否保持 DB 与缓存更新顺序、锁 TTL 和幂等释放语义
 out_of_scope:
   - 不要代替 MQ 专家判断消息顺序与死信
   - 不要代替前端专家判断界面可访问性

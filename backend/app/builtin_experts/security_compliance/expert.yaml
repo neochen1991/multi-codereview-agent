@@ -9,17 +9,43 @@ focus_areas:
 - 输入校验
 activation_hints:
 - auth
+- authorize
+- authorization
+- permission
+- preauthorize
 - security
 - valid
 - validation
 - bindingresult
 - requestbody
 - requestparam
+- pathvariable
+- restcontroller
+- controller
+- requestmapping
+- getmapping
+- postmapping
+- tenant
+- userid
+- user_id
+- token
+- cookie
+- session
+- header
+- password
+- mobile
+- phone
+- idcard
+- like
+- criteria
 required_checks:
 - 权限边界是否被绕过
 - 输入校验是否被绕过
+- 交易系统中的用户、租户、订单、支付、退款、账户等资源级授权是否仍按主体与资源同时校验
+- 外部输入进入查询、反序列化、日志、回调验签和金额/状态变更前是否有校验、转义或签名校验
 out_of_scope:
 - 不要代替性能专家判断容量瓶颈
+- 不要把普通业务边界条件误报成安全漏洞，必须说明攻击面、越权路径或敏感数据暴露路径
 preferred_artifacts:
 - diff hunk
 knowledge_sources:

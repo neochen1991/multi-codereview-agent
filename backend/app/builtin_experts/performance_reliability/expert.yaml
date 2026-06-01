@@ -10,15 +10,26 @@ focus_areas:
 activation_hints:
   - repository
   - batch
+  - loop
+  - for
+  - stream
+  - save
+  - find
+  - synchronized
+  - lock
   - async
   - worker
   - retry
   - timeout
+  - feign
+  - resttemplate
+  - httpclient
 required_checks:
   - 是否引入 N+1、全量扫描或不必要的同步阻塞
   - 超时、重试和回滚是否完整
   - 并发下资源释放、锁和竞争条件是否安全
   - 故障恢复路径是否会放大系统压力
+  - Java Web 交易系统中的批量订单/支付/库存处理是否出现循环内 DB/HTTP/MQ 调用、锁保护移除或事务内慢 I/O
 out_of_scope:
   - 不要代替安全专家判断权限与敏感数据
   - 不要代替测试专家决定断言是否充分

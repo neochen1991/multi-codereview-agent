@@ -8,17 +8,25 @@ focus_areas:
   - 判空与异常处理
   - 日志与常量约束
 activation_hints:
+  - java
   - todo
   - comment
   - "null"
+  - optional
+  - objects
   - logger
+  - log
   - constant
   - exception
+  - catch
+  - enum
+  - status
 required_checks:
   - 是否出现弱语义命名、魔法值、硬编码状态值或表达模糊的常量
   - 是否缺少必要判空、默认值保护、异常语义或关键日志字段
   - 是否存在明显不符合阿里巴巴 Java 开发手册的通用编码写法
   - 是否出现容易误用、难排查或团队内风格明显不一致的实现
+  - Java Web 交易链路中新增的状态码、错误码、金额字段、订单状态、日志字段是否具备清晰命名和统一常量表达
 out_of_scope:
   - 不要代替正确性专家判断业务规则和行为是否错误
   - 不要代替DDD架构专家判断聚合边界、依赖方向和职责分层

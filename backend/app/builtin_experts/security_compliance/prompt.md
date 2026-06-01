@@ -12,6 +12,10 @@
 - 输入校验、反序列化、注入和外部输入边界是否安全。
 - 密钥、令牌、敏感字段和日志是否存在泄露风险。
 - 改动是否违反团队安全规范或合规要求。
+- Java Web 交易系统中的 Controller、Filter、Interceptor、Service 入口是否仍校验当前用户、租户、角色、资源归属和操作权限。
+- 订单、支付、退款、账户、优惠券、库存等资源查询或操作是否从 `tenant/user/resource` 组合校验退化成只按 id、状态或模糊条件处理。
+- `@RequestBody`、`@RequestParam`、`@PathVariable`、回调参数、Header/Cookie/Token、文件上传、JSON 反序列化、Criteria/SQL like 条件进入业务或查询前是否校验、转义、验签或限长。
+- 日志、异常、审计、埋点、MQ 消息和返回值中是否新增 token、手机号、身份证、银行卡、密钥、支付流水等敏感信息明文。
 
 输出要求：
 - 必须说明攻击面或泄露路径是如何形成的。
@@ -29,6 +33,9 @@
 - 该报：接口从按 `tenant_id + user_id` 查询改成只按 `id` 查询，可能跨租户读取；这是 `tenant_isolation_broken`。
 - 该报：新增管理接口没有角色校验或资源级授权；这是 `missing_auth_check`。
 - 该报：日志新增 token、身份证、手机号等敏感字段明文输出；这是 `sensitive_data_exposed`。
+- 该报：原本按 `tenantId + userId + orderId` 查询或更新，改成只按 `orderId`，用户可操作他人订单；这是 `tenant_isolation_broken` 或 `authorization_scope_broken`。
+- 该报：`builder.equal` 改成未转义的 `like`，且输入来自外部筛选条件，可能扩大查询范围或形成注入/通配符滥用；这是 `injection_risk` 或 `authorization_scope_broken`，要说明输入来源和影响对象。
+- 该报：支付回调、退款回调、库存回调删除验签/重放校验/幂等校验；这是 `input_validation_missing` 或 `security_guard_removed`。
 - 不该报：只是普通空值、业务边界或异常返回问题，没有攻击面或敏感数据路径。
 - 不该报：性能、SQL 索引、命名和可读性问题。
 

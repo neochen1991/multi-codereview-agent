@@ -8,16 +8,23 @@ focus_areas:
   - 可读性
   - 演化成本
 activation_hints:
+  - controller
   - service
   - util
   - helper
   - manager
   - workflow
+  - facade
+  - adapter
+  - switch
+  - if
+  - mapper
 required_checks:
   - 是否把多种职责揉进一个函数或对象
   - 是否引入难懂的分支、魔法值或复制粘贴逻辑
   - 是否让测试和调试难度显著上升
   - 是否缺少能解释意图的抽象
+  - Java Web 交易链路中的 Controller/Service/Adapter 是否继续堆叠参数转换、校验、业务编排、持久化和外部调用等多重职责
 out_of_scope:
   - 不要代替正确性专家判断业务语义是否错误
   - 不要代替性能专家预测容量瓶颈

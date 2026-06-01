@@ -10,6 +10,13 @@ focus_areas:
 activation_hints:
   - test
   - spec
+  - junit
+  - mockito
+  - assertj
+  - springboottest
+  - mockmvc
+  - integration
+  - regression
   - jest
   - vitest
   - pytest
@@ -19,6 +26,7 @@ required_checks:
   - 断言是否覆盖失败分支和边界条件
   - 新增行为是否具备回归保护
   - 是否缺少验证脚本、监控或人工检查步骤
+  - Java Web 交易系统的订单、支付、库存、权限、幂等、事务回滚、消息重试和缓存一致性风险是否有单测/集成测试/回归脚本覆盖
 out_of_scope:
   - 不要代替正确性专家定义业务规则正确性
   - 不要代替安全专家判断漏洞成立

@@ -834,9 +834,15 @@ class MainAgentService(MainAgentPromptingMixin):
         changed_files_lowered = "\n".join(subject.changed_files).lower()
         global_blob = "\n".join([lowered, excerpt_lowered, changed_files_lowered, global_diff_lowered])
 
-        if expert_id == "mq_analysis" and not any(token in f"{lowered}\n{excerpt_lowered}" for token in ["mq", "queue", "kafka", "rabbit", "consumer", "producer"]):
+        if expert_id == "mq_analysis" and not any(
+            token in f"{lowered}\n{excerpt_lowered}"
+            for token in ["mq", "queue", "kafka", "rabbit", "consumer", "producer", "eventbus", "event bus", "listener", "publish", "ack", "deadletter"]
+        ):
             return False, "当前变更未命中该中间件专家的关键线索"
-        if expert_id == "redis_analysis" and not any(token in f"{lowered}\n{excerpt_lowered}" for token in ["redis", "cache", "ttl", "expire", "setnx", "pipeline"]):
+        if expert_id == "redis_analysis" and not any(
+            token in f"{lowered}\n{excerpt_lowered}"
+            for token in ["redis", "cache", "ttl", "expire", "setnx", "pipeline", "redisson", "setifabsent", "cacheable", "cacheevict"]
+        ):
             return False, "当前变更未命中该缓存专家的关键线索"
         if expert_id == "security_compliance" and not any(
             token in global_blob
@@ -1208,7 +1214,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 
