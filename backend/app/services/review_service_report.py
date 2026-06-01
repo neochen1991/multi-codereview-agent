@@ -26,7 +26,7 @@ class ReviewServiceReportMixin:
             raise KeyError(review_id)
         findings = self.list_findings(review_id)
         raw_issues = self.issue_repo.list(review_id)
-        issues = self.list_issues(review_id)
+        issues = self._dedupe_report_issues_by_anchor(self.list_issues(review_id))
         display_findings = self._ensure_display_findings_cover_issues(
             self._build_display_report_findings(findings),
             issues,
@@ -103,6 +103,108 @@ class ReviewServiceReportMixin:
                 self.get_runtime_settings(),
             )
         return None
+
+    def _dedupe_report_issues_by_anchor(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        """Merge same-root-cause issues from different experts before rendering."""
+
+        deduped: dict[tuple[str, str, int], DebateIssue] = {}
+        order: list[tuple[str, str, int]] = []
+        for issue in issues:
+            normalized = self._normalize_report_issue_family(issue)
+            family = self._classify_display_issue_family(
+                normalized.normalized_issue_type,
+                "\n".join(
+                    [
+                        str(normalized.title or ""),
+                        str(normalized.summary or ""),
+                        str(normalized.file_path or ""),
+                        str(normalized.primary_expert_id or ""),
+                        *[str(item or "") for item in list(normalized.aggregated_titles or [])],
+                        *[str(item or "") for item in list(normalized.aggregated_summaries or [])],
+                    ]
+                ),
+            )
+            key = (
+                str(normalized.file_path or "").replace("\\", "/").strip().lower(),
+                family or str(normalized.normalized_issue_type or normalized.finding_type or "").strip().lower(),
+                int(normalized.line_start or 1),
+            )
+            if key not in deduped:
+                deduped[key] = normalized
+                order.append(key)
+                continue
+            deduped[key] = self._merge_report_duplicate_issue(deduped[key], normalized)
+        return [deduped[key] for key in order]
+
+    def _merge_report_duplicate_issue(self, left: DebateIssue, right: DebateIssue) -> DebateIssue:
+        merged_participants = self._dedupe_report_strings(
+            [
+                *list(left.participant_expert_ids or []),
+                str(left.primary_expert_id or ""),
+                *list(right.participant_expert_ids or []),
+                str(right.primary_expert_id or ""),
+            ]
+        )
+        merged_views = self._dedupe_report_dicts([*list(left.expert_views or []), *list(right.expert_views or [])], limit=12)
+        return left.model_copy(
+            update={
+                "finding_ids": self._dedupe_report_strings([*list(left.finding_ids or []), *list(right.finding_ids or [])]),
+                "participant_expert_ids": [item for item in merged_participants if item and item != str(left.primary_expert_id or "")],
+                "expert_views": merged_views,
+                "aggregated_titles": self._dedupe_report_strings(
+                    [
+                        *list(left.aggregated_titles or []),
+                        str(right.title or ""),
+                        *list(right.aggregated_titles or []),
+                    ]
+                )[:10],
+                "aggregated_summaries": self._dedupe_report_strings(
+                    [
+                        *list(left.aggregated_summaries or []),
+                        str(right.summary or ""),
+                        *list(right.aggregated_summaries or []),
+                    ]
+                )[:10],
+                "aggregated_remediation_strategies": self._dedupe_report_strings(
+                    [
+                        *list(left.aggregated_remediation_strategies or []),
+                        str(right.remediation_strategy or ""),
+                        *list(right.aggregated_remediation_strategies or []),
+                    ]
+                )[:10],
+                "aggregated_remediation_suggestions": self._dedupe_report_strings(
+                    [
+                        *list(left.aggregated_remediation_suggestions or []),
+                        str(right.remediation_suggestion or ""),
+                        *list(right.aggregated_remediation_suggestions or []),
+                    ]
+                )[:10],
+                "evidence": self._dedupe_report_strings([*list(left.evidence or []), *list(right.evidence or [])])[:10],
+                "cross_file_evidence": self._dedupe_report_strings(
+                    [*list(left.cross_file_evidence or []), *list(right.cross_file_evidence or [])]
+                )[:8],
+                "confidence": max(float(left.confidence or 0.0), float(right.confidence or 0.0)),
+                "needs_human": bool(left.needs_human or right.needs_human),
+                "needs_debate": bool(left.needs_debate or right.needs_debate),
+                "verified": bool(left.verified or right.verified),
+            }
+        )
+
+    @staticmethod
+    def _dedupe_report_dicts(values: list[dict[str, object]], *, limit: int) -> list[dict[str, object]]:
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[tuple[str, str], ...]] = set()
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            key = tuple(sorted((str(key), str(item)) for key, item in value.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(value))
+            if len(deduped) >= limit:
+                break
+        return deduped
 
     def _realign_issue_location(
         self,
@@ -1197,6 +1299,9 @@ class ReviewServiceReportMixin:
         text = text.replace("lock_guard_removed", "并发保护被移除")
         text = text.replace("query_bound_removed", "查询边界缺失")
         text = text.replace("comment_contract_unimplemented", "注释承诺未实现")
+        text = re.sub(r"\s*建议[:：]\s*补齐缺失实现，并增加能复现该风险的回归测试。?", "", text)
+        text = text.replace("补齐缺失实现，并增加能复现该风险的回归测试。", "")
+        text = text.replace("补齐缺失实现，并增加能复现该风险的回归测试", "")
         text = text.replace(
             "异常被静默吞掉后仍返回成功状态，无日志、无指标、无补偿动作",
             "catch 分支把支付网关异常转换成成功返回，缺少失败结果、日志或补偿动作。",

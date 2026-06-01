@@ -1633,7 +1633,7 @@ def test_build_report_normalizes_query_semantics_finding_remediation(storage_roo
             finding_id="fdg_query_semantics",
             expert_id="security_compliance",
             title="查询语义从精确匹配退化为模糊匹配",
-            summary="builder.equal 被改成 builder.like，查询语义被静默放宽。",
+            summary="builder.equal 被改成 builder.like，查询语义被静默放宽。建议：补齐缺失实现，并增加能复现该风险的回归测试。",
             normalized_issue_type="query_semantics_weakened",
             severity="high",
             confidence=0.9,
@@ -1647,6 +1647,8 @@ def test_build_report_normalizes_query_semantics_finding_remediation(storage_roo
 
     report = service.build_report(review.review_id)
 
+    assert "补齐缺失实现" not in report.findings[0].summary
+    assert "like" in report.findings[0].summary
     assert report.findings[0].remediation_suggestion.startswith("若 equalsPredicateTransformer")
     assert report.confidence_summary.fallback_text_failure_count == 0
 
@@ -1816,6 +1818,65 @@ def test_list_issues_keeps_same_line_multi_expert_issue_merged(storage_root: Pat
     assert issues[0].finding_ids == ["fdg_query_a", "fdg_query_b"]
     assert report.issue_count == 1
     assert report.issues[0].issue_id == "iss_query_merged"
+
+
+def test_build_report_merges_same_anchor_query_semantics_issues_from_different_experts(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_query_duplicate",
+            "project_id": "proj_query_duplicate",
+            "source_ref": "feature/query-duplicate",
+            "target_ref": "main",
+            "title": "query duplicate",
+        }
+    )
+    current_code = (
+        "# src/shared/HibernateCriteriaConverter.java\n"
+        "  15 |      private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n"
+        "  16 | +        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+        "  17 |      }"
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_query_security",
+                title="查询语义从精确匹配退化为模糊匹配",
+                summary="安全专家发现 equal 被改成 like，权限过滤范围可能被放大。",
+                normalized_issue_type="query_semantics_regression",
+                primary_expert_id="security_compliance",
+                participant_expert_ids=["security_compliance"],
+                file_path="src/shared/HibernateCriteriaConverter.java",
+                line_start=16,
+                current_code=current_code,
+                finding_ids=["fdg_query_security"],
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_query_database",
+                title="查询语义从精确匹配退化为模糊匹配",
+                summary="数据库专家发现同一行 like 会导致索引使用和查询结果范围变化。",
+                normalized_issue_type="query_semantics_regression",
+                primary_expert_id="database_analysis",
+                participant_expert_ids=["database_analysis"],
+                file_path="src/shared/HibernateCriteriaConverter.java",
+                line_start=16,
+                current_code=current_code,
+                finding_ids=["fdg_query_database"],
+            ),
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.issue_count == 1
+    assert len(report.issues) == 1
+    assert set(report.issues[0].finding_ids) == {"fdg_query_security", "fdg_query_database"}
+    assert "database_analysis" in report.issues[0].participant_expert_ids
+    assert report.issues[0].title == "查询语义从精确匹配退化为模糊匹配"
 
 
 def test_list_issues_merges_same_file_when_windows_path_separators_differ(storage_root: Path):
