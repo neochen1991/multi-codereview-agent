@@ -95,6 +95,7 @@ class IssueJudgeService:
             "你是代码检视结果裁判。"
             "你的目标不是多报问题，而是过滤误报。"
             "请只根据当前提供的代码证据、跨文件证据、假设前提和问题描述判断。"
+            "你只负责裁决发布状态和置信度，不允许改写问题标题、问题说明、修复建议或建议代码。"
             "如果证据不足，不要脑补，优先输出 needs_verification 或 abstain。"
             "如果问题已经有强直接证据，只有在明显不成立时才 reject。"
             "必须只返回 JSON。"
@@ -133,6 +134,7 @@ class IssueJudgeService:
             "- 对跨文件契约问题，不要只因为当前 diff 没展示全部调用方就直接 reject。\n"
             "- 对 direct_defect，除非证据与结论明显矛盾，否则优先 accept 或 needs_human。\n"
             "- 对 risk_hypothesis，如果主要依赖 assumptions，优先 needs_verification。\n"
+            "- 你不能输出 title、summary、remediation_suggestion、suggested_code 等改写字段；即使输出也会被系统忽略。\n"
             "输出 JSON: {\"final_verdict\":\"...\",\"confidence_adjustment\":-0.2~0.2,\"reason\":\"...\"}\n\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )

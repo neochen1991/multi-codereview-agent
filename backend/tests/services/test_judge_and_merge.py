@@ -516,6 +516,80 @@ def test_judge_uses_llm_judge_to_reject_low_confidence_issue(monkeypatch):
     assert result["issues"] == []
 
 
+def test_judge_llm_result_cannot_rewrite_issue_details(monkeypatch):
+    def _fake_complete_text(_self, **kwargs):
+        assert "不允许改写问题标题、问题说明、修复建议或建议代码" in kwargs["system_prompt"]
+        assert "即使输出也会被系统忽略" in kwargs["user_prompt"]
+        return LLMTextResult(
+            text=(
+                "{"
+                '"final_verdict":"accept",'
+                '"confidence_adjustment":0.05,'
+                '"reason":"证据成立",'
+                '"title":"错误改写后的标题",'
+                '"summary":"错误改写后的说明",'
+                '"remediation_suggestion":"错误改写后的修复建议",'
+                '"suggested_code":"return null;"'
+                "}"
+            ),
+            mode="live",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "issues": [
+            {
+                "issue_id": "iss_judge_no_rewrite",
+                "title": "原始标题：支付捕获异常后仍返回成功",
+                "summary": "原始说明：catch 分支返回 success。",
+                "remediation_suggestion": "原始建议：不要在 catch 分支返回 success。",
+                "suggested_code": "throw e;",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "exception_swallowed",
+                "severity": "medium",
+                "confidence": 0.72,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "evidence": ["catch (RuntimeException ignored)", "return SettlementResult.success(payments.size())"],
+                "assumptions": [],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["title"] == "原始标题：支付捕获异常后仍返回成功"
+    assert issue["summary"] == "原始说明：catch 分支返回 success。"
+    assert issue["remediation_suggestion"] == "原始建议：不要在 catch 分支返回 success。"
+    assert issue["suggested_code"] == "throw e;"
+    assert issue["llm_judge_result"] == {
+        "final_verdict": "accept",
+        "confidence_adjustment": 0.05,
+        "reason": "证据成立",
+        "trigger_reason": "low_confidence<=0.78",
+        "provider": "test",
+        "model": "judge-model",
+        "mode": "live",
+    }
+
+
 def test_judge_llm_judge_failure_falls_back_to_existing_rules(monkeypatch):
     def _fake_complete_text(_self, **_kwargs):
         return LLMTextResult(
