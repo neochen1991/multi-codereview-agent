@@ -182,6 +182,46 @@ def build_repository_context_summary(
         summary = str(repository_context.get("summary") or "").strip()
         if summary:
             lines.append(f"- 主Agent上下文: {summary}")
+        change_understanding = repository_context.get("change_understanding")
+        if isinstance(change_understanding, dict) and change_understanding:
+            risk_domains = [
+                str(item).strip()
+                for item in list(change_understanding.get("risk_domains") or [])
+                if str(item).strip()
+            ]
+            expert_hints = [
+                str(item).strip()
+                for item in list(change_understanding.get("expert_hints") or [])
+                if str(item).strip()
+            ]
+            changed_symbols = [
+                str(item).strip()
+                for item in list(change_understanding.get("changed_symbols") or [])
+                if str(item).strip()
+            ]
+            lines.append("- 结构化变更理解（确定性规则生成，供专家复核，不是最终结论）:")
+            lines.append(f"  * 风险域: {' / '.join(risk_domains[:10]) or '无'}")
+            lines.append(f"  * 建议专家: {' / '.join(expert_hints[:10]) or '无'}")
+            lines.append(f"  * 关键符号: {' / '.join(changed_symbols[:16]) or '无'}")
+            files = [item for item in list(change_understanding.get("files") or []) if isinstance(item, dict)]
+            for item in files[:6]:
+                file_path = str(item.get("path") or "").strip()
+                role = str(item.get("file_role") or "").strip()
+                domains = [
+                    str(value).strip()
+                    for value in list(item.get("risk_domains") or [])
+                    if str(value).strip()
+                ]
+                methods = [
+                    str(value).strip()
+                    for value in list(item.get("changed_methods") or [])
+                    if str(value).strip()
+                ]
+                if file_path:
+                    lines.append(
+                        f"  * {file_path} · role={role or 'code'} · "
+                        f"methods={','.join(methods[:4]) or 'unknown'} · domains={'/'.join(domains[:6]) or 'none'}"
+                    )
         primary_context = repository_context.get("primary_context")
         if isinstance(primary_context, dict) and primary_context.get("snippet"):
             lines.append(f"- 目标文件: {primary_context.get('path')}")

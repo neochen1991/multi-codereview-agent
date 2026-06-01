@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from app.services.change_understanding_service import ChangeUnderstandingService
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.main_agent_routing_support import filter_primary_signals_for_expert
@@ -193,6 +194,7 @@ class MainAgentPromptingMixin:
         language_general_guidance = self._build_language_general_guidance_summary(
             [str(item.get("file_path") or "") for item in candidate_hunks] + business_changed_files
         )
+        change_understanding_summary = self._build_change_understanding_summary(subject)
         return (
             f"审核对象: {subject.title or subject.mr_url or subject.source_ref}\n"
             f"源分支: {subject.source_ref}\n"
@@ -202,6 +204,7 @@ class MainAgentPromptingMixin:
             f"目标文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
             f"变更源码与关联上下文:\n{source_context_summary}\n\n"
+            f"结构化变更理解（确定性规则生成，不是最终结论）:\n{change_understanding_summary}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
             "主责专家速查：\n"
             "- correctness_business: 业务规则、状态流转、交易金额/库存/支付/退款/订单状态、注释或接口承诺未实现\n"
@@ -261,6 +264,7 @@ class MainAgentPromptingMixin:
         related_diff_summary = self._build_related_diff_summary(subject, primary_file_path, max_files=2, max_lines_per_file=12)
         java_quality = self._collect_java_quality_signals(subject)
         java_quality_summary = self._build_java_quality_signal_summary(java_quality)
+        change_understanding_summary = self._build_change_understanding_summary(subject)
         language_general_guidance = self._build_language_general_guidance_summary(
             business_changed_files or [str(item) for item in list(subject.changed_files or [])]
         )
@@ -279,6 +283,7 @@ class MainAgentPromptingMixin:
             f"用户原始选择: {json.dumps(requested_expert_ids, ensure_ascii=False)}\n"
             f"业务变更文件完整 diff:\n{target_file_full_diff}\n\n"
             f"其他变更文件摘要:\n{related_diff_summary}\n\n"
+            f"结构化变更理解（确定性规则生成，不是最终结论）:\n{change_understanding_summary}\n\n"
             f"通用质量信号摘要:\n{java_quality_summary}\n\n"
             f"跨文件影响提示:\n{chr(10).join(f'- {item}' for item in selection_cross_file_hints) or '- 当前未识别到明确的跨文件传播线索'}\n\n"
             f"语言通用规范提示:\n{language_general_guidance}\n\n"
@@ -505,6 +510,14 @@ class MainAgentPromptingMixin:
             skipped_entries=skipped_entries,
             java_quality_signals=java_quality["signals"],
         )
+        selected_ids, selected_entries, skipped_entries = self._apply_change_understanding_expert_retention(
+            subject=subject,
+            requested_expert_ids=requested_expert_ids,
+            experts_by_id=experts_by_id,
+            selected_ids=selected_ids,
+            selected_entries=selected_entries,
+            skipped_entries=skipped_entries,
+        )
         return {
             "requested_expert_ids": requested_expert_ids,
             "candidate_expert_ids": [expert.expert_id for expert in experts],
@@ -534,6 +547,72 @@ class MainAgentPromptingMixin:
                 if normalized and normalized not in matched_terms:
                     matched_terms.append(normalized)
         return {"signals": signals, "matched_terms": matched_terms}
+
+    def _collect_change_understanding(self, subject: ReviewSubject) -> dict[str, object]:
+        metadata = dict(getattr(subject, "metadata", None) or {})
+        cached = metadata.get("change_understanding")
+        if isinstance(cached, dict):
+            return cached
+        return ChangeUnderstandingService(self._diff_excerpt_service).understand(
+            changed_files=[str(item).strip() for item in list(subject.changed_files or []) if str(item).strip()],
+            unified_diff=str(subject.unified_diff or ""),
+        )
+
+    def _build_change_understanding_summary(self, subject: ReviewSubject) -> str:
+        facts = self._collect_change_understanding(subject)
+        files = [item for item in list(facts.get("files") or []) if isinstance(item, dict)]
+        lines = [
+            f"- summary: {str(facts.get('summary') or '未生成摘要')}",
+            f"- risk_domains: {', '.join(str(item) for item in list(facts.get('risk_domains') or [])) or '无'}",
+            f"- expert_hints: {', '.join(str(item) for item in list(facts.get('expert_hints') or [])) or '无'}",
+            f"- changed_symbols: {', '.join(str(item) for item in list(facts.get('changed_symbols') or [])[:16]) or '无'}",
+        ]
+        for item in files[:8]:
+            lines.append(
+                "- file: "
+                f"{item.get('path')} | role={item.get('file_role')} | methods={','.join(str(value) for value in list(item.get('changed_methods') or [])[:5]) or 'unknown'} "
+                f"| domains={','.join(str(value) for value in list(item.get('risk_domains') or [])) or 'none'}"
+            )
+        if len(files) > 8:
+            lines.append(f"- remaining_files: {len(files) - 8}")
+        return "\n".join(lines)
+
+    def _apply_change_understanding_expert_retention(
+        self,
+        *,
+        subject: ReviewSubject,
+        requested_expert_ids: list[str],
+        experts_by_id: dict[str, ExpertProfile],
+        selected_ids: list[str],
+        selected_entries: list[dict[str, object]],
+        skipped_entries: list[dict[str, object]],
+    ) -> tuple[list[str], list[dict[str, object]], list[dict[str, object]]]:
+        facts = self._collect_change_understanding(subject)
+        hints = [
+            str(item).strip()
+            for item in list(facts.get("expert_hints") or [])
+            if str(item).strip() and str(item).strip() in experts_by_id
+        ]
+        if requested_expert_ids:
+            requested = set(requested_expert_ids)
+            hints = [expert_id for expert_id in hints if expert_id in requested]
+        risk_domains = ", ".join(str(item) for item in list(facts.get("risk_domains") or [])[:8]) or "未标记"
+        for expert_id in hints:
+            if expert_id in selected_ids:
+                continue
+            expert = experts_by_id[expert_id]
+            selected_ids.append(expert_id)
+            selected_entries.append(
+                {
+                    "expert_id": expert_id,
+                    "expert_name": expert.name_zh,
+                    "reason": f"结构化变更理解命中风险域 {risk_domains}，系统补入该专家做专项复核。",
+                    "confidence": 0.76,
+                    "source": "change_understanding_selected",
+                }
+            )
+            skipped_entries = [item for item in skipped_entries if str(item.get("expert_id") or "") != expert_id]
+        return selected_ids, selected_entries, skipped_entries
 
     def _apply_java_signal_expert_retention(
         self,

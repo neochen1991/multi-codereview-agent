@@ -10,6 +10,7 @@ class ReviewState(TypedDict, total=False):
     phase: str
     subject_type: str
     changed_files: list[str]
+    change_understanding: dict[str, Any]
     change_slices: list[dict[str, Any]]
     unified_diff: str
     selected_experts: list[str]
@@ -22,6 +23,8 @@ class ReviewState(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
     issues: list[dict[str, Any]]
     risk_hints: list[str]
+    risk_domains: list[str]
+    expert_hints: list[str]
     pending_human_issue_ids: list[str]
     human_review_required: bool
     report_summary: str

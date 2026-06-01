@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.change_understanding_service import RISK_DOMAIN_EXPERTS
 from app.services.orchestrator.state import ReviewState
 
 
@@ -189,6 +190,8 @@ def route_experts(state: ReviewState) -> ReviewState:
             continue
         for expert_id in expert_ids:
             _append_once(selected, expert_id)
+    for expert_id in _match_experts_by_change_understanding(next_state):
+        _append_once(selected, expert_id)
     for expert_id in _match_experts_by_risk_signals(next_state):
         _append_once(selected, expert_id)
     for expert_id in _match_experts_by_diff(next_state):
@@ -210,6 +213,29 @@ def _match_experts_by_diff(state: ReviewState) -> list[str]:
     for expert_id, keywords in EXPERT_SIGNAL_KEYWORDS.items():
         if any(keyword in text for keyword in keywords):
             matched.append(expert_id)
+    return matched
+
+
+def _match_experts_by_change_understanding(state: ReviewState) -> list[str]:
+    """Use deterministic change facts as the first-class recall source."""
+
+    matched: list[str] = []
+    change_understanding = dict(state.get("change_understanding") or {})
+    for expert_id in list(state.get("expert_hints") or change_understanding.get("expert_hints") or []):
+        normalized = str(expert_id or "").strip()
+        if normalized and normalized not in matched:
+            matched.append(normalized)
+    for domain in list(state.get("risk_domains") or change_understanding.get("risk_domains") or []):
+        for expert_id in RISK_DOMAIN_EXPERTS.get(str(domain).strip(), ()):
+            if expert_id not in matched:
+                matched.append(expert_id)
+    for file_facts in list(change_understanding.get("files") or []):
+        if not isinstance(file_facts, dict):
+            continue
+        for expert_id in list(file_facts.get("expert_hints") or []):
+            normalized = str(expert_id or "").strip()
+            if normalized and normalized not in matched:
+                matched.append(normalized)
     return matched
 
 

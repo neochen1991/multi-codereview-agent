@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from app.services.change_understanding_service import ChangeUnderstandingService
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.orchestrator.state import ReviewState
 
@@ -49,6 +50,10 @@ def slice_change(state: ReviewState) -> ReviewState:
     files = list(next_state.get("changed_files", []))
     unified_diff = str(next_state.get("unified_diff") or "")
     diff_service = DiffExcerptService()
+    change_understanding = ChangeUnderstandingService(diff_service).understand(
+        changed_files=[str(item).strip() for item in files if str(item).strip()],
+        unified_diff=unified_diff,
+    )
     change_slices: list[dict[str, object]] = []
     risk_hints = list(next_state.get("risk_hints") or [])
     for file_path in files:
@@ -85,6 +90,9 @@ def slice_change(state: ReviewState) -> ReviewState:
             )
     next_state["change_slices"] = change_slices
     next_state["risk_hints"] = risk_hints
+    next_state["change_understanding"] = change_understanding
+    next_state["risk_domains"] = list(change_understanding.get("risk_domains") or [])
+    next_state["expert_hints"] = list(change_understanding.get("expert_hints") or [])
     return next_state
 
 

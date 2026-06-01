@@ -99,6 +99,37 @@ def test_route_experts_adds_specialists_from_hunk_risk_signals():
     assert "performance_reliability" in selected
 
 
+def test_route_experts_uses_change_understanding_risk_domains():
+    state = {
+        "selected_experts": ["change_impact_analysis"],
+        "risk_hints": [],
+        "changed_files": [],
+        "unified_diff": "",
+        "change_understanding": {
+            "risk_domains": ["security", "business", "transaction", "mq"],
+            "expert_hints": ["security_compliance", "correctness_business"],
+            "files": [
+                {
+                    "path": "src/main/java/app/order/OrderService.java",
+                    "file_role": "service",
+                    "risk_domains": ["transaction", "mq"],
+                    "expert_hints": ["database_analysis", "mq_analysis"],
+                }
+            ],
+        },
+    }
+
+    routed = route_experts(state)
+
+    selected = routed["selected_experts"]
+    assert selected[0] == "change_impact_analysis"
+    assert "security_compliance" in selected
+    assert "correctness_business" in selected
+    assert "database_analysis" in selected
+    assert "performance_reliability" in selected
+    assert "mq_analysis" in selected
+
+
 def test_route_experts_adds_required_experts_from_repo_policy():
     state = {
         "selected_experts": ["correctness_business"],

@@ -93,6 +93,7 @@ class MainAgentService(MainAgentPromptingMixin):
             dict(target_focus.get("repo_hits") or {}),
             str(target_hunk.get("excerpt") or ""),
         )
+        repo_context["change_understanding"] = self._collect_change_understanding(subject)
         if route_hint is not None:
             routeable = bool(target_focus.get("routeable", True))
             skip_reason = "" if routeable else str(target_focus.get("skip_reason") or "")
@@ -1214,7 +1215,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 
