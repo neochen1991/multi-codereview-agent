@@ -83,6 +83,23 @@ const getDesignAlignmentColor = (status?: string): string => {
   return "default";
 };
 
+const normalizeReviewPath = (value?: string) =>
+  String(value || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase();
+
+const isSameReviewPath = (left?: string, right?: string) => {
+  const normalizedLeft = normalizeReviewPath(left);
+  const normalizedRight = normalizeReviewPath(right);
+  if (!normalizedLeft || !normalizedRight) return true;
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+  );
+};
+
 const hasDesignEvidence = (finding: ReviewFinding): boolean =>
   Boolean(
     (finding.design_doc_titles || []).length ||
@@ -169,7 +186,6 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
     );
   }
 
-  const codeContext = finding.code_context;
   const displayFilePath = String(issue?.file_path || finding.file_path || "").trim();
   const displayLineStart = Number(issue?.line_start || finding.line_start || 1);
   const displaySeverity = String(issue?.severity || finding.severity || "medium");
@@ -177,84 +193,109 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const displayExpertId = String(issue?.primary_expert_id || issue?.participant_expert_ids?.[0] || finding.expert_id || "").trim();
   const displayCategory = issue?.category_label || issue?.normalized_issue_type || finding.category_label || finding.normalized_issue_type || finding.finding_type;
   const issueTextType = issue?.normalized_issue_type || finding.normalized_issue_type || issue?.finding_type || finding.finding_type || issue?.title || finding.title;
+  const findingTextForAlignment = [
+    finding.normalized_issue_type,
+    finding.finding_type,
+    finding.category_label,
+    finding.title,
+    finding.summary,
+    finding.rule_based_reasoning,
+  ].filter(Boolean).join("\n");
+  const issueLineStart = Number(issue?.line_start || 0);
+  const findingLineStart = Number(finding.line_start || 0);
+  const sameIssueAnchor =
+    !issue ||
+    (
+      isSameReviewPath(issue.file_path, finding.file_path) &&
+      (!issueLineStart || !findingLineStart || Math.abs(issueLineStart - findingLineStart) <= 2)
+    );
+  const linkedToIssue = !issue || (issue.finding_ids || []).includes(finding.finding_id);
+  const findingMatchesIssueType = !issue || issueTextMatchesIssueType(issueTextType, findingTextForAlignment);
+  const alignedFinding = sameIssueAnchor && linkedToIssue && findingMatchesIssueType ? finding : null;
+  const codeContext = alignedFinding?.code_context;
   const issueSummaryAligned = issueTextMatchesIssueType(issueTextType, issue?.summary);
   const findingSummaryAligned = issueTextMatchesIssueType(
     issueTextType,
     [
-      finding.normalized_issue_type,
-      finding.finding_type,
-      finding.title,
-      finding.summary,
-      finding.rule_based_reasoning,
+      alignedFinding?.normalized_issue_type,
+      alignedFinding?.finding_type,
+      alignedFinding?.title,
+      alignedFinding?.summary,
+      alignedFinding?.rule_based_reasoning,
     ].filter(Boolean).join("\n"),
   );
   const issueTitle = buildReadableIssueTitle({
-    title: issue?.title || finding.title,
-    summary: issue?.summary || finding.summary,
+    title: issue?.title || alignedFinding?.title || finding.title,
+    summary: issue?.problem_description || issue?.summary || alignedFinding?.summary || finding.summary,
     file_path: displayFilePath,
     line_start: displayLineStart,
-    finding_type: finding.finding_type,
-    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
+    finding_type: issue?.finding_type || alignedFinding?.finding_type || finding.finding_type,
+    normalized_issue_type: issue?.normalized_issue_type || alignedFinding?.normalized_issue_type || finding.normalized_issue_type,
     category_label: displayCategory,
   });
-  const issueSummary = buildReadableIssueSummary({
-    title: issue?.title || finding.title,
-    summary: pickUserFacingText([
-      findingSummaryAligned ? finding.summary : "",
-      issueSummaryAligned ? issue?.summary : "",
-      finding.summary,
-      issue?.title,
-      finding.title,
-    ]),
-    file_path: displayFilePath,
-    line_start: displayLineStart,
-    finding_type: finding.finding_type,
-    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
-    category_label: displayCategory,
-  });
-  const issueStrategy = pickUserFacingText([issue?.remediation_strategy, finding.remediation_strategy]);
-  const issueSuggestion = pickUserFacingText([issue?.remediation_suggestion, finding.remediation_suggestion]);
-  const issueSteps = cleanUserFacingList(issue?.remediation_steps?.length ? issue.remediation_steps : finding.remediation_steps);
+  const directIssueProblemDescription = cleanUserFacingText(issue?.problem_description || "");
+  const directIssueSummary = issueSummaryAligned ? cleanUserFacingText(issue?.summary) : "";
+  const issueSummary =
+    directIssueProblemDescription ||
+    directIssueSummary ||
+    buildReadableIssueSummary({
+      title: issue?.title || alignedFinding?.title || finding.title,
+      summary: pickUserFacingText([
+        findingSummaryAligned ? alignedFinding?.summary : "",
+        alignedFinding?.summary,
+        issue?.title,
+        alignedFinding?.title,
+        finding.title,
+      ]),
+      file_path: displayFilePath,
+      line_start: displayLineStart,
+      finding_type: issue?.finding_type || alignedFinding?.finding_type || finding.finding_type,
+      normalized_issue_type: issue?.normalized_issue_type || alignedFinding?.normalized_issue_type || finding.normalized_issue_type,
+      category_label: displayCategory,
+    });
+  const issueStrategy = pickUserFacingText([issue?.remediation_strategy, alignedFinding?.remediation_strategy]);
+  const issueSuggestion = pickUserFacingText([issue?.remediation_suggestion, alignedFinding?.remediation_suggestion]);
+  const issueSteps = cleanUserFacingList(issue?.remediation_steps?.length ? issue.remediation_steps : alignedFinding?.remediation_steps);
   const fixSummary = buildReadableFixSummary({
     remediation_strategy: issueStrategy,
     remediation_suggestion: issueSuggestion,
     remediation_steps: issueSteps,
-    finding_type: finding.finding_type,
-    normalized_issue_type: issue?.normalized_issue_type || finding.normalized_issue_type,
+    finding_type: issue?.finding_type || alignedFinding?.finding_type || finding.finding_type,
+    normalized_issue_type: issue?.normalized_issue_type || alignedFinding?.normalized_issue_type || finding.normalized_issue_type,
     category_label: displayCategory,
   });
   const currentCode =
     String(issue?.current_code || "").trim() ||
-    finding.code_excerpt ||
+    alignedFinding?.code_excerpt ||
     codeContext?.target_hunk?.excerpt ||
     codeContext?.problem_source_context?.snippet ||
     codeContext?.source_file_context ||
     codeContext?.primary_context?.snippet;
   const suggestedCode = (() => {
-    const value = String(issue?.suggested_code || finding.suggested_code || "").trim();
+    const value = String(issue?.suggested_code || alignedFinding?.suggested_code || "").trim();
     return isConcreteDisplayCode(value) ? value : "";
   })();
   const hasFullDetails = Boolean(
-    finding.code_excerpt ||
-      finding.suggested_code ||
-      (finding.code_context && Object.keys(finding.code_context).length > 0),
+    alignedFinding?.code_excerpt ||
+      alignedFinding?.suggested_code ||
+      (alignedFinding?.code_context && Object.keys(alignedFinding.code_context).length > 0),
   );
-  const evidenceChain = evidenceChainFor(finding, issue);
-  const evidenceIssueContext = JSON.stringify({ finding, issue });
-  const callChainGraph = buildIssueCallChainGraph(finding, issue, evidenceChain);
-  const rawConfidenceRationale = cleanUserFacingText(finding.confidence_rationale || issue?.confidence_rationale || "");
+  const evidenceChain = alignedFinding ? evidenceChainFor(alignedFinding, issue) : issue?.evidence_chain || [];
+  const evidenceIssueContext = JSON.stringify({ finding: alignedFinding, issue });
+  const callChainGraph = alignedFinding ? buildIssueCallChainGraph(alignedFinding, issue, evidenceChain) : "";
+  const rawConfidenceRationale = cleanUserFacingText(issue?.confidence_rationale || alignedFinding?.confidence_rationale || "");
   const displayConfidenceRationale =
     rawConfidenceRationale &&
     !hasCrossContextPollution(rawConfidenceRationale, displayFilePath) &&
     issueTextMatchesIssueType(issueTextType, rawConfidenceRationale)
       ? rawConfidenceRationale
       : "";
-  const displayMatchedRules = cleanUserFacingList(finding.matched_rules || []);
-  const displayViolatedGuidelines = cleanUserFacingList(finding.violated_guidelines || []);
+  const displayMatchedRules = cleanUserFacingList(alignedFinding?.matched_rules || []);
+  const displayViolatedGuidelines = cleanUserFacingList(alignedFinding?.violated_guidelines || []);
   const rawRuleBasis = pickUserFacingText([
-    finding.rule_based_reasoning,
     issue?.evidence?.join("；"),
     issue?.consistency_check_summary,
+    alignedFinding?.rule_based_reasoning,
   ]);
   const displayRuleBasis =
     rawRuleBasis &&

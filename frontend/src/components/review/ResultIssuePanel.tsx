@@ -219,10 +219,13 @@ const buildIssueListSummary = (
     ),
   );
   const candidates = [
+    issueTextMatchesIssueType(issueType, issue.problem_description) ? issue.problem_description : "",
+    issue.problem_description,
+    issueTextMatchesIssueType(issueType, issue.summary) ? issue.summary : "",
+    issue.summary,
+    ...(issue.aggregated_summaries || []).filter((summary) => issueTextMatchesIssueType(issueType, summary)),
     ...alignedFindings.map((finding) => finding.summary),
     ...alignedFindings.map((finding) => finding.rule_based_reasoning),
-    issueTextMatchesIssueType(issueType, issue.summary) ? issue.summary : "",
-    ...(issue.aggregated_summaries || []).filter((summary) => issueTextMatchesIssueType(issueType, summary)),
     ...relatedFindings.map((finding) => finding.summary),
     ...(issue.evidence || []).filter((item) => issueTextMatchesIssueType(issueType, item)),
   ];
@@ -316,6 +319,11 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           line_start: lineStart,
           title: issue.title,
           summary: buildIssueListSummary(issue, relatedFindings, filePath, lineStart),
+          fixSummary: compactReadableText(
+            issue.remediation_suggestion ||
+              issue.remediation_strategy ||
+              (issue.remediation_steps || []).join("；"),
+          ),
           metaSummary: metaSummaryParts.join(" · "),
           finding_types:
             issue.aggregated_finding_types && issue.aggregated_finding_types.length > 0

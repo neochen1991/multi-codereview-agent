@@ -4,7 +4,7 @@ import type { ColumnsType } from "antd/es/table";
 
 import type { IssueFilterDecision } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText, humanizeSeverity } from "@/utils/displayText";
-import { buildReadableFixSummary, buildReadableIssueSummary, buildReadableIssueTitle, issueTypeDisplayLabel } from "./issueDisplayQuality";
+import { buildReadableIssueTitle, cleanUserFacingText, issueTypeDisplayLabel } from "./issueDisplayQuality";
 
 export type ReviewResultListRow = {
   id: string;
@@ -12,6 +12,7 @@ export type ReviewResultListRow = {
   line_start?: number;
   title: string;
   summary: string;
+  fixSummary?: string;
   metaSummary?: string;
   finding_type: string;
   finding_types?: string[];
@@ -357,16 +358,8 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
             summary: value,
             normalized_issue_type: item.finding_types?.[0],
           });
-          const summaryText = buildReadableIssueSummary({
-            ...item,
-            summary: value,
-            normalized_issue_type: item.finding_types?.[0],
-          });
-          const fixText = buildReadableFixSummary({
-            ...item,
-            summary: value,
-            normalized_issue_type: item.finding_types?.[0],
-          });
+          const summaryText = cleanUserFacingText(value) || humanizeReviewText(value || item.title || "");
+          const fixText = cleanUserFacingText(item.fixSummary || "");
           return (
             <Tooltip
               placement="topLeft"

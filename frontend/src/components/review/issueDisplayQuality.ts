@@ -42,6 +42,9 @@ const INTERNAL_TEXT_PATTERNS: RegExp[] = [
   /^需(要)?.*确认/,
   /无法确认.*是否/,
   /不确定.*是否/,
+  /命中「[^」]+」风险.*建议先核对/,
+  /围绕「[^」]+」对应位置补齐缺失逻辑/,
+  /建议先核对该位置的输入、分支和副作用/,
 ];
 
 const INTERNAL_LINE_PREFIXES = [

@@ -229,6 +229,7 @@ export interface DebateIssue {
   review_id: string;
   title: string;
   summary: string;
+  problem_description?: string;
   finding_type?: string;
   normalized_issue_type?: string;
   category_label?: string;

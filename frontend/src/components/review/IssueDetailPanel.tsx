@@ -87,7 +87,28 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       fileName !== issueFileName &&
       (rawFindingRuleReasoning.includes(fileName) || rawFindingRuleReasoning.includes(`${className}.`) || rawFindingRuleReasoning.includes(`${className} `)),
   );
-  const alignedFinding = finding && isSameReviewPath(issueFilePath, findingFilePath) && !otherChangedFileMentioned ? finding : null;
+  const issueTextType = issue?.normalized_issue_type || issue?.finding_type || issue?.category_label || issue?.title || "";
+  const findingTextForAlignment = [
+    finding?.normalized_issue_type,
+    finding?.finding_type,
+    finding?.category_label,
+    finding?.title,
+    finding?.summary,
+    finding?.rule_based_reasoning,
+  ].filter(Boolean).join("\n");
+  const issueLineStart = Number(issue?.line_start || 0);
+  const findingLineStart = Number(finding?.line_start || 0);
+  const sameIssueAnchor =
+    !issue ||
+    !finding ||
+    (
+      isSameReviewPath(issueFilePath, findingFilePath) &&
+      (!issueLineStart || !findingLineStart || Math.abs(issueLineStart - findingLineStart) <= 2)
+    );
+  const linkedToIssue = !issue || !finding || (issue.finding_ids || []).includes(finding.finding_id);
+  const findingMatchesIssueType = !issue || !finding || issueTextMatchesIssueType(issueTextType, findingTextForAlignment);
+  const alignedFinding =
+    finding && sameIssueAnchor && linkedToIssue && findingMatchesIssueType && !otherChangedFileMentioned ? finding : null;
   const codeContext = alignedFinding?.code_context;
   const codeGraphSourceSummary = codeContext?.code_graph_source_summary || {};
   const codeGraphMinimalContext = codeContext?.code_graph_minimal_context || {};
@@ -117,6 +138,7 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
     : [];
   const issueDisplayContext = JSON.stringify({
     title: issue?.title,
+    problem_description: issue?.problem_description,
     summary: issue?.summary,
     file_path: issue?.file_path,
     current_code: issue?.current_code,
@@ -159,10 +181,9 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
   const issueTitle = issue
     ? buildReadableIssueTitle({
         ...issue,
-        summary: issue.summary || alignedFinding?.summary,
+        summary: issue.problem_description || issue.summary || alignedFinding?.summary,
       })
     : "";
-  const issueTextType = issue?.normalized_issue_type || issue?.finding_type || issue?.category_label || issue?.title || "";
   const issueSummaryAligned = issueTextMatchesIssueType(issueTextType, issue?.summary);
   const findingSummaryAligned = issueTextMatchesIssueType(
     issueTextType,
@@ -174,12 +195,15 @@ const IssueDetailPanel: React.FC<IssueDetailPanelProps> = ({
       alignedFinding?.rule_based_reasoning,
     ].filter(Boolean).join("\n"),
   );
+  const directIssueProblemDescription = cleanUserFacingText(issue?.problem_description || "");
+  const directIssueSummary = issueSummaryAligned ? cleanUserFacingText(issue?.summary) : "";
   const issueDescription = issue
-    ? buildReadableIssueSummary({
+    ? directIssueProblemDescription ||
+      directIssueSummary ||
+      buildReadableIssueSummary({
         ...issue,
         summary: pickUserFacingText([
           findingSummaryAligned ? alignedFinding?.summary : "",
-          issueSummaryAligned ? issue.summary : "",
           alignedFinding?.summary,
           issue.title,
         ]),
