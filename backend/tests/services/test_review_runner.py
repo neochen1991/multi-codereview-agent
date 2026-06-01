@@ -4758,6 +4758,28 @@ def test_review_runner_schema_gate_downgrades_unstructured_direct_defect(storage
     assert result["schema_payload_valid"] is True
 
 
+def test_review_runner_does_not_reclassify_neighbor_todo_as_comment_contract(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    result = runner._normalize_candidate_for_refined_anchor(
+        {
+            "title": "新增帧长校验后抛出异常",
+            "claim": "新增 maxFrameLength 校验会拒绝超长报文。",
+            "summary": "本次变更处理 ByteBuf 长度边界；上下文里仍有 TODO: take care of charset? 注释。",
+            "evidence": [
+                "+if (length > maxFrameLength) {",
+                "+  throw new Error('frame too large')",
+                " // TODO: take care of charset?",
+            ],
+            "normalized_issue_type": "",
+        },
+        expert_id="correctness_business",
+        line_start=64,
+    )
+
+    assert result.get("normalized_issue_type") != "comment_contract_unimplemented"
+
+
 def test_review_runner_schema_gate_hard_rejects_empty_expert_payload(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -9033,6 +9055,63 @@ def test_review_runner_appends_deterministic_comment_contract_finding(storage_ro
     assert findings[0].title == "承诺未落地"
     assert findings[0].line_start == 22
     assert len(finding_payloads) == 1
+
+
+def test_review_runner_keeps_loop_and_todo_deterministic_findings_separate(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    file_path = "src/main/java/com/example/BulkEnrollmentService.java"
+    review = ReviewTask(
+        review_id="rev_minimax_loop_todo_separation",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/bulk-enrollment",
+            target_ref="main",
+            changed_files=[file_path],
+            unified_diff=f"""diff --git a/{file_path} b/{file_path}
+--- a/{file_path}
++++ b/{file_path}
+@@ -31,8 +31,10 @@ public class BulkEnrollmentService {{
+     public class BulkEnrollmentService {{
+-        public synchronized EnrollmentResult enrollAll(List<EnrollmentRequest> requests) {{
++        public EnrollmentResult enrollAll(List<EnrollmentRequest> requests) {{
+             List<Enrollment> enrollments = new ArrayList<>();
++            for (EnrollmentRequest request : requests) {{
++                enrollmentRepository.save(toEnrollment(request));
++            }}
++            // TODO 扣减库存并发送报名成功事件
+             return EnrollmentResult.success();
+         }}
+     }}
+""",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = [
+        {
+            "file_path": file_path,
+            "line_start": 31,
+            "title": "循环调用放大",
+            "summary": "循环内逐条保存会放大批量处理成本。",
+            "normalized_issue_type": "comment_contract_unimplemented",
+        }
+    ]
+
+    runner._append_deterministic_java_quality_findings(review, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    families = {
+        (finding.normalized_issue_type, finding.line_start, finding.expert_id)
+        for finding in findings
+    }
+    assert ("n_plus_one", 35, "performance_reliability") in families
+    assert ("comment_contract_unimplemented", 37, "correctness_business") in families
+    assert not any(
+        finding.normalized_issue_type == "comment_contract_unimplemented" and finding.line_start == 31
+        for finding in findings
+    )
 
 
 def test_review_runner_does_not_force_comment_contract_when_interface_is_implemented(storage_root: Path):

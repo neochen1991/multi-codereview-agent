@@ -65,6 +65,32 @@ def test_code_observation_extractor_detects_typescript_comment_contract_gap() ->
     assert observation["line_start"] == 12
 
 
+def test_code_observation_extractor_ignores_ambiguous_todo_without_promised_action() -> None:
+    extractor = CodeObservationExtractor()
+
+    payload = extractor.extract(
+        file_path="frontend/src/codec/decode.ts",
+        target_hunk={
+            "start_line": 63,
+            "changed_lines": [64, 65],
+            "excerpt": "\n".join(
+                [
+                    "@@ -63,6 +63,9 @@",
+                    "+if (length > maxFrameLength) {",
+                    "+  throw new Error('frame too large')",
+                    "+}",
+                    " const bytes = source.readBytes(length)",
+                    " // TODO: take care of charset?",
+                    " return new TextDecoder().decode(bytes)",
+                ]
+            ),
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+    assert not any(item["signal"] == "comment_contract_unimplemented" for item in payload["observations"])
+
+
 def test_code_observation_extractor_detects_python_swallowed_exception() -> None:
     extractor = CodeObservationExtractor()
 

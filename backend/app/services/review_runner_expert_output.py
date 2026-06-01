@@ -1455,7 +1455,7 @@ class ReviewRunnerExpertOutputMixin:
                 result["normalized_issue_type"] = "n_plus_one"
             return result
         if int(line_start or 1) >= 30 and any(token in text for token in ("库存", "加锁", "超卖", "stock", "lock")):
-            if any(token in text for token in ("承诺", "todo", "未实现", "没有实现", "comment_contract")):
+            if self._looks_like_concrete_comment_contract(text):
                 result["normalized_issue_type"] = "comment_contract_unimplemented"
                 result.setdefault("title", "注释或 TODO 承诺未落地")
                 result.setdefault("fix_strategy", "补齐注释或 TODO 承诺的业务动作；如果不准备实现，就删除会误导调用方的承诺。")
@@ -1483,7 +1483,7 @@ class ReviewRunnerExpertOutputMixin:
                 result["title"] = "并发保护被删除"
             result.setdefault("fix_strategy", "恢复原有锁保护，或补充数据库唯一约束、乐观锁、幂等表、分布式锁等等价并发控制。")
             result.setdefault("suggested_fix", "不要直接删除并发保护；先补齐等价并发控制，再用并发提交或重复消费测试验证。")
-        elif "comment_contract_unimplemented" in text or "todo" in text or "承诺未落地" in text or "未实现" in text:
+        elif self._looks_like_concrete_comment_contract(text):
             result["normalized_issue_type"] = "comment_contract_unimplemented"
             if not str(result.get("title") or "").strip():
                 result["title"] = "注释或 TODO 承诺未落地"
@@ -1508,6 +1508,39 @@ class ReviewRunnerExpertOutputMixin:
                 result.setdefault("fix_strategy", "收窄查询过滤条件，保持权限、租户、用户或业务对象边界的精确匹配。")
                 result.setdefault("suggested_fix", "对安全边界字段继续使用精确匹配；如需模糊搜索，请拆出明确的搜索操作符并限制可搜索字段。")
         return result
+
+    def _looks_like_concrete_comment_contract(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if "comment_contract_unimplemented" in lowered:
+            return True
+        if not any(token in lowered for token in ("todo", "承诺", "未实现", "没有实现", "未落地")):
+            return False
+        concrete_terms = (
+            "库存",
+            "inventory",
+            "reserve",
+            "deduct",
+            "审计",
+            "audit",
+            "事件",
+            "event",
+            "通知",
+            "notify",
+            "缓存",
+            "cache",
+            "调用接口",
+            "调用下游",
+            "远程",
+            "remote",
+            "retry",
+            "重试",
+            "输入校验",
+            "参数校验",
+            "权限",
+            "越权",
+            "登录用户",
+        )
+        return any(token in lowered for token in concrete_terms)
 
     def _build_anchor_specific_remediation(
         self,

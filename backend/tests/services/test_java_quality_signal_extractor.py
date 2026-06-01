@@ -372,6 +372,33 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented() 
     assert "承诺未落地" in observation["risk_hints"]
 
 
+def test_java_quality_signal_extractor_prioritizes_comment_contract_in_composite_observations() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+        target_hunk={
+            "start_line": 25,
+            "changed_lines": [28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38],
+            "excerpt": "\n".join(
+                [
+                    "@@ -25,16 +25,16 @@ public final class BulkEnrollmentService {",
+                    "-        Object lock = lockRegistry.lockFor(courseId.value());",
+                    "-        synchronized (lock) {",
+                    "-            repository.saveAll(enrollments);",
+                    "+        for (CourseEnrollment enrollment : enrollments) {",
+                    "+            repository.save(enrollment);",
+                    "+        }",
+                    "+        // TODO 批量报名成功后扣减库存并发送预占事件",
+                    "+        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));",
+                ]
+            ),
+        },
+    )
+
+    first_three_signals = [item["signal"] for item in payload["observations"][:3]]
+    assert "comment_contract_unimplemented" in first_three_signals
+
+
 def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_from_context() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(

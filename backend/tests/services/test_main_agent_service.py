@@ -1362,7 +1362,59 @@ def test_main_agent_light_routing_plan_still_allows_llm_refinement(monkeypatch):
     assert captured["called"] is True
     assert route["routeable"] is True
     assert route["routing_llm"]["mode"] == "live"
-    assert route["routing_source"] in {"llm", "selected_override"}
+    assert route["routing_source"] in {"llm", "selected_override", "rule"}
+
+
+def test_main_agent_security_route_keeps_sql_like_scope_broadening_signal():
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/sql-like",
+        target_ref="main",
+        changed_files=[
+            "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        ],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java "
+            "b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+            '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全与合规专家",
+        role="security",
+        enabled=True,
+        focus_areas=["SQL 注入", "越权查询"],
+        activation_hints=["sql", "like", "query"],
+        system_prompt="prompt",
+    )
+
+    routeable, reason = agent._should_route_expert(
+        subject,
+        expert,
+        {
+            "score": 1,
+            "target_hunk": {
+                "excerpt": (
+                    "@@ -60,7 +60,7 @@ public final class HibernateCriteriaConverter<T> {\n"
+                    '-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n'
+                    '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+                )
+            },
+        },
+        "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+    )
+
+    assert routeable is True
+    assert reason == ""
 
 
 def test_main_agent_routing_plan_overrides_llm_skip_for_selected_expert(monkeypatch):
@@ -1420,8 +1472,7 @@ def test_main_agent_routing_plan_overrides_llm_skip_for_selected_expert(monkeypa
 
     route = plan["security_compliance"]
     assert route["routeable"] is True
-    assert route["routing_source"] == "selected_override"
-    assert route["routing_override_reason"] == "当前变更未命中安全相关线索"
+    assert route["routing_source"] == "rule"
 
 
 def test_main_agent_build_command_respects_route_hint_routeable_override():

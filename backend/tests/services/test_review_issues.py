@@ -716,6 +716,16 @@ def test_build_report_supplements_display_finding_when_linked_finding_family_dif
         for issue_type, line_start, title in families
     )
     assert ("comment_contract_unimplemented", 37, "TODO 里的库存扣减未实现") in families
+    comment_report_finding = next(
+        item for item in report.findings if item.normalized_issue_type == "comment_contract_unimplemented"
+    )
+    assert "扣减库存" in comment_report_finding.summary
+    assert "TODO" in comment_report_finding.summary
+    comment_report_issue = next(
+        item for item in report.issues if item.normalized_issue_type == "comment_contract_unimplemented"
+    )
+    assert "扣减库存" in comment_report_issue.summary
+    assert "TODO" in comment_report_issue.summary
 
 
 def test_build_report_dedupes_comment_findings_and_prefers_correctness_owner(storage_root: Path):
@@ -775,6 +785,105 @@ def test_build_report_dedupes_comment_findings_and_prefers_correctness_owner(sto
     assert comment_findings[0].title == "TODO 里的库存扣减未实现"
     assert comment_findings[0].expert_id == "correctness_business"
     assert comment_findings[0].category_label == "正确性与业务"
+
+
+def test_build_report_keeps_synchronized_keyword_in_lock_summary(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_lock_keyword",
+            "project_id": "proj_lock_keyword",
+            "source_ref": "feature/lock-keyword",
+            "target_ref": "main",
+            "title": "lock keyword",
+        }
+    )
+    service.finding_repo.save_many(
+        review.review_id,
+        [
+            ReviewFinding(
+                review_id=review.review_id,
+                finding_id="fdg_lock_keyword",
+                expert_id="performance_reliability",
+                title="并发保护被删除",
+                summary="本次 diff 删除了 synchronized、Lock 或分布式锁等并发保护，新增代码没有看到等价保护。",
+                finding_type="direct_defect",
+                normalized_issue_type="lock_guard_removed",
+                file_path="src/main/java/com/example/BulkEnrollmentService.java",
+                line_start=26,
+                confidence=0.9,
+                code_excerpt=(
+                    "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                    "   - |         synchronized (lock) {\n"
+                    "  28 | +        if (studentIds.isEmpty()) {"
+                ),
+            )
+        ],
+    )
+
+    lock_finding = next(
+        item for item in service.build_report(review.review_id).findings if item.normalized_issue_type == "lock_guard_removed"
+    )
+
+    assert "synchronized" in lock_finding.summary
+    assert "锁" in lock_finding.summary
+
+
+def test_list_display_findings_dedupes_query_semantics_variants_same_line(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_query_findings",
+            "project_id": "proj_query_findings",
+            "source_ref": "feature/query-findings",
+            "target_ref": "main",
+            "title": "query finding dedupe",
+        }
+    )
+    file_path = "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"
+    service.finding_repo.save_many(
+        review.review_id,
+        [
+            ReviewFinding(
+                review_id=review.review_id,
+                finding_id="fdg_query_db",
+                expert_id="database_analysis",
+                title="查询语义从精确匹配退化为模糊匹配",
+                summary="equal 改成 like 后结果集扩大。",
+                finding_type="direct_defect",
+                normalized_issue_type="query_semantics_weakened",
+                file_path=file_path,
+                line_start=16,
+                confidence=0.88,
+                code_excerpt='+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            ),
+            ReviewFinding(
+                review_id=review.review_id,
+                finding_id="fdg_query_sec",
+                expert_id="security_compliance",
+                title="LIKE 查询未转义通配符，用户可通过特殊字符扩大匹配范围",
+                summary="同一行 equal 改成 like 后安全边界字段可能被放宽。",
+                finding_type="direct_defect",
+                normalized_issue_type="query_semantics_weakened",
+                file_path=file_path,
+                line_start=16,
+                confidence=0.9,
+                code_excerpt='+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            ),
+        ],
+    )
+
+    findings = service.list_display_findings(review.review_id)
+
+    query_findings = [
+        item
+        for item in findings
+        if item.file_path == file_path and item.line_start == 16 and item.normalized_issue_type == "query_semantics_weakened"
+    ]
+    assert len(query_findings) == 1
+    assert query_findings[0].title == "查询语义从精确匹配退化为模糊匹配"
 
 
 def test_list_display_findings_sanitizes_internal_remediation_text(storage_root: Path):

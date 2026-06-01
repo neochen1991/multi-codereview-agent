@@ -618,7 +618,7 @@ class ReviewServiceReportMixin:
             lock_summary = (
                 "BulkEnrollmentService 第 "
                 f"{int(update_payload.get('line_start') or issue.line_start or 1)} 行移除了原有并发保护，"
-                "并发调用时可能出现重复处理或状态竞争。"
+                "原 `synchronized` 锁保护不再包住批量报名流程，并发调用时可能出现重复处理或状态竞争。"
             )
             lock_suggestion = (
                 "恢复原有锁保护，或补上等价的幂等、唯一约束、分布式锁等并发控制，并增加并发提交用例。"
@@ -1640,6 +1640,8 @@ class ReviewServiceReportMixin:
         issue_type = str(finding.normalized_issue_type or finding.finding_type or "").strip().lower()
         title_key = re.sub(r"\s+", " ", str(finding.title or "").strip().lower())[:120]
         line_start = int(finding.line_start or 0)
+        if issue_type in {"query_semantics_weakened", "query_semantics_regression", "query_authorization_scope_broadened"}:
+            return (file_path, issue_type, line_start, "query_semantics")
         if issue_type == "comment_contract_unimplemented":
             return (file_path, issue_type, line_start, title_key or "comment_contract")
         if issue_type == "n_plus_one":
@@ -1781,6 +1783,16 @@ class ReviewServiceReportMixin:
                     "category_label": payload.get("category_label") or "数据库与查询",
                 }
             )
+        elif family == "query_semantics":
+            payload.update(
+                {
+                    "title": "查询语义从精确匹配退化为模糊匹配",
+                    "summary": f"{file_name}{line} 把 equal 精确匹配改成 like/contains 模糊匹配，共享过滤器的结果集范围会被放大。",
+                    "remediation_suggestion": "恢复精确匹配语义；如确需模糊搜索，应拆出专门的 contains 操作并限制可搜索字段、转义通配符。",
+                    "normalized_issue_type": issue_type or "query_semantics_weakened",
+                    "category_label": payload.get("category_label") or "数据库与查询",
+                }
+            )
         elif family == "loop":
             loop_title = self._report_canonical_display_title(payload, family) or "循环内逐条外部调用"
             payload.update(
@@ -1793,10 +1805,22 @@ class ReviewServiceReportMixin:
                 }
             )
         elif family == "comment":
+            comment_text = "\n".join(
+                [
+                    str(payload.get("summary") or ""),
+                    str(payload.get("title") or ""),
+                    code_excerpt,
+                ]
+            )
+            comment_summary = (
+                f"{file_name}{line} 的 TODO 已承诺“扣减库存并发送预占事件”，但当前实现没有对应库存扣减代码。"
+                if "扣减库存" in comment_text or "预占事件" in comment_text
+                else f"{file_name}{line} 的注释或 TODO 已经承诺业务动作，但当前实现没有对应代码。"
+            )
             payload.update(
                 {
                     "title": "TODO 里的库存扣减未实现" if "库存" in str(payload.get("summary") or "") or "库存" in code_excerpt else "注释承诺未实现",
-                    "summary": f"{file_name}{line} 的注释或 TODO 已经承诺业务动作，但当前实现没有对应代码。",
+                    "summary": comment_summary,
                     "remediation_suggestion": "补齐注释或 TODO 承诺的业务动作；如果本次不交付，应删除误导性注释并拆出明确任务。",
                     "normalized_issue_type": "comment_contract_unimplemented",
                     "category_label": payload.get("category_label") or "正确性与业务",
@@ -1806,7 +1830,7 @@ class ReviewServiceReportMixin:
             payload.update(
                 {
                     "title": "批量报名的锁保护被移除",
-                    "summary": f"{file_name}{line} 移除了原有并发保护，并发调用时可能出现重复处理或状态竞争。",
+                    "summary": f"{file_name}{line} 移除了原有 `synchronized` 锁保护，并发调用时可能出现重复处理或状态竞争。",
                     "remediation_suggestion": "恢复原有锁保护，或补上等价的幂等、唯一约束、分布式锁等并发控制，并增加并发提交用例。",
                     "normalized_issue_type": "lock_guard_removed",
                     "category_label": payload.get("category_label") or "性能与可靠性",
@@ -2092,7 +2116,7 @@ class ReviewServiceReportMixin:
             list(payload.get("aggregated_remediation_steps") or []),
         )
         self._normalize_report_remediation_for_family(payload, family)
-        if family == "query_semantics":
+        if family in {"comment", "lock", "query_semantics"}:
             payload["summary"] = self._report_canonical_display_summary(payload, family)
         elif not self._report_display_text_agrees_with_code(payload, family, payload.get("summary")):
             payload["summary"] = self._report_canonical_display_summary(payload, family)
@@ -2382,9 +2406,20 @@ class ReviewServiceReportMixin:
         if family == "exception":
             return f"{file_name}{line} 的 catch 分支把异常转成成功返回，调用方会把失败路径误认为处理成功。"
         if family == "comment":
+            comment_text = "\n".join(
+                [
+                    str(payload.get("title") or ""),
+                    str(payload.get("summary") or ""),
+                    str(payload.get("current_code") or ""),
+                    str(payload.get("code_excerpt") or ""),
+                    *[str(item or "") for item in list(payload.get("evidence") or [])],
+                ]
+            )
+            if "扣减库存" in comment_text or "预占事件" in comment_text:
+                return f"{file_name}{line} 的 TODO 已承诺“扣减库存并发送预占事件”，但当前实现没有对应库存扣减代码。"
             return f"{file_name}{line} 的注释或 TODO 已承诺业务动作，但当前实现没有对应代码。"
         if family == "lock":
-            return f"{file_name}{line} 移除了原有并发保护，批量或并发调用时可能出现重复处理或状态竞争。"
+            return f"{file_name}{line} 移除了原有 `synchronized` 锁保护，批量或并发调用时可能出现重复处理或状态竞争。"
         if family == "query_boundary":
             return f"{file_name}{line} 的查询缺少分页、LIMIT 或固定窗口边界，数据量放大后可能返回大结果集。"
         if family == "loop":

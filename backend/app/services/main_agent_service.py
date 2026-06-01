@@ -12,7 +12,7 @@ from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.cross_file_impact import build_cross_file_impact_hints
 from app.services.diff_excerpt_service import DiffExcerptService
-from app.services.expert_capability_service import ExpertCapabilityService
+from app.services.expert_capability_service import ExpertCapabilityService, SECURITY_REVIEW_SIGNAL_TOKENS
 from app.services.code_observation_extractor import CodeObservationExtractor
 from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.main_agent_prompting import MainAgentPromptingMixin
@@ -808,23 +808,12 @@ class MainAgentService(MainAgentPromptingMixin):
                 self._strip_non_diff_signal_lines(str(subject.unified_diff or "")).lower(),
             ]
         )
-        tokens = [
-            "auth",
-            "security",
-            "permission",
-            "token",
-            "secret",
-            "@valid",
-            "validation",
-            "bindingresult",
-            "requestbody",
-            "requestparam",
-            "input",
-            "sanitize",
-            "csrf",
-            "bean validation",
-        ]
-        return any(token in lowered for token in tokens)
+        selection_tokens = tuple(
+            token
+            for token in SECURITY_REVIEW_SIGNAL_TOKENS
+            if token not in {"payload", "header", "sort", "tenant", "tenantid", "tenant_id"}
+        )
+        return any(token in lowered for token in selection_tokens)
 
     def _should_route_expert(
         self,
@@ -851,31 +840,7 @@ class MainAgentService(MainAgentPromptingMixin):
             return False, "当前变更未命中该缓存专家的关键线索"
         if expert_id == "security_compliance" and not any(
             token in global_blob
-            for token in [
-                "auth",
-                "security",
-                "permission",
-                "token",
-                "secret",
-                "frame",
-                "decoder",
-                "encode",
-                "netty",
-                "memory",
-                "oom",
-                "payload",
-                "dos",
-                "denial",
-                "serialize",
-                "@valid",
-                "validation",
-                "bindingresult",
-                "requestbody",
-                "requestparam",
-                "bean validation",
-                "sanitize",
-                "csrf",
-            ]
+            for token in SECURITY_REVIEW_SIGNAL_TOKENS
         ):
             return False, "当前变更未命中安全相关线索"
         if expert_id == "frontend_accessibility" and "frontend" not in lowered:
@@ -1243,8 +1208,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
-
 
 
 

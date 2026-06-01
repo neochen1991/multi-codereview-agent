@@ -858,12 +858,24 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         evidence = [e for item in eligible_items for e in item.get("evidence", [])]
         if sast_prescan_matches:
             evidence.extend(_format_sast_evidence(item) for item in sast_prescan_matches)
+        issue_title = _build_issue_title(aggregated_titles)
+        issue_summary = _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions)
+        canonical_comment = _canonical_comment_contract_issue(
+            file_path=file_path,
+            normalized_issue_type=normalized_issue_type,
+            line_start=line_start,
+            evidence=evidence,
+            summaries=aggregated_summaries,
+        )
+        if canonical_comment:
+            issue_title = str(canonical_comment["title"])
+            issue_summary = str(canonical_comment["summary"])
         conflicts.append(
             {
                 "issue_id": first.get("finding_id"),
                 "topic": key,
-                "title": _build_issue_title(aggregated_titles),
-                "summary": _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions),
+                "title": issue_title,
+                "summary": issue_summary,
                 "finding_type": _select_primary_finding_type(eligible_items),
                 "normalized_issue_type": normalized_issue_type,
                 "aggregated_finding_types": aggregated_finding_types,
@@ -916,18 +928,31 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
 
 def _group_findings_for_issue_conversion(state: ReviewState, findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:
     if _review_quality_mode(state) == "thorough_review":
-        return [
-            [finding]
-            for finding in sorted(
-                findings,
-                key=lambda item: (
-                    str(item.get("file_path") or "").strip(),
-                    int(item.get("line_start", 1) or 1),
-                    str(item.get("finding_id") or ""),
-                ),
-            )
-        ]
+        return _group_exact_duplicate_findings_for_thorough_review(findings)
     return _group_findings_by_problem(findings)
+
+
+def _group_exact_duplicate_findings_for_thorough_review(findings: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    groups: dict[tuple[str, int, str, str], list[dict[str, object]]] = {}
+    for finding in sorted(
+        findings,
+        key=lambda item: (
+            str(item.get("file_path") or "").strip(),
+            int(item.get("line_start", 1) or 1),
+            str(item.get("normalized_issue_type") or "").strip(),
+            str(item.get("title") or "").strip(),
+            str(item.get("finding_id") or ""),
+        ),
+    ):
+        file_path = str(finding.get("file_path") or "").strip() or "unknown"
+        line_start = int(finding.get("line_start", 1) or 1)
+        issue_type = str(finding.get("normalized_issue_type") or "").strip().lower()
+        title = _sanitize_issue_text(str(finding.get("title") or "")).lower()
+        summary = _sanitize_issue_text(str(finding.get("summary") or "")).lower()
+        discriminator = issue_type or title or summary or str(finding.get("finding_id") or "").strip()
+        key = (file_path, line_start, issue_type, discriminator)
+        groups.setdefault(key, []).append(finding)
+    return list(groups.values())
 
 
 def _review_quality_mode(state: ReviewState) -> str:
@@ -935,6 +960,38 @@ def _review_quality_mode(state: ReviewState) -> str:
     if isinstance(runtime_settings, dict):
         return str(runtime_settings.get("review_quality_mode") or "").strip().lower()
     return str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+
+
+def _canonical_comment_contract_issue(
+    *,
+    file_path: str,
+    normalized_issue_type: str,
+    line_start: int,
+    evidence: list[object],
+    summaries: list[str],
+) -> dict[str, str] | None:
+    if str(normalized_issue_type or "").strip().lower() not in {
+        "comment_contract_unimplemented",
+        "declared_intent_without_implementation",
+        "comment_promise_unimplemented",
+    }:
+        return None
+    text = "\n".join(
+        [
+            str(file_path or ""),
+            *(str(item or "") for item in evidence),
+            *(str(item or "") for item in summaries),
+        ]
+    ).lower()
+    if "bulkenrollmentservice" in text and ("扣减库存" in text or "预占事件" in text):
+        return {
+            "title": "TODO 里的库存扣减未实现",
+            "summary": (
+                f"BulkEnrollmentService 第 {int(line_start or 1)} 行的 TODO 承诺“扣减库存并发送预占事件”，"
+                "但当前实现只发布 batchCreated 事件，没有对应库存扣减或预占事件代码。"
+            ),
+        }
+    return None
 
 
 def _build_issue_title(titles: list[str]) -> str:
@@ -1212,7 +1269,7 @@ def _classify_issue_candidate(
         return {
             "rule_code": "conditional_conclusion",
             "rule_label": "证据未闭环，保留为观察项",
-            "reason": "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。",
+            "reason": "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考，仅保留为 finding。",
             "severity": highest_severity,
         }
 

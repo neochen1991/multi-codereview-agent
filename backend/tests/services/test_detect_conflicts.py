@@ -1586,6 +1586,148 @@ def test_detect_conflicts_keeps_each_finding_as_separate_issue_in_thorough_revie
     assert limit_issue["summary"] == "SELECT 删除 LIMIT :chunk 后可能一次性读取全部事件。"
 
 
+def test_detect_conflicts_dedupes_same_problem_same_line_in_thorough_review_mode():
+    state = {
+        "runtime_settings": {"review_quality_mode": "thorough_review"},
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_sql_security",
+                "expert_id": "security_compliance",
+                "title": "查询访问范围可能被放大",
+                "summary": "builder.equal 改成 builder.like 后扩大了安全边界字段的查询范围。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/HibernateCriteriaConverter.java",
+                "line_start": 60,
+                "evidence": ["builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()))"],
+                "cross_file_evidence": [],
+                "context_files": ["src/HibernateCriteriaConverter.java"],
+                "matched_rules": ["SEC-SQL-001"],
+                "violated_guidelines": ["安全边界字段查询必须保持精确匹配"],
+                "normalized_issue_type": "query_authorization_scope_broadened",
+            },
+            {
+                "finding_id": "fdg_sql_business",
+                "expert_id": "correctness_business",
+                "title": "查询访问范围可能被放大",
+                "summary": "builder.equal 改成 builder.like 后扩大了安全边界字段的查询范围。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": False,
+                "file_path": "src/HibernateCriteriaConverter.java",
+                "line_start": 60,
+                "evidence": ["builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()))"],
+                "cross_file_evidence": [],
+                "context_files": ["src/HibernateCriteriaConverter.java"],
+                "matched_rules": ["CORR-SQL-001"],
+                "violated_guidelines": ["查询语义不能扩大业务访问范围"],
+                "normalized_issue_type": "query_authorization_scope_broadened",
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert set(conflict["finding_ids"]) == {"fdg_sql_security", "fdg_sql_business"}
+    assert set(conflict["participant_expert_ids"]) == {"security_compliance", "correctness_business"}
+
+
+def test_detect_conflicts_dedupes_same_issue_type_same_line_with_different_titles_in_thorough_review_mode():
+    state = {
+        "runtime_settings": {"review_quality_mode": "thorough_review"},
+        "issue_filter_config": {"issue_filter_enabled": False},
+        "findings": [
+            {
+                "finding_id": "fdg_query_db",
+                "expert_id": "database_analysis",
+                "title": "查询语义变更可能导致索引失效和结果集扩大",
+                "summary": "equal 改成 like 后查询范围扩大。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/HibernateCriteriaConverter.java",
+                "line_start": 16,
+                "evidence": ["builder.like(...)"],
+                "cross_file_evidence": [],
+                "context_files": ["src/HibernateCriteriaConverter.java"],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["共享过滤器必须保持精确查询语义"],
+                "normalized_issue_type": "query_semantics_weakened",
+            },
+            {
+                "finding_id": "fdg_query_sec",
+                "expert_id": "security_compliance",
+                "title": "LIKE query missing wildcard escape allows result set expansion attacks",
+                "summary": "equal 改成 like 后安全边界字段可能被放宽。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": False,
+                "file_path": "src/HibernateCriteriaConverter.java",
+                "line_start": 16,
+                "evidence": ["builder.like(...)"],
+                "cross_file_evidence": [],
+                "context_files": ["src/HibernateCriteriaConverter.java"],
+                "matched_rules": ["SEC-JDDD-002"],
+                "violated_guidelines": ["安全边界字段不能从精确匹配退化为模糊匹配"],
+                "normalized_issue_type": "query_semantics_weakened",
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert set(result["conflicts"][0]["finding_ids"]) == {"fdg_query_db", "fdg_query_sec"}
+
+
+def test_detect_conflicts_builds_specific_summary_for_inventory_todo_contract():
+    state = {
+        "runtime_settings": {"review_quality_mode": "thorough_review"},
+        "issue_filter_config": {"issue_filter_enabled": False},
+        "findings": [
+            {
+                "finding_id": "fdg_todo_inventory",
+                "expert_id": "correctness_business",
+                "title": "注释承诺未实现",
+                "summary": "本次 diff 新增或保留了 TODO/注释承诺，但当前实现没有对应业务动作，调用方会误以为该能力已经落地。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                "line_start": 37,
+                "evidence": [
+                    "+ // TODO 批量报名成功后扣减库存并发送预占事件",
+                    "+ eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()))",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java"],
+                "matched_rules": ["CORRECTNESS-CONTRACT-001"],
+                "violated_guidelines": ["注释、TODO、接口说明和方法意图必须与真实实现保持一致"],
+                "normalized_issue_type": "comment_contract_unimplemented",
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["title"] == "TODO 里的库存扣减未实现"
+    assert "扣减库存" in conflict["summary"]
+    assert "预占事件" in conflict["summary"]
+
+
 def test_detect_conflicts_does_not_upgrade_expert_failure_placeholder_even_when_filter_disabled():
     state = {
         "issue_filter_config": {

@@ -176,8 +176,6 @@ class CodeObservationExtractor:
         ]
         for comment in comment_lines:
             lowered = comment.lower()
-            if re.search(r"\b(todo|fixme|hack|xxx)\b", lowered):
-                return [comment[:80]]
             for source_tokens, impl_tokens in contract_pairs:
                 if any(token in comment or token in lowered for token in source_tokens):
                     if not any(token in code_blob for token in impl_tokens):
@@ -185,8 +183,11 @@ class CodeObservationExtractor:
         stub_terms = [
             line[:80]
             for line in lines
-            if re.search(r"\b(pass|todo|notimplemented|not implemented)\b", line, re.IGNORECASE)
-            or "throw new Error" in line
+            if not self._is_comment_line(line)
+            and (
+                re.search(r"\b(pass|todo|notimplemented|not implemented)\b", line, re.IGNORECASE)
+                or re.search(r"throw\s+new\s+Error\s*\([^)]*(todo|not implemented|未实现)", line, re.IGNORECASE)
+            )
         ]
         return stub_terms[:1]
 

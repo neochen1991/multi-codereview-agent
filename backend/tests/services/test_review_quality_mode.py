@@ -75,7 +75,7 @@ def test_thorough_review_selection_adds_core_quality_experts_for_auto_routing(st
     assert not any(item["expert_id"] == "security_compliance" for item in plan["skipped_experts"])
 
 
-def test_thorough_review_selection_respects_explicit_requested_experts(storage_root) -> None:
+def test_thorough_review_selection_expands_sparse_requested_experts(storage_root) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     enabled_experts = [
         ExpertProfile(expert_id="security_compliance", name="Security", name_zh="安全专家", role="security"),
@@ -111,8 +111,8 @@ def test_thorough_review_selection_respects_explicit_requested_experts(storage_r
         runtime_settings=RuntimeSettings(review_quality_mode="thorough_review"),
     )
 
-    assert plan["selected_expert_ids"] == ["correctness_business"]
-    assert "thorough_review_added_expert_ids" not in plan
+    assert set(plan["selected_expert_ids"]) == {"correctness_business", "security_compliance"}
+    assert plan["thorough_review_added_expert_ids"] == ["security_compliance"]
 
 
 def test_thorough_review_does_not_honor_sparse_routing_skip(storage_root) -> None:

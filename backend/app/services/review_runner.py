@@ -3693,13 +3693,6 @@ class ReviewRunner(
             for expert_id in list(selection_plan.get("requested_expert_ids", []) or [])
             if str(expert_id).strip()
         ]
-        force_expand_requested = bool(
-            isinstance(subject.metadata, dict)
-            and subject.metadata.get("force_thorough_review_core_experts")
-        )
-        if requested_ids and not force_expand_requested:
-            return selection_plan
-
         added_ids: list[str] = []
         for expert_id in THOROUGH_REVIEW_CORE_EXPERT_IDS:
             expert = enabled_by_id.get(expert_id)

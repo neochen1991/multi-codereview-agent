@@ -40,6 +40,7 @@ class JavaQualitySignalExtractor:
         primary_context = dict(repository_context.get("primary_context") or {})
 
         diff_excerpt = str(target_hunk.get("excerpt") or "").strip()
+        file_local_diff = self._extract_file_local_diff(file_path, full_diff)
         current_snippet = str(current_class.get("snippet") or "").strip()
         primary_snippet = str(primary_context.get("snippet") or "").strip()
         related_snippets = self._collect_repository_context_snippets(repository_context)
@@ -139,7 +140,12 @@ class JavaQualitySignalExtractor:
             signal_terms["magic_value_literal"] = magic_value_terms
             summary_parts.append("检测到疑似魔法值直接落在业务逻辑中")
 
-        if self._detect_exception_swallowed(diff_lower, combined_lower):
+        exception_signal_detected = self._detect_exception_swallowed(diff_lower, combined_lower)
+        if not exception_signal_detected and file_local_diff:
+            file_local_diff_lower = file_local_diff.lower()
+            if any(token in file_local_diff_lower for token in ("catch", "exception")):
+                exception_signal_detected = self._detect_exception_swallowed(file_local_diff_lower, combined_lower)
+        if exception_signal_detected:
             signals.append("exception_swallowed")
             swallow_terms = ["catch", "printstacktrace", "throw", "logger"]
             matched_terms.extend(swallow_terms)
@@ -224,7 +230,7 @@ class JavaQualitySignalExtractor:
             target_hunk=target_hunk,
             repository_context=repository_context,
             signal_terms=signal_terms,
-            combined_text=combined,
+            combined_text="\n".join(part for part in [combined, file_local_diff] if str(part).strip()),
         )
 
         deduped_signals = self._dedupe(signals)
@@ -258,6 +264,24 @@ class JavaQualitySignalExtractor:
             "signal_terms": {key: self._dedupe(value)[:8] for key, value in signal_terms.items()},
             "observations": observations,
         }
+
+    def _extract_file_local_diff(self, file_path: str, full_diff: str) -> str:
+        full_diff = str(full_diff or "").strip()
+        if not full_diff:
+            return ""
+        normalized_path = str(file_path or "").strip().lstrip("./")
+        if not normalized_path:
+            return ""
+        sections = re.split(r"(?=^diff --git )", full_diff, flags=re.MULTILINE)
+        for section in sections:
+            if not section.strip():
+                continue
+            header = section.splitlines()[0] if section.splitlines() else ""
+            if f" a/{normalized_path} " in header or f" b/{normalized_path}" in header:
+                return section.strip()
+        if len([section for section in sections if section.strip().startswith("diff --git ")]) <= 1:
+            return full_diff
+        return ""
 
     def _build_observations(
         self,
@@ -318,7 +342,26 @@ class JavaQualitySignalExtractor:
                     "confidence": float(profile.get("confidence") or 0.7),
                 }
             )
-        return observations
+        priority = {
+            "sql_injection_risk": 0,
+            "query_authorization_scope_broadened": 1,
+            "query_semantics_weakened": 2,
+            "security_guard_removed": 3,
+            "exception_swallowed": 4,
+            "exception_semantics_weakened": 5,
+            "lock_guard_removed": 6,
+            "comment_contract_unimplemented": 7,
+            "loop_call_amplification": 8,
+            "bulk_processing_risk": 9,
+        }
+        return sorted(
+            observations,
+            key=lambda item: (
+                priority.get(str(item.get("signal") or ""), 50),
+                int(item.get("line_start") or 1),
+                str(item.get("observation_id") or ""),
+            ),
+        )
 
     def _observation_profile(self, signal_name: str) -> dict[str, object]:
         profiles: dict[str, dict[str, object]] = {
@@ -912,11 +955,12 @@ class JavaQualitySignalExtractor:
                 "exception",
                 "throw ",
                 "throws ",
-                "printstacktrace",
-                "logger.",
-                "log.",
             ]
         )
+        if not diff_mentions_exception_path and any(
+            token in diff_lower for token in ["printstacktrace", "logger.error", "log.error", "throw new", "throw e"]
+        ):
+            diff_mentions_exception_path = any(token in combined_lower for token in ["catch", "exception"])
         if not diff_mentions_exception_path:
             return False
 
@@ -1139,11 +1183,7 @@ class JavaQualitySignalExtractor:
 
     def _detect_comment_contract_unimplemented(self, diff_excerpt: str, combined_context: str) -> list[str]:
         normalized_context = self._normalize_java_context_snippet("\n".join([diff_excerpt, combined_context]))
-        added_lines = [
-            line[1:].strip()
-            for line in diff_excerpt.splitlines()
-            if line.startswith("+") and not line.startswith("+++")
-        ]
+        added_lines = self._extract_added_line_contents(diff_excerpt)
         normalized_added = {
             self._normalize_contract_context_line(line)
             for line in added_lines
@@ -1205,6 +1245,19 @@ class JavaQualitySignalExtractor:
         if stub_terms:
             return stub_terms
         return []
+
+    @staticmethod
+    def _extract_added_line_contents(diff_excerpt: str) -> list[str]:
+        added_lines: list[str] = []
+        for raw_line in str(diff_excerpt or "").splitlines():
+            line = str(raw_line or "")
+            if line.startswith("+") and not line.startswith("+++"):
+                added_lines.append(line[1:].strip())
+                continue
+            numbered_match = re.match(r"^\s*\d+\s*\|\s*\+\s?(.*)$", line)
+            if numbered_match:
+                added_lines.append(numbered_match.group(1).strip())
+        return added_lines
 
     @staticmethod
     def _is_comment_contract_candidate_line(line: str) -> bool:
