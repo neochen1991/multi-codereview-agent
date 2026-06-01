@@ -7,6 +7,7 @@
       "title": "Missing owner_id authorization check",
       "summary": "The update path no longer verifies owner_id before charging.",
       "expert_id": "security_compliance",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},
@@ -20,6 +21,7 @@
       "title": "Transaction rollback is skipped",
       "summary": "The transaction can commit after a downstream failure without rollback.",
       "expert_id": "database_analysis",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},

@@ -10,6 +10,7 @@
       "title": "Icon button is missing an accessible name",
       "summary": "The icon button renders only a visual icon and does not provide an accessible name for screen readers.",
       "expert_id": "frontend_accessibility",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},
@@ -23,6 +24,7 @@
       "title": "Keyboard toggle state is not exposed",
       "summary": "The toolbar toggle can be changed by keyboard, but the selected state is not exposed with aria-pressed.",
       "expert_id": "frontend_accessibility",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},

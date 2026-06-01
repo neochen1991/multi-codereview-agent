@@ -20,7 +20,10 @@ PYTHONPATH=backend .venv/bin/python scripts/smoke_gitnexus_impact_demo.py
   --cases-dir backend/tests/fixtures/review_eval_cases \
   --results-dir backend/tests/fixtures/review_eval_results \
   --min-critical-recall 1.0 \
+  --min-precision 1.0 \
   --min-blocking-precision 1.0 \
   --min-evidence-chain-coverage 1.0 \
+  --min-anchor-accuracy 1.0 \
+  --min-display-quality-rate 1.0 \
   --max-false-positive-rate 0.0 \
   --max-duplicate-rate 0.0

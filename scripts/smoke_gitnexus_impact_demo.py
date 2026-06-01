@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.repositories.fs import write_json
 from app.services.gitnexus_impact_service import GitNexusImpactService
+from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.review_service import ReviewService
 
 
@@ -152,6 +153,41 @@ def _build_review_payload(repo_path: Path) -> dict[str, object]:
     }
 
 
+def _fake_live_llm_text(
+    _self,
+    *,
+    fallback_text: str = "",
+    log_context: dict[str, object] | None = None,
+    **_kwargs,
+) -> LLMTextResult:
+    phase = str((log_context or {}).get("phase") or "smoke").strip() or "smoke"
+    if phase == "impact_report_synthesis":
+        text = (
+            "# 关联影响分析报告\n\n"
+            "## 影响范围\n"
+            "- OrderController.createOrder 影响应用服务与仓储保存链路。\n\n"
+            "## 建议测试范围\n"
+            "- 下单主链路接口回归。\n"
+            "- 变更文件对应的单元测试。\n"
+        )
+    elif phase == "final_summary":
+        text = "主Agent收敛完成：本轮已生成关联影响分析报告。"
+    else:
+        text = fallback_text or "smoke live llm response"
+    return LLMTextResult(
+        text=text,
+        mode="live",
+        provider="smoke",
+        model=f"smoke-{phase}",
+        base_url="http://llm.smoke",
+        api_key_env="SMOKE_KEY",
+        call_id=f"smoke-{phase}",
+        prompt_tokens=10,
+        completion_tokens=10,
+        total_tokens=20,
+    )
+
+
 def _run_case(name: str, client) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="impact-demo-") as tmp:
         root = Path(tmp)
@@ -182,7 +218,9 @@ def _run_case(name: str, client) -> dict[str, object]:
         import os
 
         original_home_env = os.environ.get("HOME")
+        original_complete_text = LLMChatService.complete_text
         os.environ["HOME"] = str(root)
+        LLMChatService.complete_text = _fake_live_llm_text
         try:
             review = service.create_review(_build_review_payload(repo_path))
             review = service.start_review(review.review_id)
@@ -215,6 +253,7 @@ def _run_case(name: str, client) -> dict[str, object]:
                 os.environ.pop("HOME", None)
             else:
                 os.environ["HOME"] = original_home_env
+            LLMChatService.complete_text = original_complete_text
 
 
 def _assert_smoke_results(results: list[dict[str, object]]) -> None:

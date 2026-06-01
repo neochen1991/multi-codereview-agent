@@ -11,6 +11,7 @@
       "summary": "The repository query no longer applies a limit or pagination guard, so batch jobs can read a large result set and overload the database path.",
       "expert_id": "database_analysis",
       "matched_rules": ["PERF-SQL-001"],
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},
@@ -25,6 +26,7 @@
       "title": "Missing large data regression test",
       "summary": "There is no large data regression test covering the repository path after the query boundary change.",
       "expert_id": "performance_reliability",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},

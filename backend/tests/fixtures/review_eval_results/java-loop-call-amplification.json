@@ -11,6 +11,7 @@
       "title": "Loop external call amplification",
       "summary": "The new loop performs an external call for every course item, creating linear amplification under batch input. Move the dependency access outside the loop or replace it with a batch call.",
       "primary_expert_id": "performance_reliability",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},
@@ -26,6 +27,7 @@
       "title": "Batch remediation should move dependency access outside the loop",
       "summary": "Use a batch query or precomputed map outside the loop so each item does not trigger a separate repository or remote call.",
       "primary_expert_id": "architecture_design",
+      "evidence_anchor_status": "valid",
       "evidence_chain": [
         {"step": "claim", "status": "present"},
         {"step": "anchor", "status": "anchored"},
