@@ -11,8 +11,14 @@ SIGNAL_EXPERT_PRIMARY = {
     "loop_call_amplification": "performance_reliability",
     "unbounded_query_risk": "database_analysis",
     "query_semantics_weakened": "database_analysis",
+    "query_authorization_scope_broadened": "security_compliance",
+    "sql_injection_risk": "security_compliance",
+    "sensitive_data_exposure": "security_compliance",
+    "security_guard_removed": "security_compliance",
     "comment_contract_unimplemented": "correctness_business",
-    "exception_swallowed": "maintainability_code_health",
+    "exception_semantics_weakened": "correctness_business",
+    "configuration_behavior_coupling": "correctness_business",
+    "exception_swallowed": "correctness_business",
     "naming_convention_violation": "maintainability_code_health",
     "magic_value_literal": "maintainability_code_health",
 }
@@ -124,7 +130,7 @@ def apply_java_signal_expert_retention(
         )
 
     def _add_if_requested(expert_id: str, reason: str, confidence: float) -> None:
-        if expert_id not in requested_expert_ids or expert_id in selected_ids:
+        if expert_id in selected_ids:
             return
         expert = experts_by_id.get(expert_id)
         if expert is None:
@@ -165,6 +171,33 @@ def apply_java_signal_expert_retention(
             "correctness_business",
             "检测到注释或 TODO 承诺未落地，系统补入正确性与业务专家复核承诺与实现是否一致。",
             0.79,
+        )
+
+    security_signals = _primary_signals(
+        "security_compliance",
+        {
+            "security_guard_removed",
+            "sql_injection_risk",
+            "sensitive_data_exposure",
+            "query_authorization_scope_broadened",
+        },
+    )
+    if security_signals:
+        _add_if_requested(
+            "security_compliance",
+            "检测到权限/输入保护、SQL 注入或敏感信息暴露线索，系统补入安全与合规专家复核安全边界。",
+            0.84,
+        )
+
+    correctness_signals = _primary_signals(
+        "correctness_business",
+        {"exception_semantics_weakened", "configuration_behavior_coupling", "exception_swallowed"},
+    )
+    if correctness_signals:
+        _add_if_requested(
+            "correctness_business",
+            "检测到异常成功返回、配置驱动业务分支或错误处理语义变化，系统补入正确性与业务专家复核运行时业务结果。",
+            0.8,
         )
 
     if _primary_signals("database_analysis", {"query_semantics_weakened"}):

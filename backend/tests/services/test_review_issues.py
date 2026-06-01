@@ -346,6 +346,214 @@ def test_list_issues_hides_loop_issue_when_current_code_has_no_loop(storage_root
     assert issues[0].file_path.endswith("BulkEnrollmentService.java")
 
 
+def test_list_issues_hides_loop_issue_when_only_summary_mentions_loop(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_loop_summary_only",
+            "project_id": "proj_loop_summary_only",
+            "source_ref": "feature/loop-summary-only",
+            "target_ref": "main",
+            "title": "loop summary only",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_loop_summary_only",
+                title="循环内逐条外部调用会放大批量处理成本",
+                summary="本次 diff 在循环 `for (CourseEnrollment enrollment : enrollments)` 内调用 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/CourseCreator.java",
+                line_start=23,
+                current_code=(
+                    "# src/main/java/com/example/CourseCreator.java\n"
+                    "  22 |          eventBus.publish(course.pullDomainEvents());\n"
+                    "  23 | +        repository.save(course);"
+                ),
+                suggested_code="repository.save(course);\neventBus.publish(course.pullDomainEvents());",
+                confidence=0.92,
+            )
+        ],
+    )
+
+    assert service.list_issues(review.review_id) == []
+
+
+def test_list_issues_rewrites_payment_loop_summary_from_anchor_code(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_payment_loop_rewrite",
+            "project_id": "proj_payment_loop_rewrite",
+            "source_ref": "feature/payment-loop",
+            "target_ref": "main",
+            "title": "payment loop rewrite",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_payment_loop",
+                title="异常吞没：catch (RuntimeException ignored) 将失败伪装为成功（循环调用放大）",
+                summary="PaymentSettlementService.java:30 定位到异常吞没，但 normalized_issue_type 是 n_plus_one。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/PaymentSettlementService.java",
+                line_start=25,
+                current_code=(
+                    "# src/main/java/com/example/PaymentSettlementService.java\n"
+                    "  25 | +            for (Payment payment : payments) {\n"
+                    "  26 | +                gateway.capture(payment);\n"
+                    "  27 | +                payment.markCaptured();"
+                ),
+                suggested_code=(
+                    "for (Payment payment : payments) {\n"
+                    "    gateway.capture(payment);\n"
+                    "    payment.markCaptured();\n"
+                    "}"
+                ),
+                participant_expert_ids=["performance_reliability"],
+                confidence=0.86,
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.normalized_issue_type == "n_plus_one"
+    assert issue.title == "支付结算循环内逐条调用支付网关"
+    assert "gateway.capture" in issue.summary
+    assert "异常吞没" not in issue.summary
+
+
+def test_list_issues_hydrates_truncated_loop_code_from_linked_finding(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_truncated_loop",
+            "project_id": "proj_truncated_loop",
+            "source_ref": "feature/truncated-loop",
+            "target_ref": "main",
+            "title": "truncated loop",
+            "changed_files": ["src/main/java/com/example/BulkEnrollmentService.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/com/example/BulkEnrollmentService.java b/src/main/java/com/example/BulkEnrollmentService.java\n"
+                "--- a/src/main/java/com/example/BulkEnrollmentService.java\n"
+                "+++ b/src/main/java/com/example/BulkEnrollmentService.java\n"
+                "@@ -31,4 +31,7 @@\n"
+                "+        List<CourseEnrollment> enrollments = studentIds.stream()\n"
+                "+            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n"
+                "+            .toList();\n"
+                "+        for (CourseEnrollment enrollment : enrollments) {\n"
+                "+            repository.save(enrollment);\n"
+                "+        }\n"
+            ),
+        }
+    )
+    finding = ReviewFinding(
+        review_id=review.review_id,
+        finding_id="fdg_real_loop",
+        expert_id="performance_reliability",
+        title="批量报名从 saveAll 退化为循环逐条保存",
+        summary="循环内逐条 repository.save 会把批量写入放大为 N 次。",
+        finding_type="direct_defect",
+        normalized_issue_type="n_plus_one",
+        file_path="src/main/java/com/example/BulkEnrollmentService.java",
+        line_start=31,
+        code_excerpt=(
+            "# src/main/java/com/example/BulkEnrollmentService.java\n"
+            "  31 | +        List<CourseEnrollment> enrollments = studentIds.stream()\n"
+            "  32 | +            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n"
+            "  33 | +            .toList();"
+        ),
+        confidence=0.88,
+        severity="high",
+    )
+    service.finding_repo.save(review.review_id, finding)
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_truncated_loop",
+                title="批量报名从 saveAll 退化为循环逐条保存",
+                summary="循环内逐条 repository.save 会把批量写入放大为 N 次。",
+                normalized_issue_type="n_plus_one",
+                file_path=finding.file_path,
+                line_start=31,
+                finding_ids=[finding.finding_id],
+                current_code=(
+                    "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                    "  31 | +        List<CourseEnrollment> enrollments = studentIds.stream()\n"
+                    "  32 | +            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n"
+                    "  33 | +            .toList();"
+                ),
+                suggested_code="repository.saveAll(enrollments);",
+                confidence=0.88,
+            )
+        ],
+    )
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 1
+    assert "for (CourseEnrollment enrollment : enrollments)" in issues[0].current_code
+    assert "repository.save(enrollment)" in issues[0].current_code
+
+
+def test_list_issues_keeps_comment_contract_when_summary_mentions_other_exception(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_comment_with_exception_context",
+            "project_id": "proj_comment_with_exception_context",
+            "source_ref": "feature/comment-exception-context",
+            "target_ref": "main",
+            "title": "comment with exception context",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_comment_exception_context",
+                title="TODO 承诺未实现，跨聚合副作用缺少建模",
+                summary=(
+                    "批量报名 TODO 承诺扣减库存并发送预占事件，但当前实现没有对应动作。"
+                    "同一 MR 里 PaymentSettlementService 还有 catch 返回 success 的异常问题。"
+                ),
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/BulkEnrollmentService.java",
+                line_start=37,
+                current_code=(
+                    "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                    "  35 | +            repository.save(enrollment);\n"
+                    "  36 | +        }\n"
+                    "  37 | +        // TODO 批量报名成功后扣减库存并发送预占事件\n"
+                    "  38 | +        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));"
+                ),
+                suggested_code="repository.saveAll(enrollments);",
+                confidence=0.86,
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.normalized_issue_type == "comment_contract_unimplemented"
+    assert issue.title == "TODO 里的库存扣减未实现"
+    assert "扣减库存" in issue.summary
+
+
 def test_list_display_issues_hides_stale_consistency_failure_after_repair(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -621,6 +829,145 @@ def test_list_display_findings_sanitizes_internal_remediation_text(storage_root:
     assert finding.remediation_steps == ["补齐 TODO 或注释承诺的业务动作"]
 
 
+def test_list_display_findings_disambiguates_same_text_across_anchors(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_finding_duplicate_display",
+            "project_id": "proj_finding_duplicate_display",
+            "source_ref": "feature/finding-duplicate-display",
+            "target_ref": "main",
+            "title": "finding duplicate display",
+        }
+    )
+    shared_title = "批量保存改成了循环逐条保存"
+    shared_summary = "当前批量路径在循环内逐条保存，批量输入会被放大为多次数据库访问。"
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_first_loop",
+            expert_id="performance_reliability",
+            title=shared_title,
+            summary=shared_summary,
+            finding_type="direct_defect",
+            normalized_issue_type="n_plus_one",
+            file_path="src/main/java/com/example/a/BatchService.java",
+            line_start=35,
+            code_excerpt=(
+                "35 | +        for (Order order : orders) {\n"
+                "36 | +            orderRepository.save(order);\n"
+                "37 | +        }"
+            ),
+            confidence=0.9,
+        ),
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_second_loop",
+            expert_id="performance_reliability",
+            title=shared_title,
+            summary=shared_summary,
+            finding_type="direct_defect",
+            normalized_issue_type="n_plus_one",
+            file_path="src/main/java/com/example/b/BatchService.java",
+            line_start=35,
+            code_excerpt=(
+                "35 | +        for (Payment payment : payments) {\n"
+                "36 | +            paymentRepository.save(payment);\n"
+                "37 | +        }"
+            ),
+            confidence=0.88,
+        ),
+    )
+
+    findings = service.list_display_findings(review.review_id)
+    report_findings = service.build_report(review.review_id).findings
+
+    assert len(findings) == 2
+    assert len(report_findings) == 2
+    titles = {finding.file_path: finding.title for finding in findings}
+    summaries = {finding.file_path: finding.summary for finding in findings}
+    assert "example/a/BatchService.java 第 36 行" in titles["src/main/java/com/example/a/BatchService.java"]
+    assert "example/b/BatchService.java 第 36 行" in titles["src/main/java/com/example/b/BatchService.java"]
+    assert summaries["src/main/java/com/example/a/BatchService.java"] != summaries[
+        "src/main/java/com/example/b/BatchService.java"
+    ]
+    assert report_findings[0].title != report_findings[1].title
+
+
+def test_build_report_uses_target_line_not_neighbor_todo_for_finding_family(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_loop_with_neighbor_todo",
+            "project_id": "proj_loop_with_neighbor_todo",
+            "source_ref": "feature/loop-with-neighbor-todo",
+            "target_ref": "main",
+            "title": "loop finding with neighbor todo",
+        }
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_loop_polluted_by_todo",
+            expert_id="performance_reliability",
+            title="批处理写入被退化为逐条写入，吞吐能力严重退化",
+            summary="批处理写入被替换为逐条循环写入，吞吐能力退化。",
+            finding_type="direct_defect",
+            normalized_issue_type="comment_contract_unimplemented",
+            file_path="src/main/java/com/example/BulkEnrollmentService.java",
+            line_start=35,
+            code_excerpt=(
+                "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                "  34 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                "  35 | +            repository.save(enrollment);\n"
+                "  36 | +        }\n"
+                "  37 | +        // TODO 批量报名成功后扣减库存并发送预占事件\n"
+            ),
+            confidence=0.91,
+        ),
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_comment_type_on_non_comment_line",
+            expert_id="performance_reliability",
+            title="循环调用放大",
+            summary="当前实现把外部依赖调用放进循环路径（for (...) / repository.save）。",
+            finding_type="direct_defect",
+            normalized_issue_type="comment_contract_unimplemented",
+            file_path="src/main/java/com/example/BulkEnrollmentService.java",
+            line_start=31,
+            code_excerpt=(
+                "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                "  29 | +            return;\n"
+                "  30 |          }\n"
+                "  31 | +        List<CourseEnrollment> enrollments = studentIds.stream()\n"
+                "  32 | +            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n"
+                "  33 | +            .toList();\n"
+            ),
+            confidence=0.89,
+        ),
+    )
+
+    findings = service.build_report(review.review_id).findings
+    finding = findings[0]
+
+    assert len(findings) == 1
+    assert finding.normalized_issue_type == "n_plus_one"
+    assert finding.title == "批量报名从 saveAll 退化为循环逐条保存"
+    assert "TODO" not in finding.title
+    assert "TODO" not in finding.summary
+    assert "库存扣减" not in finding.summary
+
+
 def test_list_issues_dedupes_same_display_root_cause(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -661,6 +1008,300 @@ def test_list_issues_dedupes_same_display_root_cause(storage_root: Path):
     assert issues[0].finding_ids == ["fdg_a", "fdg_b"]
     assert issues[0].participant_expert_ids == ["correctness_business", "database_analysis"]
     assert issues[0].confidence == 0.86
+
+
+def test_list_issues_disambiguates_same_summary_across_different_files(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_same_summary",
+            "project_id": "proj_same_summary",
+            "source_ref": "feature/same-summary",
+            "target_ref": "main",
+            "title": "same summary display",
+        }
+    )
+    shared_summary = "本次 diff 新增或保留了 TODO/注释承诺，但当前实现没有对应业务动作，调用方会误以为该能力已经落地。"
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_order_contract",
+                title="承诺未落地",
+                summary=shared_summary,
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/order/OrderService.java",
+                line_start=32,
+                current_code="32 | +        // TODO: 扣减库存并发送订单事件\n33 | +        return orderRepository.save(order);",
+                confidence=0.86,
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_payment_contract",
+                title="承诺未落地",
+                summary=shared_summary,
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/main/java/com/example/payment/PaymentService.java",
+                line_start=32,
+                current_code="32 | +        // TODO: 记录审计日志并发送支付事件\n33 | +        return paymentRepository.save(payment);",
+                confidence=0.86,
+            ),
+        ],
+    )
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 2
+    summaries = {issue.file_path: issue.summary for issue in issues}
+    assert "OrderService.java 第 32 行" in summaries["src/main/java/com/example/order/OrderService.java"]
+    assert "PaymentService.java 第 32 行" in summaries["src/main/java/com/example/payment/PaymentService.java"]
+    assert summaries["src/main/java/com/example/order/OrderService.java"] != summaries[
+        "src/main/java/com/example/payment/PaymentService.java"
+    ]
+
+
+def test_list_issues_disambiguates_same_title_across_different_files(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_same_title",
+            "project_id": "proj_same_title",
+            "source_ref": "feature/same-title",
+            "target_ref": "main",
+            "title": "same title display",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_payment_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="PaymentSettlementService 将 paymentRepository.saveAll 改成循环内逐条 paymentRepository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/payment/PaymentSettlementService.java",
+                line_start=28,
+                current_code=(
+                    "28 | +        for (Payment payment : payments) {\n"
+                    "29 | +            paymentRepository.save(payment);\n"
+                    "30 | +        }"
+                ),
+                confidence=0.9,
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_enroll_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="BulkEnrollmentService 将 repository.saveAll 改成循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/enroll/BulkEnrollmentService.java",
+                line_start=35,
+                current_code=(
+                    "35 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                    "36 | +            repository.save(enrollment);\n"
+                    "37 | +        }"
+                ),
+                confidence=0.9,
+            ),
+        ],
+    )
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 2
+    titles = {issue.file_path: issue.title for issue in issues}
+    assert "PaymentSettlementService.java 第 29 行" in titles[
+        "src/main/java/com/example/payment/PaymentSettlementService.java"
+    ]
+    assert "BulkEnrollmentService.java 第 36 行" in titles[
+        "src/main/java/com/example/enroll/BulkEnrollmentService.java"
+    ]
+    assert titles["src/main/java/com/example/payment/PaymentSettlementService.java"] != titles[
+        "src/main/java/com/example/enroll/BulkEnrollmentService.java"
+    ]
+
+
+def test_list_issues_disambiguates_windows_path_title_with_basename(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_same_title_windows",
+            "project_id": "proj_same_title_windows",
+            "source_ref": "feature/same-title-windows",
+            "target_ref": "main",
+            "title": "same title windows display",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_payment_loop_windows",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="PaymentSettlementService 将 paymentRepository.saveAll 改成循环内逐条 paymentRepository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src\\main\\java\\com\\example\\payment\\PaymentSettlementService.java",
+                line_start=28,
+                current_code=(
+                    "28 | +        for (Payment payment : payments) {\n"
+                    "29 | +            paymentRepository.save(payment);\n"
+                    "30 | +        }"
+                ),
+                confidence=0.9,
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_enroll_loop_windows",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="BulkEnrollmentService 将 repository.saveAll 改成循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src\\main\\java\\com\\example\\enroll\\BulkEnrollmentService.java",
+                line_start=35,
+                current_code=(
+                    "35 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                    "36 | +            repository.save(enrollment);\n"
+                    "37 | +        }"
+                ),
+                confidence=0.9,
+            ),
+        ],
+    )
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 2
+    titles = {issue.file_path: issue.title for issue in issues}
+    assert titles["src\\main\\java\\com\\example\\payment\\PaymentSettlementService.java"].startswith(
+        "PaymentSettlementService.java 第 29 行"
+    )
+    assert titles["src\\main\\java\\com\\example\\enroll\\BulkEnrollmentService.java"].startswith(
+        "BulkEnrollmentService.java 第 36 行"
+    )
+    assert "src\\main\\java" not in titles["src\\main\\java\\com\\example\\payment\\PaymentSettlementService.java"]
+    assert "src\\main\\java" not in titles["src\\main\\java\\com\\example\\enroll\\BulkEnrollmentService.java"]
+
+
+def test_list_display_issues_disambiguates_light_report_canonical_titles(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_light_title_duplicate",
+            "project_id": "proj_light_title_duplicate",
+            "source_ref": "feature/light-title-duplicate",
+            "target_ref": "main",
+            "title": "light report title duplicate",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_first_batch_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="第一个批量入口在循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/a/BatchService.java",
+                line_start=35,
+                current_code=(
+                    "35 | +        for (Order order : orders) {\n"
+                    "36 | +            orderRepository.save(order);\n"
+                    "37 | +        }"
+                ),
+                confidence=0.9,
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_second_batch_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="第二个批量入口在循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/b/BatchService.java",
+                line_start=35,
+                current_code=(
+                    "35 | +        for (Payment payment : payments) {\n"
+                    "36 | +            paymentRepository.save(payment);\n"
+                    "37 | +        }"
+                ),
+                confidence=0.88,
+            ),
+        ],
+    )
+
+    issues = service.list_display_issues(review.review_id)
+    report_issues = service.build_report(review.review_id).issues
+
+    assert len(issues) == 2
+    assert len(report_issues) == 2
+    titles = {issue.file_path: issue.title for issue in issues}
+    assert "example/a/BatchService.java 第 36 行" in titles["src/main/java/com/example/a/BatchService.java"]
+    assert "example/b/BatchService.java 第 36 行" in titles["src/main/java/com/example/b/BatchService.java"]
+    assert titles["src/main/java/com/example/a/BatchService.java"] != titles[
+        "src/main/java/com/example/b/BatchService.java"
+    ]
+    assert report_issues[0].title != report_issues[1].title
+
+
+def test_list_issues_keeps_same_file_different_loop_anchors_separate(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_same_file_loop",
+            "project_id": "proj_same_file_loop",
+            "source_ref": "feature/same-file-loop",
+            "target_ref": "main",
+            "title": "same file loop anchors",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_first_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="第一个批量入口在循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/BatchService.java",
+                line_start=30,
+                current_code=(
+                    "30 | +        for (Order order : orders) {\n"
+                    "31 | +            orderRepository.save(order);\n"
+                    "32 | +        }"
+                ),
+                confidence=0.9,
+            ),
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_second_loop",
+                title="批量写入从 saveAll 退化为循环逐条 repository.save",
+                summary="第二个批量入口在循环内逐条 repository.save。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/BatchService.java",
+                line_start=68,
+                current_code=(
+                    "68 | +        for (Payment payment : payments) {\n"
+                    "69 | +            paymentRepository.save(payment);\n"
+                    "70 | +        }"
+                ),
+                confidence=0.88,
+            ),
+        ],
+    )
+
+    issues = service.list_issues(review.review_id)
+
+    assert len(issues) == 2
+    assert {issue.line_start for issue in issues} == {31, 69}
+    assert all("BatchService.java 第" in issue.title for issue in issues)
 
 
 def test_list_issues_does_not_resurrect_below_threshold_finding(storage_root: Path):
@@ -817,6 +1458,136 @@ def test_build_report_does_not_emit_fallback_after_gitnexus_failure(storage_root
     assert report.impact_report is None
 
 
+def test_build_report_quality_summary_audits_display_issues_after_cleanup(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_quality_summary",
+            "project_id": "proj_quality_summary",
+            "source_ref": "feature/quality-summary",
+            "target_ref": "main",
+            "title": "quality summary",
+            "selected_experts": ["performance_reliability"],
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_loop_weak_remediation",
+                title="批量保存改成循环逐条保存",
+                summary="循环内逐条 repository.save，批量输入会放大为 N 次持久化调用。",
+                normalized_issue_type="n_plus_one",
+                primary_expert_id="performance_reliability",
+                participant_expert_ids=["performance_reliability"],
+                severity="medium",
+                confidence=0.9,
+                file_path="src/main/java/com/example/BulkEnrollmentService.java",
+                line_start=35,
+                current_code=(
+                    "  34 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                    "  35 | +            repository.save(enrollment);\n"
+                    "  36 | +        }\n"
+                ),
+                remediation_suggestion="结合本条问题说明和修改思路处理。",
+                suggested_code="repository.saveAll(enrollments);",
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert "结合本条问题说明" not in report.issues[0].remediation_suggestion
+    assert report.confidence_summary.quality_gate_passed is True
+    assert report.confidence_summary.fallback_text_failure_count == 0
+    assert report.confidence_summary.finding_issue_family_mismatch_count == 0
+
+
+def test_build_report_normalizes_query_semantics_finding_remediation(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_query_semantics_finding",
+            "project_id": "proj_query_semantics_finding",
+            "source_ref": "feature/query-semantics-finding",
+            "target_ref": "main",
+            "title": "query semantics finding",
+        }
+    )
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_query_semantics",
+            expert_id="security_compliance",
+            title="查询语义从精确匹配退化为模糊匹配",
+            summary="builder.equal 被改成 builder.like，查询语义被静默放宽。",
+            normalized_issue_type="query_semantics_weakened",
+            severity="high",
+            confidence=0.9,
+            file_path="src/shared/HibernateCriteriaConverter.java",
+            line_start=16,
+            code_excerpt='  16 | +        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+            remediation_suggestion="补齐缺失实现，并增加能复现该风险的回归测试。",
+            suggested_code="private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n    return builder.equal(root.get(filter.field().value()), filter.value().value());\n}",
+        ),
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.findings[0].remediation_suggestion.startswith("若 equalsPredicateTransformer")
+    assert report.confidence_summary.fallback_text_failure_count == 0
+
+
+def test_build_report_quality_summary_flags_expected_expert_not_selected(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_quality_expected_expert",
+            "project_id": "proj_quality_expected_expert",
+            "source_ref": "feature/expected-expert",
+            "target_ref": "main",
+            "title": "expected expert",
+            "selected_experts": ["correctness_business"],
+            "metadata": {
+                "expected_required_experts": ["correctness_business", "security_compliance"],
+            },
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_business",
+                title="注释或 TODO 写了要做，但代码没有对应实现",
+                summary="第 19 行 TODO 承诺补充权限校验，但当前代码没有对应实现。",
+                normalized_issue_type="comment_contract_unimplemented",
+                primary_expert_id="correctness_business",
+                participant_expert_ids=["correctness_business"],
+                severity="medium",
+                confidence=0.9,
+                file_path="src/main/java/com/example/OrderService.java",
+                line_start=19,
+                current_code="  19 | +        // TODO 补充当前登录用户权限校验",
+                remediation_suggestion="补齐 TODO 或注释承诺的业务动作；如果本次不交付该能力，应删除误导性注释并拆出明确任务。",
+                suggested_code="if (!permissionService.canRead(currentUser, orderId)) {\n    throw new ForbiddenException();\n}",
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.confidence_summary.quality_gate_passed is False
+    assert report.confidence_summary.security_expert_activated is False
+    assert report.confidence_summary.business_expert_activated is True
+    assert report.confidence_summary.expert_activation_missing_count == 1
+
+
 def test_list_issues_rehydrates_legacy_merged_issue_into_individual_findings(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -938,6 +1709,49 @@ def test_list_issues_keeps_same_line_multi_expert_issue_merged(storage_root: Pat
     assert report.issues[0].issue_id == "iss_query_merged"
 
 
+def test_list_issues_merges_same_file_when_windows_path_separators_differ(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_windows_path",
+            "project_id": "proj_windows_path",
+            "source_ref": "feature/windows-path-dedupe",
+            "target_ref": "main",
+            "title": "windows path dedupe",
+        }
+    )
+    issue_a = DebateIssue(
+        review_id=review.review_id,
+        issue_id="iss_windows_path_a",
+        title="批量报名从 saveAll 退化为循环逐条保存",
+        summary="循环内逐条 repository.save 会放大批量保存成本。",
+        normalized_issue_type="n_plus_one",
+        file_path="src\\main\\java\\com\\example\\BulkEnrollmentService.java",
+        line_start=35,
+        finding_ids=["fdg_windows_path_a"],
+        participant_expert_ids=["performance_reliability"],
+    )
+    issue_b = issue_a.model_copy(
+        update={
+            "issue_id": "iss_windows_path_b",
+            "file_path": "src/main/java/com/example/BulkEnrollmentService.java",
+            "finding_ids": ["fdg_windows_path_b"],
+            "participant_expert_ids": ["database_analysis"],
+            "summary": "同一行循环内调用 repository.save，批量输入会被放大为多次数据库访问。",
+        }
+    )
+    service.issue_repo.save_all(review.review_id, [issue_a, issue_b])
+
+    issues = service.list_issues(review.review_id)
+    report = service.build_report(review.review_id)
+
+    assert len(issues) == 1
+    assert issues[0].finding_ids == ["fdg_windows_path_a", "fdg_windows_path_b"]
+    assert issues[0].participant_expert_ids == ["performance_reliability", "database_analysis"]
+    assert report.issue_count == 1
+
+
 def test_list_issues_normalizes_query_semantics_family_for_report(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -967,10 +1781,22 @@ def test_list_issues_normalizes_query_semantics_family_for_report(storage_root: 
                 review_id=review.review_id,
                 issue_id="iss_query_title",
                 title="同一代码行存在 3 个问题：equals操作被错误替换为模糊like",
-                summary="equals 查询语义从精确匹配退化为模糊匹配。",
+                summary=(
+                    "HibernateCriteriaConverter.java:63 定位到“查询语义从精确匹配退化为模糊匹配”，"
+                    "修复时应围绕该问题位置处理。 建议：补齐缺失实现，并增加能复现该风险的回归测试。 "
+                    "模糊匹配未对特殊字符转义，可能导致查询结果偏差。"
+                ),
                 normalized_issue_type="magic_value_overuse",
                 file_path=finding.file_path,
                 line_start=63,
+                current_code=(
+                    "private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n"
+                    "    return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+                    "}"
+                ),
+                remediation_strategy="围绕本条问题指向的位置，补齐缺失的业务逻辑或保护逻辑。",
+                remediation_suggestion="补齐缺失实现，并增加能复现该风险的回归测试。",
+                remediation_steps=["补齐缺失实现，并增加能复现该风险的回归测试。"],
                 finding_ids=["fdg_query_title"],
             )
         ],
@@ -983,6 +1809,66 @@ def test_list_issues_normalizes_query_semantics_family_for_report(storage_root: 
     assert issue.title == "查询语义从精确匹配退化为模糊匹配"
     assert report_issue.normalized_issue_type == "query_semantics_regression"
     assert report_issue.title == "查询语义从精确匹配退化为模糊匹配"
+    assert "补齐缺失实现" not in report_issue.summary
+    assert "把 equal 精确匹配改成 like/contains 模糊匹配" in report_issue.summary
+    assert report_issue.remediation_steps[:2] == [
+        "确认该过滤器是否仍应执行精确匹配；如果是，请恢复 equal/等值查询。",
+        "如果产品确实需要模糊搜索，请新增明确的 contains/like 操作符，并补充通配符转义和权限边界测试。",
+    ]
+    assert "恢复 builder.equal" in report_issue.remediation_suggestion
+
+
+def test_list_issues_replaces_weak_loop_remediation_for_report(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_loop_display",
+            "project_id": "proj_loop_display",
+            "source_ref": "feature/loop-display",
+            "target_ref": "main",
+            "title": "loop display",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_loop_display",
+                title="批量报名从 saveAll 退化为循环逐条保存",
+                summary="批处理写入被替换为逐条循环写入，吞吐能力退化。",
+                normalized_issue_type="n_plus_one",
+                file_path="src/main/java/com/example/BulkEnrollmentService.java",
+                line_start=35,
+                current_code=(
+                    "# src/main/java/com/example/BulkEnrollmentService.java\n"
+                    "  34 | +        for (CourseEnrollment enrollment : enrollments) {\n"
+                    "  35 | +            repository.save(enrollment);\n"
+                    "  36 | +        }"
+                ),
+                remediation_suggestion="补齐缺失实现，并增加能复现该风险的回归测试。",
+                remediation_steps=[
+                    "把循环内逐条访问改为批量查询、批量保存或固定窗口批处理。",
+                    "补充大批量输入下的调用次数和耗时回归测试。",
+                    "把循环内逐条访问改为批量查询、批量保存或固定窗口批处理。",
+                ],
+            )
+        ],
+    )
+
+    report_issue = service.build_report(review.review_id).issues[0]
+
+    assert report_issue.normalized_issue_type == "n_plus_one"
+    assert "补齐缺失" not in report_issue.remediation_strategy
+    assert "repository.save" in report_issue.remediation_strategy
+    assert "补齐缺失实现" not in report_issue.remediation_suggestion
+    assert "repository.save" in report_issue.remediation_suggestion
+    assert "saveAll" in report_issue.remediation_suggestion
+    assert report_issue.remediation_steps == [
+        "把循环内逐条访问改为批量查询、批量保存或固定窗口批处理。",
+        "补充大批量输入下的调用次数和耗时回归测试。",
+    ]
 
 
 def test_list_issues_normalizes_comment_contract_family_for_report(storage_root: Path):

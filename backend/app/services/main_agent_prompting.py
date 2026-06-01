@@ -56,6 +56,7 @@ class MainAgentPromptingMixin:
             "聚合边界、应用服务职责、依赖方向、分层边界 -> ddd_architecture；"
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
+            "权限、鉴权、SQL注入、敏感数据泄露、日志脱敏 -> security_compliance；"
             "SQL、事务、schema、索引 -> database_analysis；"
             "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
             "影响范围、调用链、测试范围 -> change_impact_analysis。"
@@ -78,6 +79,7 @@ class MainAgentPromptingMixin:
             "聚合边界、应用服务职责、依赖方向、分层边界 -> ddd_architecture；"
             "命名、日志、判空、异常写法、魔法值 -> architecture_design；"
             "复杂度、重复代码、长期演化成本 -> maintainability_code_health；"
+            "权限、鉴权、SQL注入、敏感数据泄露、日志脱敏 -> security_compliance；"
             "SQL、事务、schema、索引 -> database_analysis；"
             "批处理、锁竞争、超时重试、故障放大 -> performance_reliability；"
             "影响范围、调用链、测试范围 -> change_impact_analysis。"
@@ -203,6 +205,7 @@ class MainAgentPromptingMixin:
             "- ddd_architecture: 聚合边界、应用服务职责、依赖方向、分层边界\n"
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
+            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏\n"
             "- database_analysis: SQL、事务、schema、索引\n"
             "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
             "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
@@ -280,6 +283,7 @@ class MainAgentPromptingMixin:
             "- ddd_architecture: 聚合边界、应用服务职责、依赖方向、分层边界\n"
             "- architecture_design: 命名、日志、判空、异常写法、魔法值\n"
             "- maintainability_code_health: 复杂度、重复代码、长期演化成本\n"
+            "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏\n"
             "- database_analysis: SQL、事务、schema、索引\n"
             "- performance_reliability: 批处理、锁竞争、超时重试、故障放大\n"
             "- change_impact_analysis: 影响范围、调用链、测试范围\n\n"
@@ -592,11 +596,19 @@ class MainAgentPromptingMixin:
                 0.79,
             )
 
-        if "security_guard_removed" in signal_set:
+        if _primary_signals(
+            "security_compliance",
+            {
+                "security_guard_removed",
+                "sql_injection_risk",
+                "sensitive_data_exposure",
+                "query_authorization_scope_broadened",
+            },
+        ):
             _add_if_requested(
                 "security_compliance",
-                "检测到入口保护删除，系统补入安全与合规专家复核安全边界。",
-                0.82,
+                "检测到权限/输入保护、SQL 注入或敏感信息暴露线索，系统补入安全与合规专家复核安全边界。",
+                0.84,
             )
 
         if _primary_signals("database_analysis", {"query_semantics_weakened"}):
@@ -616,12 +628,21 @@ class MainAgentPromptingMixin:
                 0.82,
             )
 
+        if _primary_signals(
+            "correctness_business",
+            {"exception_semantics_weakened", "configuration_behavior_coupling", "exception_swallowed"},
+        ):
+            _add_if_requested(
+                "correctness_business",
+                "检测到异常成功返回、配置驱动业务分支或错误处理语义变化，系统补入正确性与业务专家复核运行时业务结果。",
+                0.8,
+            )
+
         maintainability_signals = _primary_signals(
             "maintainability_code_health",
             {
                 "naming_convention_violation",
                 "magic_value_literal",
-                "exception_swallowed",
                 "comment_contract_unimplemented",
                 "python_mutable_default_arg",
                 "go_unchecked_error_return",

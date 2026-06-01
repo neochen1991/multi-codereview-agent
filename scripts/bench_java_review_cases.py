@@ -16,12 +16,17 @@ import urllib.request
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 DEFAULT_MANIFEST_PATH = REPO_ROOT / "backend" / "tests" / "fixtures" / "java_cases" / "cases.json"
 DEFAULT_CACHE_ROOT = Path("/tmp/java-review-eval-cache")
 DEFAULT_WORKSPACE_ROOT = Path("/tmp/java-review-eval-workspaces")
 DEFAULT_API_BASE = "http://127.0.0.1:8011/api"
 FIXTURE_MARKER_FILE = ".codereview-fixture.json"
 FIXTURE_VERSION = 3
+
+from validate_windows_review_quality import build_windows_review_quality_report  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1081,8 @@ def submit_case(
     analysis_mode: str = "light",
     wait_timeout_seconds: int = 900,
     poll_interval_seconds: int = 5,
+    windows_quality_gate: bool = False,
+    quality_gate_model: str = "MiniMax-M2.7",
 ) -> dict[str, object]:
     created = request_json("POST", f"{api_base}/reviews", materialized.to_review_payload(analysis_mode=analysis_mode))
     review_id = str(created["review_id"])
@@ -1101,6 +1108,16 @@ def submit_case(
     review_status = str(latest_review.get("status") or "")
     review_phase = str(latest_review.get("phase") or "")
     score = evaluate_case_result(materialized.case, report if isinstance(report, dict) else {}, replay if isinstance(replay, dict) else {})
+    windows_quality_report: dict[str, object] | None = None
+    if windows_quality_gate:
+        windows_quality_report = build_windows_review_quality_report(
+            workspace_path=str(materialized.workspace_repo),
+            changed_files=list(materialized.changed_files),
+            metadata=dict(materialized.graph_metadata or {}),
+            report=report if isinstance(report, dict) else {},
+            replay=replay if isinstance(replay, dict) else {},
+            model_name=quality_gate_model,
+        )
     if review_status not in {"completed", "failed", "closed", "waiting_human"}:
         score = replace(
             score,
@@ -1109,7 +1126,7 @@ def submit_case(
             review_status=review_status,
             review_phase=review_phase,
         )
-    return {
+    result = {
         "case_id": materialized.case.case_id,
         "review_id": review_id,
         "status": latest_review.get("status", ""),
@@ -1167,6 +1184,17 @@ def submit_case(
         },
         "score_summary": _build_score_summary(score),
     }
+    if windows_quality_report is not None:
+        result["windows_quality_gate"] = {
+            "passed": bool(windows_quality_report.get("passed")),
+            "missing": list(windows_quality_report.get("missing") or []),
+            "executed_experts": list(windows_quality_report.get("executed_experts") or []),
+            "issue_count": int(windows_quality_report.get("issue_count") or 0),
+            "finding_count": int(windows_quality_report.get("finding_count") or 0),
+            "model_name": str(windows_quality_report.get("model_name") or quality_gate_model),
+            "prompt_profile": str(windows_quality_report.get("prompt_profile") or ""),
+        }
+    return result
 
 
 def _collect_matched_rule_ids(findings: list[dict[str, object]], replay_messages: list[dict[str, object]]) -> tuple[str, ...]:
@@ -1532,6 +1560,18 @@ def _serialise_materialized(materialized: MaterializedCase) -> dict[str, object]
     }
 
 
+def _benchmark_exit_code(results: list[dict[str, object]], *, windows_quality_gate: bool) -> int:
+    if windows_quality_gate:
+        for result in results:
+            score = result.get("score")
+            if isinstance(score, dict) and not bool(score.get("passed")):
+                return 2
+            gate = result.get("windows_quality_gate")
+            if not isinstance(gate, dict) or not bool(gate.get("passed")):
+                return 2
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build and optionally run realistic Java review benchmark cases.")
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST_PATH))
@@ -1546,6 +1586,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace-root", default=str(DEFAULT_WORKSPACE_ROOT))
     parser.add_argument("--wait-timeout-seconds", type=int, default=900)
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
+    parser.add_argument(
+        "--windows-quality-gate",
+        action="store_true",
+        help="After submission, run the Windows/MiniMax review quality gate against each real review result.",
+    )
+    parser.add_argument("--quality-gate-model", default="MiniMax-M2.7")
     return parser.parse_args()
 
 
@@ -1585,11 +1631,13 @@ def main() -> int:
             analysis_mode=args.analysis_mode,
             wait_timeout_seconds=args.wait_timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
+            windows_quality_gate=bool(args.windows_quality_gate),
+            quality_gate_model=args.quality_gate_model,
         )
         for item in materialized_cases
     ]
     print(json.dumps(results, ensure_ascii=False, indent=2))
-    return 0
+    return _benchmark_exit_code(results, windows_quality_gate=bool(args.windows_quality_gate))
 
 
 if __name__ == "__main__":

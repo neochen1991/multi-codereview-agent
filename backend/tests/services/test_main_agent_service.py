@@ -1846,6 +1846,7 @@ def test_main_agent_routing_prompt_includes_target_file_full_diff_and_related_su
     assert "authGuard" in prompt
     assert "语言通用规范提示" in prompt
     assert "JavaScript / TypeScript 通用代码规范" in prompt
+    assert "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏" in prompt
 
 
 def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
@@ -1904,6 +1905,7 @@ def test_main_agent_expert_selection_prompt_uses_structured_diff_context():
     assert "变更源码与关联上下文" not in prompt
     assert "语言通用规范提示" in prompt
     assert "JavaScript / TypeScript 通用代码规范" in prompt
+    assert "- security_compliance: 权限、鉴权、SQL注入、敏感数据泄露、日志脱敏" in prompt
 
 
 def test_main_agent_readds_security_expert_for_java_validation_signal():
@@ -1965,6 +1967,276 @@ def test_main_agent_readds_security_expert_for_java_validation_signal():
     assert "security_compliance" in merged["selected_expert_ids"]
     selected = {item["expert_id"]: item for item in merged["selected_experts"]}
     assert selected["security_compliance"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_security_expert_for_added_sql_and_sensitive_log_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["注入", "敏感信息"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="通用编码规范专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["代码健康"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/security-surface",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/UserSearchRepository.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/UserSearchRepository.java b/src/main/java/com/example/UserSearchRepository.java\n"
+            "--- a/src/main/java/com/example/UserSearchRepository.java\n"
+            "+++ b/src/main/java/com/example/UserSearchRepository.java\n"
+            "@@ -31,0 +31,4 @@ public class UserSearchRepository {\n"
+            '+    String sql = "select * from users where name = \'" + request.getName() + "\'";\n'
+            '+    logger.info("login token={}", request.getAuthorizationToken());\n'
+            "+    return jdbcTemplate.query(sql, mapper);\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["security_compliance", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "maintainability_code_health", "reason": "只看到日志代码", "confidence": 0.78}
+            ],
+            "skipped_experts": [
+                {"expert_id": "security_compliance", "reason": "LLM 未识别安全风险"}
+            ],
+        },
+        fallback_ids=["maintainability_code_health"],
+    )
+
+    assert "security_compliance" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["security_compliance"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_security_expert_for_shared_filter_scope_broadening():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="database_analysis",
+            name="Database",
+            name_zh="数据库专家",
+            role="database",
+            enabled=True,
+            focus_areas=["查询语义"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["数据访问边界"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/filter-scope",
+        target_ref="main",
+        changed_files=["src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"],
+        unified_diff=(
+            "diff --git a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "--- a/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "+++ b/src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java\n"
+            "@@ -13,6 +13,6 @@ public final class HibernateCriteriaConverter<T> {\n"
+            "     private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n"
+            "-        return builder.equal(root.get(filter.field().value()), filter.value().value());\n"
+            '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));\n'
+            "     }\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=[],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "correctness_business", "reason": "方法名和实现语义不一致", "confidence": 0.9},
+                {"expert_id": "database_analysis", "reason": "like 查询可能影响索引", "confidence": 0.84},
+            ],
+            "skipped_experts": [
+                {"expert_id": "security_compliance", "reason": "LLM 未识别为安全问题"},
+            ],
+        },
+        fallback_ids=["correctness_business"],
+    )
+
+    assert "security_compliance" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["security_compliance"]["source"] == "heuristic_selected"
+
+
+def test_main_agent_readds_security_and_correctness_when_llm_skips_both_java_signals():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="通用编码规范专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["代码健康"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["权限", "输入校验"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务语义"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/minimax-missed-experts",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/OrderService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n"
+            "--- a/src/main/java/com/example/OrderService.java\n"
+            "+++ b/src/main/java/com/example/OrderService.java\n"
+            "@@ -18,7 +18,9 @@ public class OrderService {\n"
+            "-    public Order create(@Valid CreateOrderRequest request, BindingResult result) {\n"
+            "+    public Order create(CreateOrderRequest request, BindingResult result) {\n"
+            "+        // TODO: 创建订单后扣减库存并发送订单事件\n"
+            "+        return orderRepository.save(new Order(request.skuId(), request.quantity()));\n"
+            "     }\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["maintainability_code_health", "security_compliance", "correctness_business"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "maintainability_code_health", "reason": "只识别到代码风格问题", "confidence": 0.74}
+            ],
+            "skipped_experts": [
+                {"expert_id": "security_compliance", "reason": "LLM 未识别安全风险"},
+                {"expert_id": "correctness_business", "reason": "LLM 未识别业务语义风险"},
+            ],
+        },
+        fallback_ids=["maintainability_code_health"],
+    )
+
+    assert "security_compliance" in merged["selected_expert_ids"]
+    assert "correctness_business" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["security_compliance"]["source"] == "heuristic_selected"
+    assert selected["correctness_business"]["source"] == "heuristic_selected"
+    skipped_ids = {item["expert_id"] for item in merged["skipped_experts"]}
+    assert "security_compliance" not in skipped_ids
+    assert "correctness_business" not in skipped_ids
+
+
+def test_main_agent_readds_correctness_expert_for_exception_success_semantics_signal():
+    agent = MainAgentService()
+    experts = [
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="通用编码规范专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["代码健康"],
+            system_prompt="prompt",
+        ),
+    ]
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/business-semantics",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/SettlementService.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/SettlementService.java b/src/main/java/com/example/SettlementService.java\n"
+            "--- a/src/main/java/com/example/SettlementService.java\n"
+            "+++ b/src/main/java/com/example/SettlementService.java\n"
+            "@@ -44,0 +44,6 @@ public class SettlementService {\n"
+            "+    try {\n"
+            "+        paymentGateway.charge(orderId);\n"
+            "+    } catch (Exception e) {\n"
+            "+        return SettlementResult.success(orderId);\n"
+            "+    }\n"
+        ),
+    )
+
+    merged = agent._merge_expert_selection(
+        subject=subject,
+        experts=experts,
+        requested_expert_ids=["correctness_business", "maintainability_code_health"],
+        llm_payload={
+            "selected_experts": [
+                {"expert_id": "maintainability_code_health", "reason": "只看到异常写法", "confidence": 0.78}
+            ],
+            "skipped_experts": [
+                {"expert_id": "correctness_business", "reason": "LLM 未识别业务语义"}
+            ],
+        },
+        fallback_ids=["maintainability_code_health"],
+    )
+
+    assert "correctness_business" in merged["selected_expert_ids"]
+    selected = {item["expert_id"]: item for item in merged["selected_experts"]}
+    assert selected["correctness_business"]["source"] == "heuristic_selected"
 
 
 def test_main_agent_readds_ddd_architecture_and_database_for_java_quality_signals():

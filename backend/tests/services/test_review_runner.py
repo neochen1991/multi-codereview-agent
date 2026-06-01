@@ -4624,6 +4624,79 @@ def test_review_runner_builds_forced_security_guard_candidate_as_verification_ri
     assert float(forced[0]["confidence"]) <= 0.8
 
 
+def test_review_runner_builds_forced_sql_injection_candidate_as_security_risk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全合规专家",
+        role="security",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_sql_001",
+                "kind": "sql_injection_risk",
+                "file_path": "src/main/java/com/example/UserSearchRepository.java",
+                "line_start": 31,
+                "summary": "SQL 字符串拼接使用请求参数",
+                "evidence": ['String sql = "select * from users where name = \'" + request.getName() + "\'";'],
+                "related_symbols": ["jdbcTemplate", "where"],
+                "confidence": 0.88,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "动态 SQL 拼接存在注入风险"
+    assert forced[0]["normalized_issue_type"] == "sql_injection_risk"
+    assert forced[0]["finding_type"] == "risk_hypothesis"
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["direct_evidence"] is False
+    assert forced[0]["evidence_source"] == "observation_signal"
+
+
+def test_review_runner_builds_forced_query_scope_candidate_as_security_risk(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全合规专家",
+        role="security",
+        enabled=True,
+        system_prompt="prompt",
+    )
+
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=[
+            {
+                "observation_id": "obs_scope_001",
+                "kind": "query_authorization_scope_broadened",
+                "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+                "line_start": 16,
+                "summary": "共享过滤条件从 equal 改为 like",
+                "evidence": ['return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));'],
+                "related_symbols": ["equal_to_like", "shared_criteria"],
+                "confidence": 0.86,
+            }
+        ],
+        max_findings=4,
+    )
+
+    assert len(forced) == 1
+    assert forced[0]["title"] == "共享过滤条件从精确匹配放宽为模糊匹配"
+    assert forced[0]["normalized_issue_type"] == "query_authorization_scope_broadened"
+    assert "数据访问范围" in forced[0]["claim"]
+    assert forced[0]["verification_needed"] is True
+    assert forced[0]["evidence_source"] == "observation_signal"
+
+
 def test_review_runner_stabilize_expert_analysis_preserves_observation_ids(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     result = runner._stabilize_expert_analysis(
@@ -8032,6 +8105,48 @@ def test_review_runner_coalesces_same_root_cause_issues_before_final_judge(stora
     assert merged.severity == "blocker"
 
 
+def test_review_runner_coalesces_exact_duplicate_issue_text_even_when_type_differs(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    first = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_security_1",
+        title="接口存在安全风险",
+        summary="该接口直接使用请求参数拼接 SQL，存在注入风险。",
+        finding_type="risk_hypothesis",
+        normalized_issue_type="security_risk",
+        file_path="src/main/java/com/example/UserSearchRepository.java",
+        line_start=31,
+        status="needs_human",
+        severity="high",
+        confidence=0.82,
+        finding_ids=["fdg_security"],
+        participant_expert_ids=["security_compliance"],
+        primary_expert_id="security_compliance",
+    )
+    second = DebateIssue(
+        review_id="rev_demo",
+        issue_id="iss_security_2",
+        title=first.title,
+        summary=first.summary,
+        finding_type="risk_hypothesis",
+        normalized_issue_type="generic_code_risk",
+        file_path=first.file_path,
+        line_start=31,
+        status="needs_human",
+        severity="medium",
+        confidence=0.74,
+        finding_ids=["fdg_generic"],
+        participant_expert_ids=["maintainability_code_health"],
+        primary_expert_id="maintainability_code_health",
+    )
+
+    issues = runner._coalesce_duplicate_issues([first, second])
+
+    assert len(issues) == 1
+    assert set(issues[0].finding_ids) == {"fdg_security", "fdg_generic"}
+    assert set(issues[0].participant_expert_ids) == {"security_compliance", "maintainability_code_health"}
+
+
 def test_review_runner_disables_issue_coalescing_in_thorough_review_mode(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
 
@@ -8087,6 +8202,39 @@ def test_review_runner_sanitizes_mixed_issue_candidate_to_current_anchor(storage
     assert "26-28" not in "\n".join(sanitized["evidence"])
     assert sanitized["fix_strategy"] == "修正常量命名与使用方式，使当前变更行只表达一个具体问题。"
     assert sanitized["suggested_fix"] == "将当前变更行恢复为符合命名、不可变性和实际使用语义的常量写法。"
+
+
+def test_review_runner_prefers_target_line_loop_over_neighbor_todo(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    target_hunk = {
+        "file_path": "src/main/java/com/example/BulkEnrollmentService.java",
+        "changed_lines": [34, 35, 36, 37],
+        "excerpt": "\n".join(
+            [
+                "  34 | +        for (CourseEnrollment enrollment : enrollments) {",
+                "  35 | +            repository.save(enrollment);",
+                "  36 | +        }",
+                "  37 | +        // TODO 批量报名成功后扣减库存并发送预占事件",
+            ]
+        ),
+    }
+    parsed = {
+        "title": "批处理写入被退化为逐条写入，吞吐能力严重退化",
+        "claim": "批处理写入被替换为逐条循环写入，吞吐能力退化。",
+        "finding_type": "direct_defect",
+        "normalized_issue_type": "comment_contract_unimplemented",
+        "evidence": ["第 35 行 repository.save 在 for 循环中逐条执行。"],
+    }
+
+    sanitized = runner._sanitize_candidate_to_current_anchor(
+        parsed,
+        "src/main/java/com/example/BulkEnrollmentService.java",
+        35,
+        target_hunk,
+    )
+
+    assert sanitized["normalized_issue_type"] == "loop_call_amplification"
+    assert "TODO" not in str(sanitized.get("title") or "")
 
 
 def test_review_runner_sanitizes_mixed_title_and_evidence_to_anchor_domain(storage_root: Path):
@@ -9738,6 +9886,25 @@ def test_review_runner_preserves_explicit_exception_type_when_candidate_mentions
     )
 
     assert candidate["normalized_issue_type"] == "exception_swallowed"
+
+
+def test_review_runner_does_not_rewrite_generic_permission_risk_to_order_todo(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    candidate = runner._normalize_candidate_for_refined_anchor(
+        {
+            "title": "LIKE 查询缺少通配符转义，可能导致数据泄露",
+            "claim": "共享 Filter 从 equal 改为 like 后，用户输入中的 % 可能扩大数据访问范围，存在越权读取风险。",
+            "normalized_issue_type": "query_authorization_scope_broadened",
+        },
+        expert_id="security_compliance",
+        line_start=16,
+    )
+
+    rendered = "\n".join(str(candidate.get(key) or "") for key in ("title", "claim", "normalized_issue_type"))
+    assert candidate["normalized_issue_type"] == "query_authorization_scope_broadened"
+    assert "listOrders" not in rendered
+    assert "订单权限过滤" not in rendered
 
 
 def test_review_runner_refines_line_again_after_anchor_normalization(storage_root: Path):

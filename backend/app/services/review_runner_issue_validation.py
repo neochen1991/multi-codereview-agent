@@ -51,12 +51,15 @@ class ReviewRunnerIssueValidationMixin:
             return False
         if not candidate.file_path:
             return False
+        candidate_exact_key = self._exact_duplicate_issue_display_key(candidate)
         candidate_family = self._issue_root_family(candidate)
-        if not candidate_family:
+        if not candidate_family and not candidate_exact_key:
             return False
         for item in grouped:
             if item.file_path != candidate.file_path:
                 continue
+            if candidate_exact_key and candidate_exact_key == self._exact_duplicate_issue_display_key(item):
+                return True
             item_family = self._issue_root_family(item)
             if item_family != candidate_family:
                 continue
@@ -76,6 +79,19 @@ class ReviewRunnerIssueValidationMixin:
             } and line_distance <= 4:
                 return True
         return False
+
+    @staticmethod
+    def _exact_duplicate_issue_display_key(issue: DebateIssue) -> tuple[str, int, str, str] | None:
+        title = re.sub(r"\s+", "", str(issue.title or "").strip().lower())
+        summary = re.sub(r"\s+", "", str(issue.summary or "").strip().lower())
+        if not title and not summary:
+            return None
+        return (
+            str(issue.file_path or "").replace("\\", "/").strip().lower(),
+            int(issue.line_start or 1),
+            title[:120],
+            summary[:180],
+        )
 
     def _issue_root_family(self, issue: DebateIssue) -> str:
         normalized_type = str(issue.normalized_issue_type or "").strip().lower()
@@ -899,7 +915,7 @@ class ReviewRunnerIssueValidationMixin:
             issue.normalized_issue_type = "comment_contract_unimplemented"
             if not issue.title.strip():
                 issue.title = "注释/TODO 承诺未实现"
-            if any(token in compact for token in ("权限", "越权", "登录用户")):
+            if "listorders" in compact and "todo" in compact and any(token in compact for token in ("权限", "越权", "登录用户")):
                 issue.summary = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有权限过滤逻辑，存在越权读取风险。"
                 issue.needs_human = False
         issue.category_label = issue.category_label or self._category_label_for_issue_type(issue.normalized_issue_type)

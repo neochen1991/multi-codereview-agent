@@ -779,32 +779,70 @@ class ReviewRunnerExpertOutputMixin:
                         "evidence_source": "observation_signal",
                     }
                 )
-            elif expert.expert_id == "security_compliance" and kind in {"input_validation_removed", "security_guard_removed"}:
+            elif expert.expert_id == "security_compliance" and kind in {
+                "input_validation_removed",
+                "security_guard_removed",
+                "sql_injection_risk",
+                "sensitive_data_exposure",
+                "query_authorization_scope_broadened",
+            }:
+                if kind == "sql_injection_risk":
+                    title = "动态 SQL 拼接存在注入风险"
+                    normalized_issue_type = "sql_injection_risk"
+                    claim = f"当前查询把外部输入拼进 SQL 或动态查询语句（{symbol_display}），应改为参数绑定，避免注入和越权读取。"
+                    reasoning = "SQL 查询不能通过字符串拼接承接用户输入；应使用占位符、参数绑定或安全的查询构造器。"
+                    fix_strategy = "把拼接 SQL 改为参数化查询，并补充带特殊字符输入的安全测试。"
+                    suggested_fix = "使用 ? / named parameter / QueryWrapper 等参数绑定方式，不要把请求参数直接拼进 SQL 字符串。"
+                    steps = ["定位拼接 SQL 的输入来源", "改成参数绑定", "补充注入字符和越权查询测试"]
+                elif kind == "sensitive_data_exposure":
+                    title = "敏感信息可能被日志或响应暴露"
+                    normalized_issue_type = "sensitive_data_exposure"
+                    claim = f"当前变更把 token、密码、密钥或个人敏感字段输出到日志/响应路径（{symbol_display}），需要脱敏或移除。"
+                    reasoning = "敏感字段进入日志、错误响应或普通返回值后，会扩大泄露面并带来合规风险。"
+                    fix_strategy = "移除敏感字段输出，或在统一脱敏组件中只保留必要的掩码信息。"
+                    suggested_fix = "日志只记录脱敏后的用户标识或请求编号，不输出 token、password、secret、Authorization 等字段原文。"
+                    steps = ["识别敏感字段来源", "移除或脱敏输出", "补充日志/响应不含敏感字段的测试"]
+                elif kind == "query_authorization_scope_broadened":
+                    title = "共享过滤条件从精确匹配放宽为模糊匹配"
+                    normalized_issue_type = "query_authorization_scope_broadened"
+                    claim = f"当前共享过滤或查询条件从精确匹配放宽为模糊匹配（{symbol_display}），可能扩大用户、租户或业务对象的数据访问范围。"
+                    reasoning = "用于权限、租户、用户或通用 criteria 的过滤条件应保持边界明确；equal 改为 like/contains 会让原本只匹配一个值的查询返回更多数据。"
+                    fix_strategy = "保留安全边界相关字段的精确匹配；如果确需模糊搜索，应只用于明确允许搜索的展示字段，并增加权限/租户过滤测试。"
+                    suggested_fix = "将共享 criteria 的默认等值过滤恢复为 builder.equal；新增单独的 contains/like 操作符并限制可用字段。"
+                    steps = ["识别该过滤器覆盖的用户/租户/权限字段", "恢复默认精确匹配或拆出显式模糊查询操作符", "补充越权和结果集扩大回归测试"]
+                else:
+                    title = "入口保护变更风险"
+                    normalized_issue_type = "security_guard_removed"
+                    claim = f"当前变更删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），如果没有等价保护会放大越权或非法输入风险。"
+                    reasoning = "入口校验和权限判断属于安全边界；删除或迁移这类保护时，应在同一调用链提供等价保护，避免越权或非法输入进入业务层。"
+                    fix_strategy = "把被删除或迁移的入口保护落实到 Controller、Filter、Interceptor、注解或下游服务中的等价保护点。"
+                    suggested_fix = "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。"
+                    steps = ["定位原入口保护职责", "补齐新路径的等价保护", "补充非法输入或越权路径测试"]
                 forced.append(
                     {
                         "file_path": file_path,
                         "line_start": line_start,
                         "line_end": line_start,
-                        "title": "入口保护变更风险",
+                        "title": title,
                         "finding_type": "risk_hypothesis",
-                        "normalized_issue_type": "security_guard_removed",
-                        "claim": f"当前变更删除或弱化了入口校验、权限校验或身份一致性保护（{symbol_display}），如果没有等价保护会放大越权或非法输入风险。",
+                        "normalized_issue_type": normalized_issue_type,
+                        "claim": claim,
                         "severity": "high",
                         "matched_rules": [],
                         "violated_guidelines": [],
-                        "rule_based_reasoning": "入口校验和权限判断属于安全边界；删除或迁移这类保护时，应在同一调用链提供等价保护，避免越权或非法输入进入业务层。",
+                        "rule_based_reasoning": reasoning,
                         "evidence": evidence[:3] or [summary or "检测到入口保护或权限校验被删除。"],
                         "cross_file_evidence": [],
                         "assumptions": [],
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
-                        "fix_strategy": "把被删除或迁移的入口保护落实到 Controller、Filter、Interceptor、注解或下游服务中的等价保护点。",
-                        "suggested_fix": "如果没有等价保护，请恢复入口校验或权限判断；如果已经迁移，请补充测试和说明证明保护仍然生效。",
-                        "change_steps": ["定位原入口保护职责", "补齐新路径的等价保护", "补充非法输入或越权路径测试"],
+                        "fix_strategy": fix_strategy,
+                        "suggested_fix": suggested_fix,
+                        "change_steps": steps,
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.68), 0.8),
                         "verification_needed": True,
-                        "verification_plan": "验证重点：沿当前接口调用链检查入口校验、权限校验或身份一致性保护是否仍然生效。",
+                        "verification_plan": "验证重点：沿当前接口调用链检查输入、权限、日志/响应和 SQL 执行路径是否具备等价安全保护。",
                         "direct_evidence": False,
                         "evidence_source": "observation_signal",
                     }
@@ -1119,7 +1157,8 @@ class ReviewRunnerExpertOutputMixin:
         """把弱模型混入的其它文件/其它问题证据收回到当前 finding 锚点。"""
 
         result = dict(parsed)
-        hunk_domains = self._candidate_issue_domains(str((target_hunk or {}).get("excerpt") or ""))
+        anchor_domains = self._candidate_anchor_issue_domains(target_hunk, line_start)
+        hunk_domains = anchor_domains if anchor_domains != {"general"} else self._candidate_issue_domains(str((target_hunk or {}).get("excerpt") or ""))
         metadata_domain_blob = "\n".join(
             [
                 str(result.get("normalized_issue_type") or ""),
@@ -1141,7 +1180,14 @@ class ReviewRunnerExpertOutputMixin:
         if title and self._candidate_text_mixes_unrelated_domains(title, issue_domains):
             result["title"] = self._build_anchor_specific_title(title, issue_domains)
         normalized_issue_type = str(result.get("normalized_issue_type") or "").strip()
-        if not normalized_issue_type and issue_domains != {"general"}:
+        if (
+            normalized_issue_type.lower()
+            in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
+            and "loop_call" in anchor_domains
+            and "contract" not in anchor_domains
+        ):
+            result["normalized_issue_type"] = self._build_anchor_specific_issue_type(anchor_domains, normalized_issue_type)
+        elif not normalized_issue_type and issue_domains != {"general"}:
             result["normalized_issue_type"] = self._build_anchor_specific_issue_type(issue_domains, "")
         elif normalized_issue_type and self._candidate_text_mixes_unrelated_domains(normalized_issue_type, issue_domains):
             result["normalized_issue_type"] = self._build_anchor_specific_issue_type(issue_domains, normalized_issue_type)
@@ -1194,6 +1240,39 @@ class ReviewRunnerExpertOutputMixin:
             result["change_steps"] = scoped_steps or self._build_anchor_specific_steps(issue_domains)
         return result
 
+    def _candidate_anchor_issue_domains(self, target_hunk: dict[str, object], line_start: int) -> set[str]:
+        line_candidates = self._extract_semantic_line_candidates(target_hunk or {})
+        target_line = "\n".join(line_candidates.get(int(line_start or 0), []))
+        target_window = "\n".join(
+            value
+            for line_no, values in line_candidates.items()
+            if abs(int(line_no) - int(line_start or 0)) <= 1
+            for value in values
+        )
+        if self._anchor_line_looks_like_comment_contract(target_line):
+            return {"contract"}
+        domains = self._candidate_issue_domains(target_window or target_line)
+        lowered_line = target_line.lower()
+        lowered_window = target_window.lower()
+        if any(token in lowered_window for token in ("for (", ".foreach", "foreach", "while (")) and any(
+            token in lowered_line or token in lowered_window
+            for token in ("repository.save", ".save(", "gateway.", "client.", "service.", "mapper.")
+        ):
+            domains.add("loop_call")
+            domains.discard("contract")
+        return domains or {"general"}
+
+    @staticmethod
+    def _anchor_line_looks_like_comment_contract(value: object) -> bool:
+        stripped = str(value or "").strip().lower()
+        return bool(
+            stripped
+            and (
+                stripped.startswith(("//", "/*", "*"))
+                or any(token in stripped for token in ("todo", "fixme", "未实现", "承诺", "unsupportedoperationexception"))
+            )
+        )
+
     def _candidate_issue_domains(self, text: str) -> set[str]:
         lowered = str(text or "").lower()
         domains: set[str] = set()
@@ -1202,7 +1281,7 @@ class ReviewRunnerExpertOutputMixin:
             "exception": ("异常", "catch", "printstacktrace", "吞掉", "静默吞", "exception"),
             "query_bound": ("limit", "分页", "全表", "无上限", "不设上限", "unbounded"),
             "query_semantics": ("like", "equal", "predicate", "精确匹配", "模糊匹配", "查询语义"),
-            "contract": ("todo", "注释", "承诺", "未实现", "未落地", "占位实现"),
+            "contract": ("todo", "注释", "承诺", "未实现", "未落地", "占位实现", "comment_contract", "unimplemented"),
             "domain_creation": (
                 "course.create",
                 "new course",
@@ -1215,7 +1294,7 @@ class ReviewRunnerExpertOutputMixin:
                 "domain_event_missing",
             ),
             "security": ("鉴权", "权限", "越权", "注入", "token", "secret", "security", "auth"),
-            "loop_call": ("循环", "外部接口", "远程调用", "逐条", "n+1", "foreach", "for ("),
+            "loop_call": ("循环", "外部接口", "远程调用", "逐条", "n+1", "foreach", "for (", "repository.save", ".save("),
         }
         for domain, terms in domain_terms.items():
             if any(term in lowered for term in terms):
@@ -1367,6 +1446,10 @@ class ReviewRunnerExpertOutputMixin:
             "n_plus_one",
             "exception_swallowed",
             "exception_semantics_weakened",
+            "query_authorization_scope_broadened",
+            "sql_injection_risk",
+            "sensitive_data_exposure",
+            "security_guard_removed",
         }:
             if explicit_type == "loop_call_amplification":
                 result["normalized_issue_type"] = "n_plus_one"
@@ -1412,11 +1495,18 @@ class ReviewRunnerExpertOutputMixin:
             or "登录用户" in text
             or (expert_id == "correctness_business" and int(line_start or 1) <= 20 and "todo" in text)
         ):
-            result["normalized_issue_type"] = "comment_contract_unimplemented"
-            result["title"] = "订单权限过滤承诺未落地"
-            result["claim"] = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有任何权限过滤逻辑，存在越权读取风险。"
-            result.setdefault("fix_strategy", "按当前登录用户或租户维度过滤订单查询结果。")
-            result.setdefault("suggested_fix", "在查询前获取当前用户身份，将 orderIds 与用户可访问订单范围做交集，或在仓储查询中加入用户/租户条件。")
+            if "listorders" in text and "todo" in text:
+                result["normalized_issue_type"] = "comment_contract_unimplemented"
+                result["title"] = "订单权限过滤承诺未落地"
+                result["claim"] = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有任何权限过滤逻辑，存在越权读取风险。"
+                result.setdefault("fix_strategy", "按当前登录用户或租户维度过滤订单查询结果。")
+                result.setdefault("suggested_fix", "在查询前获取当前用户身份，将 orderIds 与用户可访问订单范围做交集，或在仓储查询中加入用户/租户条件。")
+            else:
+                result["normalized_issue_type"] = "query_authorization_scope_broadened"
+                if not str(result.get("title") or "").strip() or "订单权限过滤" in str(result.get("title") or ""):
+                    result["title"] = "查询访问范围可能被放大"
+                result.setdefault("fix_strategy", "收窄查询过滤条件，保持权限、租户、用户或业务对象边界的精确匹配。")
+                result.setdefault("suggested_fix", "对安全边界字段继续使用精确匹配；如需模糊搜索，请拆出明确的搜索操作符并限制可搜索字段。")
         return result
 
     def _build_anchor_specific_remediation(

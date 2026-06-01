@@ -133,10 +133,15 @@ RISK_HINT_EXPERTS: dict[str, tuple[str, ...]] = {
 
 RISK_SIGNAL_EXPERTS: dict[str, tuple[str, ...]] = {
     "security_guard_removed": ("security_compliance", "correctness_business"),
+    "sql_injection_risk": ("security_compliance",),
+    "sensitive_data_exposure": ("security_compliance",),
+    "query_authorization_scope_broadened": ("security_compliance", "correctness_business"),
     "query_bound_removed": ("database_analysis", "performance_reliability"),
     "loop_call_amplification": ("performance_reliability", "database_analysis"),
     "comment_contract_unimplemented": ("correctness_business",),
     "exception_swallowed": ("correctness_business", "maintainability_code_health"),
+    "exception_semantics_weakened": ("correctness_business",),
+    "configuration_behavior_coupling": ("correctness_business",),
     "lock_scope_risk": ("performance_reliability",),
     "transactional_side_effect": ("performance_reliability", "database_analysis"),
     "mq_delivery_risk": ("mq_analysis",),

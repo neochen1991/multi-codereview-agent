@@ -31,6 +31,15 @@ class ConfidenceSummary(BaseModel):
     review_policy_reviewable_file_count: int = 0
     review_policy_path_rule_count: int = 0
     review_policy_required_expert_count: int = 0
+    quality_gate_passed: bool = True
+    quality_gate_missing_count: int = 0
+    security_expert_activated: bool = True
+    business_expert_activated: bool = True
+    expert_activation_missing_count: int = 0
+    finding_issue_family_mismatch_count: int = 0
+    todo_anchor_failure_count: int = 0
+    cross_anchor_duplicate_text_count: int = 0
+    fallback_text_failure_count: int = 0
 
 
 class LlmUsageSummary(BaseModel):

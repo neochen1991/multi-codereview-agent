@@ -328,6 +328,134 @@ def test_evaluate_case_result_scores_expected_hits() -> None:
     assert score.input_quality_coverage >= 0.8
 
 
+def test_submit_case_can_attach_windows_quality_gate_result(tmp_path: Path, monkeypatch) -> None:
+    module = _load_benchmark_module()
+    workspace = tmp_path / "workspace 中文 with space"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+    graph_db = workspace / ".code-review-graph" / "graph.db"
+    graph_db.parent.mkdir()
+    graph_db.write_text("", encoding="utf-8")
+    (workspace / ".gitnexus").mkdir()
+    case = module.JavaReviewCase(
+        case_id="windows-quality-gate-case",
+        repo_key="local-java-demo",
+        category="composite",
+        scenario="Windows MiniMax quality gate",
+        business_context="security and correctness should both be active",
+        tags=("java",),
+        patch_operations=(),
+        expected=module.ExpectedOutcome(
+            required_experts=("security_compliance", "correctness_business"),
+            rule_ids_any_of=("SEC-JDDD-002",),
+            finding_keywords=("like", "TODO"),
+            min_findings=1,
+            min_issues=1,
+        ),
+    )
+    materialized = module.MaterializedCase(
+        case=case,
+        repository=module.RepoDefinition(
+            repo_key="local-java-demo",
+            clone_url="https://example.invalid/local-java-demo.git",
+            default_branch="main",
+            review_mode="general",
+        ),
+        workspace_repo=workspace,
+        changed_files=("src/main/java/com/example/OrderService.java",),
+        unified_diff="diff --git a/src/main/java/com/example/OrderService.java b/src/main/java/com/example/OrderService.java\n",
+        graph_metadata={"code_graph_db_path": str(graph_db), "review_workspace_gitnexus_graph": {"status": "ready"}},
+    )
+
+    def fake_request_json(method: str, url: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        if method == "POST" and url.endswith("/reviews"):
+            return {"review_id": "rev_gate"}
+        if method == "POST" and url.endswith("/reviews/rev_gate/start"):
+            return {"review_id": "rev_gate"}
+        if method == "GET" and url.endswith("/reviews/rev_gate"):
+            return {"review_id": "rev_gate", "status": "completed", "phase": "completed"}
+        if method == "GET" and url.endswith("/reviews/rev_gate/report"):
+            return {
+                "findings": [
+                    {
+                        "expert_id": "security_compliance",
+                        "title": "查询语义放宽可能扩大数据访问范围",
+                        "summary": "OrderService 使用 like 放宽查询范围。",
+                        "normalized_issue_type": "query_semantics_regression",
+                        "file_path": "src/main/java/com/example/OrderService.java",
+                        "line_start": 20,
+                        "code_excerpt": "20 | +        return builder.like(root.get(\"ownerId\"), value);",
+                        "matched_rules": ["SEC-JDDD-002"],
+                        "code_context": {
+                            "input_completeness": {
+                                "review_spec_present": True,
+                                "language_guidance_present": True,
+                                "target_file_diff_present": True,
+                                "source_context_present": True,
+                                "related_context_count": 1,
+                                "missing_sections": [],
+                            }
+                        },
+                    }
+                ],
+                "issues": [
+                    {
+                        "primary_expert_id": "correctness_business",
+                        "participant_expert_ids": ["security_compliance"],
+                        "title": "TODO 里的库存扣减未实现",
+                        "summary": "OrderService 第 31 行 TODO 承诺扣减库存，但当前实现没有对应动作。",
+                        "normalized_issue_type": "comment_contract_unimplemented",
+                        "file_path": "src/main/java/com/example/OrderService.java",
+                        "line_start": 31,
+                        "current_code": "31 | +        // TODO 创建订单后扣减库存并发送事件",
+                        "remediation_suggestion": "删除误导性 TODO，或补齐库存扣减和事件发送。",
+                    }
+                ],
+            }
+        if method == "GET" and url.endswith("/reviews/rev_gate/replay"):
+            return {
+                "messages": [
+                    {"expert_id": "security_compliance", "message_type": "expert_analysis", "metadata": {}},
+                    {"expert_id": "correctness_business", "message_type": "expert_analysis", "metadata": {}},
+                ]
+            }
+        raise AssertionError(f"{method} {url}")
+
+    monkeypatch.setattr(module, "request_json", fake_request_json)
+
+    result = module.submit_case(materialized, windows_quality_gate=True, quality_gate_model="MiniMax-M2.7")
+
+    assert result["review_id"] == "rev_gate"
+    assert result["windows_quality_gate"]["passed"] is True
+    assert result["windows_quality_gate"]["executed_experts"] == ["correctness_business", "security_compliance"]
+    assert result["windows_quality_gate"]["prompt_profile"] == "rule-guided-compact"
+
+
+def test_benchmark_exit_code_fails_when_windows_quality_gate_fails() -> None:
+    module = _load_benchmark_module()
+
+    assert module._benchmark_exit_code(
+        [{"case_id": "ok", "score": {"passed": True}, "windows_quality_gate": {"passed": True}}],
+        windows_quality_gate=True,
+    ) == 0
+    assert module._benchmark_exit_code(
+        [{"case_id": "score-bad", "score": {"passed": False}, "windows_quality_gate": {"passed": True}}],
+        windows_quality_gate=True,
+    ) == 2
+    assert module._benchmark_exit_code(
+        [{"case_id": "bad", "windows_quality_gate": {"passed": False, "missing": ["security_expert_activated"]}}],
+        windows_quality_gate=True,
+    ) == 2
+    assert module._benchmark_exit_code(
+        [{"case_id": "legacy-without-gate"}],
+        windows_quality_gate=True,
+    ) == 2
+    assert module._benchmark_exit_code(
+        [{"case_id": "legacy-without-gate"}],
+        windows_quality_gate=False,
+    ) == 0
+
+
 def test_evaluate_case_result_flags_missing_inputs_and_keywords() -> None:
     module = _load_benchmark_module()
     case = module.JavaReviewCase(

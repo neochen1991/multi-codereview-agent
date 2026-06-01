@@ -241,10 +241,19 @@ const pickRepresentativeFindingForIssue = (
     .map((id) => findingById.get(id))
     .filter((item): item is ReviewFinding => Boolean(item));
   if (!candidates.length) return null;
-  const issuePath = String(issue.file_path || "").trim();
+  const normalizeReviewPath = (value?: string) =>
+    String(value || "")
+      .replace(/\\/g, "/")
+      .trim()
+      .toLowerCase();
+  const issuePath = normalizeReviewPath(issue.file_path);
   const issueLine = Number(issue.line_start || 0);
   const scored = candidates.map((finding) => {
-    const samePath = issuePath && finding.file_path === issuePath ? 1 : 0;
+    const findingPath = normalizeReviewPath(finding.file_path);
+    const samePath =
+      issuePath && findingPath && (issuePath === findingPath || issuePath.endsWith(`/${findingPath}`) || findingPath.endsWith(`/${issuePath}`))
+        ? 1
+        : 0;
     const lineDistance = issueLine > 0 ? Math.abs(Number(finding.line_start || 0) - issueLine) : 999999;
     return { finding, samePath, lineDistance };
   });

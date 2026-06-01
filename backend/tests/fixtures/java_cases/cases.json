@@ -338,6 +338,95 @@
       }
     },
     {
+      "case_id": "java-ddd-windows-minimax-quality-gate",
+      "repo_key": "java-ddd-example",
+      "category": "composite",
+      "scenario": "Windows MiniMax quality gate MR combines security scope broadening and business TODO contract risk",
+      "business_context": "该 MR 同时把共享 Criteria 精确匹配改成 like 模糊匹配，又删除批量报名锁、把批量保存改成逐条保存，并留下扣减库存和预占事件 TODO。用于验证 MiniMax2.7 下安全专家和业务专家都必须参与，TODO 不能虚报，最终 findings/issues 不能重复错配。",
+      "tags": [
+        "windows",
+        "minimax",
+        "quality-gate",
+        "security",
+        "correctness",
+        "comment-contract",
+        "concurrency",
+        "performance"
+      ],
+      "patch_operations": [
+        {
+          "path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+          "description": "Broaden exact match into contains semantics so security and database experts should be retained.",
+          "search": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.equal(root.get(filter.field().value()), filter.value().value());\n    }\n",
+          "replace": "    private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n        return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n    }\n"
+        },
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+          "description": "Remove course lock, change bulk save to per-row save, and add an unimplemented inventory reservation comment.",
+          "search": "    public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {\n        Object lock = lockRegistry.lockFor(courseId.value());\n        synchronized (lock) {\n            if (studentIds.isEmpty()) {\n                return;\n            }\n            List<CourseEnrollment> enrollments = studentIds.stream()\n                .map(studentId -> CourseEnrollment.create(courseId, studentId))\n                .toList();\n            repository.saveAll(enrollments);\n            eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));\n        }\n    }\n",
+          "replace": "    public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {\n        if (studentIds.isEmpty()) {\n            return;\n        }\n        List<CourseEnrollment> enrollments = studentIds.stream()\n            .map(studentId -> CourseEnrollment.create(courseId, studentId))\n            .toList();\n        for (CourseEnrollment enrollment : enrollments) {\n            repository.save(enrollment);\n        }\n        // TODO 批量报名成功后扣减库存并发送预占事件\n        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));\n    }\n"
+        }
+      ],
+      "expected": {
+        "required_experts": [
+          "security_compliance",
+          "correctness_business",
+          "database_analysis",
+          "performance_reliability"
+        ],
+        "rule_ids_any_of": [
+          "SEC-JDDD-002",
+          "PERF-SQL-001",
+          "CONCURRENCY-LOCK-001",
+          "PERF-LOOP-001",
+          "CORRECTNESS-CONTRACT-001"
+        ],
+        "finding_keywords": [
+          "equal",
+          "like",
+          "criteria",
+          "synchronized",
+          "锁",
+          "repository.save",
+          "TODO",
+          "扣减库存",
+          "未实现"
+        ],
+        "problem_markers": [
+          {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "keywords": [
+              "equal",
+              "like"
+            ]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": [
+              "synchronized",
+              "锁"
+            ]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": [
+              "repository.save",
+              "循环"
+            ]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+            "keywords": [
+              "TODO",
+              "扣减库存"
+            ]
+          }
+        ],
+        "min_findings": 4,
+        "min_issues": 2
+      }
+    },
+    {
       "case_id": "java-ddd-payment-settlement-query-exception-regression",
       "repo_key": "java-ddd-example",
       "category": "composite",

@@ -1217,14 +1217,16 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
     def list_display_findings(self, review_id: str, *, since: str = "", limit: int = 0) -> list[ReviewFinding]:
         raw_findings = self.list_findings(review_id, since=since, limit=limit)
         if str(since or "").strip():
-            return [
+            return self._make_display_findings_texts_distinct([
                 normalized
                 for normalized in (self._normalize_display_report_finding(finding) for finding in raw_findings)
                 if normalized is not None
-            ]
-        return self._ensure_display_findings_cover_issues(
-            self._build_display_report_findings(raw_findings),
-            self.list_issues(review_id),
+            ])
+        return self._make_display_findings_texts_distinct(
+            self._ensure_display_findings_cover_issues(
+                self._build_display_report_findings(raw_findings),
+                self.list_issues(review_id),
+            )
         )
 
     def get_finding(self, review_id: str, finding_id: str) -> ReviewFinding | None:
@@ -1271,7 +1273,9 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
     def list_display_issues(self, review_id: str) -> list[DebateIssue]:
         """返回面向前端展示的 issue 列表，统一清洗内部诊断文案。"""
 
-        return [self._build_light_report_issue(issue) for issue in self.list_issues(review_id)]
+        return self._make_display_issue_texts_distinct(
+            [self._build_light_report_issue(issue) for issue in self.list_issues(review_id)]
+        )
 
     def _filter_user_visible_issues(self, issues: list[DebateIssue]) -> list[DebateIssue]:
         """Hide historical/weak-model issues whose narrative does not match the anchor.
@@ -1326,28 +1330,26 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
 
         deduped: dict[tuple[str, str, int], DebateIssue] = {}
         order: list[tuple[str, str, int]] = []
+        exact_seen: dict[tuple[str, int, str, str], tuple[str, str, int]] = {}
         for issue in issues:
             normalized = self._normalize_report_issue_family(issue)
             family = self._display_issue_family(normalized)
             line_bucket = int(normalized.line_start or 1)
-            if family in {
-                "course_creation_semantics",
-                "n_plus_one",
-                "comment_contract_unimplemented",
-                "exception_swallowed",
-                "lock_guard_removed",
-                "query_bound_removed",
-                "query_boundary_missing",
-            }:
+            if family in {"course_creation_semantics"}:
                 line_bucket = 0
             key = (
-                str(normalized.file_path or "").strip(),
+                self._display_issue_path_key(normalized.file_path),
                 family or str(normalized.normalized_issue_type or "").strip().lower(),
                 line_bucket,
             )
+            exact_key = self._exact_display_issue_key(normalized)
+            if exact_key in exact_seen:
+                key = exact_seen[exact_key]
             if key not in deduped:
                 deduped[key] = normalized
                 order.append(key)
+                if exact_key:
+                    exact_seen[exact_key] = key
                 continue
             existing = deduped[key]
             merged_finding_ids = list(dict.fromkeys([*existing.finding_ids, *normalized.finding_ids]))
@@ -1362,7 +1364,135 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                     "aggregated_summaries": list(dict.fromkeys([*existing.aggregated_summaries, normalized.summary, *normalized.aggregated_summaries]))[:10],
                 }
             )
-        return [deduped[key] for key in order]
+        return self._make_display_issue_texts_distinct([deduped[key] for key in order])
+
+    def _make_display_issue_texts_distinct(self, issues: list[DebateIssue]) -> list[DebateIssue]:
+        summary_groups: dict[str, list[DebateIssue]] = {}
+        title_groups: dict[str, list[DebateIssue]] = {}
+        for issue in issues:
+            summary_key = re.sub(r"\s+", "", str(issue.summary or "").strip().lower())
+            if summary_key:
+                summary_groups.setdefault(summary_key, []).append(issue)
+            title_key = re.sub(r"\s+", "", str(issue.title or "").strip().lower())
+            if title_key:
+                title_groups.setdefault(title_key, []).append(issue)
+
+        duplicate_summary_ids: set[str] = set()
+        duplicate_title_ids: set[str] = set()
+        use_path_label_by_id: dict[str, bool] = {}
+        rewritten_by_id: dict[str, DebateIssue] = {}
+        for groups, target in ((summary_groups, duplicate_summary_ids), (title_groups, duplicate_title_ids)):
+            for duplicated in groups.values():
+                anchors = {
+                    (
+                        str(issue.file_path or "").replace("\\", "/").strip().lower(),
+                        int(issue.line_start or 1),
+                    )
+                    for issue in duplicated
+                }
+                if len(duplicated) <= 1 or len(anchors) <= 1:
+                    continue
+                target.update(str(issue.issue_id or "").strip() for issue in duplicated if str(issue.issue_id or "").strip())
+                display_labels = [
+                    self._build_display_anchor_label(issue, use_path=False)
+                    for issue in duplicated
+                ]
+                if len(set(display_labels)) < len(display_labels):
+                    for issue in duplicated:
+                        issue_id = str(issue.issue_id or "").strip()
+                        if issue_id:
+                            use_path_label_by_id[issue_id] = True
+
+        duplicated_ids = duplicate_summary_ids | duplicate_title_ids
+        for issue in issues:
+            issue_id = str(issue.issue_id or "").strip()
+            if issue_id not in duplicated_ids:
+                continue
+            anchor_label = self._build_display_anchor_label(
+                issue,
+                use_path=bool(use_path_label_by_id.get(issue_id)),
+            )
+            summary = self._build_display_anchor_summary(issue, anchor_label=anchor_label) if issue_id in duplicate_summary_ids else issue.summary
+            title = self._build_display_anchor_title(issue, anchor_label=anchor_label) if issue_id in duplicate_title_ids else issue.title
+            rewritten_by_id[issue_id] = issue.model_copy(
+                update={
+                    "title": title,
+                    "summary": summary,
+                    "consistency_check_summary": (
+                        f"{str(issue.consistency_check_summary or '').strip()} "
+                        "系统已按文件和行号补充问题标题或摘要，避免不同位置展示成同一条问题。"
+                    ).strip(),
+                }
+            )
+        if not rewritten_by_id:
+            return issues
+        return [rewritten_by_id.get(issue.issue_id, issue) for issue in issues]
+
+    @staticmethod
+    def _display_issue_path_key(value: object) -> str:
+        return str(value or "").replace("\\", "/").strip().lower()
+
+    def _build_display_anchor_title(self, issue: DebateIssue, *, anchor_label: str = "") -> str:
+        anchor = anchor_label or self._build_display_anchor_label(issue)
+        title = self._sanitize_user_facing_issue_text(str(issue.title or "").strip())
+        if title and not title.startswith(anchor):
+            return f"{anchor}：{title}"
+        return title or f"{anchor} 的代码问题"
+
+    def _build_display_anchor_summary(self, issue: DebateIssue, *, anchor_label: str = "") -> str:
+        code_hint = self._extract_display_code_hint(issue.current_code)
+        anchor = anchor_label or self._build_display_anchor_label(issue)
+        if code_hint:
+            anchor = f"{anchor} 的 `{code_hint}`"
+        summary = self._sanitize_user_facing_issue_text(str(issue.summary or "").strip())
+        if summary and not summary.startswith(anchor):
+            return f"{anchor}：{summary}"
+        return summary or f"{anchor} 存在需要处理的代码风险。"
+
+    @staticmethod
+    def _display_issue_file_name(value: object) -> str:
+        path = str(value or "").replace("\\", "/").rstrip("/")
+        return path.split("/")[-1] or "当前文件"
+
+    def _build_display_anchor_label(self, issue: DebateIssue, *, use_path: bool = False) -> str:
+        line_text = f"第 {int(issue.line_start or 1)} 行"
+        if not use_path:
+            return f"{self._display_issue_file_name(issue.file_path)} {line_text}"
+        path = str(issue.file_path or "").replace("\\", "/").strip("/")
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3:
+            path = "/".join(parts[-3:])
+        elif parts:
+            path = "/".join(parts)
+        else:
+            path = "当前文件"
+        return f"{path} {line_text}"
+
+    @staticmethod
+    def _extract_display_code_hint(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        for raw_line in text.splitlines():
+            line = re.sub(r"^\s*\d+\s*\|\s*", "", str(raw_line or "").strip())
+            line = re.sub(r"^[+\-]\s*", "", line).strip()
+            if not line or line.startswith(("//", "/*", "*")):
+                continue
+            return f"{line[:93]}..." if len(line) > 96 else line
+        return ""
+
+    @staticmethod
+    def _exact_display_issue_key(issue: DebateIssue) -> tuple[str, int, str, str] | None:
+        title = re.sub(r"\s+", "", str(issue.title or "").strip().lower())
+        summary = re.sub(r"\s+", "", str(issue.summary or "").strip().lower())
+        if not title and not summary:
+            return None
+        return (
+            str(issue.file_path or "").replace("\\", "/").strip().lower(),
+            int(issue.line_start or 1),
+            title[:120],
+            summary[:180],
+        )
 
     def _add_missing_high_confidence_display_issues(
         self,
@@ -1484,10 +1614,14 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if family == "n_plus_one":
             if not current_code:
                 return any(token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "repository.", ".save", "查库"))
-            has_loop_context = any(token in current_code for token in ("for (", ".foreach", "while (", "循环", "逐条")) or any(
-                token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "saveall")
-            )
+            has_loop_context = any(token in current_code for token in ("for (", ".foreach", "while (", "循环", "逐条"))
             has_repeated_call = any(token in current_code for token in ("repository.", ".save", "gateway.", "find", "query", "查库"))
+            if not has_loop_context and has_repeated_call:
+                file_path = str(issue.file_path or "").strip().lower()
+                if "coursecreator" not in file_path and any(
+                    token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "saveall")
+                ):
+                    return True
             return has_loop_context and has_repeated_call
         return True
 

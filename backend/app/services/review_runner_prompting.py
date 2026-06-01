@@ -519,9 +519,12 @@ class ReviewRunnerPromptingMixin:
                     "title": "专家通用必查项",
                     "severity": "P2",
                     "must_check": [str(item).strip() for item in expected_checks if str(item).strip()],
-                    "required_context": ["changed_file_full_content", "repository_context"],
+                    "required_context": ["target_hunks", "current_code_excerpt", "compact_repository_context"],
                     "evidence_required": ["具体代码行", "违反专家职责或通用规范的原因"],
-                    "false_positive_guards": ["缺少直接代码证据时不要输出候选"],
+                    "false_positive_guards": [
+                        "缺少直接代码证据时不要输出候选",
+                        "不能只因为缺少完整文件、Schema 或配置就把已能由当前 hunk 证明的问题写成待确认",
+                    ],
                     "normalized_issue_type": "general_expert_rule_violation",
                 }
             )

@@ -80,6 +80,11 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
   const excludedFileCount = asNumber(summary?.review_policy_excluded_file_count, excludedFiles.length);
   const reviewableFileCount = asNumber(summary?.review_policy_reviewable_file_count, reviewableFiles.length);
   const pathRuleCount = asNumber(summary?.review_policy_path_rule_count, pathRules.length);
+  const qualityGateMissingCount = asNumber(summary?.quality_gate_missing_count, 0);
+  const findingIssueMismatchCount = asNumber(summary?.finding_issue_family_mismatch_count, 0);
+  const todoAnchorFailureCount = asNumber(summary?.todo_anchor_failure_count, 0);
+  const duplicateTextCount = asNumber(summary?.cross_anchor_duplicate_text_count, 0);
+  const fallbackTextCount = asNumber(summary?.fallback_text_failure_count, 0);
   const visibleDecisions = issueFilterDecisions.slice(0, 6);
   const ruleIds = useMemo(() => {
     const ids = new Set<string>();
@@ -132,6 +137,17 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
                 {`环境预检 ${environmentStatusLabel(environmentStatus)}`}
               </Tag>
             ) : null}
+            {summary ? (
+              <Tag color={summary.quality_gate_passed === false ? "error" : "success"}>
+                {summary.quality_gate_passed === false ? `质量门禁异常 ${qualityGateMissingCount}` : "质量门禁通过"}
+              </Tag>
+            ) : null}
+            {summary?.security_expert_activated === false ? <Tag color="error">安全专家未执行</Tag> : null}
+            {summary?.business_expert_activated === false ? <Tag color="error">业务专家未执行</Tag> : null}
+            {findingIssueMismatchCount ? <Tag color="error">{`发现转问题错配 ${findingIssueMismatchCount}`}</Tag> : null}
+            {todoAnchorFailureCount ? <Tag color="error">{`TODO 锚点异常 ${todoAnchorFailureCount}`}</Tag> : null}
+            {duplicateTextCount ? <Tag color="error">{`重复描述 ${duplicateTextCount}`}</Tag> : null}
+            {fallbackTextCount ? <Tag color="error">{`兜底文案 ${fallbackTextCount}`}</Tag> : null}
             {ruleIds.length ? <Tag color="purple">{`命中规则 ${ruleIds.length}`}</Tag> : null}
             {requiredExperts.map((expertId) => (
               <Tag key={expertId} color="geekblue">

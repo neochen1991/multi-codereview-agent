@@ -401,6 +401,15 @@ export interface ConfidenceSummary {
   review_policy_reviewable_file_count?: number;
   review_policy_path_rule_count?: number;
   review_policy_required_expert_count?: number;
+  quality_gate_passed?: boolean;
+  quality_gate_missing_count?: number;
+  security_expert_activated?: boolean;
+  business_expert_activated?: boolean;
+  expert_activation_missing_count?: number;
+  finding_issue_family_mismatch_count?: number;
+  todo_anchor_failure_count?: number;
+  cross_anchor_duplicate_text_count?: number;
+  fallback_text_failure_count?: number;
 }
 
 export interface LlmUsageSummary {

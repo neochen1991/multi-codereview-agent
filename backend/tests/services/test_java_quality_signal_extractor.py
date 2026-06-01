@@ -109,6 +109,90 @@ def test_java_quality_signal_extractor_detects_removed_guards():
     assert security_observation["kind"] == "security_guard_removed"
 
 
+def test_java_quality_signal_extractor_detects_added_security_surfaces() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/UserSearchRepository.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -31,0 +31,5 @@ public class UserSearchRepository {",
+                    '+    String sql = "select * from users where name = \'" + request.getName() + "\'";',
+                    "+    logger.info(\"login token={}\", request.getAuthorizationToken());",
+                    "+    return jdbcTemplate.query(sql, mapper);",
+                ]
+            )
+        },
+    )
+
+    assert "sql_injection_risk" in payload["signals"]
+    assert "sensitive_data_exposure" in payload["signals"]
+    assert {item["signal"] for item in payload["observations"]} >= {
+        "sql_injection_risk",
+        "sensitive_data_exposure",
+    }
+
+
+def test_java_quality_signal_extractor_detects_shared_filter_scope_broadening_as_security_signal() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -13,6 +13,6 @@ public final class HibernateCriteriaConverter<T> {",
+                    "     private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {",
+                    "-        return builder.equal(root.get(filter.field().value()), filter.value().value());",
+                    '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+                    "     }",
+                ]
+            )
+        },
+    )
+
+    assert "query_semantics_weakened" in payload["signals"]
+    assert "query_authorization_scope_broadened" in payload["signals"]
+    observation = next(item for item in payload["observations"] if item["signal"] == "query_authorization_scope_broadened")
+    assert observation["kind"] == "query_authorization_scope_broadened"
+    assert "越权读取风险" in observation["risk_hints"]
+
+
+def test_java_quality_signal_extractor_does_not_leak_full_diff_signals_across_files() -> None:
+    extractor = JavaQualitySignalExtractor()
+    full_diff = "\n".join(
+        [
+            "diff --git a/src/mooc/BulkEnrollmentService.java b/src/mooc/BulkEnrollmentService.java",
+            "--- a/src/mooc/BulkEnrollmentService.java",
+            "+++ b/src/mooc/BulkEnrollmentService.java",
+            "@@ -34,3 +34,5 @@",
+            "+        for (CourseEnrollment enrollment : enrollments) {",
+            "+            repository.save(enrollment);",
+            "+        }",
+            "+        // TODO 批量报名成功后扣减库存并发送预占事件",
+        ]
+    )
+
+    payload = extractor.extract(
+        file_path="src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -13,6 +13,6 @@ public final class HibernateCriteriaConverter<T> {",
+                    "     private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {",
+                    "-        return builder.equal(root.get(filter.field().value()), filter.value().value());",
+                    '+        return builder.like(root.get(filter.field().value()), String.format("%%%s%%", filter.value().value()));',
+                    "     }",
+                ]
+            )
+        },
+        full_diff=full_diff,
+    )
+
+    assert "query_semantics_weakened" in payload["signals"]
+    assert "loop_call_amplification" not in payload["signals"]
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
 def test_java_quality_signal_extractor_detects_factory_bypass_and_event_ordering() -> None:
     extractor = JavaQualitySignalExtractor()
     payload = extractor.extract(
@@ -311,6 +395,149 @@ def test_java_quality_signal_extractor_detects_comment_contract_unimplemented_fr
                     ]
                 )
             }
+        },
+    )
+
+    assert "comment_contract_unimplemented" in payload["signals"]
+
+
+def test_java_quality_signal_extractor_does_not_flag_unrelated_context_todo() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -60,1 +60,2 @@ public class OrderService {",
+                    "+    return healthStatus();",
+                ]
+            )
+        },
+        repository_context={
+            "current_class_context": {
+                "snippet": "\n".join(
+                    [
+                        "22 |     // TODO: 创建订单后自动扣减库存并发送事件",
+                        "23 |     public Order createOrder(Order order) {",
+                        "24 |         return orderRepository.save(order);",
+                        "25 |     }",
+                        "60 |     public String health() {",
+                        "61 |         return healthStatus();",
+                        "62 |     }",
+                    ]
+                )
+            }
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
+def test_java_quality_signal_extractor_does_not_flag_unrelated_context_stub() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -60,1 +60,2 @@ public class OrderService {",
+                    "+    return healthStatus();",
+                ]
+            )
+        },
+        repository_context={
+            "current_class_context": {
+                "snippet": "\n".join(
+                    [
+                        "22 |     // TODO: 创建订单后自动扣减库存",
+                        "23 |     public boolean reserve(Order order) {",
+                        "24 |         return false;",
+                        "25 |     }",
+                        "60 |     public String health() {",
+                        "61 |         return healthStatus();",
+                        "62 |     }",
+                    ]
+                )
+            }
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
+def test_java_quality_signal_extractor_does_not_flag_generic_todo_without_business_contract() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/OrderService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,3 +22,5 @@ public class OrderService {",
+                    "+    // TODO: rename after next cleanup",
+                    "+    public Order create(Order order) {",
+                    "+        return orderRepository.save(order);",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
+def test_java_quality_signal_extractor_does_not_flag_descriptive_inventory_comment() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/InventoryViewService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -22,3 +22,5 @@ public class InventoryViewService {",
+                    "+    // 当前库存快照来自上游同步任务，仅用于页面展示",
+                    "+    public InventoryView buildView(InventorySnapshot snapshot) {",
+                    "+        return mapper.toView(snapshot);",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
+def test_java_quality_signal_extractor_does_not_flag_plain_false_return_as_stub() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/FeatureSwitch.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -18,2 +18,5 @@ public class FeatureSwitch {",
+                    "+    public boolean disabledForTenant(String tenantId) {",
+                    "+        return false;",
+                    "+    }",
+                ]
+            )
+        },
+    )
+
+    assert "comment_contract_unimplemented" not in payload["signals"]
+
+
+def test_java_quality_signal_extractor_flags_placeholder_return_with_explicit_stub_marker() -> None:
+    extractor = JavaQualitySignalExtractor()
+    payload = extractor.extract(
+        file_path="src/main/java/com/example/InventoryService.java",
+        target_hunk={
+            "excerpt": "\n".join(
+                [
+                    "@@ -18,2 +18,6 @@ public class InventoryService {",
+                    "+    // TODO: 扣减库存逻辑待实现",
+                    "+    public boolean reserve(String sku) {",
+                    "+        return false;",
+                    "+    }",
+                ]
+            )
         },
     )
 

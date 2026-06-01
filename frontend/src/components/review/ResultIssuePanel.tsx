@@ -137,6 +137,68 @@ const clipListSummary = (value: string): string => {
   return `${text.slice(0, 148).replace(/[，,、；;。\s]+$/g, "")}…`;
 };
 
+const normalizeIssueSummaryKey = (value?: string): string =>
+  String(value || "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+
+const basename = (value?: string): string => {
+  const normalized = String(value || "").replace(/\\/g, "/").trim();
+  return normalized.split("/").filter(Boolean).pop() || normalized;
+};
+
+const normalizePathKey = (value?: string): string =>
+  String(value || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .toLowerCase();
+
+const buildRowLocationPrefix = (row: ReviewResultListRow): string => {
+  const fileName = basename(row.file_path) || "当前文件";
+  const line = row.line_start ? `L${row.line_start}` : "";
+  return [fileName, line].filter(Boolean).join(" ");
+};
+
+const disambiguateDuplicateSummaries = (rows: ReviewResultListRow[]): ReviewResultListRow[] => {
+  const summaryGroups = new Map<string, ReviewResultListRow[]>();
+  const titleGroups = new Map<string, ReviewResultListRow[]>();
+  for (const row of rows) {
+    const summaryKey = normalizeIssueSummaryKey(row.summary);
+    if (summaryKey) summaryGroups.set(summaryKey, [...(summaryGroups.get(summaryKey) || []), row]);
+    const titleKey = normalizeIssueSummaryKey(row.title);
+    if (titleKey) titleGroups.set(titleKey, [...(titleGroups.get(titleKey) || []), row]);
+  }
+  const duplicateSummaryIds = new Set<string>();
+  const duplicateTitleIds = new Set<string>();
+  const collectDuplicateAnchors = (groups: Map<string, ReviewResultListRow[]>, target: Set<string>) => {
+    for (const group of groups.values()) {
+      const anchors = new Set(group.map((row) => `${normalizePathKey(row.file_path)}:${row.line_start || ""}`));
+      if (group.length > 1 && anchors.size > 1) {
+        group.forEach((row) => target.add(row.id));
+      }
+    }
+  };
+  collectDuplicateAnchors(summaryGroups, duplicateSummaryIds);
+  collectDuplicateAnchors(titleGroups, duplicateTitleIds);
+  const duplicateIds = new Set([...duplicateSummaryIds, ...duplicateTitleIds]);
+  if (duplicateIds.size === 0) return rows;
+  return rows.map((row) => {
+    if (!duplicateIds.has(row.id)) return row;
+    const prefix = buildRowLocationPrefix(row);
+    if (!prefix) return row;
+    const title = duplicateTitleIds.has(row.id) && !row.title.includes(prefix) ? `${prefix}：${row.title}` : row.title;
+    const summary =
+      duplicateSummaryIds.has(row.id) && !row.summary.includes(prefix)
+        ? clipListSummary(`${prefix}：${row.summary}`)
+        : row.summary;
+    return {
+      ...row,
+      title,
+      summary,
+    };
+  });
+};
+
 const buildIssueListSummary = (
   issue: DebateIssue,
   relatedFindings: ReviewFinding[],
@@ -218,8 +280,8 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
   );
 
   const rows = useMemo<ReviewResultListRow[]>(
-    () =>
-      formalIssues.map((issue) => {
+    () => {
+      const builtRows = formalIssues.map((issue) => {
         const relatedFindings = issue.finding_ids
           .map((findingId) => findingById.get(findingId))
           .filter(Boolean) as ReviewFinding[];
@@ -288,7 +350,9 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           designAlignmentStatus: getDesignAlignmentStatus(relatedFindings),
           hasDesignEvidence: relatedFindings.some((finding) => hasDesignEvidence(finding)),
         };
-      }),
+      });
+      return disambiguateDuplicateSummaries(builtRows);
+    },
     [findingById, formalIssues],
   );
 

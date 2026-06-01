@@ -11,8 +11,12 @@ class JavaQualitySignalExtractor:
 
     DETERMINISTIC_SIGNALS = {
         "query_semantics_weakened",
+        "query_authorization_scope_broadened",
         "unbounded_query_risk",
+        "sql_injection_risk",
+        "sensitive_data_exposure",
         "exception_swallowed",
+        "exception_semantics_weakened",
         "event_ordering_risk",
         "loop_call_amplification",
         "comment_contract_unimplemented",
@@ -39,9 +43,12 @@ class JavaQualitySignalExtractor:
         current_snippet = str(current_class.get("snippet") or "").strip()
         primary_snippet = str(primary_context.get("snippet") or "").strip()
         related_snippets = self._collect_repository_context_snippets(repository_context)
+        # Keep file-local signals anchored to the current target hunk. Using the
+        # whole MR diff here pollutes unrelated files, for example making a
+        # Hibernate criteria hunk inherit BulkEnrollmentService loop/TODO signals.
         combined = "\n".join(
             part
-            for part in [diff_excerpt, full_diff, current_snippet, primary_snippet, *related_snippets]
+            for part in [diff_excerpt, current_snippet, primary_snippet, *related_snippets]
             if str(part).strip()
         )
         diff_lower = diff_excerpt.lower()
@@ -58,6 +65,16 @@ class JavaQualitySignalExtractor:
             matched_terms.extend(query_terms)
             signal_terms["query_semantics_weakened"] = query_terms
             summary_parts.append("检测到查询语义从精确匹配放宽为模糊匹配")
+            security_scope_terms = self._detect_query_authorization_scope_broadened(
+                file_path=file_path,
+                diff_excerpt=diff_excerpt,
+                combined_context=combined,
+            )
+            if security_scope_terms:
+                signals.append("query_authorization_scope_broadened")
+                matched_terms.extend(security_scope_terms)
+                signal_terms["query_authorization_scope_broadened"] = security_scope_terms
+                summary_parts.append("检测到共享过滤条件从精确匹配放宽，可能扩大数据访问范围")
 
         if self._detect_unbounded_query_risk(diff_lower, combined_lower):
             signals.append("unbounded_query_risk")
@@ -72,6 +89,20 @@ class JavaQualitySignalExtractor:
             matched_terms.extend(security_guard_terms)
             signal_terms["security_guard_removed"] = security_guard_terms
             summary_parts.append("检测到入口校验、权限或身份一致性保护被删除")
+
+        sql_injection_terms = self._detect_sql_injection_risk(diff_excerpt)
+        if sql_injection_terms:
+            signals.append("sql_injection_risk")
+            matched_terms.extend(sql_injection_terms)
+            signal_terms["sql_injection_risk"] = sql_injection_terms
+            summary_parts.append("检测到 SQL 字符串拼接或动态 SQL 注入风险")
+
+        sensitive_exposure_terms = self._detect_sensitive_data_exposure(diff_excerpt)
+        if sensitive_exposure_terms:
+            signals.append("sensitive_data_exposure")
+            matched_terms.extend(sensitive_exposure_terms)
+            signal_terms["sensitive_data_exposure"] = sensitive_exposure_terms
+            summary_parts.append("检测到日志或响应中可能暴露敏感信息")
 
         idempotency_terms = self._detect_idempotency_guard_removed(diff_excerpt)
         if idempotency_terms:
@@ -321,12 +352,33 @@ class JavaQualitySignalExtractor:
                 "risk_hints": ["无分页", "全量扫描", "数据库压力"],
                 "confidence": 0.8,
             },
+            "query_authorization_scope_broadened": {
+                "kind": "query_authorization_scope_broadened",
+                "summary": "检测到共享过滤条件从精确匹配放宽为模糊匹配：{terms}",
+                "risk_hints": ["数据范围扩大", "权限/租户过滤弱化", "越权读取风险"],
+                "confidence": 0.86,
+                "tags": ["security", "query-scope"],
+            },
             "security_guard_removed": {
                 "kind": "security_guard_removed",
                 "summary": "检测到入口校验、权限或身份一致性保护被删除：{terms}",
                 "risk_hints": ["入口保护删除", "越权/非法输入风险", "安全边界弱化"],
                 "confidence": 0.86,
                 "tags": ["security", "guard"],
+            },
+            "sql_injection_risk": {
+                "kind": "sql_injection_risk",
+                "summary": "检测到 SQL 字符串拼接或动态 SQL 注入风险：{terms}",
+                "risk_hints": ["SQL 注入", "参数未绑定", "输入直达查询"],
+                "confidence": 0.88,
+                "tags": ["security", "sql"],
+            },
+            "sensitive_data_exposure": {
+                "kind": "sensitive_data_exposure",
+                "summary": "检测到日志或响应中可能暴露敏感信息：{terms}",
+                "risk_hints": ["敏感信息泄露", "日志脱敏缺失", "合规风险"],
+                "confidence": 0.84,
+                "tags": ["security", "sensitive-data"],
             },
             "idempotency_guard_removed": {
                 "kind": "idempotency_guard_removed",
@@ -595,6 +647,46 @@ class JavaQualitySignalExtractor:
             or ("findby" in diff_lower and "containing" in diff_lower and "+" in diff_lower)
         )
 
+    def _detect_query_authorization_scope_broadened(
+        self,
+        *,
+        file_path: str,
+        diff_excerpt: str,
+        combined_context: str,
+    ) -> list[str]:
+        """Flag exact-to-fuzzy changes in shared filters as a security-scope risk."""
+
+        path_lower = str(file_path or "").lower()
+        combined_lower = "\n".join([diff_excerpt, combined_context]).lower()
+        exact_to_fuzzy = self._detect_query_semantics_weakened(str(diff_excerpt or "").lower())
+        if not exact_to_fuzzy:
+            return []
+        shared_filter_context = any(
+            token in path_lower or token in combined_lower
+            for token in (
+                "criteria",
+                "filter",
+                "predicate",
+                "specification",
+                "querywrapper",
+                "tenant",
+                "owner",
+                "user",
+                "account",
+                "permission",
+            )
+        )
+        if not shared_filter_context:
+            return []
+        terms = ["equal_to_like"]
+        if "criteria" in path_lower or "criteria" in combined_lower:
+            terms.append("shared_criteria")
+        if "filter" in path_lower or "filter" in combined_lower:
+            terms.append("filter_scope")
+        if any(token in combined_lower for token in ("tenant", "owner", "user", "account", "permission")):
+            terms.append("access_scope")
+        return self._dedupe(terms)[:4]
+
     def _detect_unbounded_query_risk(self, diff_lower: str, combined_lower: str) -> bool:
         removed_limit = any(
             token in diff_lower
@@ -655,6 +747,54 @@ class JavaQualitySignalExtractor:
         if not removed_terms:
             return []
         return removed_terms[:4]
+
+    def _detect_sql_injection_risk(self, diff_excerpt: str) -> list[str]:
+        added = "\n".join(self._added_diff_lines(diff_excerpt))
+        if not added.strip():
+            return []
+        lowered = added.lower()
+        sql_execution = any(
+            token in lowered
+            for token in (
+                "jdbctemplate.query",
+                "jdbctemplate.update",
+                "createnativequery",
+                "createstatement",
+                "statement.execute",
+                "entitymanager.createquery",
+                "@query",
+            )
+        )
+        sql_literal = any(token in lowered for token in ("select ", "update ", "delete ", "insert ", " where "))
+        string_concat = bool(re.search(r"(select|update|delete|insert|where)[^;\n]*(?:\"|\')\s*\+", added, flags=re.IGNORECASE))
+        unsafe_formatter = bool(
+            re.search(r"(string\.format|formatted)\s*\([^;\n]*(select|update|delete|insert|where)", added, flags=re.IGNORECASE)
+        )
+        if (sql_execution or sql_literal) and (string_concat or unsafe_formatter):
+            terms = []
+            for token in ("jdbcTemplate", "createNativeQuery", "Statement", "String.format", "where"):
+                if token.lower() in lowered:
+                    terms.append(token)
+            return self._dedupe(terms or ["sql_concat"])[:4]
+        return []
+
+    def _detect_sensitive_data_exposure(self, diff_excerpt: str) -> list[str]:
+        added_lines = self._added_diff_lines(diff_excerpt)
+        sensitive_tokens = ("password", "passwd", "pwd", "secret", "token", "authorization", "credential", "手机号", "身份证", "密钥")
+        sink_tokens = ("log.", "logger.", "system.out", "response", "return ", "json")
+        terms: list[str] = []
+        for line in added_lines:
+            lowered = line.lower()
+            if not any(sink in lowered for sink in sink_tokens):
+                continue
+            if not any(token in lowered for token in sensitive_tokens):
+                continue
+            for token in sensitive_tokens:
+                if token in lowered and token not in terms:
+                    terms.append(token)
+            if len(terms) >= 4:
+                break
+        return terms[:4]
 
     def _detect_idempotency_guard_removed(self, diff_excerpt: str) -> list[str]:
         removed = "\n".join(self._removed_diff_lines(diff_excerpt)).lower()
@@ -1004,15 +1144,34 @@ class JavaQualitySignalExtractor:
             for line in diff_excerpt.splitlines()
             if line.startswith("+") and not line.startswith("+++")
         ]
-        context_lines = [line.strip() for line in normalized_context.splitlines() if line.strip()]
+        normalized_added = {
+            self._normalize_contract_context_line(line)
+            for line in added_lines
+            if self._normalize_contract_context_line(line)
+        }
+        context_lines = [
+            line.strip()
+            for line in normalized_context.splitlines()
+            if line.strip()
+            and not line.strip().startswith("@@")
+            and self._normalize_contract_context_line(line) not in normalized_added
+        ]
         candidate_lines = added_lines + [line for line in context_lines if line not in added_lines]
         if not candidate_lines:
             return []
-        comment_lines = [
+        added_comment_lines = [
             line
-            for line in candidate_lines
-            if line.startswith("//") or line.startswith("/*") or "todo" in line.lower()
+            for line in added_lines
+            if self._is_comment_contract_candidate_line(line)
         ]
+        context_comment_lines = [
+            line
+            for index, line in enumerate(context_lines)
+            if line not in added_lines
+            and self._is_comment_contract_candidate_line(line)
+            and self._context_comment_relevant_to_added_lines(index, context_lines, added_lines)
+        ]
+        comment_lines = added_comment_lines + context_comment_lines
         if not comment_lines:
             return []
         code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
@@ -1032,16 +1191,62 @@ class JavaQualitySignalExtractor:
             lowered_comment = comment.lower()
             for source_tokens, impl_tokens in contract_pairs:
                 if any(token in comment or token in lowered_comment for token in source_tokens):
+                    if not self._comment_declares_concrete_action(lowered_comment):
+                        continue
                     if not any(token in implementation_blob for token in impl_tokens):
                         return [comment[:48].strip()]
             if "todo" in lowered_comment:
                 if self._todo_has_matching_implementation(lowered_comment, implementation_blob):
                     continue
-                return [comment[:48].strip()]
-        stub_terms = self._detect_stubbed_implementation(normalized_context)
+                if self._todo_comment_declares_action_contract(lowered_comment):
+                    return [comment[:48].strip()]
+                continue
+        stub_terms = self._detect_stubbed_implementation(self._normalize_java_context_snippet(diff_excerpt))
         if stub_terms:
             return stub_terms
         return []
+
+    @staticmethod
+    def _is_comment_contract_candidate_line(line: str) -> bool:
+        text = str(line or "").strip()
+        return bool(text.startswith("//") or text.startswith("/*") or "todo" in text.lower())
+
+    def _context_comment_relevant_to_added_lines(
+        self,
+        comment_index: int,
+        context_lines: list[str],
+        added_lines: list[str],
+    ) -> bool:
+        if not added_lines:
+            return False
+        added_blob = "\n".join(added_lines).lower()
+        nearby_end = min(len(context_lines), comment_index + 10)
+        method_names = self._method_names_near_comment(context_lines[comment_index:nearby_end])
+        return any(f"{name.lower()}(" in added_blob for name in method_names)
+
+    @staticmethod
+    def _normalize_contract_context_line(line: str) -> str:
+        text = str(line or "").strip()
+        text = re.sub(r"^\s*[+\-]\s*", "", text)
+        text = re.sub(r"^\s*\d+\s*\|\s*", "", text)
+        return re.sub(r"\s+", "", text).lower()
+
+    @staticmethod
+    def _method_names_near_comment(lines: list[str]) -> list[str]:
+        names: list[str] = []
+        declaration_pattern = re.compile(
+            r"\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?"
+            r"(?:[\w.$<>\[\], ?]+\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        )
+        ignored = {"if", "for", "while", "switch", "catch", "return", "new"}
+        for line in lines[:8]:
+            match = declaration_pattern.search(str(line or ""))
+            if not match:
+                continue
+            name = match.group(1)
+            if name and name.lower() not in ignored:
+                names.append(name)
+        return names
 
     def _collect_repository_context_snippets(self, repository_context: dict[str, Any]) -> list[str]:
         snippets: list[str] = []
@@ -1154,22 +1359,114 @@ class JavaQualitySignalExtractor:
             return any(re.search(pattern, implementation_blob, flags=re.IGNORECASE) for pattern in implementation_patterns)
         return False
 
+    @staticmethod
+    def _todo_comment_declares_action_contract(lowered_comment: str) -> bool:
+        return any(
+            token in lowered_comment
+            for token in (
+                "审计",
+                "日志",
+                "库存",
+                "事件",
+                "通知",
+                "缓存",
+                "下游",
+                "接口",
+                "远程",
+                "重试",
+                "校验",
+                "权限",
+                "鉴权",
+                "状态",
+                "持久化",
+                "保存",
+                "补偿",
+                "回滚",
+                "audit",
+                "inventory",
+                "event",
+                "notify",
+                "cache",
+                "remote",
+                "retry",
+                "validate",
+                "permission",
+                "auth",
+                "persist",
+                "save",
+                "compensate",
+            )
+        )
+
+    @staticmethod
+    def _comment_declares_concrete_action(lowered_comment: str) -> bool:
+        text = str(lowered_comment or "").strip()
+        if not text:
+            return False
+        if "todo" in text:
+            return JavaQualitySignalExtractor._todo_comment_declares_action_contract(text)
+        action_markers = (
+            "需要",
+            "必须",
+            "应该",
+            "后续",
+            "待",
+            "补充",
+            "实现",
+            "落地",
+            "创建后",
+            "成功后",
+            "完成后",
+            "持久化后",
+            "扣减",
+            "发送",
+            "发布",
+            "记录",
+            "写入",
+            "调用",
+            "校验",
+            "重试",
+            "补偿",
+            "回滚",
+            "should",
+            "must",
+            "need",
+            "needs",
+            "todo",
+            "fixme",
+            "implement",
+            "after",
+            "send",
+            "publish",
+            "record",
+            "write",
+            "deduct",
+            "reserve",
+            "validate",
+            "retry",
+            "compensate",
+        )
+        return any(marker in text for marker in action_markers)
+
     def _detect_stubbed_implementation(self, normalized_context: str) -> list[str]:
         context = str(normalized_context or "")
         if not context.strip():
             return []
+        has_stub_marker = self._has_explicit_stub_marker(context)
         placeholder_patterns = [
-            r"throw\s+new\s+UnsupportedOperationException\s*\(",
-            r"throw\s+new\s+NotImplementedException\s*\(",
-            r"throw\s+new\s+IllegalStateException\s*\(\s*\"TODO",
-            r"return\s+null\s*;",
-            r"return\s+Collections\.emptyList\s*\(\s*\)\s*;",
-            r"return\s+List\.of\s*\(\s*\)\s*;",
-            r"return\s+Map\.of\s*\(\s*\)\s*;",
-            r"return\s+false\s*;",
-            r"return\s+0\s*;",
+            (r"throw\s+new\s+UnsupportedOperationException\s*\(", False),
+            (r"throw\s+new\s+NotImplementedException\s*\(", False),
+            (r"throw\s+new\s+IllegalStateException\s*\(\s*\"TODO", False),
+            (r"return\s+null\s*;", True),
+            (r"return\s+Collections\.emptyList\s*\(\s*\)\s*;", True),
+            (r"return\s+List\.of\s*\(\s*\)\s*;", True),
+            (r"return\s+Map\.of\s*\(\s*\)\s*;", True),
+            (r"return\s+false\s*;", True),
+            (r"return\s+0\s*;", True),
         ]
-        for pattern in placeholder_patterns:
+        for pattern, requires_marker in placeholder_patterns:
+            if requires_marker and not has_stub_marker:
+                continue
             match = re.search(pattern, context, flags=re.IGNORECASE)
             if match:
                 return [match.group(0).strip()]
@@ -1192,6 +1489,16 @@ class JavaQualitySignalExtractor:
             comment_text = re.sub(r"\s+", " ", comment_block_match.group(2) or "").strip()
             return [comment_text[:48]]
         return []
+
+    @staticmethod
+    def _has_explicit_stub_marker(context: str) -> bool:
+        return bool(
+            re.search(
+                r"(todo|fixme|待实现|未实现|先占位|占位|placeholder|not\s+implemented|implement\s+later)",
+                str(context or ""),
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _normalize_java_context_snippet(self, content: str) -> str:
         normalized_lines: list[str] = []

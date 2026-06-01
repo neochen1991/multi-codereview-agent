@@ -33,10 +33,14 @@ class ReviewServiceReportMixin:
         )
         findings_total_count = len(display_findings)
         paged_findings = self._slice_items(display_findings, offset=findings_offset, limit=findings_limit)
-        light_findings = [item for item in (self._build_light_report_finding(item) for item in paged_findings) if item is not None]
+        light_findings = self._make_display_findings_texts_distinct(
+            [item for item in (self._build_light_report_finding(item) for item in paged_findings) if item is not None]
+        )
         issues_total_count = len(issues)
         paged_issues = self._slice_items(issues, offset=issues_offset, limit=issues_limit)
-        light_issues = [self._build_light_report_issue(item) for item in paged_issues]
+        light_issues = self._make_display_issue_texts_distinct(
+            [self._build_light_report_issue(item) for item in paged_issues]
+        )
         issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         impact_report = _attach_issue_impact_links(self._build_impact_report_for_review(review), issues)
         issue_count = issues_total_count
@@ -63,6 +67,8 @@ class ReviewServiceReportMixin:
                 review=review,
                 findings=display_findings,
                 issues=raw_issues,
+                audit_findings=light_findings,
+                audit_issues=light_issues,
                 issue_filter_decisions=issue_filter_decisions,
             ),
         )
@@ -164,8 +170,15 @@ class ReviewServiceReportMixin:
             ),
             linked_findings[0],
         )
-        if not current_code:
-            current_code = str(anchor_finding.code_excerpt or "").strip()
+        finding_current_code = str(anchor_finding.code_excerpt or "").strip()
+        if not current_code or self._should_replace_display_current_code_from_finding(issue, current_code, finding_current_code):
+            current_code = finding_current_code
+        diff_current_code = self._extract_display_current_code_from_review_diff(issue)
+        if diff_current_code and (
+            not current_code
+            or self._should_replace_display_current_code_from_finding(issue, current_code, diff_current_code)
+        ):
+            current_code = diff_current_code
         if not self._looks_like_concrete_report_suggested_code(suggested_code):
             suggested_code = next(
                 (
@@ -183,6 +196,87 @@ class ReviewServiceReportMixin:
             }
         )
         return self._normalize_report_issue_family(hydrated)
+
+    @staticmethod
+    def _should_replace_display_current_code_from_finding(
+        issue: DebateIssue,
+        current_code: str,
+        finding_code: str,
+    ) -> bool:
+        if not finding_code.strip():
+            return False
+        issue_type = str(issue.normalized_issue_type or issue.finding_type or "").strip().lower()
+        current = str(current_code or "").lower()
+        candidate = str(finding_code or "").lower()
+        if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
+            current_has_loop = any(token in current for token in ("for (", ".foreach", "while ("))
+            candidate_has_loop = any(token in candidate for token in ("for (", ".foreach", "while ("))
+            current_has_call = any(token in current for token in ("repository.", ".save", "gateway.", "find", "query"))
+            candidate_has_call = any(token in candidate for token in ("repository.", ".save", "gateway.", "find", "query"))
+            return candidate_has_loop and candidate_has_call and not (current_has_loop and current_has_call)
+        if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation"}:
+            return any(token in candidate for token in ("todo", "fixme", "未实现", "承诺")) and not any(
+                token in current for token in ("todo", "fixme", "未实现", "承诺")
+            )
+        if issue_type in {"exception_swallowed", "exception_semantics_weakened"}:
+            candidate_has_exception = any(token in candidate for token in ("catch", "runtimeexception", "ignored", "exception"))
+            current_has_exception = any(token in current for token in ("catch", "runtimeexception", "ignored", "exception"))
+            return candidate_has_exception and not current_has_exception
+        return len(finding_code) > len(current_code) * 2 and len(finding_code) > 120
+
+    def _extract_display_current_code_from_review_diff(self, issue: DebateIssue) -> str:
+        try:
+            review = self.get_review(str(issue.review_id or ""))
+        except Exception:
+            review = None
+        if review is None:
+            return ""
+        unified_diff = str(review.subject.unified_diff or "")
+        file_path = str(issue.file_path or "").replace("\\", "/").strip()
+        if not unified_diff.strip() or not file_path:
+            return ""
+        lines: list[tuple[int, str]] = []
+        current_file = ""
+        new_line: int | None = None
+        in_target_file = False
+        for raw_line in unified_diff.splitlines():
+            line = str(raw_line or "")
+            if line.startswith("diff --git "):
+                current_file = ""
+                in_target_file = False
+                new_line = None
+                continue
+            if line.startswith("+++ "):
+                current_file = line[4:].strip()
+                if current_file.startswith("b/"):
+                    current_file = current_file[2:]
+                current_file = current_file.replace("\\", "/")
+                in_target_file = current_file == file_path
+                continue
+            if not in_target_file:
+                continue
+            if line.startswith("@@"):
+                match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+                new_line = int(match.group(1)) if match else None
+                continue
+            if new_line is None or line.startswith(("---", "+++", "index ")):
+                continue
+            if line.startswith("-"):
+                continue
+            marker = "+" if line.startswith("+") else " "
+            content = line[1:] if line.startswith("+") else line[1:] if line.startswith(" ") else line
+            lines.append((new_line, f"{new_line:4d} | {marker} {content}"))
+            new_line += 1
+        if not lines:
+            return ""
+        try:
+            anchor = int(issue.line_start or 1)
+        except (TypeError, ValueError):
+            anchor = 1
+        window = [text for line_no, text in lines if anchor - 8 <= line_no <= anchor + 8]
+        if not window:
+            window = [text for _line_no, text in lines[:18]]
+        return "\n".join([f"# {file_path}", *window[:18]]).strip()
 
     def _normalize_report_issue_family(self, issue: DebateIssue) -> DebateIssue:
         file_path_lower = str(issue.file_path or "").lower()
@@ -426,10 +520,11 @@ class ReviewServiceReportMixin:
         if (
             not query_boundary_signal
             and not performance_loop_signal
+            and not comment_contract_signal
             and (
-            issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
-            and exception_evidence_signal
-            or exception_evidence_signal
+                issue.normalized_issue_type in {"exception_swallowed", "exception_semantics_weakened"}
+                and exception_evidence_signal
+                or exception_evidence_signal
             )
         ):
             return issue.model_copy(
@@ -568,6 +663,19 @@ class ReviewServiceReportMixin:
                     "删除或绕过原有 paymentRepository.saveAll(payments) 批量保存路径",
                 ]
                 loop_suggestion = "将循环内逐条 paymentRepository.save 改回 paymentRepository.saveAll，或先完成 capture/mark 后统一批量提交。"
+            elif "paymentsettlementservice" in file_path_lower and any(
+                token in str(issue.current_code or "").lower() for token in ("for (payment payment", "gateway.capture")
+            ):
+                loop_title = "支付结算循环内逐条调用支付网关"
+                loop_summary = (
+                    "PaymentSettlementService 在 `for (Payment payment : payments)` 循环内逐条调用 "
+                    "gateway.capture，批量支付数量变大时会放大为多次外部网关调用，并增加部分失败时的一致性风险。"
+                )
+                loop_evidence = [
+                    "for (Payment payment : payments)",
+                    "gateway.capture(payment)",
+                ]
+                loop_suggestion = "保留逐笔支付的业务必要性时，应增加批量上限、超时、幂等和失败补偿；如果网关支持批量接口，应优先改为批量 capture。"
             elif "repository.save" in compact and "saveall" in compact:
                 loop_summary = (
                     "本次 diff 将原本的批量 saveAll 改成循环内逐条 repository.save，"
@@ -961,6 +1069,16 @@ class ReviewServiceReportMixin:
         )
         issue_created_at = persisted_issue.created_at if persisted_issue else finding.created_at
         issue_updated_at = persisted_issue.updated_at if persisted_issue else finding.created_at
+        finding_payload = finding.model_dump(mode="json")
+        finding_family = self._report_display_finding_family(finding_payload)
+        normalized_issue_type = {
+            "comment": "comment_contract_unimplemented",
+            "lock": "lock_guard_removed",
+            "loop": "n_plus_one",
+            "exception": "exception_swallowed",
+            "query_boundary": "query_bound_removed",
+            "course_creation": "course_creation_semantics",
+        }.get(finding_family, str(getattr(finding, "normalized_issue_type", "") or ""))
         return DebateIssue(
             review_id=review_id,
             issue_id=finding.finding_id,
@@ -968,7 +1086,7 @@ class ReviewServiceReportMixin:
             title=finding.title,
             summary=self._build_issue_summary_from_finding(finding),
             finding_type=finding.finding_type,
-            normalized_issue_type=str(getattr(finding, "normalized_issue_type", "") or ""),
+            normalized_issue_type=normalized_issue_type,
             primary_expert_id=str(finding.expert_id or ""),
             aggregated_finding_types=[],
             file_path=finding.file_path,
@@ -1293,7 +1411,9 @@ class ReviewServiceReportMixin:
             normalized = self._normalize_display_report_finding(finding)
             if normalized is not None:
                 display_findings.append(normalized)
-        return self._dedupe_display_report_findings(display_findings)
+        return self._make_display_findings_texts_distinct(
+            self._dedupe_display_report_findings(display_findings)
+        )
 
     def _ensure_display_findings_cover_issues(
         self,
@@ -1328,7 +1448,9 @@ class ReviewServiceReportMixin:
             covered_ids.add(str(synthetic.finding_id or "").strip())
             covered_keys.add(synthetic_key)
             finding_by_id[str(synthetic.finding_id or "").strip()] = synthetic
-        return self._dedupe_display_report_findings(supplemented)
+        return self._make_display_findings_texts_distinct(
+            self._dedupe_display_report_findings(supplemented)
+        )
 
     def _build_display_finding_for_synthetic_id(self, review_id: str, finding_id: str) -> ReviewFinding | None:
         marker = "__issue_"
@@ -1385,15 +1507,133 @@ class ReviewServiceReportMixin:
     def _dedupe_display_report_findings(self, findings: list[ReviewFinding]) -> list[ReviewFinding]:
         deduped: dict[tuple[str, str, int, str], ReviewFinding] = {}
         order: list[tuple[str, str, int, str]] = []
+        exact_seen: dict[tuple[str, int, str, str], tuple[str, str, int, str]] = {}
         for finding in findings:
             key = self._display_report_finding_key(finding)
+            exact_key = self._exact_display_report_finding_key(finding)
+            if exact_key in exact_seen:
+                key = exact_seen[exact_key]
             existing = deduped.get(key)
             if existing is None:
                 deduped[key] = finding
                 order.append(key)
+                if exact_key:
+                    exact_seen[exact_key] = key
                 continue
             deduped[key] = self._merge_duplicate_display_finding(existing, finding)
-        return [deduped[key] for key in order]
+        return self._make_display_findings_texts_distinct([deduped[key] for key in order])
+
+    def _make_display_findings_texts_distinct(self, findings: list[ReviewFinding]) -> list[ReviewFinding]:
+        summary_groups: dict[str, list[ReviewFinding]] = {}
+        title_groups: dict[str, list[ReviewFinding]] = {}
+        for finding in findings:
+            summary_key = re.sub(r"\s+", "", str(finding.summary or "").strip().lower())
+            if summary_key:
+                summary_groups.setdefault(summary_key, []).append(finding)
+            title_key = re.sub(r"\s+", "", str(finding.title or "").strip().lower())
+            if title_key:
+                title_groups.setdefault(title_key, []).append(finding)
+
+        duplicate_summary_ids: set[str] = set()
+        duplicate_title_ids: set[str] = set()
+        use_path_label_by_id: dict[str, bool] = {}
+        rewritten_by_id: dict[str, ReviewFinding] = {}
+        for groups, target in ((summary_groups, duplicate_summary_ids), (title_groups, duplicate_title_ids)):
+            for duplicated in groups.values():
+                anchors = {
+                    (
+                        str(finding.file_path or "").replace("\\", "/").strip().lower(),
+                        int(finding.line_start or 1),
+                    )
+                    for finding in duplicated
+                }
+                if len(duplicated) <= 1 or len(anchors) <= 1:
+                    continue
+                target.update(str(finding.finding_id or "").strip() for finding in duplicated if str(finding.finding_id or "").strip())
+                display_labels = [
+                    self._build_display_finding_anchor_label(finding, use_path=False)
+                    for finding in duplicated
+                ]
+                if len(set(display_labels)) < len(display_labels):
+                    for finding in duplicated:
+                        finding_id = str(finding.finding_id or "").strip()
+                        if finding_id:
+                            use_path_label_by_id[finding_id] = True
+
+        duplicated_ids = duplicate_summary_ids | duplicate_title_ids
+        for finding in findings:
+            finding_id = str(finding.finding_id or "").strip()
+            if finding_id not in duplicated_ids:
+                continue
+            anchor_label = self._build_display_finding_anchor_label(
+                finding,
+                use_path=bool(use_path_label_by_id.get(finding_id)),
+            )
+            title = (
+                self._build_display_finding_anchor_title(finding, anchor_label=anchor_label)
+                if finding_id in duplicate_title_ids
+                else finding.title
+            )
+            summary = (
+                self._build_display_finding_anchor_summary(finding, anchor_label=anchor_label)
+                if finding_id in duplicate_summary_ids
+                else finding.summary
+            )
+            rewritten_by_id[finding_id] = finding.model_copy(
+                update={
+                    "title": title,
+                    "summary": summary,
+                }
+            )
+        if not rewritten_by_id:
+            return findings
+        return [rewritten_by_id.get(finding.finding_id, finding) for finding in findings]
+
+    def _build_display_finding_anchor_title(self, finding: ReviewFinding, *, anchor_label: str = "") -> str:
+        anchor = anchor_label or self._build_display_finding_anchor_label(finding)
+        title = self._sanitize_user_facing_issue_text(str(finding.title or "").strip())
+        if title and not title.startswith(anchor):
+            return f"{anchor}：{title}"
+        return title or f"{anchor} 的审核发现"
+
+    def _build_display_finding_anchor_summary(self, finding: ReviewFinding, *, anchor_label: str = "") -> str:
+        anchor = anchor_label or self._build_display_finding_anchor_label(finding)
+        code_hint = self._extract_display_finding_code_hint(finding.code_excerpt)
+        if code_hint:
+            anchor = f"{anchor} 的 `{code_hint}`"
+        summary = self._sanitize_user_facing_issue_text(str(finding.summary or "").strip())
+        if summary and not summary.startswith(anchor):
+            return f"{anchor}：{summary}"
+        return summary or f"{anchor} 存在需要关注的代码发现。"
+
+    @staticmethod
+    def _build_display_finding_anchor_label(finding: ReviewFinding, *, use_path: bool = False) -> str:
+        line_text = f"第 {int(finding.line_start or 1)} 行"
+        path = str(finding.file_path or "").replace("\\", "/").strip("/")
+        if not use_path:
+            file_name = path.split("/")[-1] if path else "当前文件"
+            return f"{file_name} {line_text}"
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3:
+            path = "/".join(parts[-3:])
+        elif parts:
+            path = "/".join(parts)
+        else:
+            path = "当前文件"
+        return f"{path} {line_text}"
+
+    @staticmethod
+    def _extract_display_finding_code_hint(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        for raw_line in text.splitlines():
+            line = re.sub(r"^\s*\d+\s*\|\s*", "", str(raw_line or "").strip())
+            line = re.sub(r"^[+\-]\s*", "", line).strip()
+            if not line or line.startswith(("//", "/*", "*")):
+                continue
+            return f"{line[:93]}..." if len(line) > 96 else line
+        return ""
 
     def _display_report_finding_key(self, finding: ReviewFinding) -> tuple[str, str, int, str]:
         file_path = str(finding.file_path or "").replace("\\", "/").lower()
@@ -1405,6 +1645,19 @@ class ReviewServiceReportMixin:
         if issue_type == "n_plus_one":
             return (file_path, issue_type, line_start, title_key)
         return (file_path, issue_type, line_start, title_key)
+
+    @staticmethod
+    def _exact_display_report_finding_key(finding: ReviewFinding) -> tuple[str, int, str, str] | None:
+        title = re.sub(r"\s+", "", str(finding.title or "").strip().lower())
+        summary = re.sub(r"\s+", "", str(finding.summary or finding.rule_based_reasoning or "").strip().lower())
+        if not title and not summary:
+            return None
+        return (
+            str(finding.file_path or "").replace("\\", "/").strip().lower(),
+            int(finding.line_start or 0),
+            title[:120],
+            summary[:180],
+        )
 
     def _merge_duplicate_display_finding(self, left: ReviewFinding, right: ReviewFinding) -> ReviewFinding:
         primary, secondary = (left, right)
@@ -1453,18 +1706,33 @@ class ReviewServiceReportMixin:
         family = self._report_display_finding_family(payload)
         if family and not self._report_finding_anchor_valid(payload, family):
             return None
+        issue_type = str(payload.get("normalized_issue_type") or payload.get("finding_type") or "").strip().lower()
+        if (
+            not family
+            and issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}
+            and not self._report_anchor_looks_like_comment_contract(self._report_target_line_text(payload))
+        ):
+            return None
 
         file_name = str(payload.get("file_path") or "").replace("\\", "/").split("/")[-1] or "当前文件"
         line_start = int(payload.get("line_start") or 1)
         code_excerpt = str(payload.get("code_excerpt") or "")
         suggested_code = str(payload.get("suggested_code") or "").strip()
+        infer_issue_type = {
+            "comment": "comment_contract_unimplemented",
+            "lock": "lock_guard_removed",
+            "loop": "n_plus_one",
+            "exception": "exception_swallowed",
+            "query_boundary": "query_bound_removed",
+            "course_creation": "course_creation_semantics",
+        }.get(family, str(payload.get("normalized_issue_type") or ""))
         display_issue = DebateIssue(
             review_id=str(payload.get("review_id") or finding.review_id),
             issue_id=str(payload.get("finding_id") or finding.finding_id),
             title=str(payload.get("title") or ""),
             summary=str(payload.get("summary") or ""),
             finding_type=str(payload.get("finding_type") or ""),
-            normalized_issue_type=str(payload.get("normalized_issue_type") or ""),
+            normalized_issue_type=infer_issue_type,
             primary_expert_id=str(payload.get("expert_id") or ""),
             file_path=str(payload.get("file_path") or ""),
             line_start=line_start,
@@ -1602,6 +1870,7 @@ class ReviewServiceReportMixin:
             )
             if item
         ][:8]
+        self._normalize_report_remediation_for_family(payload, family)
         return ReviewFinding.model_validate(payload)
 
     @staticmethod
@@ -1612,7 +1881,13 @@ class ReviewServiceReportMixin:
         code = str(payload.get("code_excerpt") or "").lower()
         file_path = str(payload.get("file_path") or "").lower()
         text = "\n".join([issue_type, title, summary, code])
-        if "comment" in issue_type or "declared_intent" in issue_type:
+        target_line = ReviewServiceReportMixin._report_target_line_text(payload).lower()
+        target_window = ReviewServiceReportMixin._report_target_window_text(payload).lower()
+        if ReviewServiceReportMixin._report_anchor_looks_like_loop_call(target_line, target_window) and any(
+            token in "\n".join([title, summary, issue_type]) for token in ("循环", "逐条", "n+1", "repository.save", "批量保存", "loop")
+        ):
+            return "loop"
+        if ("comment" in issue_type or "declared_intent" in issue_type) and ReviewServiceReportMixin._report_anchor_looks_like_comment_contract(target_line):
             return "comment"
         if "lock" in issue_type or "concurr" in issue_type:
             return "lock"
@@ -1622,7 +1897,13 @@ class ReviewServiceReportMixin:
             return "exception"
         if "query_bound" in issue_type or "unbounded" in issue_type:
             return "query_boundary"
-        if "todo" in text or "未实现" in title:
+        if (
+            "query_semantics" in issue_type
+            or "authorization_scope" in issue_type
+            or any(token in "\n".join([title, summary]) for token in ("精确匹配", "模糊匹配", "equal", "like", "contains"))
+        ):
+            return "query_semantics"
+        if ("todo" in text or "未实现" in title) and ReviewServiceReportMixin._report_anchor_looks_like_comment_contract(target_line):
             return "comment"
         if "锁" in title or "并发" in title:
             return "lock"
@@ -1642,6 +1923,7 @@ class ReviewServiceReportMixin:
     def _report_finding_anchor_valid(payload: dict[str, object], family: str) -> bool:
         code = str(payload.get("code_excerpt") or "").lower()
         file_path = str(payload.get("file_path") or "").lower()
+        target_line = ReviewServiceReportMixin._report_target_line_text(payload).lower()
         if not code:
             return False
         if family == "exception":
@@ -1655,12 +1937,75 @@ class ReviewServiceReportMixin:
         if family == "comment":
             if "coursecreator" in file_path and ("new course" in code or "course.create" in code):
                 return False
-            return any(token in code for token in ("todo", "//", "/*", "unsupportedoperationexception"))
+            return ReviewServiceReportMixin._report_anchor_looks_like_comment_contract(target_line) or (
+                not target_line and any(token in code for token in ("todo", "//", "/*", "unsupportedoperationexception"))
+            )
         if family == "lock":
             return any(token in code for token in ("synchronized", "lockregistry", "lockfor", " lock"))
         if family == "course_creation":
             return any(token in code for token in ("new course", "course.create", "eventbus.publish", "repository.save(course)"))
         return True
+
+    @staticmethod
+    def _report_target_line_text(payload: dict[str, object]) -> str:
+        line_start = payload.get("line_start")
+        try:
+            target_line_no = int(line_start or 0)
+        except (TypeError, ValueError):
+            target_line_no = 0
+        if target_line_no <= 0:
+            return ""
+        for line_no, text in ReviewServiceReportMixin._report_excerpt_numbered_lines(payload):
+            if line_no == target_line_no:
+                return text
+        return ""
+
+    @staticmethod
+    def _report_target_window_text(payload: dict[str, object]) -> str:
+        line_start = payload.get("line_start")
+        try:
+            target_line_no = int(line_start or 0)
+        except (TypeError, ValueError):
+            target_line_no = 0
+        if target_line_no <= 0:
+            return ""
+        return "\n".join(
+            text
+            for line_no, text in ReviewServiceReportMixin._report_excerpt_numbered_lines(payload)
+            if abs(line_no - target_line_no) <= 1
+        )
+
+    @staticmethod
+    def _report_excerpt_numbered_lines(payload: dict[str, object]) -> list[tuple[int, str]]:
+        lines: list[tuple[int, str]] = []
+        for raw_line in str(payload.get("code_excerpt") or "").splitlines():
+            match = re.match(r"^\s*(\d+)\s*\|\s*(?:[+\-]\s*)?(.*)$", raw_line)
+            if not match:
+                continue
+            lines.append((int(match.group(1)), match.group(2).strip()))
+        return lines
+
+    @staticmethod
+    def _report_anchor_looks_like_comment_contract(target_line: str) -> bool:
+        stripped = str(target_line or "").strip().lower()
+        return bool(
+            stripped
+            and (
+                stripped.startswith(("//", "/*", "*"))
+                or any(token in stripped for token in ("todo", "fixme", "未实现", "承诺", "unsupportedoperationexception"))
+            )
+        )
+
+    @staticmethod
+    def _report_anchor_looks_like_loop_call(target_line: str, target_window: str) -> bool:
+        line = str(target_line or "").lower()
+        window = str(target_window or "").lower()
+        has_loop = any(token in window for token in ("for (", ".foreach", "foreach", "while (", "循环"))
+        has_repeated_call = any(
+            token in line or token in window
+            for token in ("repository.save", ".save(", "gateway.", "client.", "service.", "mapper.")
+        )
+        return has_loop and has_repeated_call
 
     @staticmethod
     def _fallback_report_rules_for_family(issue_type: str, family: str) -> tuple[list[str], list[str]]:
@@ -1699,6 +2044,7 @@ class ReviewServiceReportMixin:
         payload["verification_plan"] = self._sanitize_user_facing_issue_text(payload.get("verification_plan"))
         payload["remediation_strategy"] = self._sanitize_user_facing_issue_text(payload.get("remediation_strategy"))
         payload["remediation_suggestion"] = self._sanitize_user_facing_issue_text(payload.get("remediation_suggestion"))
+        self._normalize_report_remediation_for_family(payload, family)
         payload["remediation_steps"] = self._normalize_report_steps_for_family(
             family,
             self._sanitize_report_text_list(list(payload.get("remediation_steps") or []), limit=6),
@@ -1745,7 +2091,10 @@ class ReviewServiceReportMixin:
             family,
             list(payload.get("aggregated_remediation_steps") or []),
         )
-        if not self._report_display_text_agrees_with_code(payload, family, payload.get("summary")):
+        self._normalize_report_remediation_for_family(payload, family)
+        if family == "query_semantics":
+            payload["summary"] = self._report_canonical_display_summary(payload, family)
+        elif not self._report_display_text_agrees_with_code(payload, family, payload.get("summary")):
             payload["summary"] = self._report_canonical_display_summary(payload, family)
         payload["summary"] = self._clip_text(payload.get("summary"), max_chars=1200)
         canonical_title = self._report_canonical_display_title(payload, family)
@@ -1758,6 +2107,7 @@ class ReviewServiceReportMixin:
             "query_boundary": "query_bound_removed",
             "loop": "n_plus_one",
             "course_creation": "course_creation_semantics",
+            "query_semantics": "query_semantics_regression",
         }.get(family)
         if canonical_type:
             payload["normalized_issue_type"] = canonical_type
@@ -1786,6 +2136,65 @@ class ReviewServiceReportMixin:
         return DebateIssue.model_validate(payload)
 
     @staticmethod
+    def _normalize_report_remediation_for_family(payload: dict[str, object], family: str) -> None:
+        """Replace weak, generic remediation text with family-specific guidance."""
+
+        weak_strategy = ReviewServiceReportMixin._report_is_weak_remediation(payload.get("remediation_strategy"))
+        weak_remediation = ReviewServiceReportMixin._report_is_weak_remediation(payload.get("remediation_suggestion"))
+        if family == "query_semantics":
+            payload["remediation_strategy"] = "先确认当前过滤条件的产品语义，再选择精确匹配或显式模糊搜索，不能把 equals 方法静默改成 contains 行为。"
+            payload["remediation_suggestion"] = (
+                "若 equalsPredicateTransformer 仍代表精确匹配，请恢复 builder.equal；"
+                "若要支持模糊搜索，应新增单独的 contains/like 转换逻辑，并对 %、_、\\ 等通配符转义。"
+            )
+            return
+
+        canonical: dict[str, tuple[str, str]] = {
+            "loop": (
+                "把循环内逐条 repository.save 或外部访问改回批量处理，控制批量大小和事务边界。",
+                "恢复批量保存/批量查询能力，把循环内的 repository.save 等逐条外部访问改为 saveAll 或等价批量接口，并补充大批量输入回归测试。",
+            ),
+            "query_boundary": (
+                "恢复查询分页、LIMIT 或固定窗口边界，避免一次性拉取不可控数据量。",
+                "为查询恢复分页、LIMIT 或固定批次窗口，并用大数据量场景验证不会一次性拉取过多记录。",
+            ),
+            "exception": (
+                "把异常路径改成明确失败语义，不能在 catch 分支继续返回成功结果。",
+                "catch 分支不能继续返回成功结果，应记录关键上下文并抛出业务异常、返回明确失败或进入补偿流程。",
+            ),
+            "comment": (
+                "补齐注释或 TODO 承诺的业务动作；如果本次不交付，应删除误导性注释并拆出明确任务。",
+                "补齐 TODO 或注释承诺的业务动作；如果本次不交付该能力，应删除误导性注释并拆出明确任务。",
+            ),
+            "lock": (
+                "恢复原有锁保护，或补充可以被测试验证的等价并发控制。",
+                "恢复被删除的锁保护，或补充幂等、唯一约束、分布式锁等可验证的等价并发控制。",
+            ),
+        }
+        if family not in canonical:
+            return
+        strategy, suggestion = canonical[family]
+        if weak_strategy:
+            payload["remediation_strategy"] = strategy
+        if weak_remediation:
+            payload["remediation_suggestion"] = suggestion
+
+    @staticmethod
+    def _report_is_weak_remediation(value: object) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        weak_patterns = (
+            "补齐缺失实现",
+            "补齐缺失的业务逻辑",
+            "补齐缺失的业务逻辑或保护逻辑",
+            "用回归用例覆盖本次被命中的风险路径",
+            "结合本条问题说明和修改思路处理",
+            "按当前代码片段",
+        )
+        return any(pattern in text for pattern in weak_patterns)
+
+    @staticmethod
     def _normalize_report_steps_for_family(family: str, steps: list[str]) -> list[str]:
         canonical: dict[str, list[str]] = {
             "exception": [
@@ -1812,6 +2221,10 @@ class ReviewServiceReportMixin:
                 "改用聚合工厂创建聚合根，并保留工厂封装的不变量校验。",
                 "补充聚合创建、领域事件记录和发布顺序的回归测试。",
             ],
+            "query_semantics": [
+                "确认该过滤器是否仍应执行精确匹配；如果是，请恢复 equal/等值查询。",
+                "如果产品确实需要模糊搜索，请新增明确的 contains/like 操作符，并补充通配符转义和权限边界测试。",
+            ],
         }
         weak_patterns = (
             "补充或更新覆盖该规则的测试",
@@ -1820,14 +2233,18 @@ class ReviewServiceReportMixin:
             "增加并发场景测试",
             "定位承诺的目标行为",
             "在当前代码锚点补齐缺失的业务逻辑或保护逻辑",
+            "补齐缺失的业务逻辑或保护逻辑",
             "用回归用例覆盖本次被命中的风险路径",
             "确认修复后问题代码和建议代码不再相同",
+            "补齐缺失实现，并增加能复现该风险的回归测试。",
         )
         cleaned = [
             step
             for step in steps
             if step and not any(pattern == step for pattern in weak_patterns)
         ]
+        if len(cleaned) >= 2:
+            return cleaned[:6]
         defaults = canonical.get(family, [])
         output = [*cleaned, *[step for step in defaults if step not in cleaned]]
         return output[:6]
@@ -1850,6 +2267,8 @@ class ReviewServiceReportMixin:
             return "循环内重复访问仓储或外部接口"
         if family == "course_creation" and any(token in compact for token in ("领域事件发布顺序", "aggregatefactory", "聚合工厂")):
             return "聚合创建没有走统一工厂入口"
+        if family == "query_semantics" and any(token in compact for token in ("querysemantic", "查询语义", "精确匹配", "模糊匹配", "equal", "like", "contains")):
+            return "查询条件从精确匹配放宽为模糊匹配"
         return text
 
     @staticmethod
@@ -1871,6 +2290,22 @@ class ReviewServiceReportMixin:
             return "course_creation"
         if any(token in semantic_text for token in ("query_bound", "unbounded", "pagerequest", "分页", "查询边界")) or any(token in title for token in ("分页", "边界", "limit")):
             return "query_boundary"
+        if any(
+            token in semantic_text
+            for token in (
+                "query_semantics",
+                "query_semantics_regression",
+                "query_semantics_weakened",
+                "query_authorization_scope_broadened",
+                "查询语义",
+                "精确匹配",
+                "模糊匹配",
+                "equal",
+                "like",
+                "contains",
+            )
+        ):
+            return "query_semantics"
         if any(token in semantic_text for token in ("n_plus_one", "loop_call_amplification", "repository.save", "saveall", "循环", "逐条", "批量保存")):
             return "loop"
         if exception_code_signal:
@@ -1909,6 +2344,7 @@ class ReviewServiceReportMixin:
             "query_boundary": ("limit", "分页", "pagerequest", "pageable", "查询", "边界", "大结果集"),
             "loop": ("循环", "逐条", "repository.save", "saveall", "批量保存", "批量输入", "n次", "n+1"),
             "course_creation": ("course.create", "newcourse", "聚合", "工厂", "领域事件", "domainevent"),
+            "query_semantics": ("query", "查询语义", "精确匹配", "模糊匹配", "equal", "equals", "like", "contains"),
         }
         return any(token in compact for token in tokens.get(family, ()))
 
@@ -1933,6 +2369,8 @@ class ReviewServiceReportMixin:
             return "批量保存改成了循环逐条保存"
         if family == "course_creation" and ("new course" in current_code or "course(" in current_code):
             return "绕过聚合工厂创建聚合根"
+        if family == "query_semantics":
+            return "查询语义从精确匹配退化为模糊匹配"
         return ""
 
     @staticmethod
@@ -1953,6 +2391,11 @@ class ReviewServiceReportMixin:
             return f"{file_name}{line} 在循环内逐条调用仓储、网关或保存接口，批量输入会被放大为 N 次外部访问。"
         if family == "course_creation" and ("new course" in current_code or "course(" in current_code):
             return f"{file_name}{line} 绕过 Course.create 创建聚合根，原先由工厂封装的不变量校验或领域事件记录可能丢失。"
+        if family == "query_semantics":
+            return (
+                f"{file_name}{line} 把 equal 精确匹配改成 like/contains 模糊匹配，"
+                "共享过滤器的结果集范围会被放大，可能影响依赖精确筛选的业务查询、权限范围和索引使用。"
+            )
         return str(payload.get("summary") or "")
 
     def _slice_items(self, values: list[object], *, offset: int = 0, limit: int | None = None) -> list[object]:

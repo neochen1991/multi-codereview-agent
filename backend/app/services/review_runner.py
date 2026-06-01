@@ -2352,6 +2352,7 @@ class ReviewRunner(
             (
                 str(item.get("file_path") or "").strip(),
                 str(item.get("normalized_issue_type") or "").strip(),
+                int(self._normalize_optional_line_value(item.get("line_start")) or 1),
             )
             for item in finding_payloads
         }
@@ -2452,11 +2453,16 @@ class ReviewRunner(
                         continue
                     profile = profiles[signal_name]
                     issue_type = str(profile["normalized_issue_type"])
-                    key = (normalized_file_path, issue_type)
+                    evidence_terms = [str(item).strip() for item in list(signal_terms.get(signal_name) or []) if str(item).strip()]
+                    line_start = self._deterministic_java_signal_line_start(
+                        excerpt=excerpt,
+                        signal_name=signal_name,
+                        evidence_terms=evidence_terms,
+                        fallback_line=int(hunk.get("start_line") or 1),
+                    )
+                    key = (normalized_file_path, issue_type, line_start)
                     if key in existing_keys:
                         continue
-                    line_start = int(hunk.get("start_line") or 1)
-                    evidence_terms = [str(item).strip() for item in list(signal_terms.get(signal_name) or []) if str(item).strip()]
                     evidence = evidence_terms[:3] or [str(profile["summary"])]
                     summary = str(profile["summary"])
                     rule_based_reasoning = str(profile["rule_based_reasoning"])
@@ -2520,6 +2526,41 @@ class ReviewRunner(
                             },
                         )
                     )
+
+    def _deterministic_java_signal_line_start(
+        self,
+        *,
+        excerpt: str,
+        signal_name: str,
+        evidence_terms: list[str],
+        fallback_line: int,
+    ) -> int:
+        preferred_terms: list[str] = []
+        if signal_name == "comment_contract_unimplemented":
+            preferred_terms = [term for term in evidence_terms if "todo" in term.lower() or term.strip().startswith(("//", "/*", "*"))]
+        elif signal_name == "loop_call_amplification":
+            preferred_terms = [term for term in evidence_terms if "." in term or "save" in term.lower()]
+            preferred_terms.extend(evidence_terms)
+        elif signal_name == "lock_guard_removed":
+            preferred_terms = [term for term in evidence_terms if "synchronized" in term.lower() or "lock" in term.lower()]
+            preferred_terms.extend(evidence_terms)
+        else:
+            preferred_terms = list(evidence_terms)
+        numbered_lines: list[tuple[int, str]] = []
+        for raw_line in str(excerpt or "").splitlines():
+            match = re.match(r"^\s*(\d+)\s*\|\s*(?:[+\-]\s*)?(.*)$", raw_line)
+            if not match:
+                continue
+            numbered_lines.append((int(match.group(1)), match.group(2).strip()))
+        for term in preferred_terms:
+            normalized_term = re.sub(r"\s+", "", str(term or "").lower())
+            if not normalized_term:
+                continue
+            for line_no, line_text in numbered_lines:
+                normalized_line = re.sub(r"\s+", "", line_text.lower())
+                if normalized_term in normalized_line or normalized_line in normalized_term:
+                    return line_no
+        return int(fallback_line or 1)
 
     def _append_empty_diff_fallback_finding(
         self,
@@ -5136,7 +5177,12 @@ class ReviewRunner(
         )
         rule_prepass_text = ""
         rule_prepass_metadata: dict[str, object] = {}
-        if prompt_profile.use_two_pass_review and prompt_profile.require_rule_check_results:
+        should_run_rule_prepass = self._should_run_rule_guided_prepass(
+            prompt_profile=prompt_profile,
+            rule_screening=rule_screening or {},
+            required_rule_ids=required_rule_ids,
+        )
+        if should_run_rule_prepass:
             rule_prepass_text, rule_prepass_metadata = self._run_rule_guided_rule_check_prepass(
                 review=review,
                 expert=expert,
@@ -6642,6 +6688,29 @@ class ReviewRunner(
         if not ids:
             ids.append("GENERAL-EXPERT-CHECKS")
         return ids
+
+    @staticmethod
+    def _should_run_rule_guided_prepass(
+        *,
+        prompt_profile,
+        rule_screening: dict[str, object],
+        required_rule_ids: list[str],
+    ) -> bool:
+        if not bool(getattr(prompt_profile, "use_two_pass_review", False)):
+            return False
+        if not bool(getattr(prompt_profile, "require_rule_check_results", False)):
+            return False
+        real_rule_ids = [
+            str(item.get("rule_id") or item.get("id") or "").strip()
+            for item in list((rule_screening or {}).get("matched_rules_for_llm") or [])
+            if isinstance(item, dict) and str(item.get("rule_id") or item.get("id") or "").strip()
+        ]
+        if real_rule_ids:
+            return True
+        # GENERAL-EXPERT-CHECKS is only a fallback output contract. A separate
+        # LLM prepass for it is costly and can make weaker models over-request
+        # full-file/schema context instead of judging concrete changed hunks.
+        return any(str(rule_id or "").strip() != "GENERAL-EXPERT-CHECKS" for rule_id in required_rule_ids)
 
     def _run_rule_guided_rule_check_prepass(
         self,

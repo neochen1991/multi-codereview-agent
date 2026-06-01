@@ -156,10 +156,17 @@ def build_confidence_summary(
     findings: list[ReviewFinding],
     issues: list[DebateIssue],
     issue_filter_decisions: list[dict[str, object]],
+    audit_findings: list[ReviewFinding] | None = None,
+    audit_issues: list[DebateIssue] | None = None,
 ) -> dict[str, object]:
     llm_judged_issues = [item for item in issues if item.llm_judge_result]
     evidence_chain_issue_count = len([item for item in issues if item.evidence_chain])
     review_policy = _review_policy_from_review(review)
+    quality_audit = _build_review_quality_audit(
+        review=review,
+        findings=audit_findings if audit_findings is not None else findings,
+        issues=audit_issues if audit_issues is not None else issues,
+    )
     return {
         "high_confidence_count": len([item for item in findings if item.confidence >= 0.85]),
         "debated_issue_count": len([item for item in issues if item.status in {"debating", "needs_human", "resolved"}]),
@@ -200,7 +207,87 @@ def build_confidence_summary(
         if isinstance(review_policy.get("path_rules"), list)
         else 0,
         "review_policy_required_expert_count": len(_string_list(review_policy.get("required_experts"))),
+        **quality_audit,
     }
+
+
+def _build_review_quality_audit(
+    *,
+    review: ReviewTask,
+    findings: list[ReviewFinding],
+    issues: list[DebateIssue],
+) -> dict[str, object]:
+    expected_experts = _expected_quality_experts(review)
+    selected_experts = {str(item or "").strip() for item in list(review.selected_experts or []) if str(item or "").strip()}
+    executed_experts = set(selected_experts)
+    for finding in findings:
+        if str(finding.expert_id or "").strip():
+            executed_experts.add(str(finding.expert_id).strip())
+    for issue in issues:
+        if str(issue.primary_expert_id or "").strip():
+            executed_experts.add(str(issue.primary_expert_id).strip())
+        executed_experts.update(str(item or "").strip() for item in issue.participant_expert_ids if str(item or "").strip())
+    security_expected = "security_compliance" in expected_experts
+    business_expected = "correctness_business" in expected_experts
+    security_activated = not security_expected or "security_compliance" in executed_experts
+    business_activated = not business_expected or "correctness_business" in executed_experts
+    finding_issue_mismatches = _finding_issue_family_alignment_failures(issues, findings)
+    todo_anchor_failures = _todo_contract_anchor_failures([*_issues_as_dicts(issues), *_findings_as_dicts(findings)])
+    duplicate_texts = _cross_anchor_duplicate_texts([*_issues_as_dicts(issues), *_findings_as_dicts(findings)])
+    fallback_failures = _fallback_text_failures([*_issues_as_dicts(issues), *_findings_as_dicts(findings)])
+    missing_count = sum(
+        [
+            0 if security_activated else 1,
+            0 if business_activated else 1,
+            len(finding_issue_mismatches),
+            len(todo_anchor_failures),
+            len(duplicate_texts),
+            len(fallback_failures),
+        ]
+    )
+    return {
+        "quality_gate_passed": missing_count == 0,
+        "quality_gate_missing_count": missing_count,
+        "security_expert_activated": security_activated,
+        "business_expert_activated": business_activated,
+        "expert_activation_missing_count": (0 if security_activated else 1) + (0 if business_activated else 1),
+        "finding_issue_family_mismatch_count": len(finding_issue_mismatches),
+        "todo_anchor_failure_count": len(todo_anchor_failures),
+        "cross_anchor_duplicate_text_count": len(duplicate_texts),
+        "fallback_text_failure_count": len(fallback_failures),
+    }
+
+
+def _expected_quality_experts(review: ReviewTask) -> set[str]:
+    expected = {str(item or "").strip() for item in list(review.selected_experts or []) if str(item or "").strip()}
+    metadata = dict(review.subject.metadata or {})
+    for key in ("expected_required_experts", "required_experts", "expected_experts"):
+        expected.update(_string_list(metadata.get(key)))
+    for key in ("expert_selection", "expert_routing"):
+        expected.update(_collect_expected_experts(metadata.get(key)))
+    policy = _review_policy_from_review(review)
+    expected.update(_string_list(policy.get("required_experts")))
+    expected.update(_string_list(policy.get("added_required_experts")))
+    return {item for item in expected if item}
+
+
+def _collect_expected_experts(value: object) -> set[str]:
+    experts: set[str] = set()
+    if isinstance(value, dict):
+        for key in ("selected_experts", "effective_experts", "user_selected_experts", "system_added_experts"):
+            experts.update(_collect_expected_experts(value.get(key)))
+        expert_id = str(value.get("expert_id") or "").strip()
+        if expert_id:
+            experts.add(expert_id)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                experts.update(_collect_expected_experts(item))
+            else:
+                text = str(item or "").strip()
+                if text:
+                    experts.add(text)
+    return experts
 
 
 def _review_policy_from_review(review: ReviewTask) -> dict[str, object]:
@@ -211,6 +298,167 @@ def _review_policy_from_review(review: ReviewTask) -> dict[str, object]:
 
 def _string_list(value: object) -> list[str]:
     return [str(item).strip() for item in value or [] if str(item).strip()] if isinstance(value, list) else []
+
+
+def _issues_as_dicts(issues: list[DebateIssue]) -> list[dict[str, object]]:
+    return [item.model_dump(mode="json") for item in issues]
+
+
+def _findings_as_dicts(findings: list[ReviewFinding]) -> list[dict[str, object]]:
+    return [item.model_dump(mode="json") for item in findings]
+
+
+def _finding_issue_family_alignment_failures(
+    issues: list[DebateIssue],
+    findings: list[ReviewFinding],
+) -> list[str]:
+    finding_by_id = {str(item.finding_id or "").strip(): item for item in findings if str(item.finding_id or "").strip()}
+    failures: list[str] = []
+    for issue in issues:
+        issue_family = _review_item_family(issue.model_dump(mode="json"))
+        if not issue_family:
+            continue
+        linked_ids = [str(item or "").strip() for item in list(issue.finding_ids or []) if str(item or "").strip()]
+        if str(issue.issue_id or "").strip():
+            linked_ids.append(str(issue.issue_id).strip())
+        for finding_id in dict.fromkeys(linked_ids):
+            finding = finding_by_id.get(finding_id)
+            if finding is None:
+                continue
+            finding_family = _review_item_family(finding.model_dump(mode="json"))
+            if finding_family and finding_family != issue_family:
+                failures.append(f"{issue.file_path}:{issue.line_start}:{issue.issue_id}:{finding_id}")
+    return failures
+
+
+def _cross_anchor_duplicate_texts(items: list[dict[str, object]]) -> list[str]:
+    groups: dict[str, set[str]] = {}
+    for item in items:
+        title = _compact_text(item.get("title"))
+        summary = _compact_text(item.get("summary"))
+        if not title and not summary:
+            continue
+        key = f"{title}|{summary}"
+        anchor = f"{_normalize_review_path(item.get('file_path'))}:{item.get('line_start') or ''}"
+        groups.setdefault(key, set()).add(anchor)
+    return [key for key, anchors in groups.items() if len(anchors) > 1]
+
+
+def _todo_contract_anchor_failures(items: list[dict[str, object]]) -> list[str]:
+    failures: list[str] = []
+    for item in items:
+        issue_type = str(item.get("normalized_issue_type") or item.get("finding_type") or "").lower()
+        text = "\n".join(
+            str(item.get(key) or "")
+            for key in ("title", "summary", "rule_based_reasoning", "remediation_suggestion")
+        ).lower()
+        if "comment_contract" not in issue_type and "todo" not in text and "承诺" not in text and "未实现" not in text:
+            continue
+        target_line = _target_line_text(item).lower()
+        if target_line and not _line_looks_like_comment_contract(target_line):
+            failures.append(f"{_normalize_review_path(item.get('file_path'))}:{item.get('line_start')}")
+            continue
+        code = str(item.get("current_code") or item.get("code_excerpt") or "").lower()
+        if not target_line and not any(token in code for token in ("todo", "fixme", "//", "/*", "承诺", "未实现")):
+            failures.append(f"{_normalize_review_path(item.get('file_path'))}:{item.get('line_start')}")
+    return failures
+
+
+def _fallback_text_failures(items: list[dict[str, object]]) -> list[str]:
+    failures: list[str] = []
+    fallback_tokens = (
+        "当前未生成可直接落地的建议代码",
+        "补齐缺失实现",
+        "补齐缺失的业务逻辑或保护逻辑",
+        "结合本条问题说明和修改思路处理",
+        "需要确定其他条件",
+        "需要特别确认",
+        "不确定是否",
+        "胆量问题",
+    )
+    for item in items:
+        text = "\n".join(
+            str(item.get(key) or "")
+            for key in (
+                "title",
+                "summary",
+                "problem_description",
+                "remediation_strategy",
+                "remediation_suggestion",
+                "suggested_code",
+            )
+        )
+        if any(token in text for token in fallback_tokens):
+            failures.append(f"{_normalize_review_path(item.get('file_path'))}:{item.get('line_start')}")
+    return failures
+
+
+def _review_item_family(item: dict[str, object]) -> str:
+    issue_type = str(item.get("normalized_issue_type") or item.get("finding_type") or "").strip().lower()
+    title = str(item.get("title") or "").strip().lower()
+    summary = str(item.get("summary") or "").strip().lower()
+    code = str(item.get("current_code") or item.get("code_excerpt") or "").strip().lower()
+    text = "\n".join([issue_type, title, summary, code])
+    target_line = _target_line_text(item).lower()
+    if issue_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}:
+        if _line_looks_like_comment_contract(target_line):
+            return "comment_contract"
+        if any(token in text for token in ("循环", "逐条", "n+1", "repository.save", ".save(")):
+            return "loop_call"
+        return "comment_contract"
+    if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
+        return "loop_call"
+    if issue_type in {"lock_guard_removed", "concurrency_guard_removed", "lock_scope_risk"}:
+        return "lock_guard"
+    if issue_type in {"exception_swallowed", "exception_semantics_weakened"}:
+        return "exception"
+    if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
+        return "query_boundary"
+    if issue_type in {"query_semantics_regression", "query_semantics_weakened", "query_authorization_scope_broadened"}:
+        return "query_semantics"
+    if any(token in text for token in ("todo", "承诺", "未实现")) and _line_looks_like_comment_contract(target_line):
+        return "comment_contract"
+    if any(token in text for token in ("循环", "逐条", "n+1", "repository.save", ".save(")):
+        return "loop_call"
+    if any(token in text for token in ("synchronized", "lockregistry", "锁", "并发保护")):
+        return "lock_guard"
+    if any(token in text for token in ("catch", "exception", "异常", "返回成功")):
+        return "exception"
+    return ""
+
+
+def _target_line_text(item: dict[str, object]) -> str:
+    try:
+        target_line_no = int(item.get("line_start") or 0)
+    except (TypeError, ValueError):
+        target_line_no = 0
+    if target_line_no <= 0:
+        return ""
+    code = str(item.get("current_code") or item.get("code_excerpt") or "")
+    for raw_line in code.splitlines():
+        match = re.match(r"^\s*(\d+)\s*\|\s*(?:[+\-]\s*)?(.*)$", raw_line)
+        if match and int(match.group(1)) == target_line_no:
+            return match.group(2).strip()
+    return ""
+
+
+def _line_looks_like_comment_contract(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(
+        text
+        and (
+            text.startswith(("//", "/*", "*"))
+            or any(token in text for token in ("todo", "fixme", "未实现", "承诺", "unsupportedoperationexception"))
+        )
+    )
+
+
+def _normalize_review_path(value: object) -> str:
+    return str(value or "").strip().replace("\\", "/").lstrip("/")
+
+
+def _compact_text(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
 
 
 def _sanitize_user_facing_issue_text(value: str) -> str:

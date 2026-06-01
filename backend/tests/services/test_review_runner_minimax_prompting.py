@@ -5,7 +5,45 @@ from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
 from app.services.llm_chat_service import LLMTextResult
+from app.services.model_prompt_profiles import resolve_model_prompt_profile
 from app.services.review_runner import ReviewRunner
+
+
+def test_general_rule_contract_does_not_force_full_file_context(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    cards = runner._build_rule_guided_rule_cards(
+        {},
+        ["检查当前 hunk 是否有直接代码风险"],
+        max_rules_per_prompt=8,
+    )
+
+    assert "GENERAL-EXPERT-CHECKS" in cards
+    assert "target_hunks" in cards
+    assert "current_code_excerpt" in cards
+    assert "changed_file_full_content" not in cards
+
+
+def test_minimax_skips_separate_prepass_for_general_fallback_rule(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    profile = resolve_model_prompt_profile("MiniMax-M2.7", profile_name="auto")
+
+    assert (
+        runner._should_run_rule_guided_prepass(
+            prompt_profile=profile,
+            rule_screening={"matched_rules_for_llm": []},
+            required_rule_ids=["GENERAL-EXPERT-CHECKS"],
+        )
+        is False
+    )
+    assert (
+        runner._should_run_rule_guided_prepass(
+            prompt_profile=profile,
+            rule_screening={"matched_rules_for_llm": [{"rule_id": "SEC-JDDD-002"}]},
+            required_rule_ids=["SEC-JDDD-002"],
+        )
+        is True
+    )
 
 
 def test_minimax_expert_prompt_uses_short_rule_guided_contract(storage_root: Path) -> None:
