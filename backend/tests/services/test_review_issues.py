@@ -1614,6 +1614,116 @@ def test_build_report_quality_summary_audits_display_issues_after_cleanup(storag
     assert report.confidence_summary.finding_issue_family_mismatch_count == 0
 
 
+def test_build_report_display_quality_gate_removes_placeholder_text(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_placeholder_display",
+            "project_id": "proj_placeholder_display",
+            "source_ref": "feature/placeholder-display",
+            "target_ref": "main",
+            "title": "placeholder display cleanup",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_placeholder_display",
+                title="胆量问题",
+                summary="需要确定其他条件后才能判断是否存在问题。",
+                problem_description="当前未生成可直接落地的建议代码，请结合本条问题说明和修改思路处理。",
+                normalized_issue_type="direct_defect",
+                severity="medium",
+                confidence=0.81,
+                file_path="src/main/java/com/example/OrderService.java",
+                line_start=21,
+                current_code=(
+                    "# src/main/java/com/example/OrderService.java\n"
+                    "  20 | +        Order order = new Order(request.getSkuId(), request.getQuantity());\n"
+                    "  21 | +        orderRepository.save(order);"
+                ),
+                remediation_strategy="建议完善处理。",
+                remediation_suggestion="当前未生成可直接落地的建议代码，请结合本条问题说明和修改思路处理。",
+                suggested_code="public void unrelated() {\n    return;\n}",
+            )
+        ],
+    )
+
+    report_issue = service.build_report(review.review_id).issues[0]
+
+    display_text = "\n".join(
+        [
+            report_issue.title,
+            report_issue.summary,
+            report_issue.remediation_strategy,
+            report_issue.remediation_suggestion,
+            report_issue.suggested_code,
+        ]
+    )
+    assert "胆量问题" not in display_text
+    assert "需要确定其他条件" not in display_text
+    assert "当前未生成可直接落地的建议代码" not in display_text
+    assert "结合本条问题说明" not in display_text
+    assert "OrderService.java" in report_issue.summary
+    assert "第 21 行" in report_issue.summary
+    assert report_issue.suggested_code == ""
+
+
+def test_build_report_display_quality_gate_hides_unrelated_suggested_code(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_unrelated_suggestion",
+            "project_id": "proj_unrelated_suggestion",
+            "source_ref": "feature/unrelated-suggestion",
+            "target_ref": "main",
+            "title": "unrelated suggestion cleanup",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_unrelated_suggestion",
+                title="批量订单保存退化为循环逐条保存",
+                summary="OrderService 第 42 行在循环内逐条调用 orderRepository.save，批量输入会放大为 N 次数据库访问。",
+                normalized_issue_type="n_plus_one",
+                severity="high",
+                confidence=0.88,
+                primary_expert_id="performance_reliability",
+                participant_expert_ids=["performance_reliability"],
+                file_path="src/main/java/com/example/OrderService.java",
+                line_start=42,
+                current_code=(
+                    "# src/main/java/com/example/OrderService.java\n"
+                    "  41 | +        for (Order order : orders) {\n"
+                    "  42 | +            orderRepository.save(order);\n"
+                    "  43 | +        }"
+                ),
+                remediation_suggestion="把循环内逐条保存改为批量保存，并增加大批量输入的回归测试。",
+                suggested_code=(
+                    "public void refreshCache(CacheKey key) {\n"
+                    "    cacheClient.evict(key);\n"
+                    "    return;\n"
+                    "}"
+                ),
+            )
+        ],
+    )
+
+    report_issue = service.build_report(review.review_id).issues[0]
+
+    assert "批量" in report_issue.title
+    assert "orderRepository.save" in report_issue.current_code
+    assert report_issue.suggested_code == ""
+    assert report_issue.remediation_filtered is True
+
+
 def test_build_report_normalizes_query_semantics_finding_remediation(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

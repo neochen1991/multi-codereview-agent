@@ -2182,6 +2182,7 @@ class ReviewServiceReportMixin:
         payload["code_excerpt"] = self._clip_text(payload.get("code_excerpt"), max_chars=600)
         payload["code_context"] = {}
         payload["suggested_code"] = self._clip_text(payload.get("suggested_code"), max_chars=800)
+        payload = self._apply_display_quality_gate(payload, family, item_kind="finding")
         return ReviewFinding.model_validate(payload)
 
     def _build_light_report_issue(self, issue: DebateIssue) -> DebateIssue:
@@ -2262,7 +2263,196 @@ class ReviewServiceReportMixin:
             payload["consistency_check_status"] = "repaired"
             payload["consistency_check_summary"] = "系统已按当前代码片段重新整理问题说明和修改建议，展示内容已完成一致性修正。"
             payload["consistency_conflicts"] = []
+        payload = self._apply_display_quality_gate(payload, family, item_kind="issue")
         return DebateIssue.model_validate(payload)
+
+    def _apply_display_quality_gate(
+        self,
+        payload: dict[str, object],
+        family: str,
+        *,
+        item_kind: str,
+    ) -> dict[str, object]:
+        """Final user-facing cleanup before report/list payload leaves backend."""
+
+        next_payload = dict(payload)
+        file_name = str(next_payload.get("file_path") or "").replace("\\", "/").split("/")[-1] or "当前文件"
+        line_start = next_payload.get("line_start")
+        line = f" 第 {line_start} 行" if line_start else ""
+        current_code = str(next_payload.get("current_code") or next_payload.get("code_excerpt") or "")
+
+        title = self._sanitize_user_facing_issue_text(str(next_payload.get("title") or ""))
+        if self._report_display_text_is_weak(title):
+            title = self._report_canonical_display_title(next_payload, family) or self._generic_display_title(next_payload)
+        next_payload["title"] = title or "代码问题"
+
+        summary = self._sanitize_user_facing_issue_text(str(next_payload.get("summary") or ""))
+        if self._report_display_text_is_weak(summary) or (
+            family and not self._report_display_text_agrees_with_code(next_payload, family, summary)
+        ):
+            summary = self._report_canonical_display_summary(next_payload, family)
+        if self._report_display_text_is_weak(summary):
+            summary = f"{file_name}{line} 的当前改动触发「{next_payload['title']}」，请结合展示代码修正对应实现。"
+        next_payload["summary"] = self._clip_text(summary, max_chars=1200)
+
+        for key in ("remediation_strategy", "remediation_suggestion"):
+            value = self._sanitize_user_facing_issue_text(str(next_payload.get(key) or ""))
+            if self._report_display_text_is_weak(value):
+                next_payload[key] = ""
+            else:
+                next_payload[key] = value
+        self._normalize_report_remediation_for_family(next_payload, family)
+        if not str(next_payload.get("remediation_suggestion") or "").strip():
+            next_payload["remediation_suggestion"] = self._generic_display_remediation(next_payload, family)
+        if not str(next_payload.get("remediation_strategy") or "").strip():
+            next_payload["remediation_strategy"] = str(next_payload.get("remediation_suggestion") or "")
+
+        steps = [
+            self._sanitize_user_facing_issue_text(str(step or ""))
+            for step in list(next_payload.get("remediation_steps") or [])
+        ]
+        next_payload["remediation_steps"] = [
+            step for step in self._normalize_report_steps_for_family(family, [step for step in steps if step]) if step
+        ][:8]
+
+        suggested_code = str(next_payload.get("suggested_code") or "").strip()
+        if not self._report_suggested_code_matches_display_context(suggested_code, current_code, family):
+            next_payload["suggested_code"] = ""
+            conflicts = [
+                str(item)
+                for item in list(next_payload.get("remediation_alignment_conflicts") or [])
+                if str(item).strip()
+            ]
+            if item_kind == "issue" and "suggested_code_hidden_by_display_quality_gate" not in conflicts:
+                conflicts.append("suggested_code_hidden_by_display_quality_gate")
+            next_payload["remediation_alignment_conflicts"] = conflicts[:8]
+            next_payload["remediation_filtered"] = True
+        else:
+            next_payload["suggested_code"] = self._clip_text(suggested_code, max_chars=800)
+
+        next_payload["aggregated_titles"] = self._sanitize_report_text_list(
+            list(next_payload.get("aggregated_titles") or []),
+            limit=10,
+        )
+        next_payload["aggregated_summaries"] = self._sanitize_report_text_list(
+            list(next_payload.get("aggregated_summaries") or []),
+            limit=10,
+        )
+        next_payload["aggregated_remediation_suggestions"] = self._sanitize_report_text_list(
+            list(next_payload.get("aggregated_remediation_suggestions") or []),
+            limit=10,
+        )
+        return next_payload
+
+    @staticmethod
+    def _report_display_text_is_weak(value: object) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        compact = re.sub(r"\s+", "", text.lower())
+        weak_tokens = (
+            "placeholder",
+            "当前未生成",
+            "需要确认",
+            "需要确定其他条件",
+            "需要特别确认",
+            "不确定是否",
+            "无法确认",
+            "建议完善处理",
+            "建议优化",
+            "存在风险",
+            "可能存在问题",
+            "待裁决议题",
+            "代码风险",
+            "代码问题",
+            "请结合本条问题说明",
+            "结合本条问题说明和修改思路处理",
+            "补齐缺失实现",
+            "补齐缺失的业务逻辑或保护逻辑",
+            "按当前代码片段",
+            "代码锚点",
+            "胆量问题",
+        )
+        if any(token.lower().replace(" ", "") in compact for token in weak_tokens):
+            return True
+        return len(compact) < 6
+
+    def _generic_display_title(self, payload: dict[str, object]) -> str:
+        issue_type = str(payload.get("normalized_issue_type") or payload.get("finding_type") or "").strip()
+        labels = {
+            "direct_defect": "当前改动存在直接缺陷",
+            "risk_hypothesis": "当前改动存在待验证风险",
+            "test_gap": "当前改动缺少回归验证",
+            "design_concern": "当前改动存在设计关注点",
+        }
+        if issue_type in labels:
+            return labels[issue_type]
+        if issue_type:
+            return issue_type.replace("_", " ")
+        return "当前改动存在待处理问题"
+
+    def _generic_display_remediation(self, payload: dict[str, object], family: str) -> str:
+        canonical = self._report_canonical_display_summary(payload, family)
+        file_name = str(payload.get("file_path") or "").replace("\\", "/").split("/")[-1] or "当前文件"
+        line_start = payload.get("line_start")
+        line = f" 第 {line_start} 行" if line_start else ""
+        if family and canonical:
+            return self._report_canonical_remediation_for_display(payload, family)
+        return f"围绕 {file_name}{line} 的当前改动修正实现，并补充能覆盖该风险路径的回归测试。"
+
+    @staticmethod
+    def _report_canonical_remediation_for_display(payload: dict[str, object], family: str) -> str:
+        file_name = str(payload.get("file_path") or "").replace("\\", "/").split("/")[-1] or "当前文件"
+        line_start = payload.get("line_start")
+        line = f" 第 {line_start} 行" if line_start else ""
+        if family == "exception":
+            return f"修改 {file_name}{line} 的 catch 分支：不要返回成功结果，改为抛出业务异常、返回明确失败或进入补偿流程。"
+        if family == "comment":
+            return f"补齐 {file_name}{line} 注释或 TODO 中承诺的业务动作；如果本次不交付，应删除误导性注释并拆出明确任务。"
+        if family == "lock":
+            return f"恢复 {file_name}{line} 被移除的并发保护，或补上等价的幂等、唯一约束、分布式锁等控制。"
+        if family == "query_boundary":
+            return f"为 {file_name}{line} 的查询补回分页、LIMIT 或固定批次窗口，并覆盖大数据量查询回归用例。"
+        if family == "loop":
+            return f"把 {file_name}{line} 循环内的逐条访问改为批量查询、批量保存或固定窗口批处理。"
+        if family == "course_creation":
+            return f"调整 {file_name}{line} 的聚合创建流程：通过聚合工厂创建聚合根，并保持正确的持久化和事件发布顺序。"
+        if family == "query_semantics":
+            return "确认该过滤器的产品语义；需要精确匹配时恢复 equal，需要模糊搜索时新增明确操作符并补充转义。"
+        return ""
+
+    def _report_suggested_code_matches_display_context(self, suggested_code: str, current_code: str, family: str) -> bool:
+        if not self._looks_like_concrete_report_suggested_code(suggested_code):
+            return False
+        code = str(suggested_code or "").lower()
+        current = str(current_code or "").lower()
+        family_tokens: dict[str, tuple[str, ...]] = {
+            "exception": ("catch", "exception", "throw", "failure", "failed"),
+            "comment": ("todo", "inventory", "stock", "reserve", "库存", "预占"),
+            "lock": ("synchronized", "lock", "idempot", "unique", "幂等", "唯一"),
+            "query_boundary": ("limit", "page", "pageable", "pagesize", "分页"),
+            "loop": ("saveall", "batch", "批量"),
+            "course_creation": ("course.create", ".create("),
+            "query_semantics": ("equal", "like", "contains", "predicate"),
+        }
+        if family:
+            tokens = family_tokens.get(family, ())
+            if tokens and not any(token in code for token in tokens):
+                return False
+        current_tokens = self._display_code_tokens(current)
+        suggested_tokens = self._display_code_tokens(code)
+        if not current_tokens:
+            return bool(family)
+        return bool(set(current_tokens[:20]) & set(suggested_tokens[:30]))
+
+    @staticmethod
+    def _display_code_tokens(value: str) -> list[str]:
+        tokens: list[str] = []
+        for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", str(value or "")):
+            token = match.group(0).lower()
+            if token not in {"public", "private", "return", "class", "void", "new", "null", "true", "false"}:
+                tokens.append(token)
+        return list(dict.fromkeys(tokens))
 
     @staticmethod
     def _normalize_report_remediation_for_family(payload: dict[str, object], family: str) -> None:
@@ -2372,9 +2562,12 @@ class ReviewServiceReportMixin:
             for step in steps
             if step and not any(pattern == step for pattern in weak_patterns)
         ]
+        defaults = canonical.get(family, [])
+        if defaults:
+            output = [*defaults, *[step for step in cleaned if step not in defaults]]
+            return output[:6]
         if len(cleaned) >= 2:
             return cleaned[:6]
-        defaults = canonical.get(family, [])
         output = [*cleaned, *[step for step in defaults if step not in cleaned]]
         return output[:6]
 
