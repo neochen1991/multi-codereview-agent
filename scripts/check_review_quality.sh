@@ -13,8 +13,11 @@ cd "$ROOT_DIR"
   backend/tests/services/test_review_quality_eval.py \
   backend/tests/services/test_review_eval_export.py \
   backend/tests/services/test_evidence_verification.py \
+  backend/tests/services/test_issue_evidence_anchor_service.py \
   backend/tests/services/test_repo_review_policy_service.py \
   backend/tests/services/test_judge_and_merge.py \
+  backend/tests/services/test_review_issues.py::test_build_report_display_quality_gate_removes_placeholder_text \
+  backend/tests/services/test_review_issues.py::test_build_report_display_quality_gate_hides_unrelated_suggested_code \
   backend/tests/services/test_review_issues.py::test_build_report_does_not_emit_fallback_after_gitnexus_failure \
   backend/tests/services/test_review_runner.py::test_change_impact_analysis_failure_does_not_emit_fallback_report \
   backend/tests/services/test_gitnexus_impact_service.py::test_gitnexus_impact_service_normalizes_mcp_fixture_payload
