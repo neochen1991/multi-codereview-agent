@@ -1365,6 +1365,95 @@ def test_main_agent_light_routing_plan_still_allows_llm_refinement(monkeypatch):
     assert route["routing_source"] in {"llm", "selected_override", "rule"}
 
 
+def test_main_agent_retains_change_understanding_experts_when_llm_misses_them(monkeypatch):
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/order-security",
+        target_ref="main",
+        changed_files=["src/main/java/com/example/order/OrderController.java"],
+        unified_diff=(
+            "diff --git a/src/main/java/com/example/order/OrderController.java "
+            "b/src/main/java/com/example/order/OrderController.java\n"
+            "@@ -20,6 +20,7 @@\n"
+            "+    return orderRepository.findByUserId(userId);\n"
+        ),
+        metadata={
+            "change_understanding": {
+                "risk_domains": ["security", "business"],
+                "expert_hints": ["security_compliance", "correctness_business"],
+                "changed_symbols": ["userId", "findByUserId"],
+                "files": [
+                    {
+                        "path": "src/main/java/com/example/order/OrderController.java",
+                        "file_role": "controller",
+                        "changed_methods": ["findOrder"],
+                        "risk_domains": ["security", "business"],
+                    }
+                ],
+            }
+        },
+    )
+    experts = [
+        ExpertProfile(
+            expert_id="security_compliance",
+            name="Security",
+            name_zh="安全与合规专家",
+            role="security",
+            enabled=True,
+            focus_areas=["鉴权授权"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="correctness_business",
+            name="Correctness",
+            name_zh="正确性与业务专家",
+            role="correctness",
+            enabled=True,
+            focus_areas=["业务正确性"],
+            system_prompt="prompt",
+        ),
+        ExpertProfile(
+            expert_id="maintainability_code_health",
+            name="Maintainability",
+            name_zh="可维护性专家",
+            role="maintainability",
+            enabled=True,
+            focus_areas=["命名"],
+            system_prompt="prompt",
+        ),
+    ]
+
+    def fake_complete_text(**_: object) -> LLMTextResult:
+        return LLMTextResult(
+            text='{"selected_experts":[{"expert_id":"maintainability_code_health","reason":"命名需要关注","confidence":0.62}],"skipped_experts":[]}',
+            mode="live",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(agent._llm, "complete_text", fake_complete_text)
+
+    result = agent.select_review_experts(subject, experts, RuntimeSettings())
+
+    assert result["selected_expert_ids"] == [
+        "maintainability_code_health",
+        "security_compliance",
+        "correctness_business",
+    ]
+    retained = {
+        item["expert_id"]: item
+        for item in result["selected_experts"]
+        if item.get("source") == "change_understanding_selected"
+    }
+    assert set(retained) == {"security_compliance", "correctness_business"}
+    assert "security, business" in retained["security_compliance"]["reason"]
+
+
 def test_main_agent_security_route_keeps_sql_like_scope_broadening_signal():
     agent = MainAgentService()
     subject = ReviewSubject(

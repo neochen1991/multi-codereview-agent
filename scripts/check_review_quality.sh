@@ -5,6 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 .venv/bin/python -m pytest \
+  backend/tests/services/test_change_understanding_service.py \
+  backend/tests/services/test_route_experts.py \
+  backend/tests/services/test_main_agent_service.py::test_main_agent_retains_change_understanding_experts_when_llm_misses_them \
+  backend/tests/services/test_review_runner_minimax_prompting.py \
+  backend/tests/services/test_review_runner_minimax_output.py \
   backend/tests/services/test_review_quality_eval.py \
   backend/tests/services/test_review_eval_export.py \
   backend/tests/services/test_evidence_verification.py \
