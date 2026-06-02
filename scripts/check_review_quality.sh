@@ -10,6 +10,7 @@ cd "$ROOT_DIR"
   backend/tests/services/test_main_agent_service.py::test_main_agent_retains_change_understanding_experts_when_llm_misses_them \
   backend/tests/services/test_review_runner_minimax_prompting.py \
   backend/tests/services/test_review_runner_minimax_output.py \
+  backend/tests/services/test_java_review_benchmarks.py \
   backend/tests/services/test_review_quality_eval.py \
   backend/tests/services/test_review_eval_export.py \
   backend/tests/services/test_evidence_verification.py \
