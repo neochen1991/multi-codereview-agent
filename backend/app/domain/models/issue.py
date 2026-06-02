@@ -36,6 +36,7 @@ class DebateIssue(BaseModel):
     line_start: int = 1
     method_name: str = ""
     code_anchor: str = ""
+    change_understanding_refs: list[str] = Field(default_factory=list)
     evidence_anchor_status: str = "unchecked"
     evidence_anchor_reason: str = ""
     status: str = "open"

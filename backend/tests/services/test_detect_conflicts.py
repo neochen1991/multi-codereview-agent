@@ -975,6 +975,64 @@ def test_detect_conflicts_merges_same_line_same_problem_into_single_issue():
     assert all(view["normalized_issue_type"] for view in conflict["expert_views"])
 
 
+def test_detect_conflicts_carries_change_understanding_refs_when_merging_findings():
+    state = {
+        "findings": [
+            {
+                "finding_id": "fdg_refs_1",
+                "expert_id": "database_analysis",
+                "title": "订单查询边界缺失",
+                "summary": "新增查询没有分页边界。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_boundary_missing",
+                "severity": "high",
+                "confidence": 0.9,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "line_start": 42,
+                "method_name": "queryOrders",
+                "code_anchor": "mapper.queryOrders(condition)",
+                "change_understanding_refs": ["target:OrderRepository.java:42", "method:queryOrders"],
+                "evidence": ["mapper.queryOrders(condition)"],
+                "cross_file_evidence": [],
+                "context_files": ["src/main/java/com/example/OrderRepository.java"],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["批量查询必须有分页或 LIMIT"],
+            },
+            {
+                "finding_id": "fdg_refs_2",
+                "expert_id": "performance_reliability",
+                "title": "订单查询边界缺失",
+                "summary": "新增查询没有分页边界。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "query_boundary_missing",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": False,
+                "file_path": "src/main/java/com/example/OrderRepository.java",
+                "line_start": 42,
+                "method_name": "queryOrders",
+                "code_anchor": "mapper.queryOrders(condition)",
+                "change_understanding_refs": ["method:queryOrders", "risk:database"],
+                "evidence": ["mapper.queryOrders(condition)"],
+                "cross_file_evidence": [],
+                "context_files": ["src/main/java/com/example/OrderRepository.java"],
+                "matched_rules": ["PERF-SQL-001"],
+                "violated_guidelines": ["批量查询必须有分页或 LIMIT"],
+            },
+        ]
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["change_understanding_refs"] == [
+        "target:OrderRepository.java:42",
+        "method:queryOrders",
+        "risk:database",
+    ]
+
+
 def test_detect_conflicts_merges_nearby_lines_for_same_normalized_issue_type():
     state = {
         "issue_filter_config": {

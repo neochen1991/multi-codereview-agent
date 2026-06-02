@@ -24,6 +24,7 @@ def test_review_finding_accepts_candidate_anchor_metadata():
         risk_domain="security",
         method_name="createOrder",
         code_anchor="orderRepository.findByUserId(userId)",
+        change_understanding_refs=["target:src/OrderController.java:12", "method:createOrder"],
         evidence_anchor_status="passed",
         evidence_anchor_reason="锚点通过",
     )
@@ -31,6 +32,18 @@ def test_review_finding_accepts_candidate_anchor_metadata():
     assert finding.risk_domain == "security"
     assert finding.method_name == "createOrder"
     assert finding.code_anchor == "orderRepository.findByUserId(userId)"
+    assert finding.change_understanding_refs == ["target:src/OrderController.java:12", "method:createOrder"]
+
+
+def test_review_finding_defaults_candidate_refs_for_legacy_records():
+    finding = ReviewFinding(
+        review_id="rev_1",
+        expert_id="security_compliance",
+        title="资源归属校验缺失",
+        summary="使用请求 userId 查询订单。",
+    )
+
+    assert finding.change_understanding_refs == []
 
 
 def test_expert_payload_accepts_candidate_anchor_metadata():
@@ -45,9 +58,11 @@ def test_expert_payload_accepts_candidate_anchor_metadata():
             "line_start": 12,
             "method_name": "createOrder",
             "code_anchor": "findByUserId(userId)",
+            "change_understanding_refs": ["target:src/OrderController.java:12"],
         }
     )
 
     assert payload.risk_domain == "security"
     assert payload.method_name == "createOrder"
     assert payload.code_anchor == "findByUserId(userId)"
+    assert payload.change_understanding_refs == ["target:src/OrderController.java:12"]

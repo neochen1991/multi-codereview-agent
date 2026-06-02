@@ -70,6 +70,9 @@ def test_parse_minimax_candidate_findings_as_review_candidates(storage_root: Pat
           "title": "应用服务绕过聚合工厂",
           "file_path": "src/CourseCreator.java",
           "line": 18,
+          "method_name": "createCourse",
+          "code_anchor": "new Course(id, name)",
+          "change_understanding_refs": ["target:src/CourseCreator.java:18", "method:createCourse"],
           "evidence": "Course course = new Course(id, name);",
           "confidence": "high"
         }
@@ -87,6 +90,9 @@ def test_parse_minimax_candidate_findings_as_review_candidates(storage_root: Pat
     assert candidate["violated_guidelines"] == ["ARCH-JDDD-002"]
     assert candidate["line_start"] == 18
     assert candidate["line_end"] == 18
+    assert candidate["method_name"] == "createCourse"
+    assert candidate["code_anchor"] == "new Course(id, name)"
+    assert candidate["change_understanding_refs"] == ["target:src/CourseCreator.java:18", "method:createCourse"]
     assert candidate["confidence"] == 0.86
     assert "Course course = new Course" in candidate["evidence"][0]
     assert candidate["rule_based_reasoning"] == "应用服务绕过聚合工厂"

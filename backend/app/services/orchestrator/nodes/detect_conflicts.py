@@ -858,6 +858,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         evidence = [e for item in eligible_items for e in item.get("evidence", [])]
         if sast_prescan_matches:
             evidence.extend(_format_sast_evidence(item) for item in sast_prescan_matches)
+        change_understanding_refs = _collect_unique_list_values(eligible_items, "change_understanding_refs")
         issue_title = _build_issue_title(aggregated_titles)
         issue_summary = _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions)
         canonical_comment = _canonical_comment_contract_issue(
@@ -884,6 +885,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "line_start": first.get("line_start"),
                 "method_name": str(first.get("method_name") or ""),
                 "code_anchor": str(first.get("code_anchor") or first.get("code_excerpt") or ""),
+                "change_understanding_refs": change_understanding_refs,
                 "current_code": str(first.get("code_excerpt") or ""),
                 "evidence_anchor_status": str(first.get("evidence_anchor_status") or "unchecked"),
                 "evidence_anchor_reason": str(first.get("evidence_anchor_reason") or ""),
@@ -1112,7 +1114,9 @@ def _collect_unique_values(items: list[dict[str, object]], field: str) -> list[s
 def _collect_unique_list_values(items: list[dict[str, object]], field: str) -> list[str]:
     values: list[str] = []
     for item in items:
-        for entry in list(item.get(field) or []):
+        raw_value = item.get(field)
+        entries = [raw_value] if isinstance(raw_value, str) else list(raw_value or [])
+        for entry in entries:
             value = str(entry or "").strip()
             if value and value not in values:
                 values.append(value)

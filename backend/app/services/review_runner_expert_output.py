@@ -167,6 +167,7 @@ class ReviewRunnerExpertOutputMixin:
             if rule_id not in matched_rules and (rule_id != "GENERAL-EXPERT-CHECKS" or not matched_rules):
                 matched_rules.append(rule_id)
             violated_guidelines = self._normalize_text_list(item.get("violated_guidelines"), [rule_id])
+            change_refs = self._normalize_text_list(item.get("change_understanding_refs"), [])
             parsed.append(
                 {
                     "title": title,
@@ -179,6 +180,9 @@ class ReviewRunnerExpertOutputMixin:
                     "severity": str(item.get("severity") or "medium").strip() or "medium",
                     "line_start": candidate_line,
                     "line_end": self._normalize_line_start(item.get("line_end"), candidate_line),
+                    "method_name": str(item.get("method_name") or "").strip(),
+                    "code_anchor": str(item.get("code_anchor") or evidence_text).strip(),
+                    "change_understanding_refs": change_refs,
                     "matched_rules": matched_rules,
                     "violated_guidelines": violated_guidelines,
                     "rule_based_reasoning": reason or f"命中规则 {rule_id}，候选证据需要进入后续校验。",
@@ -1686,8 +1690,9 @@ class ReviewRunnerExpertOutputMixin:
             "matched_rules",
             "violated_guidelines",
             "change_steps",
+            "change_understanding_refs",
         ):
-            payload[key] = [str(item).strip() for item in list(payload.get(key) or []) if str(item).strip()]
+            payload[key] = self._normalize_text_list(payload.get(key), [])
         try:
             ExpertFindingPayload.model_validate(payload)
         except Exception as exc:

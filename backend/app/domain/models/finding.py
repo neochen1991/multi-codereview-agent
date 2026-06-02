@@ -37,6 +37,7 @@ class ReviewFinding(BaseModel):
     line_start: int = 1
     method_name: str = ""
     code_anchor: str = ""
+    change_understanding_refs: list[str] = Field(default_factory=list)
     evidence_anchor_status: str = "unchecked"
     evidence_anchor_reason: str = ""
     evidence: list[str] = Field(default_factory=list)
@@ -84,6 +85,7 @@ class ExpertFindingPayload(BaseModel):
     line_end: int | None = None
     method_name: str = ""
     code_anchor: str = ""
+    change_understanding_refs: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
     cross_file_evidence: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
