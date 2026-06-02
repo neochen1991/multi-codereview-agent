@@ -38,7 +38,7 @@ class IssueEvidenceAnchorService:
             return self._result("failed", "deleted_code_only", "问题代码只来自删除行，不能作为当前有效问题发布。")
         if not self._has_added_line_overlap(current_code, file_diff):
             return self._result("warning", "code_anchor_not_confirmed_in_added_diff", "问题代码未能在新增 diff 中直接确认，需要人工复核。")
-        if self._claim_contradicts_code(issue, current_code):
+        if self._claim_contradicts_code(issue, current_code, file_diff):
             return self._result("failed", "claim_code_mismatch", "问题描述中的关键行为与展示代码不一致。")
         return self._result("passed", "anchored_to_current_diff", "问题文件、行号和代码锚点已通过当前 diff 校验。")
 
@@ -52,7 +52,7 @@ class IssueEvidenceAnchorService:
             return False
         return any(token in added_text for token in anchor_tokens[:8])
 
-    def _claim_contradicts_code(self, issue: dict[str, object], current_code: str) -> bool:
+    def _claim_contradicts_code(self, issue: dict[str, object], current_code: str, file_diff: str) -> bool:
         text = "\n".join(
             [
                 str(issue.get("title") or ""),
@@ -61,6 +61,33 @@ class IssueEvidenceAnchorService:
             ]
         ).lower()
         code = current_code.lower()
+        diff_context = str(file_diff or "").lower()
+        issue_type = str(issue.get("normalized_issue_type") or "").strip().lower()
+        deletion_or_hunk_anchored_types = {
+            "lock_guard_removed",
+            "concurrency_guard_removed",
+            "query_bound_removed",
+            "query_boundary_missing",
+            "unbounded_query",
+            "unbounded_query_risk",
+            "n_plus_one",
+            "loop_call_amplification",
+            "bulk_processing_boundary_missing",
+            "comment_contract_unimplemented",
+            "exception_swallowed",
+            "exception_semantics_weakened",
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+        }
+        # Some high-value review problems are about removed behavior: a lock,
+        # PageRequest, factory method, or failure propagation disappeared. For
+        # those cases the user-facing code anchor may point at the replacement
+        # hunk, while the decisive token lives in the deleted line. Validate the
+        # claim against the whole file diff instead of only the display snippet.
+        evidence_text = f"{code}\n{diff_context}" if issue_type in deletion_or_hunk_anchored_types else code
         contradiction_groups = (
             (("异常", "exception", "catch", "吞"), ("catch", "exception")),
             (("sql", "注入", "like", "where", "query"), ("select", "where", "query", "like", "builder")),
@@ -69,7 +96,7 @@ class IssueEvidenceAnchorService:
             (("todo", "注释", "承诺", "未实现"), ("todo", "//", "/*", "fixme", "unsupportedoperationexception")),
         )
         for claim_tokens, code_tokens in contradiction_groups:
-            if any(token in text for token in claim_tokens) and not any(token in code for token in code_tokens):
+            if any(token in text for token in claim_tokens) and not any(token in evidence_text for token in code_tokens):
                 return True
         return False
 

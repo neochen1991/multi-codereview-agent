@@ -77,3 +77,33 @@ diff --git a/src/main/java/app/OrderService.java b/src/main/java/app/OrderServic
 
     assert result["status"] == "failed"
     assert result["reason_code"] == "claim_code_mismatch"
+
+
+def test_anchor_validation_accepts_removed_guard_claim_when_replacement_hunk_is_current_anchor():
+    diff = """
+diff --git a/src/main/java/app/BulkEnrollmentService.java b/src/main/java/app/BulkEnrollmentService.java
+@@ -20,10 +20,9 @@ public class BulkEnrollmentService {
+-    synchronized (lockRegistry.lockFor(courseId.value())) {
+-        repository.saveAll(enrollments);
+-    }
++    for (CourseEnrollment enrollment : enrollments) {
++        repository.save(enrollment);
++    }
+}
+"""
+
+    result = IssueEvidenceAnchorService().validate_issue(
+        {
+            "file_path": "src/main/java/app/BulkEnrollmentService.java",
+            "line_start": 21,
+            "title": "批量报名的锁保护被移除",
+            "summary": "当前替换 hunk 已经没有原有 synchronized 保护，并发提交时可能出现重复报名。",
+            "current_code": "21 | +    for (CourseEnrollment enrollment : enrollments) {\n22 | +        repository.save(enrollment);",
+            "normalized_issue_type": "lock_guard_removed",
+        },
+        changed_files=["src/main/java/app/BulkEnrollmentService.java"],
+        unified_diff=diff,
+    )
+
+    assert result["status"] == "passed"
+    assert result["reason_code"] == "anchored_to_current_diff"

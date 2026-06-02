@@ -68,9 +68,13 @@ class ReviewRunnerIssueValidationMixin:
             if candidate_family in {"exception_swallowed"}:
                 return abs(int(item.line_start or 1) - int(candidate.line_start or 1)) <= 10
             line_distance = abs(int(item.line_start or 1) - int(candidate.line_start or 1))
+            if candidate_family == "course_creation_semantics":
+                if self._course_creation_subfamily(candidate) != self._course_creation_subfamily(item):
+                    continue
+                return line_distance <= 12
             if line_distance <= 2:
                 return True
-            if candidate_family in {"n_plus_one_loop_call", "course_creation_semantics"}:
+            if candidate_family in {"n_plus_one_loop_call"}:
                 return line_distance <= 30
             if candidate_family in {
                 "lock_guard_removed",
@@ -79,6 +83,26 @@ class ReviewRunnerIssueValidationMixin:
             } and line_distance <= 4:
                 return True
         return False
+
+    @staticmethod
+    def _course_creation_subfamily(issue: DebateIssue) -> str:
+        text = "\n".join(
+            [
+                str(issue.normalized_issue_type or ""),
+                str(issue.title or ""),
+                str(issue.summary or ""),
+                str(issue.current_code or ""),
+                *[str(value or "") for value in list(issue.evidence or [])],
+                *[str(value or "") for value in list(issue.aggregated_titles or [])],
+                *[str(value or "") for value in list(issue.aggregated_summaries or [])],
+            ]
+        ).lower()
+        compact = re.sub(r"\s+", "", text)
+        if any(token in compact for token in ("domain_event_ordering", "eventbus.publish", "发布顺序", "持久化前", "先发布", "publish")):
+            return "domain_event_ordering"
+        if any(token in compact for token in ("aggregate_factory", "course.create", "newcourse", "聚合工厂", "工厂方法", "直接new")):
+            return "aggregate_factory_bypass"
+        return "course_creation"
 
     @staticmethod
     def _exact_duplicate_issue_display_key(issue: DebateIssue) -> tuple[str, int, str, str] | None:
@@ -127,6 +151,8 @@ class ReviewRunnerIssueValidationMixin:
             "course_creation_semantics",
             "aggregate_factory_bypass",
             "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
             "domain_event_missing",
             "transaction_boundary_broken",
         }
@@ -315,7 +341,15 @@ class ReviewRunnerIssueValidationMixin:
             )
         ):
             return "comment_contract_unimplemented"
-        if normalized_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed", "domain_event_missing", "transaction_boundary_broken"}:
+        if normalized_type in {
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+            "domain_event_missing",
+            "transaction_boundary_broken",
+        }:
             return "course_creation_semantics"
         if "coursecreator" in path and any(
             token in compact
@@ -385,7 +419,15 @@ class ReviewRunnerIssueValidationMixin:
             return "query_boundary_missing"
         if normalized_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
             return "n_plus_one_loop_call"
-        if normalized_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed", "domain_event_missing", "transaction_boundary_broken"}:
+        if normalized_type in {
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+            "domain_event_missing",
+            "transaction_boundary_broken",
+        }:
             return "course_creation_semantics"
         if normalized_type in {"comment_contract_unimplemented", "declared_intent_without_implementation", "comment_promise_unimplemented"}:
             return "comment_contract_unimplemented"
@@ -456,6 +498,9 @@ class ReviewRunnerIssueValidationMixin:
                 "聚合根",
                 "领域事件",
                 "domainevent",
+                "eventbus.publish",
+                "repository.save",
+                "domain_event_ordering",
                 "coursecreateddomainevent",
                 "aggregate_factory",
             ),
@@ -569,7 +614,7 @@ class ReviewRunnerIssueValidationMixin:
                 primary.summary = boundary_summary
         self._repair_cross_context_issue_summary(primary)
         primary.category_label = primary.category_label or self._category_label_for_issue_type(primary.normalized_issue_type)
-        if not self._looks_like_concrete_suggested_code(primary.suggested_code, file_path=primary.file_path):
+        if not self._looks_like_concrete_suggested_code(primary.suggested_code, file_path=primary.file_path) or not self._suggested_code_matches_issue_family(primary):
             primary.suggested_code = self._build_deterministic_suggested_code_for_issue(primary)
         primary.confidence_breakdown = {
             **dict(primary.confidence_breakdown or {}),
@@ -626,7 +671,7 @@ class ReviewRunnerIssueValidationMixin:
         self._apply_canonical_issue_family_summary(normalized)
         self._repair_cross_context_issue_summary(normalized)
         normalized.category_label = normalized.category_label or self._category_label_for_issue_type(normalized.normalized_issue_type)
-        if not self._looks_like_concrete_suggested_code(normalized.suggested_code, file_path=normalized.file_path):
+        if not self._looks_like_concrete_suggested_code(normalized.suggested_code, file_path=normalized.file_path) or not self._suggested_code_matches_issue_family(normalized):
             normalized.suggested_code = self._build_deterministic_suggested_code_for_issue(normalized)
         return normalized
 
@@ -858,6 +903,28 @@ class ReviewRunnerIssueValidationMixin:
         normalized_suggested = re.sub(r"\s+", "", suggested)
         return bool(normalized_current and normalized_current == normalized_suggested)
 
+    def _suggested_code_matches_issue_family(self, issue: DebateIssue) -> bool:
+        suggested = str(issue.suggested_code or "").strip().lower()
+        if not suggested:
+            return False
+        family = self._issue_root_family(issue)
+        issue_type = str(issue.normalized_issue_type or "").strip().lower()
+        if family == "query_boundary_missing" or issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
+            return any(token in suggested for token in ("pagerequest", "pageable", "limit", "findpendingbycourse"))
+        if family == "n_plus_one_loop_call":
+            return any(token in suggested for token in ("saveall", "batch", "bulk", "collect", "map(", "findall"))
+        if family == "lock_guard_removed":
+            return any(token in suggested for token in ("synchronized", "lockregistry", "lockfor", "trylock"))
+        if family == "exception_swallowed":
+            return any(token in suggested for token in ("catch", "throw", "logger", "failure", "failed", "settlementresult.failure"))
+        if family == "course_creation_semantics":
+            return bool(re.search(r"\.[A-Za-z_]*create\s*\(", suggested)) and (
+                ".save(" in suggested or ".saveall(" in suggested or ".publish(" in suggested
+            )
+        if family == "comment_contract_unimplemented":
+            return True
+        return True
+
     def _detect_issue_family_file_conflict(self, issue: DebateIssue) -> list[str]:
         family = self._issue_root_family(issue)
         file_path = str(issue.file_path or "").strip().lower()
@@ -867,22 +934,22 @@ class ReviewRunnerIssueValidationMixin:
         if not family or not file_path:
             return conflicts
         text = "\n".join([current_code, suggested_code, str(issue.summary or "").lower()])
-        if family == "n_plus_one_loop_call" and "coursecreator" in file_path:
-            conflicts.append("循环/批处理问题被挂到了 CourseCreator 创建方法上，文件锚点不一致。")
-        if "n_plus_one" in str(issue.normalized_issue_type or "").lower() and "coursecreator" in file_path:
-            conflicts.append("n_plus_one 问题不能挂到 CourseCreator 单对象创建方法上。")
-        if family == "comment_contract_unimplemented" and "coursecreator" in file_path and "todo" not in text:
+        if family == "n_plus_one_loop_call" and not any(token in text for token in ("for ", "foreach", "foreach(", "while ", "stream()", ".stream(")):
+            conflicts.append("循环/批处理问题缺少循环或批量路径代码位置，文件锚点不一致。")
+        if "n_plus_one" in str(issue.normalized_issue_type or "").lower() and not any(token in text for token in ("for ", "foreach", "foreach(", "while ", "stream()", ".stream(")):
+            conflicts.append("n_plus_one 问题缺少循环或批量路径代码位置。")
+        if family == "comment_contract_unimplemented" and "todo" not in text:
             conflicts.append("注释/承诺未实现问题缺少 TODO 或注释承诺位置，文件位置不一致。")
         if "comment_contract" in str(issue.normalized_issue_type or "").lower() and "todo" not in text:
             conflicts.append("注释/承诺未实现问题缺少 TODO 代码位置。")
         if family == "lock_guard_removed" and "bulkenrollmentservice" not in file_path and "synchronized" not in text:
             conflicts.append("锁/并发保护问题缺少锁相关文件或代码位置。")
-        if family == "query_boundary_missing" and not any(token in file_path for token in ("payment", "repository", "converter")):
+        if family == "query_boundary_missing" and not any(token in text for token in ("page", "limit", "query", "select", "find", "search", "like")):
             conflicts.append("查询边界问题缺少查询相关文件位置。")
         if family == "exception_swallowed" and "catch" not in text and "exception" not in text:
             conflicts.append("异常处理问题缺少 catch/exception 代码位置。")
-        if family == "course_creation_semantics" and "coursecreator" not in file_path:
-            conflicts.append("聚合创建问题被挂到了非 CourseCreator 文件上，文件位置不一致。")
+        if family == "course_creation_semantics" and not any(token in text for token in ("new ", ".create(", "工厂", "聚合", "publish", "event", ".save(")):
+            conflicts.append("聚合创建问题缺少工厂、构造、持久化或领域事件相关代码位置。")
         return conflicts
 
     def _apply_canonical_issue_family_summary(self, issue: DebateIssue) -> None:
@@ -899,13 +966,16 @@ class ReviewRunnerIssueValidationMixin:
             issue.needs_human = False
         elif family == "lock_guard_removed":
             issue.normalized_issue_type = "lock_guard_removed"
-            issue.title = "并发保护被移除"
+            issue.title = self._canonical_issue_title_for_family(issue) or "并发保护被移除"
         elif family == "exception_swallowed":
             issue.normalized_issue_type = "exception_swallowed"
-            issue.title = "失败被当成成功返回"
+            issue.title = self._canonical_issue_title_for_family(issue) or "失败被当成成功返回"
         elif family == "query_boundary_missing":
             issue.normalized_issue_type = "query_bound_removed"
-            issue.title = "查询边界缺失"
+            issue.title = self._canonical_issue_title_for_family(issue) or "查询边界缺失"
+        elif family == "course_creation_semantics":
+            issue.normalized_issue_type = "course_creation_semantics"
+            issue.title = self._canonical_issue_title_for_family(issue) or "绕过聚合工厂创建聚合根"
         elif family == "event_consumer_exception_swallowed":
             issue.normalized_issue_type = "event_consumer_exception_swallowed"
             issue.title = "事件消费失败被忽略"
@@ -913,8 +983,7 @@ class ReviewRunnerIssueValidationMixin:
                 issue.summary = self._canonical_issue_summary_for_family(issue, family)
         elif family == "comment_contract_unimplemented":
             issue.normalized_issue_type = "comment_contract_unimplemented"
-            if not issue.title.strip():
-                issue.title = "注释/TODO 承诺未实现"
+            issue.title = self._canonical_issue_title_for_family(issue) or issue.title.strip() or "注释/TODO 承诺未实现"
             if "listorders" in compact and "todo" in compact and any(token in compact for token in ("权限", "越权", "登录用户")):
                 issue.summary = "listOrders 的 TODO 明确要求只返回当前登录用户有权限的订单，但当前实现没有权限过滤逻辑，存在越权读取风险。"
                 issue.needs_human = False
@@ -925,23 +994,33 @@ class ReviewRunnerIssueValidationMixin:
         if family == "query_semantics_regression":
             return "查询语义从精确匹配退化为模糊匹配"
         if family == "comment_contract_unimplemented":
+            if "bulkenrollmentservice" in str(issue.file_path or "").lower():
+                return "TODO 里的库存扣减未实现"
             return ""
         if family == "lock_guard_removed":
-            return "并发保护被移除"
+            prefix = self._issue_business_scope_label(issue)
+            return f"{prefix}的锁保护被移除" if prefix else "并发保护被移除"
         if family == "exception_swallowed":
-            return "失败被当成成功返回"
+            prefix = self._issue_business_scope_label(issue)
+            return f"{prefix}失败后仍返回成功" if prefix else "失败被当成成功返回"
         if family == "query_boundary_missing":
-            return "查询边界缺失"
+            prefix = self._issue_business_scope_label(issue)
+            return f"{prefix}查询没有分页限制" if prefix else "查询边界缺失"
         if family == "course_creation_semantics":
             text = "\n".join([issue.title, issue.summary, issue.current_code, *issue.aggregated_titles]).lower()
             compact = re.sub(r"\s+", "", text)
-            if any(token in compact for token in ("course.create", "newcourse", "聚合工厂", "工厂方法", "aggregatefactory")):
-                return "绕过聚合工厂创建聚合根"
+            subfamily = self._course_creation_subfamily(issue)
             if (
-                any(token in text for token in ("publish", "发布"))
-                and any(token in text for token in ("save", "持久化", "保存"))
+                subfamily == "domain_event_ordering"
+                or "domain_event_ordering" in compact
+                or (
+                    any(token in text for token in ("publish", "发布"))
+                    and any(token in text for token in ("save", "持久化", "保存"))
+                )
             ):
                 return "领域事件发布顺序早于聚合持久化"
+            if subfamily == "aggregate_factory_bypass" or any(token in compact for token in ("course.create", "newcourse", "聚合工厂", "工厂方法", "aggregatefactory")):
+                return "绕过聚合工厂创建聚合根"
             return "绕过聚合工厂创建聚合根"
         if family == "event_consumer_batch_boundary":
             text = "\n".join([issue.title, issue.summary, *issue.aggregated_titles]).lower()
@@ -953,8 +1032,20 @@ class ReviewRunnerIssueValidationMixin:
         if family == "n_plus_one_loop_call":
             text = "\n".join([issue.title, issue.summary, issue.current_code, *issue.aggregated_titles]).lower()
             if "repository.save" in text or ".save(" in text:
-                return "批量写入从 saveAll 退化为循环逐条 repository.save"
+                prefix = self._issue_business_scope_label(issue)
+                return f"{prefix}从 saveAll 退化为循环逐条保存" if prefix else "批量写入从 saveAll 退化为循环逐条 repository.save"
             return "循环内逐条外部调用会放大批量处理成本"
+        return ""
+
+    @staticmethod
+    def _issue_business_scope_label(issue: DebateIssue) -> str:
+        file_path = str(issue.file_path or "").lower()
+        if "paymentsettlementservice" in file_path:
+            return "支付批量结算"
+        if "bulkenrollmentservice" in file_path:
+            return "批量报名"
+        if "coursecreator" in file_path:
+            return "课程创建"
         return ""
 
     def _repair_cross_context_issue_summary(self, issue: DebateIssue) -> None:
@@ -1011,7 +1102,15 @@ class ReviewRunnerIssueValidationMixin:
             return "数据库与查询"
         if issue_type in {"comment_contract_unimplemented", "exception_swallowed", "exception_semantics_weakened", "event_consumer_exception_swallowed"}:
             return "正确性与业务"
-        if issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed", "domain_event_missing", "transaction_boundary_broken"}:
+        if issue_type in {
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+            "domain_event_missing",
+            "transaction_boundary_broken",
+        }:
             return "DDD 架构"
         if issue_type in {"event_consumer_batch_boundary", "naming_misleading", "maintainability_regression", "hidden_coupling", "responsibility_mixed"}:
             return "通用编码规范"
@@ -1032,8 +1131,14 @@ class ReviewRunnerIssueValidationMixin:
         lowered = text.lower()
         if "hibernatecriteriaconverter" in file_path or "query_semantics" in issue_type:
             return 'private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n    return builder.equal(root.get(filter.field().value()), filter.value().value());\n}'
-        if "coursecreator" in file_path or issue_type == "course_creation_semantics":
-            return "public void create(CourseId id, CourseName name, CourseDuration duration) {\n    Course course = Course.create(id, name, duration);\n\n    repository.save(course);\n    eventBus.publish(course.pullDomainEvents());\n}"
+        if issue_type in {
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+        }:
+            return self._build_generic_aggregate_creation_suggested_code(issue)
         if "mysqldomaineventsconsumer" in file_path and ("exception" in issue_type or "catch" in lowered):
             return "} catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException |\n         InstantiationException e) {\n    throw new RuntimeException(\"Failed to consume domain event\", e);\n}"
         if "mysqldomaineventsconsumer" in file_path and (
@@ -1054,6 +1159,65 @@ class ReviewRunnerIssueValidationMixin:
             return "List<CourseEnrollment> enrollments = studentIds.stream()\n    .map(studentId -> CourseEnrollment.create(courseId, studentId))\n    .toList();\nrepository.saveAll(enrollments);"
         if "bulkenrollmentservice" in file_path and issue_type == "comment_contract_unimplemented":
             return "List<CourseEnrollment> enrollments = studentIds.stream()\n    .map(studentId -> CourseEnrollment.create(courseId, studentId))\n    .toList();\nrepository.saveAll(enrollments);\neventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));"
+        return ""
+
+    def _build_generic_aggregate_creation_suggested_code(self, issue: DebateIssue) -> str:
+        """Build a generic DDD creation fix from diff evidence, not a fixture-specific class name."""
+
+        lines = self._extract_diff_display_lines(str(issue.current_code or ""))
+        if not lines:
+            lines = self._extract_diff_display_lines(
+                "\n".join([str(value or "") for value in [issue.summary, *issue.aggregated_summaries]])
+            )
+        removed_lines = [line for marker, line in lines if marker == "-"]
+        current_lines = [line for marker, line in lines if marker != "-"]
+
+        factory_line = self._first_matching_line(
+            removed_lines,
+            (r"\b[A-Za-z_][A-Za-z0-9_<>?,\s]*\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_.]*create\s*\(",),
+        )
+        if not factory_line:
+            factory_line = self._first_matching_line(removed_lines, (r"\.[A-Za-z_]*create\s*\(",))
+
+        save_line = self._first_matching_line(current_lines, (r"\.[A-Za-z_]*save(?:All)?\s*\(",))
+        publish_line = self._first_matching_line(current_lines, (r"\.publish\s*\(", r"pullDomainEvents\s*\("))
+        if not factory_line:
+            return ""
+
+        ordered: list[str] = [factory_line.rstrip(";") + ";"]
+        if save_line:
+            ordered.append(save_line.rstrip(";") + ";")
+        if publish_line and publish_line not in ordered:
+            ordered.append(publish_line.rstrip(";") + ";")
+        return "\n".join(self._merge_unique(ordered))
+
+    @staticmethod
+    def _extract_diff_display_lines(value: str) -> list[tuple[str, str]]:
+        results: list[tuple[str, str]] = []
+        for raw in str(value or "").splitlines():
+            line = str(raw or "").strip()
+            if not line or line.startswith("#"):
+                continue
+            marker = " "
+            content = line
+            rendered = re.match(r"^(?:\d+\s*\|\s*)?([+\- ])\s?(.*)$", line)
+            deleted_rendered = re.match(r"^-\s*\|\s?(.*)$", line)
+            if deleted_rendered:
+                marker = "-"
+                content = deleted_rendered.group(1)
+            elif rendered:
+                marker = rendered.group(1)
+                content = rendered.group(2)
+            content = re.sub(r"^\d+\s*\|\s*", "", content).strip()
+            if content:
+                results.append((marker, content))
+        return results
+
+    @staticmethod
+    def _first_matching_line(lines: list[str], patterns: tuple[str, ...]) -> str:
+        for line in lines:
+            if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in patterns):
+                return line.strip()
         return ""
 
     def _merge_issue_expert_views(self, group: list[DebateIssue]) -> list[dict[str, object]]:

@@ -9114,6 +9114,58 @@ def test_review_runner_keeps_loop_and_todo_deterministic_findings_separate(stora
     )
 
 
+def test_review_runner_appends_deterministic_ddd_creation_findings(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    file_path = "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"
+    review = ReviewTask(
+        review_id="rev_deterministic_ddd_creation",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/course-create",
+            target_ref="main",
+            changed_files=[file_path],
+            unified_diff=f"""diff --git a/{file_path} b/{file_path}
+--- a/{file_path}
++++ b/{file_path}
+@@ -15,9 +15,9 @@ public final class CourseCreator {{
+-        Course course = Course.create(id, name, duration);
++        Course course = new Course(id, name, duration);
+-        repository.save(course);
+         eventBus.publish(course.pullDomainEvents());
++        repository.save(course);
+     }}
+}}
+""",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+
+    runner._append_deterministic_java_quality_findings(review, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    families = {
+        (finding.normalized_issue_type, finding.line_start, finding.expert_id, finding.title)
+        for finding in findings
+    }
+    assert (
+        "aggregate_factory_bypass",
+        15,
+        "ddd_architecture",
+        "绕过聚合工厂创建聚合根",
+    ) in families
+    assert (
+        "domain_event_ordering_risk",
+        16,
+        "ddd_architecture",
+        "领域事件发布早于聚合持久化",
+    ) in families
+    assert len(finding_payloads) == 2
+
+
 def test_review_runner_does_not_force_comment_contract_when_interface_is_implemented(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(

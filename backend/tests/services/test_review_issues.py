@@ -645,6 +645,54 @@ def test_list_issues_normalizes_accepted_issue_as_not_needing_human(storage_root
     assert issue.needs_human is False
 
 
+def test_list_issues_builds_generic_ddd_creation_suggestion_for_non_course_aggregate(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_order_ddd",
+            "project_id": "proj_order_ddd",
+            "source_ref": "feature/order-creation",
+            "target_ref": "main",
+            "title": "order creation",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_order_aggregate_creation",
+                title="绕过聚合工厂创建聚合根",
+                summary="Order 聚合创建从 Order.create 工厂入口退化为直接构造，并且事件发布早于持久化。",
+                normalized_issue_type="course_creation_semantics",
+                file_path="src/main/java/com/example/OrderCreator.java",
+                line_start=20,
+                current_code=(
+                    "# src/main/java/com/example/OrderCreator.java\n"
+                    "  19 |      public void create(OrderId id, Money amount) {\n"
+                    "   - |         Order order = Order.create(id, amount);\n"
+                    "  20 | +        Order order = new Order(id, amount);\n"
+                    "  21 |\n"
+                    "   - |         orderRepository.save(order);\n"
+                    "  22 |          eventBus.publish(order.pullDomainEvents());\n"
+                    "  23 | +        orderRepository.save(order);\n"
+                    "  24 |      }"
+                ),
+                suggested_code="",
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.title == "领域事件发布顺序早于聚合持久化"
+    assert "Order.create(id, amount);" in issue.suggested_code
+    assert "orderRepository.save(order);" in issue.suggested_code
+    assert issue.suggested_code.index("orderRepository.save(order);") < issue.suggested_code.index("eventBus.publish(order.pullDomainEvents());")
+    assert "Course.create" not in issue.suggested_code
+
+
 def test_build_report_supplements_display_finding_when_linked_finding_family_differs(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

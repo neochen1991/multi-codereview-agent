@@ -213,6 +213,12 @@ def test_java_quality_signal_extractor_detects_factory_bypass_and_event_ordering
 
     assert "factory_bypass" in payload["signals"]
     assert "event_ordering_risk" in payload["signals"]
+    assert payload["signal_terms"]["factory_bypass"] == ["Course.create", "new Course"]
+    assert payload["signal_terms"]["event_ordering_risk"] == [
+        "eventBus.publish",
+        "repository.save",
+        "pullDomainEvents",
+    ]
 
 
 def test_java_quality_signal_extractor_detects_magic_value_and_weak_naming() -> None:

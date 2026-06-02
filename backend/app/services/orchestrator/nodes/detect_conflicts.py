@@ -252,8 +252,12 @@ SEMANTIC_SYNONYMS = {
     "领域事件": "domain_event",
     "domain event": "domain_event",
     "domainevent": "domain_event",
+    "domain_event_ordering_risk": "domain_event",
+    "domain_event_ordering": "domain_event",
     "聚合工厂": "aggregate_factory",
     "factory bypass": "aggregate_factory",
+    "aggregate_factory_bypass": "aggregate_factory",
+    "aggregate_factory_bypassed": "aggregate_factory",
 }
 
 PROBLEM_FAMILY_TOKENS = {
@@ -950,6 +954,15 @@ def _risk_domain_for_issue_type(issue_type: str, expert_id: str) -> str:
         return "performance"
     if normalized_type in {"comment_contract_unimplemented", "business_rule_broken", "transaction_boundary_broken"}:
         return "business"
+    if normalized_type in {
+        "aggregate_factory_bypass",
+        "aggregate_factory_bypassed",
+        "domain_event_ordering_risk",
+        "domain_event_ordering",
+        "domain_event_missing",
+        "course_creation_semantics",
+    }:
+        return "architecture"
     if str(expert_id or "") == "security_compliance":
         return "security"
     if str(expert_id or "") == "database_analysis":
@@ -1651,6 +1664,27 @@ def _has_structural_code_anchor_evidence(item: dict[str, object]) -> bool:
         return any(token in compact for token in ("limit", "pagerequest", "pageable", "分页", "全量", "全表"))
     if issue_type in {"query_semantics_weakened", "query_semantics_regression"}:
         return any(token in compact for token in ("builder.like", "builder.equal", "精确匹配", "模糊匹配"))
+    if issue_type in {
+        "course_creation_semantics",
+        "aggregate_factory_bypass",
+        "aggregate_factory_bypassed",
+        "domain_event_missing",
+        "domain_event_ordering_risk",
+        "domain_event_ordering",
+    }:
+        return any(
+            token in compact
+            for token in (
+                "course.create",
+                "newcourse",
+                "聚合工厂",
+                "聚合根",
+                "domainevent",
+                "领域事件",
+                "eventbus.publish",
+                "repository.save",
+            )
+        )
     return False
 
 

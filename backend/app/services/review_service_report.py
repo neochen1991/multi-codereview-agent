@@ -512,6 +512,31 @@ class ReviewServiceReportMixin:
             any(token in exception_evidence_text for token in ("catch", "runtimeexception", "ignored", "异常"))
             and any(token in exception_evidence_text for token in ("返回成功", "success", "静默吞", "吞掉", "swallow"))
         )
+        display_file_name = str(issue.file_path or "").replace("\\", "/").rsplit("/", 1)[-1] or "当前文件"
+        display_line = f" 第 {update_payload.get('line_start', issue.line_start)} 行" if update_payload.get("line_start", issue.line_start) else ""
+        ddd_evidence_text = "\n".join(
+            [
+                str(issue.current_code or ""),
+                str(issue.suggested_code or ""),
+                *[str(item or "") for item in list(issue.evidence or [])],
+                *[str(item or "") for item in list(issue.aggregated_summaries or [])],
+            ]
+        ).lower()
+        ddd_creation_signal = (
+            issue.normalized_issue_type in {
+                "course_creation_semantics",
+                "aggregate_factory_bypass",
+                "aggregate_factory_bypassed",
+                "domain_event_ordering_risk",
+                "domain_event_ordering",
+            }
+            or any(token in compact for token in ("aggregate", "factory", "domainevent", "domain event", "聚合工厂", "聚合根", "领域事件"))
+            or any(token in ddd_evidence_text for token in ("eventbus.publish", "pulldomainevents", ".publish("))
+            or (
+                bool(re.search(r"\bnew\s+[A-Z][A-Za-z0-9_]*\s*\(", ddd_evidence_text))
+                and any(token in ddd_evidence_text for token in (".create(", "factory", "工厂"))
+            )
+        )
         if "hibernatecriteriaconverter" in str(issue.file_path or "").lower() and any(
             token in compact
             for token in ("equal", "equals", "like", "精确匹配", "模糊匹配", "查询语义", "语义退化")
@@ -525,21 +550,19 @@ class ReviewServiceReportMixin:
             )
         if (
             not comment_contract_signal
-            and issue.normalized_issue_type in {"course_creation_semantics", "aggregate_factory_bypass", "aggregate_factory_bypassed"}
-            or (
-                not comment_contract_signal
-                and "coursecreator" in file_path_lower
-                and any(token in compact for token in ("course.create", "newcourse", "domainevent", "coursecreateddomainevent", "聚合工厂", "领域事件", "eventbus.publish"))
-            )
+            and not performance_loop_signal
+            and not query_boundary_signal
+            and not exception_evidence_signal
+            and ddd_creation_signal
         ):
             course_summary = (
-                "CourseCreator 当前直接 new Course 并在 repository.save 之前发布领域事件，"
-                "会绕过 Course.create 中的领域事件记录逻辑，并让事件消费者看到尚未持久化的聚合状态。"
+                f"{display_file_name}{display_line} 的聚合创建路径绕过了原有工厂/静态工厂语义，"
+                "或把领域事件发布放在持久化之前，可能丢失不变量校验、领域事件记录或发布顺序保证。"
             )
-            course_suggestion = "恢复 Course.create 创建入口，并按 repository.save(course) 在前、eventBus.publish(course.pullDomainEvents()) 在后的顺序处理。"
+            course_suggestion = "恢复原有聚合工厂/静态工厂创建入口，并保持先持久化聚合、再发布领域事件的顺序。"
             course_evidence = [
-                "当前代码使用 new Course(id, name, duration) 绕过 Course.create",
-                "当前代码先 eventBus.publish(course.pullDomainEvents())，后 repository.save(course)",
+                "当前代码出现直接构造聚合或创建入口变化",
+                "当前代码需要核对领域事件发布与持久化顺序",
             ]
             return issue.model_copy(
                 update={
@@ -548,7 +571,7 @@ class ReviewServiceReportMixin:
                     "title": "领域事件发布顺序早于聚合持久化",
                     "primary_expert_id": "ddd_architecture",
                     "category_label": "DDD 架构",
-                    "line_start": 20 if "coursecreator" in file_path_lower else update_payload.get("line_start", issue.line_start),
+                    "line_start": update_payload.get("line_start", issue.line_start),
                     "summary": course_summary,
                     "remediation_suggestion": course_suggestion,
                     "evidence": course_evidence,
@@ -943,14 +966,14 @@ class ReviewServiceReportMixin:
                 *[str(item or "") for item in list(issue.aggregated_summaries or [])],
             ]
         ).lower()
-        if "coursecreator" in file_path or issue_type == "course_creation_semantics":
-            return (
-                "public void create(CourseId id, CourseName name, CourseDuration duration) {\n"
-                "    Course course = Course.create(id, name, duration);\n\n"
-                "    repository.save(course);\n"
-                "    eventBus.publish(course.pullDomainEvents());\n"
-                "}"
-            )
+        if issue_type in {
+            "course_creation_semantics",
+            "aggregate_factory_bypass",
+            "aggregate_factory_bypassed",
+            "domain_event_ordering_risk",
+            "domain_event_ordering",
+        }:
+            return self._build_report_generic_aggregate_creation_suggested_code(issue)
         if "paymentsettlementservice" in file_path and "exception" in issue_type:
             return (
                 "try {\n"
@@ -1042,6 +1065,56 @@ class ReviewServiceReportMixin:
                 "    return builder.equal(root.get(filter.field().value()), filter.value().value());\n"
                 "}"
             )
+        return ""
+
+    def _build_report_generic_aggregate_creation_suggested_code(self, issue: DebateIssue) -> str:
+        lines = self._extract_report_diff_display_lines(str(issue.current_code or ""))
+        removed_lines = [line for marker, line in lines if marker == "-"]
+        current_lines = [line for marker, line in lines if marker != "-"]
+        factory_line = self._first_report_matching_line(
+            removed_lines,
+            (r"\b[A-Za-z_][A-Za-z0-9_<>?,\s]*\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*[A-Za-z_][A-Za-z0-9_.]*create\s*\(",),
+        )
+        if not factory_line:
+            factory_line = self._first_report_matching_line(removed_lines, (r"\.[A-Za-z_]*create\s*\(",))
+        if not factory_line:
+            return ""
+        save_line = self._first_report_matching_line(current_lines, (r"\.[A-Za-z_]*save(?:All)?\s*\(",))
+        publish_line = self._first_report_matching_line(current_lines, (r"\.publish\s*\(", r"pullDomainEvents\s*\("))
+        suggested = [factory_line.rstrip(";") + ";"]
+        if save_line:
+            suggested.append(save_line.rstrip(";") + ";")
+        if publish_line and publish_line not in suggested:
+            suggested.append(publish_line.rstrip(";") + ";")
+        return "\n".join(dict.fromkeys(suggested))
+
+    @staticmethod
+    def _extract_report_diff_display_lines(value: str) -> list[tuple[str, str]]:
+        results: list[tuple[str, str]] = []
+        for raw in str(value or "").splitlines():
+            line = str(raw or "").strip()
+            if not line or line.startswith("#"):
+                continue
+            marker = " "
+            content = line
+            deleted_rendered = re.match(r"^-\s*\|\s?(.*)$", line)
+            rendered = re.match(r"^(?:\d+\s*\|\s*)?([+\- ])\s?(.*)$", line)
+            if deleted_rendered:
+                marker = "-"
+                content = deleted_rendered.group(1)
+            elif rendered:
+                marker = rendered.group(1)
+                content = rendered.group(2)
+            content = re.sub(r"^\d+\s*\|\s*", "", content).strip()
+            if content:
+                results.append((marker, content))
+        return results
+
+    @staticmethod
+    def _first_report_matching_line(lines: list[str], patterns: tuple[str, ...]) -> str:
+        for line in lines:
+            if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in patterns):
+                return line.strip()
         return ""
 
     @staticmethod
@@ -1449,14 +1522,7 @@ class ReviewServiceReportMixin:
         java_files = set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\.java\b", text))
         if any(file_name != issue_file_name for file_name in java_files):
             return True
-        known_changed_classes = {
-            "CourseCreator",
-            "BulkEnrollmentService",
-            "PaymentSettlementService",
-            "HibernateCriteriaConverter",
-        }
-        mentioned_classes = {class_name for class_name in known_changed_classes if class_name in text}
-        return any(class_name != issue_class_name for class_name in mentioned_classes)
+        return False
 
     def _sanitize_report_dict_list(self, values: list[object], *, limit: int) -> list[dict[str, object]]:
         structural_string_keys = {
@@ -1937,7 +2003,7 @@ class ReviewServiceReportMixin:
         elif family == "lock":
             payload.update(
                 {
-                    "title": "批量报名的锁保护被移除",
+                    "title": "并发保护被移除",
                     "summary": f"{file_name}{line} 移除了原有 `synchronized` 锁保护，并发调用时可能出现重复处理或状态竞争。",
                     "remediation_suggestion": "恢复原有锁保护，或补上等价的幂等、唯一约束、分布式锁等并发控制，并增加并发提交用例。",
                     "normalized_issue_type": "lock_guard_removed",
@@ -1945,18 +2011,18 @@ class ReviewServiceReportMixin:
                 }
             )
         elif family == "course_creation":
-            is_event_order = "eventbus.publish" in code_excerpt.lower() and "repository.save(course)" in code_excerpt.lower()
+            is_event_order = ".publish" in code_excerpt.lower() and ".save(" in code_excerpt.lower()
             course_title = "领域事件发布早于聚合持久化" if is_event_order else "绕过聚合工厂创建聚合根"
             course_summary = (
                 f"{file_name}{line} 先发布领域事件再保存聚合根，下游订阅方可能看到尚未持久化的状态。"
                 if is_event_order
-                else f"{file_name}{line} 绕过 Course.create 创建聚合根，原先由工厂封装的不变量校验或领域事件记录可能丢失。"
+                else f"{file_name}{line} 绕过原有聚合工厂/静态工厂创建聚合根，工厂封装的不变量校验或领域事件记录可能丢失。"
             )
             payload.update(
                 {
                     "title": course_title,
                     "summary": course_summary,
-                    "remediation_suggestion": "改用 Course.create 创建聚合根，并保持先持久化、后发布领域事件的顺序。",
+                    "remediation_suggestion": "改用原有聚合工厂/静态工厂创建聚合根，并保持先持久化、后发布领域事件的顺序。",
                     "normalized_issue_type": "course_creation_semantics",
                     "category_label": payload.get("category_label") or "DDD 架构",
                 }
@@ -2067,7 +2133,7 @@ class ReviewServiceReportMixin:
                 token in code for token in (".save(", "repository.save", "paymentrepository.save", "saveall")
             )
         if family == "comment":
-            if "coursecreator" in file_path and ("new course" in code or "course.create" in code):
+            if any(token in code for token in ("new ", ".create(", "聚合工厂", "领域事件")) and "todo" not in code:
                 return False
             return ReviewServiceReportMixin._report_anchor_looks_like_comment_contract(target_line) or (
                 not target_line and any(token in code for token in ("todo", "//", "/*", "unsupportedoperationexception"))
@@ -2075,7 +2141,7 @@ class ReviewServiceReportMixin:
         if family == "lock":
             return any(token in code for token in ("synchronized", "lockregistry", "lockfor", " lock"))
         if family == "course_creation":
-            return any(token in code for token in ("new course", "course.create", "eventbus.publish", "repository.save(course)"))
+            return any(token in code for token in ("new ", ".create(", "eventbus.publish", ".publish(", ".save("))
         return True
 
     @staticmethod
@@ -2725,8 +2791,8 @@ class ReviewServiceReportMixin:
             return f"{file_name}{line} 的查询缺少分页、LIMIT 或固定窗口边界，数据量放大后可能返回大结果集。"
         if family == "loop":
             return f"{file_name}{line} 在循环内逐条调用仓储、网关或保存接口，批量输入会被放大为 N 次外部访问。"
-        if family == "course_creation" and ("new course" in current_code or "course(" in current_code):
-            return f"{file_name}{line} 绕过 Course.create 创建聚合根，原先由工厂封装的不变量校验或领域事件记录可能丢失。"
+        if family == "course_creation" and ("new " in current_code or ".create(" in current_code or "聚合" in current_code):
+            return f"{file_name}{line} 绕过原有聚合工厂/静态工厂创建聚合根，工厂封装的不变量校验或领域事件记录可能丢失。"
         if family == "query_semantics":
             return (
                 f"{file_name}{line} 把 equal 精确匹配改成 like/contains 模糊匹配，"

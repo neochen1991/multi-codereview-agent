@@ -278,33 +278,55 @@ def build_forced_observation_candidates(
                     "evidence_source": "observation_signal",
                 }
             )
-        elif expert.expert_id == "ddd_architecture" and kind == "construction_path_changed":
+        elif expert.expert_id == "ddd_architecture" and kind in {
+            "construction_path_changed",
+            "aggregate_factory_bypass",
+            "domain_event_ordering_risk",
+        }:
+            is_event_ordering = kind == "domain_event_ordering_risk"
+            issue_type = "domain_event_ordering_risk" if is_event_ordering else "aggregate_factory_bypass"
+            title = "领域事件发布早于聚合持久化" if is_event_ordering else "绕过聚合工厂创建聚合根"
+            claim = (
+                f"当前变更把领域事件发布放在聚合持久化之前（{symbol_display}），事件订阅方可能先看到尚未持久化成功的状态。"
+                if is_event_ordering
+                else f"当前变更把原聚合工厂创建路径改成直接 new 构造（{symbol_display}），会绕过工厂封装的不变量校验、领域事件记录或创建语义。"
+            )
+            reasoning = (
+                "领域事件应在聚合状态持久化成功后再发布，否则事件消费者可能读到未提交或最终失败的数据。"
+                if is_event_ordering
+                else "聚合工厂通常封装创建不变量、默认值和领域事件记录；直接 new 聚合根会让这些领域语义失效。"
+            )
+            fix_strategy = (
+                "恢复先创建聚合、保存聚合，再发布聚合产生的领域事件的顺序。"
+                if is_event_ordering
+                else "恢复聚合工厂创建入口，避免在应用服务中直接 new 聚合根。"
+            )
             forced.append(
                 {
                     "file_path": file_path,
                     "line_start": line_start,
                     "line_end": line_start,
-                    "title": "创建路径变更风险",
-                    "finding_type": "risk_hypothesis",
-                    "normalized_issue_type": "construction_path_changed",
-                    "claim": f"当前变更改变了对象创建路径（{symbol_display}），原创建入口承载的不变量校验、领域事件或其他副作用可能在新路径中丢失。",
+                    "title": title,
+                    "finding_type": "direct_defect",
+                    "normalized_issue_type": issue_type,
+                    "claim": claim,
                     "severity": "high",
                     "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
-                    "violated_guidelines": ["领域对象创建入口变更时必须确认不变量、领域事件和副作用仍被保留"],
-                    "rule_based_reasoning": "创建路径变化本身不是自动缺陷；只有原创建入口确实承载不变量、领域事件或副作用且新路径未保留时，才应升级为确定问题。",
+                    "violated_guidelines": ["聚合创建和领域事件发布必须保持领域不变量、持久化顺序和事件一致性"],
+                    "rule_based_reasoning": reasoning,
                     "evidence": evidence[:3] or [summary or "检测到对象创建路径发生变化。"],
                     "cross_file_evidence": [],
                     "assumptions": [],
                     "context_files": [file_path] if file_path else [],
                     "observation_ids": [observation_id] if observation_id else [],
-                    "fix_strategy": "对比原创建入口与新创建路径，确认不变量校验、领域事件和副作用是否仍然完整。",
-                    "suggested_fix": "如果原创建入口承载关键领域逻辑，请恢复该入口或把等价逻辑迁移到新的创建路径；如果不承载关键逻辑，应在评审说明中明确。",
-                    "change_steps": ["定位原创建入口的校验和副作用", "对比新路径是否保留等价逻辑", "补充创建路径变更的领域行为测试"],
+                    "fix_strategy": fix_strategy,
+                    "suggested_fix": "恢复原有聚合工厂或聚合静态工厂创建入口，先完成持久化，再发布该聚合产生的领域事件，并补充创建行为测试。",
+                    "change_steps": ["恢复原有聚合工厂/静态工厂创建入口", "先保存聚合状态，再发布聚合产生的领域事件", "补充聚合创建、事件记录和持久化顺序的回归测试"],
                     "suggested_code": "",
-                    "confidence": min(max(normalize_confidence_value(item.get("confidence"), 0.0), 0.65), 0.78),
-                    "verification_needed": True,
-                    "verification_plan": "验证重点：对比原创建入口和新构造路径，检查不变量校验、领域事件记录和副作用是否被保留。",
-                    "direct_evidence": False,
+                    "confidence": min(max(normalize_confidence_value(item.get("confidence"), 0.0), 0.82), 0.92),
+                    "verification_needed": False,
+                    "verification_plan": "",
+                    "direct_evidence": True,
                     "evidence_source": "observation_signal",
                 }
             )

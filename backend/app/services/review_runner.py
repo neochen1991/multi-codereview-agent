@@ -2442,6 +2442,34 @@ class ReviewRunner(
                 "remediation_steps": ["保留异常对象和错误上下文", "不要在 catch 分支返回 success", "补充异常路径测试"],
                 "confidence": 0.88,
             },
+            "factory_bypass": {
+                "expert_id": "ddd_architecture",
+                "title": "绕过聚合工厂创建聚合根",
+                "normalized_issue_type": "aggregate_factory_bypass",
+                "category_label": "ddd_architecture",
+                "summary": "本次 diff 把聚合创建从工厂方法改成直接构造，可能绕过工厂封装的不变量校验、默认值和领域事件记录。",
+                "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
+                "violated_guidelines": ["聚合根创建必须经过领域工厂或聚合自身工厂方法，不能在应用服务中直接绕过创建语义"],
+                "rule_based_reasoning": "删除行出现聚合工厂/静态工厂入口，新增行出现直接构造调用，且同一 hunk 包含领域事件或持久化上下文，属于可由静态 diff 确认的 DDD 创建语义退化。",
+                "remediation_strategy": "恢复聚合工厂创建入口，并保持聚合创建、保存和事件发布的领域语义一致。",
+                "remediation_suggestion": "使用原有聚合工厂/静态工厂创建聚合根，不要在应用服务里直接绕过创建入口。",
+                "remediation_steps": ["恢复原有聚合工厂/静态工厂创建入口", "确认工厂内的不变量校验和领域事件记录仍被执行", "补充聚合创建语义的回归测试"],
+                "confidence": 0.9,
+            },
+            "event_ordering_risk": {
+                "expert_id": "ddd_architecture",
+                "title": "领域事件发布早于聚合持久化",
+                "normalized_issue_type": "domain_event_ordering_risk",
+                "category_label": "ddd_architecture",
+                "summary": "本次 diff 把领域事件发布放到了聚合持久化之前，事件订阅方可能先看到尚未保存成功的状态。",
+                "matched_rules": ["DDD-JDDD-001", "ARCH-JDDD-002"],
+                "violated_guidelines": ["领域事件发布必须与聚合持久化顺序保持一致，不能在持久化成功前提前发布"],
+                "rule_based_reasoning": "删除行和新增行同时出现 repository.save 与 eventBus.publish 顺序变化，且 publish 位于 save 之前，属于可由静态 diff 确认的一致性风险。",
+                "remediation_strategy": "恢复先保存聚合，再发布该聚合产生的领域事件的顺序。",
+                "remediation_suggestion": "先完成聚合持久化，再发布该聚合产生的领域事件。",
+                "remediation_steps": ["把持久化调用放回领域事件发布之前", "确认事件只发布已成功持久化的聚合状态", "补充保存失败时不发布事件的回归测试"],
+                "confidence": 0.88,
+            },
         }
 
         for file_path in review.subject.changed_files:
@@ -2463,6 +2491,8 @@ class ReviewRunner(
                     "comment_contract_unimplemented",
                     "exception_swallowed",
                     "exception_semantics_weakened",
+                    "factory_bypass",
+                    "event_ordering_risk",
                 ):
                     if signal_name not in signals:
                         continue
@@ -9520,11 +9550,11 @@ class ReviewRunner(
                 )
             if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
                 return (
-                    "export function createCourse(command: CreateCourseCommand, deps: { repository: CourseRepository, eventBus: EventBus }): Course {\n"
-                    "  const course = Course.create(command.id, command.name, command.duration);\n"
-                    "  deps.repository.save(course);\n"
-                    "  deps.eventBus.publish(course.pullDomainEvents());\n"
-                    "  return course;\n"
+                    "export function createAggregate(command: CreateAggregateCommand, deps: { factory: AggregateFactory, repository: AggregateRepository, eventBus: EventBus }): Aggregate {\n"
+                    "  const aggregate = deps.factory.create(command);\n"
+                    "  deps.repository.save(aggregate);\n"
+                    "  deps.eventBus.publish(aggregate.pullDomainEvents());\n"
+                    "  return aggregate;\n"
                     "}\n"
                 )
             return (
@@ -9561,11 +9591,11 @@ class ReviewRunner(
                 )
             if expert_id in DDD_ARCHITECTURE_EXPERT_IDS:
                 return (
-                    "def create_course(command: CreateCourseCommand, repository: CourseRepository, event_bus: EventBus) -> Course:\n"
-                    "    course = Course.create(command.id, command.name, command.duration)\n"
-                    "    repository.save(course)\n"
-                    "    event_bus.publish(course.pull_domain_events())\n"
-                    "    return course\n"
+                    "def create_aggregate(command: CreateAggregateCommand, factory: AggregateFactory, repository: AggregateRepository, event_bus: EventBus) -> Aggregate:\n"
+                    "    aggregate = factory.create(command)\n"
+                    "    repository.save(aggregate)\n"
+                    "    event_bus.publish(aggregate.pull_domain_events())\n"
+                    "    return aggregate\n"
                 )
             return (
                 "def review_guard(payload: dict) -> bool:\n"

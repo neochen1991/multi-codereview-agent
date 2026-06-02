@@ -18,6 +18,7 @@ class JavaQualitySignalExtractor:
         "exception_swallowed",
         "exception_semantics_weakened",
         "event_ordering_risk",
+        "factory_bypass",
         "loop_call_amplification",
         "comment_contract_unimplemented",
         "lock_guard_removed",
@@ -40,6 +41,7 @@ class JavaQualitySignalExtractor:
         primary_context = dict(repository_context.get("primary_context") or {})
 
         diff_excerpt = str(target_hunk.get("excerpt") or "").strip()
+        signal_diff_excerpt = self._normalize_review_diff_excerpt(diff_excerpt)
         file_local_diff = self._extract_file_local_diff(file_path, full_diff)
         current_snippet = str(current_class.get("snippet") or "").strip()
         primary_snippet = str(primary_context.get("snippet") or "").strip()
@@ -52,7 +54,7 @@ class JavaQualitySignalExtractor:
             for part in [diff_excerpt, current_snippet, primary_snippet, *related_snippets]
             if str(part).strip()
         )
-        diff_lower = diff_excerpt.lower()
+        diff_lower = signal_diff_excerpt.lower()
         combined_lower = combined.lower()
 
         signals: list[str] = []
@@ -68,7 +70,7 @@ class JavaQualitySignalExtractor:
             summary_parts.append("检测到查询语义从精确匹配放宽为模糊匹配")
             security_scope_terms = self._detect_query_authorization_scope_broadened(
                 file_path=file_path,
-                diff_excerpt=diff_excerpt,
+                diff_excerpt=signal_diff_excerpt,
                 combined_context=combined,
             )
             if security_scope_terms:
@@ -84,56 +86,56 @@ class JavaQualitySignalExtractor:
             signal_terms["unbounded_query_risk"] = query_risk_terms
             summary_parts.append("检测到分页或 limit 保护被移除")
 
-        security_guard_terms = self._detect_security_guard_removed(diff_excerpt)
+        security_guard_terms = self._detect_security_guard_removed(signal_diff_excerpt)
         if security_guard_terms:
             signals.append("security_guard_removed")
             matched_terms.extend(security_guard_terms)
             signal_terms["security_guard_removed"] = security_guard_terms
             summary_parts.append("检测到入口校验、权限或身份一致性保护被删除")
 
-        sql_injection_terms = self._detect_sql_injection_risk(diff_excerpt)
+        sql_injection_terms = self._detect_sql_injection_risk(signal_diff_excerpt)
         if sql_injection_terms:
             signals.append("sql_injection_risk")
             matched_terms.extend(sql_injection_terms)
             signal_terms["sql_injection_risk"] = sql_injection_terms
             summary_parts.append("检测到 SQL 字符串拼接或动态 SQL 注入风险")
 
-        sensitive_exposure_terms = self._detect_sensitive_data_exposure(diff_excerpt)
+        sensitive_exposure_terms = self._detect_sensitive_data_exposure(signal_diff_excerpt)
         if sensitive_exposure_terms:
             signals.append("sensitive_data_exposure")
             matched_terms.extend(sensitive_exposure_terms)
             signal_terms["sensitive_data_exposure"] = sensitive_exposure_terms
             summary_parts.append("检测到日志或响应中可能暴露敏感信息")
 
-        idempotency_terms = self._detect_idempotency_guard_removed(diff_excerpt)
+        idempotency_terms = self._detect_idempotency_guard_removed(signal_diff_excerpt)
         if idempotency_terms:
             signals.append("idempotency_guard_removed")
             matched_terms.extend(idempotency_terms)
             signal_terms["idempotency_guard_removed"] = idempotency_terms
             summary_parts.append("检测到幂等或重复处理保护被删除")
 
-        lock_guard_terms = self._detect_lock_guard_removed(diff_excerpt)
+        lock_guard_terms = self._detect_lock_guard_removed(signal_diff_excerpt)
         if lock_guard_terms:
             signals.append("lock_guard_removed")
             matched_terms.extend(lock_guard_terms)
             signal_terms["lock_guard_removed"] = lock_guard_terms
             summary_parts.append("检测到锁或并发保护被删除")
 
-        query_plan_terms = self._detect_query_plan_risk(diff_excerpt, combined)
+        query_plan_terms = self._detect_query_plan_risk(signal_diff_excerpt, combined)
         if query_plan_terms:
             signals.append("query_plan_risk")
             matched_terms.extend(query_plan_terms)
             signal_terms["query_plan_risk"] = query_plan_terms
             summary_parts.append("检测到查询条件、排序或模糊匹配可能带来索引失配与计划退化")
 
-        naming_violation = self._detect_naming_convention_violation(diff_excerpt)
+        naming_violation = self._detect_naming_convention_violation(signal_diff_excerpt)
         if naming_violation:
             signals.append("naming_convention_violation")
             matched_terms.extend(naming_violation)
             signal_terms["naming_convention_violation"] = naming_violation
             summary_parts.append("检测到常量或标识符命名退化")
 
-        magic_value_terms = self._detect_magic_value_literals(diff_excerpt)
+        magic_value_terms = self._detect_magic_value_literals(signal_diff_excerpt)
         if magic_value_terms:
             signals.append("magic_value_literal")
             matched_terms.extend(magic_value_terms)
@@ -152,7 +154,7 @@ class JavaQualitySignalExtractor:
             signal_terms["exception_swallowed"] = swallow_terms
             summary_parts.append("检测到 catch 块吞异常或异常处理被移除")
 
-        exception_semantics_terms = self._detect_exception_semantics_weakened(diff_excerpt, combined)
+        exception_semantics_terms = self._detect_exception_semantics_weakened(signal_diff_excerpt, combined)
         if exception_semantics_terms:
             signals.append("exception_semantics_weakened")
             matched_terms.extend(exception_semantics_terms)
@@ -161,21 +163,21 @@ class JavaQualitySignalExtractor:
 
         if self._detect_event_ordering_risk(diff_lower):
             signals.append("event_ordering_risk")
-            event_terms = ["publish", "save", "pullDomainEvents"]
+            event_terms = self._event_ordering_terms(signal_diff_excerpt)
             matched_terms.extend(event_terms)
             signal_terms["event_ordering_risk"] = event_terms
             summary_parts.append("检测到事件发布与持久化顺序存在风险")
 
         if self._detect_factory_bypass(diff_lower):
             signals.append("factory_bypass")
-            factory_terms = ["create", "new"]
+            factory_terms = self._factory_bypass_terms(signal_diff_excerpt)
             matched_terms.extend(factory_terms)
             signal_terms["factory_bypass"] = factory_terms
             summary_parts.append("检测到工厂方法被直接构造绕过")
 
         cross_layer_terms = self._detect_cross_layer_dependency(
             file_path=file_path,
-            diff_excerpt=diff_excerpt,
+            diff_excerpt=signal_diff_excerpt,
             combined_context=combined,
         )
         if cross_layer_terms:
@@ -185,7 +187,7 @@ class JavaQualitySignalExtractor:
             summary_parts.append("检测到分层边界被直接穿透")
 
         transactional_side_effect_terms = self._detect_transactional_side_effect(
-            diff_excerpt=diff_excerpt,
+            diff_excerpt=signal_diff_excerpt,
             combined_context=combined,
         )
         if transactional_side_effect_terms:
@@ -195,7 +197,7 @@ class JavaQualitySignalExtractor:
             summary_parts.append("检测到事务边界内混入外部副作用")
 
         configuration_behavior_terms = self._detect_configuration_behavior_coupling(
-            diff_excerpt=diff_excerpt,
+            diff_excerpt=signal_diff_excerpt,
             combined_context=combined,
         )
         if configuration_behavior_terms:
@@ -204,21 +206,21 @@ class JavaQualitySignalExtractor:
             signal_terms["configuration_behavior_coupling"] = configuration_behavior_terms
             summary_parts.append("检测到配置开关直接控制业务副作用或核心路径")
 
-        loop_amplification_terms = self._detect_loop_call_amplification(diff_excerpt, combined)
+        loop_amplification_terms = self._detect_loop_call_amplification(signal_diff_excerpt, combined)
         if loop_amplification_terms:
             signals.append("loop_call_amplification")
             matched_terms.extend(loop_amplification_terms)
             signal_terms["loop_call_amplification"] = loop_amplification_terms
             summary_parts.append("检测到循环内仓储或远程调用，批量路径可能被逐条放大")
 
-        bulk_processing_terms = self._detect_bulk_processing_risk(diff_excerpt, combined)
+        bulk_processing_terms = self._detect_bulk_processing_risk(signal_diff_excerpt, combined)
         if bulk_processing_terms:
             signals.append("bulk_processing_risk")
             matched_terms.extend(bulk_processing_terms)
             signal_terms["bulk_processing_risk"] = bulk_processing_terms
             summary_parts.append("检测到集合/批处理路径缺少批量边界，可能逐条持久化或逐条外调")
 
-        comment_contract_terms = self._detect_comment_contract_unimplemented(diff_excerpt, combined)
+        comment_contract_terms = self._detect_comment_contract_unimplemented(signal_diff_excerpt, combined)
         if comment_contract_terms:
             signals.append("comment_contract_unimplemented")
             matched_terms.extend(comment_contract_terms)
@@ -283,6 +285,31 @@ class JavaQualitySignalExtractor:
             return full_diff
         return ""
 
+    def _normalize_review_diff_excerpt(self, diff_excerpt: str) -> str:
+        """Convert rendered hunk snippets back to git-like +/- lines for detectors."""
+
+        normalized_lines: list[str] = []
+        for raw_line in str(diff_excerpt or "").splitlines():
+            line = str(raw_line or "")
+            stripped = line.lstrip()
+            if not stripped:
+                continue
+            rendered_deleted = re.match(r"^-\s*\|\s*(.*)$", stripped)
+            if rendered_deleted:
+                normalized_lines.append(f"-{rendered_deleted.group(1)}".rstrip())
+                continue
+            rendered = re.match(r"^(?:(\d+)\s*\|\s*)?([+\- ])\s*(.*)$", stripped)
+            if rendered:
+                marker = rendered.group(2)
+                content = rendered.group(3)
+                normalized_lines.append(f"{marker}{content}".rstrip())
+                continue
+            if stripped.startswith(("@@", "diff --git ", "index ", "+++", "---", "+", "-")):
+                normalized_lines.append(stripped)
+                continue
+            normalized_lines.append(f" {stripped}")
+        return "\n".join(normalized_lines)
+
     def _build_observations(
         self,
         *,
@@ -305,6 +332,20 @@ class JavaQualitySignalExtractor:
                 target_hunk=target_hunk,
                 repository_context=repository_context,
             )
+            if signal_name == "factory_bypass":
+                line_start = self._locate_line_by_patterns(
+                    target_hunk,
+                    (r"\bnew\s+[A-Za-z_][A-Za-z0-9_]*\s*\(",),
+                    line_start,
+                    added_only=True,
+                )
+            elif signal_name == "event_ordering_risk":
+                line_start = self._locate_line_by_patterns(
+                    target_hunk,
+                    (r"\beventBus\.publish\s*\(", r"\brepository\.save\s*\("),
+                    line_start,
+                    added_only=False,
+                )
             if signal_name == "exception_swallowed":
                 line_start = self._locate_exception_swallowed_line_start(
                     target_hunk=target_hunk,
@@ -362,6 +403,49 @@ class JavaQualitySignalExtractor:
                 str(item.get("observation_id") or ""),
             ),
         )
+
+    def _locate_line_by_patterns(
+        self,
+        target_hunk: dict[str, Any],
+        patterns: tuple[str, ...],
+        fallback: int,
+        *,
+        added_only: bool,
+    ) -> int:
+        current_new_line = int(target_hunk.get("start_line") or fallback or 1)
+        for raw_line in str(target_hunk.get("excerpt") or "").splitlines():
+            stripped = str(raw_line or "").lstrip()
+            if stripped.startswith("@@"):
+                start_line, _line_count = self._parse_hunk_new_file_range(stripped)
+                if start_line is not None:
+                    current_new_line = start_line
+                continue
+
+            marker = ""
+            content = stripped
+            rendered_deleted = re.match(r"^-\s*\|\s*(.*)$", stripped)
+            rendered_line = re.match(r"^(?:(\d+)\s*\|\s*)?([+\- ])\s*(.*)$", stripped)
+            if rendered_deleted:
+                marker = "-"
+                content = rendered_deleted.group(1)
+            elif rendered_line:
+                if rendered_line.group(1):
+                    current_new_line = int(rendered_line.group(1))
+                marker = rendered_line.group(2)
+                content = rendered_line.group(3)
+            elif stripped.startswith(("+", "-", " ")):
+                marker = stripped[0]
+                content = stripped[1:]
+
+            is_removed = marker == "-"
+            is_added = marker == "+"
+            if (not added_only or is_added) and not is_removed and any(
+                re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns
+            ):
+                return current_new_line
+            if not is_removed:
+                current_new_line += 1
+        return int(fallback or 1)
 
     def _observation_profile(self, signal_name: str) -> dict[str, object]:
         profiles: dict[str, dict[str, object]] = {
@@ -464,17 +548,18 @@ class JavaQualitySignalExtractor:
                 "tags": ["exception", "semantics"],
             },
             "event_ordering_risk": {
-                "kind": "state_and_event_ordering_change",
+                "kind": "domain_event_ordering_risk",
                 "summary": "检测到事件发布与持久化顺序变化现象：{terms}",
                 "risk_hints": ["事件顺序风险", "一致性风险", "领域事件时序异常"],
-                "confidence": 0.78,
+                "confidence": 0.86,
+                "tags": ["domain-event", "ordering", "ddd"],
             },
             "factory_bypass": {
-                "kind": "construction_path_changed",
-                "summary": "检测到对象构造路径变化现象：{terms}",
+                "kind": "aggregate_factory_bypass",
+                "summary": "检测到聚合创建从工厂方法退化为直接构造：{terms}",
                 "risk_hints": ["工厂约束绕过", "不变量丢失", "领域建模退化"],
-                "confidence": 0.73,
-                "tags": ["construction", "domain-model"],
+                "confidence": 0.88,
+                "tags": ["construction", "domain-model", "ddd"],
             },
             "cross_layer_dependency": {
                 "kind": "cross_layer_dependency",
@@ -1019,11 +1104,50 @@ class JavaQualitySignalExtractor:
         added_save_pos = diff_lower.rfind("repository.save(")
         return bool(removed_save and added_save and publish_pos != -1 and added_save_pos != -1 and publish_pos < added_save_pos)
 
+    def _event_ordering_terms(self, diff_excerpt: str) -> list[str]:
+        terms: list[str] = []
+        for token in ("eventBus.publish", "repository.save", "pullDomainEvents"):
+            if token.lower() in str(diff_excerpt or "").lower():
+                terms.append(token)
+        return self._dedupe(terms or ["eventBus.publish", "repository.save"])[:4]
+
     def _detect_factory_bypass(self, diff_lower: str) -> bool:
-        return bool(
-            re.search(r"^-.*\.[a-z_]*create\s*\(", diff_lower, flags=re.MULTILINE)
-            and re.search(r"^\+.*\bnew\s+[a-z_][a-z0-9_]*\s*\(", diff_lower, flags=re.MULTILINE)
+        removed_factory_call = re.search(
+            r"^-.*\b[a-z_][a-z0-9_]*\.[a-z_]*create\s*\(",
+            diff_lower,
+            flags=re.MULTILINE,
         )
+        added_constructor_call = re.search(
+            r"^\+.*\bnew\s+[a-z_][a-z0-9_]*\s*\(",
+            diff_lower,
+            flags=re.MULTILINE,
+        )
+        aggregate_context = any(
+            token in diff_lower
+            for token in (
+                "domainevent",
+                "domain event",
+                "aggregate",
+                "coursecreated",
+                "pullDomainEvents".lower(),
+                "eventbus.publish",
+            )
+        )
+        return bool(removed_factory_call and added_constructor_call and aggregate_context)
+
+    def _factory_bypass_terms(self, diff_excerpt: str) -> list[str]:
+        terms: list[str] = []
+        for pattern in (
+            r"^-.*?\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_]*create)\s*\(",
+            r"^\+.*?\bnew\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ):
+            for match in re.finditer(pattern, str(diff_excerpt or ""), flags=re.MULTILINE):
+                value = str(match.group(1) or "").strip()
+                if value and pattern.startswith(r"^\+"):
+                    value = f"new {value}"
+                if value:
+                    terms.append(value)
+        return self._dedupe(terms or ["factory.create", "new Aggregate"])[:4]
 
     def _detect_cross_layer_dependency(
         self,
