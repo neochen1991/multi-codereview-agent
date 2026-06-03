@@ -138,6 +138,9 @@ def test_java_benchmark_manifest_covers_required_quality_regressions() -> None:
         "criteria_query_semantics",
         "batch_limit_removed",
         "compile_error",
+        "mq_idempotency_removed",
+        "redis_cache_ttl_missing",
+        "high_risk_change_without_test",
     }
 
 
@@ -186,9 +189,15 @@ def test_java_ddd_fixture_repo_is_created_when_fixture_mode_enabled(tmp_path: Pa
     course_creator = cache_path / "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"
     consumer = cache_path / "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
     criteria = cache_path / "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java"
+    mq_consumer = cache_path / "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/CourseEnrollmentConsumer.java"
+    cache_warmer = cache_path / "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/CourseCacheWarmer.java"
+    payment_test = cache_path / "src/mooc/test/tv/codely/mooc/courses/application/payment/PaymentSettlementServiceTest.java"
     assert "Course course = Course.create(id, name, duration);" in course_creator.read_text(encoding="utf-8")
     assert "LIMIT :chunk" in consumer.read_text(encoding="utf-8")
     assert "builder.equal" in criteria.read_text(encoding="utf-8")
+    assert "processedMessages.exists" in mq_consumer.read_text(encoding="utf-8")
+    assert "Duration.ofMinutes(30)" in cache_warmer.read_text(encoding="utf-8")
+    assert "settlesOnlyFirstPage" in payment_test.read_text(encoding="utf-8")
 
 
 def test_materialize_java_ddd_case_uses_local_fixture_and_graph_metadata(tmp_path: Path, monkeypatch) -> None:

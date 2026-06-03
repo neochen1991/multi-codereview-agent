@@ -24,7 +24,7 @@ DEFAULT_CACHE_ROOT = Path("/tmp/java-review-eval-cache")
 DEFAULT_WORKSPACE_ROOT = Path("/tmp/java-review-eval-workspaces")
 DEFAULT_API_BASE = "http://127.0.0.1:8011/api"
 FIXTURE_MARKER_FILE = ".codereview-fixture.json"
-FIXTURE_VERSION = 3
+FIXTURE_VERSION = 4
 
 from eval_review_quality import evaluate_case as evaluate_quality_case  # noqa: E402
 from validate_windows_review_quality import build_windows_review_quality_report  # noqa: E402
@@ -145,6 +145,9 @@ REQUIRED_BENCHMARK_PROBLEM_COVERAGE: dict[str, tuple[str, ...]] = {
     "criteria_query_semantics": ("equal", "like", "criteria"),
     "batch_limit_removed": ("LIMIT", "全表"),
     "compile_error": ("compile", "编译", "semicolon"),
+    "mq_idempotency_removed": ("mq", "ack", "幂等"),
+    "redis_cache_ttl_missing": ("redis", "ttl", "缓存"),
+    "high_risk_change_without_test": ("测试", "覆盖", "高风险"),
 }
 
 
@@ -859,6 +862,146 @@ public final class SettlementResult {
     )
     _write_fixture_file(
         repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/CourseEnrollmentConsumer.java",
+        """package tv.codely.mooc.courses.infrastructure.mq;
+
+import tv.codely.mooc.courses.domain.CourseEnrollmentRepository;
+import tv.codely.mooc.courses.domain.StudentId;
+
+public final class CourseEnrollmentConsumer {
+    private final CourseEnrollmentRepository repository;
+    private final ProcessedMessageRepository processedMessages;
+
+    public CourseEnrollmentConsumer(
+        CourseEnrollmentRepository repository,
+        ProcessedMessageRepository processedMessages
+    ) {
+        this.repository = repository;
+        this.processedMessages = processedMessages;
+    }
+
+    public void consume(EnrollmentMessage message, Acknowledgement acknowledgement) {
+        if (processedMessages.exists(message.messageId())) {
+            acknowledgement.ack();
+            return;
+        }
+        repository.save(message.toEnrollment(new StudentId(message.studentId())));
+        processedMessages.markProcessed(message.messageId());
+        acknowledgement.ack();
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/EnrollmentMessage.java",
+        """package tv.codely.mooc.courses.infrastructure.mq;
+
+import tv.codely.mooc.courses.domain.CourseEnrollment;
+import tv.codely.mooc.courses.domain.CourseId;
+import tv.codely.mooc.courses.domain.StudentId;
+
+public final class EnrollmentMessage {
+    public String messageId() {
+        return "message-1";
+    }
+
+    public String studentId() {
+        return "student-1";
+    }
+
+    public CourseEnrollment toEnrollment(StudentId studentId) {
+        return CourseEnrollment.create(new CourseId("course-1"), studentId);
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/Acknowledgement.java",
+        """package tv.codely.mooc.courses.infrastructure.mq;
+
+public interface Acknowledgement {
+    void ack();
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/ProcessedMessageRepository.java",
+        """package tv.codely.mooc.courses.infrastructure.mq;
+
+public interface ProcessedMessageRepository {
+    boolean exists(String messageId);
+    void markProcessed(String messageId);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/CourseCacheWarmer.java",
+        """package tv.codely.mooc.courses.infrastructure.cache;
+
+import java.time.Duration;
+import java.util.List;
+import tv.codely.mooc.courses.domain.CourseId;
+
+public final class CourseCacheWarmer {
+    private final RedisClient redisClient;
+    private final CourseReadRepository repository;
+
+    public CourseCacheWarmer(RedisClient redisClient, CourseReadRepository repository) {
+        this.redisClient = redisClient;
+        this.repository = repository;
+    }
+
+    public void warmPopularCourses(List<CourseId> courseIds) {
+        for (CourseId courseId : courseIds) {
+            redisClient.set("course:" + courseId.value(), repository.snapshot(courseId), Duration.ofMinutes(30));
+        }
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/RedisClient.java",
+        """package tv.codely.mooc.courses.infrastructure.cache;
+
+import java.time.Duration;
+
+public interface RedisClient {
+    void set(String key, String value, Duration ttl);
+    void set(String key, String value);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/CourseReadRepository.java",
+        """package tv.codely.mooc.courses.infrastructure.cache;
+
+import tv.codely.mooc.courses.domain.CourseId;
+
+public interface CourseReadRepository {
+    String snapshot(CourseId courseId);
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
+        "src/mooc/test/tv/codely/mooc/courses/application/payment/PaymentSettlementServiceTest.java",
+        """package tv.codely.mooc.courses.application.payment;
+
+public final class PaymentSettlementServiceTest {
+    public void settlesOnlyFirstPage() {
+        // protects paginated settlement behavior
+    }
+}
+""",
+    )
+    _write_fixture_file(
+        repo_path,
         FIXTURE_MARKER_FILE,
         json.dumps(
             {
@@ -1078,6 +1221,20 @@ def _apply_patch_operations(repo_dir: Path, operations: tuple[PatchOperation, ..
     return tuple(changed_files)
 
 
+def _patch_operations_available(repo_dir: Path, operations: tuple[PatchOperation, ...]) -> bool:
+    for operation in operations:
+        file_path = repo_dir / operation.path
+        if not file_path.exists() or not file_path.is_file():
+            return False
+        try:
+            original = file_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if operation.search not in original:
+            return False
+    return True
+
+
 def build_git_diff(repo_dir: Path, changed_files: tuple[str, ...]) -> str:
     if not changed_files:
         raise ValueError("changed_files cannot be empty")
@@ -1096,6 +1253,10 @@ def materialize_case(
 ) -> MaterializedCase:
     repository = repositories[case.repo_key]
     source_repo = ensure_repo_cache(repository, cache_root)
+    if repository.repo_key == "java-ddd-example" and not _patch_operations_available(source_repo, case.patch_operations):
+        fixture_repo = cache_root / repository.repo_key
+        _create_java_ddd_example_fixture_repo(fixture_repo)
+        source_repo = fixture_repo
     workspace_root.mkdir(parents=True, exist_ok=True)
     target_repo = workspace_root / case.case_id
     if target_repo.exists():

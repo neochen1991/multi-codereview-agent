@@ -57,6 +57,8 @@ class IssueJudgeService:
         fallback = {
             "final_verdict": "abstain",
             "confidence_adjustment": 0.0,
+            "evidence_score": 0.0,
+            "suggested_action": "keep_existing_rule_result",
             "reason": "llm_judge_unavailable",
         }
         resolution = self._llm.resolve_main_agent(runtime)
@@ -78,11 +80,17 @@ class IssueJudgeService:
         )
         payload = self._parse_json_payload(result.text)
         verdict = str(payload.get("final_verdict") or "abstain").strip().lower()
-        if verdict not in {"accept", "reject", "needs_human", "needs_verification", "abstain"}:
+        if verdict not in {"accept", "reject", "downgrade", "needs_human", "needs_verification", "abstain"}:
             verdict = "abstain"
+        suggested_action = str(payload.get("suggested_action") or "").strip().lower()
+        allowed_actions = {"publish", "reject", "downgrade", "needs_human", "keep_existing_rule_result"}
+        if suggested_action not in allowed_actions:
+            suggested_action = self._default_suggested_action(verdict)
         return {
             "final_verdict": verdict,
             "confidence_adjustment": self._coerce_adjustment(payload.get("confidence_adjustment")),
+            "evidence_score": self._coerce_evidence_score(payload.get("evidence_score")),
+            "suggested_action": suggested_action,
             "reason": str(payload.get("reason") or result.error or "llm_judge_abstained").strip(),
             "trigger_reason": self._build_trigger_reason(issue, runtime, quality_profiles or {}),
             "provider": result.provider,
@@ -127,6 +135,7 @@ class IssueJudgeService:
             "判定规则：\n"
             "- accept: 证据足够，问题成立\n"
             "- reject: 证据明显不足或结论明显不成立\n"
+            "- downgrade: 问题可能存在但当前证据不足，不应作为正式有效问题发布\n"
             "- needs_human: 风险较高，且当前不适合自动裁掉\n"
             "- needs_verification: 有一定风险，但证据不够硬\n"
             "- abstain: 无法可靠判断\n"
@@ -135,7 +144,7 @@ class IssueJudgeService:
             "- 对 direct_defect，除非证据与结论明显矛盾，否则优先 accept 或 needs_human。\n"
             "- 对 risk_hypothesis，如果主要依赖 assumptions，优先 needs_verification。\n"
             "- 你不能输出 title、summary、remediation_suggestion、suggested_code 等改写字段；即使输出也会被系统忽略。\n"
-            "输出 JSON: {\"final_verdict\":\"...\",\"confidence_adjustment\":-0.2~0.2,\"reason\":\"...\"}\n\n"
+            "输出 JSON: {\"final_verdict\":\"accept|reject|downgrade|needs_human|needs_verification|abstain\",\"confidence_adjustment\":-0.2~0.2,\"evidence_score\":0.0~1.0,\"suggested_action\":\"publish|reject|downgrade|needs_human|keep_existing_rule_result\",\"reason\":\"...\"}\n\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
         )
 
@@ -164,6 +173,24 @@ class IssueJudgeService:
         except (TypeError, ValueError):
             adjustment = 0.0
         return max(-0.25, min(0.1, round(adjustment, 2)))
+
+    def _coerce_evidence_score(self, value: object) -> float:
+        try:
+            score = float(value or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        return max(0.0, min(1.0, round(score, 3)))
+
+    def _default_suggested_action(self, verdict: str) -> str:
+        if verdict == "accept":
+            return "publish"
+        if verdict == "reject":
+            return "reject"
+        if verdict in {"downgrade", "needs_verification", "abstain"}:
+            return "downgrade"
+        if verdict == "needs_human":
+            return "needs_human"
+        return "keep_existing_rule_result"
 
     def _build_trigger_reason(
         self,

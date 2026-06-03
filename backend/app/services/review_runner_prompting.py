@@ -426,6 +426,32 @@ class ReviewRunnerPromptingMixin:
         )
         lines = [
             "[SYSTEM RULES]",
+            self._build_prompt_contract_block(
+                phase="rule_guided_expert_scan",
+                objective="结合专家画像、语言通用规范、RULE_CARDS、TARGET_HUNKS 和 CONTEXT_PACKET，高召回发现候选问题并补齐可验证证据草案。",
+                non_goals=[
+                    "不要输出最终有效问题清单",
+                    "不要把工具观察或风险候选直接当成已确认问题",
+                    "不要编造未提供的产品规则 ID",
+                    "不要把多个文件或多个根因合并成一条 candidate_finding",
+                ],
+                allowed_evidence=[
+                    "EXPERT_PROFILE",
+                    "RULE_CARDS",
+                    "QUALITY_INPUTS",
+                    "TARGET_HUNKS",
+                    "CONTEXT_PACKET",
+                    "tool_observations",
+                    "risk_candidates",
+                ],
+                output_schema={
+                    "rule_check_results": "逐条覆盖 RULE_CARDS 或 GENERAL-EXPERT-CHECKS",
+                    "candidate_findings": "每条绑定 rule_id、target_id、file_path、line、evidence",
+                    "context_requests": "缺上下文但已有当前代码证据时填写",
+                    "self_check": "必须声明 checked_all_rules 和 used_context_files",
+                },
+                failure_policy="缺少 rule_check_results/candidate_findings/context_requests/self_check 会被系统拒收并触发结构化修复重试。",
+            ),
             "你是代码审查专家。只能基于 EXPERT_PROFILE、DIFF、CONTEXT_PACKET、RULE_CARDS 判断，不要编造缺失上下文。",
             "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；绑定规范和专家画像都要参与检视，候选结果取并集。",
             "必须逐条检查 RULE_CARDS。每条适用规则都要输出 rule_check_results。",

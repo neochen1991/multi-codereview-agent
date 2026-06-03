@@ -6442,7 +6442,7 @@ class ReviewRunner(
         lowered_user = user_text.lower()
         lowered_system = system_text.lower()
         if stage == "expert_general_profile_scan":
-            if "[custom_rule_batch]" in lowered_user or "custom_rule_batch" in lowered_user:
+            if "[custom_rule_batch]" in lowered_user:
                 conflicts.append("general_scan_contains_custom_rule_batch")
             if "只按本批 custom_rule_batch" in lowered_system:
                 conflicts.append("general_system_scope_conflicts_with_custom_batch")
@@ -6466,6 +6466,40 @@ class ReviewRunner(
             "system_prompt_chars": len(system_text),
             "user_prompt_chars": len(user_text),
         }
+
+    def _build_prompt_contract_block(
+        self,
+        *,
+        phase: str,
+        objective: str,
+        non_goals: list[str],
+        allowed_evidence: list[str],
+        output_schema: dict[str, object],
+        failure_policy: str,
+    ) -> str:
+        """Render a machine-readable prompt contract before phase-specific inputs.
+
+        Weak-instruction-following models behave better when the task boundary is
+        explicit and repeated as data instead of mixed into long prose.
+        """
+
+        return "\n".join(
+            [
+                "[PROMPT_CONTRACT]",
+                json.dumps(
+                    {
+                        "phase": phase,
+                        "objective": objective,
+                        "non_goals": non_goals,
+                        "allowed_evidence": allowed_evidence,
+                        "output_schema": output_schema,
+                        "failure_policy": failure_policy,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            ]
+        )
 
     def _llm_message_metadata(self, llm_result) -> dict[str, object]:
         metadata = {
@@ -6785,6 +6819,23 @@ class ReviewRunner(
         prepass_prompt = "\n".join(
             [
                 "[RULE_CHECK_PREPASS_ONLY]",
+                self._build_prompt_contract_block(
+                    phase="rule_check_prepass",
+                    objective="只逐条判断 REQUIRED_RULE_IDS 在 TARGET_HUNKS 和 COMPACT_CONTEXT 中的检查状态。",
+                    non_goals=[
+                        "不要发现或撰写 candidate_findings",
+                        "不要执行专家通用规范扫描",
+                        "不要执行专家绑定规则批量扫描之外的其他任务",
+                    ],
+                    allowed_evidence=["RULE_CARDS", "TARGET_HUNKS", "COMPACT_CONTEXT"],
+                    output_schema={
+                        "rule_check_results": "必须覆盖 REQUIRED_RULE_IDS",
+                        "candidate_findings": "必须是空数组",
+                        "context_requests": "缺上下文时填写",
+                        "self_check": "必须声明 checked_all_rules",
+                    },
+                    failure_policy="缺字段或 candidate_findings 非空会被系统拒收并进入修复重试。",
+                ),
                 "第一阶段：只做规则逐条检查，不要输出代码问题结论。",
                 "你必须基于 RULE_CARDS、TARGET_HUNKS、COMPACT_CONTEXT 判断每条 REQUIRED_RULE_IDS 的状态。",
                 "candidate_findings 必须输出空数组；只允许输出 rule_check_results、context_requests、self_check。",
@@ -6819,7 +6870,7 @@ class ReviewRunner(
             stage="expert_rule_check_prepass",
             system_prompt=system_prompt,
             user_prompt=prepass_prompt,
-            required_sections=["[RULE_CHECK_PREPASS_ONLY]", "[RULE_CARDS]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]"],
+            required_sections=["[RULE_CHECK_PREPASS_ONLY]", "[PROMPT_CONTRACT]", "[RULE_CARDS]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]"],
             forbidden_sections=["[EMPTY_CANDIDATE_RETRY]", "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[CUSTOM_RULE_BATCH]"],
             required_rule_ids=required_rule_ids,
             scope="rule checks only; candidate_findings must stay empty",
@@ -7211,6 +7262,31 @@ class ReviewRunner(
         prompt = "\n".join(
             [
                 "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]",
+                self._build_prompt_contract_block(
+                    phase="general_expert_scan",
+                    objective="按专家画像、专家职责、专家审视规范和代码语言通用规范全量扫描 TARGET_HUNKS，输出专家职责范围内的真实风险候选。",
+                    non_goals=[
+                        "不要检查 CUSTOM_RULE_BATCH 或专家绑定产品规则",
+                        "不要编造产品规则 ID",
+                        "不要输出最终有效问题清单",
+                        "不要把工具观察当成已确认问题",
+                    ],
+                    allowed_evidence=[
+                        "EXPERT_PROFILE",
+                        "LANGUAGE_GUIDELINES",
+                        "TARGET_HUNKS",
+                        "COMPACT_CONTEXT",
+                        "tool_observations",
+                        "risk_candidates",
+                    ],
+                    output_schema={
+                        "rule_check_results": "只使用 GENERAL-EXPERT-CHECKS",
+                        "candidate_findings": "只输出专家通用扫描发现的候选",
+                        "context_requests": "缺上下文但已有代码证据时填写",
+                        "self_check": "必须说明已按专家职责扫描全部 TARGET_HUNKS",
+                    },
+                    failure_policy="候选为空时必须在 self_check.unverified_assumptions 说明逐 hunk 无问题原因；缺字段会被系统拒收。",
+                ),
                 "本阶段只按专家画像、专家职责、专家审视规范和代码语言通用规范做通用检视。",
                 "它和专家绑定规范扫描相互补充，最终候选取并集并由收敛层去重。",
                 "如果存在当前变更代码位置和专家职责范围内的真实风险，必须输出 candidate_findings，rule_id 使用 GENERAL-EXPERT-CHECKS。",
@@ -7278,7 +7354,7 @@ class ReviewRunner(
             stage="expert_general_profile_scan",
             system_prompt=system_prompt,
             user_prompt=prompt,
-            required_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+            required_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]", "[PROMPT_CONTRACT]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
             forbidden_sections=["[CUSTOM_RULE_BATCH]"],
             required_rule_ids=["GENERAL-EXPERT-CHECKS"],
             scope="general expert profile and language-guideline scan",
@@ -7416,6 +7492,30 @@ class ReviewRunner(
             custom_prompt = "\n".join(
                 [
                     "[CUSTOM_BOUND_RULE_REVIEW_ONLY]",
+                    self._build_prompt_contract_block(
+                        phase="custom_rule_batch_scan",
+                        objective="只按 CUSTOM_RULE_BATCH 中的专家绑定/产品/仓库结构化 RuleCard 逐条校验 TARGET_HUNKS。",
+                        non_goals=[
+                            "不要执行专家画像通用扫描",
+                            "不要输出 GENERAL-EXPERT-CHECKS",
+                            "不要引用本批 CUSTOM_RULE_BATCH 之外的规则 ID",
+                            "不要输出最终有效问题清单",
+                        ],
+                        allowed_evidence=[
+                            "CUSTOM_RULE_BATCH",
+                            "TARGET_HUNKS",
+                            "COMPACT_CONTEXT",
+                            "tool_observations",
+                            "risk_candidates",
+                        ],
+                        output_schema={
+                            "rule_check_results": "必须覆盖本批 REQUIRED_RULE_IDS",
+                            "candidate_findings": "只输出违反本批 RuleCard 的候选",
+                            "context_requests": "规则所需上下文缺失时填写",
+                            "self_check": "必须声明 checked_all_rules",
+                        },
+                        failure_policy="缺少本批规则检查矩阵、输出本批外 rule_id 或缺字段会被系统拒收。",
+                    ),
                     "本阶段只做专家绑定/产品/仓库自定义规范校验，和通用规范扫描相互补充，最终结果取并集。",
                     "必须严格逐条检查 CUSTOM_RULE_BATCH 中的规则，并全量扫描 TARGET_HUNKS 中的所有目标 hunk。",
                     "不要因为主审或规则预筛没有发现问题就跳过本阶段；本阶段以 CUSTOM_RULE_BATCH 为准重新校验。",
@@ -7483,7 +7583,7 @@ class ReviewRunner(
                 stage="expert_custom_rule_batch_scan",
                 system_prompt=system_prompt,
                 user_prompt=custom_prompt,
-                required_sections=["[CUSTOM_BOUND_RULE_REVIEW_ONLY]", "[CUSTOM_RULE_BATCH]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+                required_sections=["[CUSTOM_BOUND_RULE_REVIEW_ONLY]", "[PROMPT_CONTRACT]", "[CUSTOM_RULE_BATCH]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
                 forbidden_sections=["[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]"],
                 required_rule_ids=required_rule_ids,
                 scope="custom bound RuleCard batch scan only",

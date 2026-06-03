@@ -464,6 +464,107 @@
       }
     },
     {
+      "case_id": "java-ddd-mq-consumer-idempotency-ack-regression",
+      "repo_key": "java-ddd-example",
+      "category": "mq",
+      "scenario": "Course enrollment MQ consumer removes idempotency guard and acknowledges before durable processing",
+      "business_context": "课程报名消息消费端为了降低重复消息处理成本，删除了 messageId 幂等校验，并把 ack 提前到数据库写入之前。",
+      "tags": ["ddd", "mq", "ack", "idempotency", "consumer"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/CourseEnrollmentConsumer.java",
+          "description": "Remove idempotency guard and acknowledge before repository write.",
+          "search": "    public void consume(EnrollmentMessage message, Acknowledgement acknowledgement) {\n        if (processedMessages.exists(message.messageId())) {\n            acknowledgement.ack();\n            return;\n        }\n        repository.save(message.toEnrollment(new StudentId(message.studentId())));\n        processedMessages.markProcessed(message.messageId());\n        acknowledgement.ack();\n    }\n",
+          "replace": "    public void consume(EnrollmentMessage message, Acknowledgement acknowledgement) {\n        acknowledgement.ack();\n        repository.save(message.toEnrollment(new StudentId(message.studentId())));\n    }\n"
+        }
+      ],
+      "expected": {
+        "required_experts": ["mq_analysis", "correctness_business", "test_verification"],
+        "rule_ids_any_of": ["MQ-IDEMPOTENCY-001", "MQ-ACK-001", "CORR-JDDD-001"],
+        "finding_keywords": ["mq", "ack", "幂等", "messageId", "processedMessages"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/CourseEnrollmentConsumer.java",
+            "keywords": ["ack", "repository.save"]
+          },
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/infrastructure/mq/CourseEnrollmentConsumer.java",
+            "keywords": ["messageId", "幂等"]
+          }
+        ],
+        "min_findings": 2,
+        "min_issues": 1
+      }
+    },
+    {
+      "case_id": "java-ddd-redis-cache-ttl-removed",
+      "repo_key": "java-ddd-example",
+      "category": "redis",
+      "scenario": "Course cache warmer removes Redis TTL from hot course snapshots",
+      "business_context": "热门课程缓存预热为了减少过期重建成本，把带 TTL 的 Redis 写入改成永久 key，增加缓存与数据库长期不一致风险。",
+      "tags": ["redis", "cache", "ttl", "consistency"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/CourseCacheWarmer.java",
+          "description": "Remove TTL when writing course snapshots into Redis.",
+          "search": "            redisClient.set(\"course:\" + courseId.value(), repository.snapshot(courseId), Duration.ofMinutes(30));",
+          "replace": "            redisClient.set(\"course:\" + courseId.value(), repository.snapshot(courseId));"
+        }
+      ],
+      "expected": {
+        "required_experts": ["redis_analysis", "performance_reliability", "test_verification"],
+        "rule_ids_any_of": ["REDIS-TTL-001", "CACHE-CONSISTENCY-001"],
+        "finding_keywords": ["redis", "ttl", "缓存", "Duration.ofMinutes", "一致"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/infrastructure/cache/CourseCacheWarmer.java",
+            "keywords": ["redis", "ttl"]
+          }
+        ],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
+      "case_id": "java-ddd-high-risk-payment-change-without-test",
+      "repo_key": "java-ddd-example",
+      "category": "test",
+      "scenario": "Payment settlement high-risk behavior changes while its regression test protection is removed",
+      "business_context": "支付结算逻辑同时放宽查询边界并删除分页行为测试，属于高风险交易链路缺少测试覆盖保护。",
+      "tags": ["test", "coverage", "payment", "high-risk", "regression"],
+      "patch_operations": [
+        {
+          "path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+          "description": "Broaden settlement query without keeping page-bound behavior.",
+          "search": "        List<Payment> payments = paymentRepository.findPendingByCourse(courseId, PageRequest.of(0, 200));",
+          "replace": "        List<Payment> payments = paymentRepository.searchPendingByCourseLike(courseId.value());"
+        },
+        {
+          "path": "src/mooc/test/tv/codely/mooc/courses/application/payment/PaymentSettlementServiceTest.java",
+          "description": "Remove the regression test that protected paginated settlement behavior.",
+          "search": "    public void settlesOnlyFirstPage() {\n        // protects paginated settlement behavior\n    }\n",
+          "replace": ""
+        }
+      ],
+      "expected": {
+        "required_experts": ["test_verification", "database_analysis", "correctness_business"],
+        "rule_ids_any_of": ["TEST-COVERAGE-001", "PERF-SQL-001"],
+        "finding_keywords": ["测试", "覆盖", "高风险", "PageRequest", "searchPendingByCourseLike"],
+        "problem_markers": [
+          {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/payment/PaymentSettlementService.java",
+            "keywords": ["searchPendingByCourseLike", "PageRequest"]
+          },
+          {
+            "file_path": "src/mooc/test/tv/codely/mooc/courses/application/payment/PaymentSettlementServiceTest.java",
+            "keywords": ["测试", "覆盖"]
+          }
+        ],
+        "min_findings": 1,
+        "min_issues": 0
+      }
+    },
+    {
       "case_id": "java-ddd-operational-safety-composite-regression",
       "repo_key": "java-ddd-example",
       "category": "composite",

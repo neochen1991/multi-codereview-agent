@@ -134,6 +134,8 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
                 "applied": True,
                 "final_verdict": str(llm_judge_result.get("final_verdict") or ""),
                 "confidence_adjustment": float(llm_judge_result.get("confidence_adjustment") or 0.0),
+                "evidence_score": float(llm_judge_result.get("evidence_score") or 0.0),
+                "suggested_action": str(llm_judge_result.get("suggested_action") or ""),
                 "trigger_reason": str(llm_judge_result.get("trigger_reason") or ""),
                 "reason": str(llm_judge_result.get("reason") or ""),
             }
@@ -141,9 +143,11 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
             if verdict == "reject":
                 issue_filter_decisions.append(_build_llm_reject_filter_decision(next_issue, llm_judge_result))
                 continue
-            if verdict == "needs_verification":
+            if verdict in {"needs_verification", "downgrade"}:
                 next_issue["status"] = "needs_verification"
-                next_issue["resolution"] = "llm_judge_needs_verification"
+                next_issue["resolution"] = (
+                    "llm_judge_downgraded" if verdict == "downgrade" else "llm_judge_needs_verification"
+                )
                 next_issue["needs_human"] = False
                 merged_issues.append(next_issue)
                 continue

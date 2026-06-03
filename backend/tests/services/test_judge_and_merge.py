@@ -584,6 +584,8 @@ def test_judge_llm_result_cannot_rewrite_issue_details(monkeypatch):
                 "{"
                 '"final_verdict":"accept",'
                 '"confidence_adjustment":0.05,'
+                '"evidence_score":0.91,'
+                '"suggested_action":"publish",'
                 '"reason":"证据成立",'
                 '"title":"错误改写后的标题",'
                 '"summary":"错误改写后的说明",'
@@ -641,6 +643,8 @@ def test_judge_llm_result_cannot_rewrite_issue_details(monkeypatch):
     assert issue["llm_judge_result"] == {
         "final_verdict": "accept",
         "confidence_adjustment": 0.05,
+        "evidence_score": 0.91,
+        "suggested_action": "publish",
         "reason": "证据成立",
         "trigger_reason": "low_confidence<=0.78",
         "provider": "test",
@@ -745,6 +749,62 @@ def test_judge_uses_llm_judge_for_cross_file_contract_even_above_threshold(monke
     assert "cross_file_contract" in issue["llm_judge_result"]["trigger_reason"]
     assert issue["status"] == "needs_verification"
     assert issue["resolution"] == "llm_judge_needs_verification"
+
+
+def test_judge_llm_downgrade_does_not_publish_as_formal_issue(monkeypatch):
+    def _fake_complete_text(_self, **kwargs):
+        assert "downgrade" in kwargs["user_prompt"]
+        assert "suggested_action" in kwargs["user_prompt"]
+        return LLMTextResult(
+            text=(
+                '{"final_verdict":"downgrade","confidence_adjustment":-0.1,'
+                '"evidence_score":0.42,"suggested_action":"downgrade",'
+                '"reason":"当前问题仍依赖额外条件，证据不足以作为正式问题发布"}'
+            ),
+            mode="live",
+            provider="test",
+            model="judge-model",
+            base_url="http://judge",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(
+        "app.services.issue_judge_service.LLMChatService.complete_text",
+        _fake_complete_text,
+    )
+
+    state = {
+        "runtime_settings": RuntimeSettings(
+            enable_llm_issue_judge=True,
+            llm_issue_judge_confidence_threshold=0.78,
+        ),
+        "issues": [
+            {
+                "issue_id": "iss_llm_downgrade",
+                "finding_type": "risk_hypothesis",
+                "severity": "medium",
+                "confidence": 0.7,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": False,
+                "evidence": ["仅看到风险入口"],
+                "assumptions": ["需要额外条件才会触发"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["status"] == "needs_verification"
+    assert issue["resolution"] == "llm_judge_downgraded"
+    assert issue["needs_human"] is False
+    assert issue["llm_judge_result"]["final_verdict"] == "downgrade"
+    assert issue["llm_judge_result"]["suggested_action"] == "downgrade"
+    assert issue["confidence_breakdown"]["llm_judge"]["evidence_score"] == 0.42
 
 
 def test_judge_uses_feedback_profile_to_expand_llm_judge_trigger(monkeypatch):

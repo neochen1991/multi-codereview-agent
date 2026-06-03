@@ -103,6 +103,9 @@ def test_minimax_expert_prompt_uses_short_rule_guided_contract(storage_root: Pat
     )
 
     assert "[SYSTEM RULES]" in prompt
+    assert "[PROMPT_CONTRACT]" in prompt
+    assert '"phase": "rule_guided_expert_scan"' in prompt
+    assert '"non_goals"' in prompt
     assert "[RULE_CARDS]" in prompt
     assert "[CONTEXT_PACKET]" in prompt
     assert "[OUTPUT_JSON]" in prompt
@@ -607,6 +610,9 @@ def test_bound_custom_rules_are_scanned_in_batches_after_empty_main_review(stora
     findings = runner.finding_repo.list(review.review_id)
     assert "expert_custom_rule_batch_scan" in phases
     assert "[CUSTOM_BOUND_RULE_REVIEW_ONLY]" in prompts["expert_custom_rule_batch_scan"]
+    assert "[PROMPT_CONTRACT]" in prompts["expert_custom_rule_batch_scan"]
+    assert '"phase": "custom_rule_batch_scan"' in prompts["expert_custom_rule_batch_scan"]
+    assert "不要输出 GENERAL-EXPERT-CHECKS" in prompts["expert_custom_rule_batch_scan"]
     assert "[CUSTOM_RULE_BATCH]" in prompts["expert_custom_rule_batch_scan"]
     assert "SEC-JAVA-LOOP-IO-001" in prompts["expert_custom_rule_batch_scan"]
     custom_messages = [
@@ -733,6 +739,9 @@ def test_empty_review_without_bound_rule_hits_runs_general_expert_profile_scan(s
     findings = runner.finding_repo.list(review.review_id)
     assert "expert_general_profile_scan" in phases
     assert "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]" in prompts["expert_general_profile_scan"]
+    assert "[PROMPT_CONTRACT]" in prompts["expert_general_profile_scan"]
+    assert '"phase": "general_expert_scan"' in prompts["expert_general_profile_scan"]
+    assert "不要检查 CUSTOM_RULE_BATCH" in prompts["expert_general_profile_scan"]
     assert "专家画像" in prompts["expert_general_profile_scan"]
     general_messages = [
         message
@@ -1105,6 +1114,9 @@ def test_rule_check_prepass_uses_dedicated_inputs_without_nested_main_prompt(sto
 
     assert text
     assert metadata["success"] is True
+    assert "[PROMPT_CONTRACT]" in captured["user_prompt"]
+    assert '"phase": "rule_check_prepass"' in captured["user_prompt"]
+    assert "不要发现或撰写 candidate_findings" in captured["user_prompt"]
     assert "[RULE_CARDS]" in captured["user_prompt"]
     assert "[TARGET_HUNKS]" in captured["user_prompt"]
     assert "[COMPACT_CONTEXT]" in captured["user_prompt"]
