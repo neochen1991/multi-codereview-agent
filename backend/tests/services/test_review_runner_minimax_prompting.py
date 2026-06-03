@@ -820,6 +820,17 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         '"confidence":"high"}],"context_requests":[],"self_check":{"checked_all_rules":true,'
         '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
     )
+    tool_candidate = (
+        '{"rule_check_results":[{"rule_id":"semgrep:java.spring.security.audit.token-log:20","status":"violated",'
+        '"evidence":["semgrep 命中 Authorization header 进入日志"],"missing_context":[],'
+        '"reason":"工具信号与本次新增日志行一致"}],'
+        '"candidate_findings":[{"rule_id":"semgrep:java.spring.security.audit.token-log:20","title":"工具确认 Authorization token 日志风险",'
+        '"file_path":"src/main/java/demo/UserController.java","line":20,'
+        '"evidence":"log.info(\\"token={}\\", request.getHeader(\\"Authorization\\"))",'
+        '"confidence":"high","adopted_tool_observations":["semgrep:java.spring.security.audit.token-log:20"]}],'
+        '"context_requests":[],"self_check":{"checked_all_rules":true,'
+        '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
+    )
     custom_batch_empty = (
         '{"rule_check_results":[{"rule_id":"SEC-JAVA-LOOP-IO-001","status":"passed",'
         '"evidence":[],"missing_context":[],"reason":"主审已经覆盖"}],'
@@ -833,6 +844,8 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         phases.append(phase)
         if phase == "expert_general_profile_scan":
             text = general_candidate
+        elif phase == "expert_tool_observation_scan":
+            text = tool_candidate
         elif phase == "expert_custom_rule_batch_scan":
             text = custom_batch_empty
         else:
@@ -857,7 +870,6 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         command_message=command_message,
         file_path="src/main/java/demo/UserController.java",
         line_start=20,
-        repository_context={"summary": "新增 token 日志与循环外部接口调用。"},
         target_hunk={
             "hunk_header": "@@ -20,2 +20,2 @@",
             "start_line": 20,
@@ -877,6 +889,23 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
         bound_documents=[],
         knowledge_context={},
+        repository_context={
+            "summary": "新增 token 日志与循环外部接口调用。",
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.spring.security.audit.token-log",
+                    "observation_id": "semgrep:java.spring.security.audit.token-log:20",
+                    "category": "security",
+                    "file_path": "src/main/java/demo/UserController.java",
+                    "line_start": 20,
+                    "message": "Authorization header reaches application log.",
+                    "confidence": 0.86,
+                    "is_issue": False,
+                    "expert_must_decide": True,
+                }
+            ],
+        },
         rule_screening={
             "matched_rules_for_llm": [
                 {
@@ -897,8 +926,51 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
     findings = runner.finding_repo.list(review.review_id)
     titles = {finding.title for finding in findings}
     assert "expert_general_profile_scan" in phases
+    assert "expert_tool_observation_scan" in phases
     assert any("循环中逐条调用外部风控接口" in title for title in titles)
     assert any("日志明文输出 Authorization token" in title for title in titles)
+    assert any(title.startswith("工具确认 Authorization token 日志风险") for title in titles)
+
+
+def test_tool_observations_are_forced_into_uncovered_followup_candidates(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+    )
+
+    observations = runner._collect_batch_review_observations(
+        {
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql-injection",
+                    "observation_id": "semgrep:java.sql-injection:42",
+                    "category": "security",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 42,
+                    "message": "User input is concatenated into SQL.",
+                    "why_it_matters": "该工具命中涉及 SQL 注入风险。",
+                    "confidence": 0.86,
+                }
+            ]
+        },
+        [],
+    )
+    forced = runner._build_forced_observation_candidates(
+        expert=expert,
+        uncovered_observations=observations,
+        max_findings=5,
+    )
+
+    assert observations[0]["kind"] == "tool_observation"
+    assert forced
+    assert forced[0]["evidence_source"] == "tool_observation"
+    assert forced[0]["adopted_tool_observations"] == ["semgrep:java.sql-injection:42"]
+    assert forced[0]["verification_needed"] is True
 
 
 def test_custom_rule_scan_batches_use_all_bound_rules_not_only_screening_hits(storage_root: Path) -> None:

@@ -5301,6 +5301,7 @@ class ReviewRunner(
         thorough_review_enabled = self._review_thorough_mode_enabled(runtime_settings, prompt_profile)
         fast_light_mode = (
             analysis_mode == "light"
+            and not thorough_review_enabled
             and str(os.getenv("REVIEW_LIGHT_EXTRA_LLM_SCANS", "") or "").strip().lower() not in {"1", "true", "yes"}
         )
         main_prompt_contract = self._build_prompt_contract_metadata(
@@ -5544,6 +5545,41 @@ class ReviewRunner(
             repository_context=repository_context,
             rule_screening=rule_screening or {},
         )
+        tool_scan_metadata: dict[str, object] = {}
+        if (
+            prompt_profile.require_rule_check_results
+            and not fast_light_mode
+            and should_scan_review_targets
+        ):
+            tool_scan_text, tool_scan_metadata = self._run_rule_guided_tool_observation_scan(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                normalized_batch_items=normalized_batch_items,
+                repository_context=repository_context,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
+            if tool_scan_metadata:
+                expert_llm_diagnostics["tool_observation_scan"] = tool_scan_metadata
+            if tool_scan_text:
+                tool_candidates = self._parse_expert_analyses(
+                    tool_scan_text,
+                    review.subject,
+                    expert,
+                    file_path,
+                    line_start,
+                    max_findings=max_findings_cap,
+                    require_rule_guided=True,
+                )
+                if tool_candidates:
+                    parsed_candidates = self._merge_expert_analysis_candidates(
+                        parsed_candidates,
+                        tool_candidates,
+                        max_findings=max_findings_cap,
+                    )
         if fast_light_mode:
             custom_scan_texts: list[str] = []
             custom_scan_metadata = {"attempted": False, "skipped_reason": "light_mode_fast_path"}
@@ -5647,10 +5683,12 @@ class ReviewRunner(
                 "main_candidate_count": int((expert_llm_diagnostics.get("rule_coverage") or {}).get("candidate_count") or 0),
                 "empty_retry_attempted": bool(empty_retry_metadata.get("attempted")),
                 "general_scan_attempted": bool(general_scan_metadata.get("attempted")),
+                "tool_scan_attempted": bool(tool_scan_metadata.get("attempted")),
                 "custom_scan_attempted": bool(custom_scan_metadata.get("attempted")),
                 "custom_scan_batch_count": int(custom_scan_metadata.get("batch_count") or 0),
                 "prompt_contract": main_prompt_contract,
                 "general_scan": general_scan_metadata,
+                "tool_observation_scan": tool_scan_metadata,
                 "custom_rule_batch_scan": custom_scan_metadata,
                 "empty_candidate_retry": empty_retry_metadata,
                 "input_completeness": input_completeness,
@@ -6451,6 +6489,11 @@ class ReviewRunner(
                 conflicts.append("custom_scan_allows_general_rule_id")
             if "语言通用规范" in lowered_system and "custom_rule_batch" not in lowered_system:
                 conflicts.append("custom_system_scope_may_include_general_rules")
+        if stage == "expert_tool_observation_scan":
+            if "[custom_rule_batch]" in lowered_user:
+                conflicts.append("tool_scan_contains_custom_rule_batch")
+            if "[general_expert_profile_review_only]" in lowered_user:
+                conflicts.append("tool_scan_contains_general_scan_section")
         if stage == "expert_rule_check_prepass" and "candidate_findings 必须输出空数组" not in user_text:
             conflicts.append("rule_prepass_missing_empty_candidate_instruction")
         return {
@@ -7447,6 +7490,317 @@ class ReviewRunner(
             )
         )
         return (result.text if valid else ""), metadata
+
+    def _run_rule_guided_tool_observation_scan(
+        self,
+        *,
+        review: ReviewTask,
+        expert: ExpertProfile,
+        runtime_settings,
+        resolution,
+        normalized_batch_items: list[dict[str, object]],
+        repository_context: dict[str, object],
+        file_path: str,
+        line_start: int,
+        timeout_seconds: float,
+    ) -> tuple[str, dict[str, object]]:
+        tool_observations = self._collect_tool_observations_for_scan(repository_context, normalized_batch_items)
+        if not tool_observations:
+            return "", {"attempted": False, "reason": "no_tool_observations"}
+
+        targets = self._build_empty_candidate_retry_targets(
+            normalized_batch_items=normalized_batch_items,
+            fallback_file_path=file_path,
+            fallback_line_start=line_start,
+        )
+        relevant_observations = self._filter_tool_observations_for_expert(
+            expert_id=expert.expert_id,
+            tool_observations=tool_observations,
+        )
+        if not relevant_observations:
+            return "", {
+                "attempted": False,
+                "reason": "no_expert_relevant_tool_observations",
+                "tool_observation_count": len(tool_observations),
+            }
+
+        prompt = "\n".join(
+            [
+                "[TOOL_OBSERVATION_REVIEW_ONLY]",
+                self._build_prompt_contract_block(
+                    phase="tool_observation_scan",
+                    objective="只解释 TOOL_OBSERVATIONS 中的 SAST/linter/报告工具候选信号，判断它们是否和 TARGET_HUNKS 的当前变更构成真实候选问题。",
+                    non_goals=[
+                        "不要执行专家画像通用扫描",
+                        "不要执行 CUSTOM_RULE_BATCH 绑定规范扫描",
+                        "不要把工具信号直接当成已确认正式问题",
+                        "不要输出最终有效问题清单",
+                    ],
+                    allowed_evidence=[
+                        "TOOL_OBSERVATIONS",
+                        "TARGET_HUNKS",
+                        "COMPACT_CONTEXT",
+                        "EXPERT_PROFILE",
+                    ],
+                    output_schema={
+                        "rule_check_results": "逐条覆盖 TOOL_OBSERVATIONS，rule_id 使用 tool:rule_id 或 observation_id",
+                        "candidate_findings": "只输出已与当前 diff 相关的工具候选",
+                        "context_requests": "工具信号需要更多代码上下文时填写",
+                        "self_check": "必须说明已检查全部 TOOL_OBSERVATIONS",
+                    },
+                    failure_policy="缺少规则检查矩阵、缺少 adopted_tool_observations 或输出绑定规则/通用规则结论会被系统拒收。",
+                ),
+                "本阶段只做工具信号解释。工具输出是候选证据，不是最终问题。",
+                "你必须逐条判断 TOOL_OBSERVATIONS 是否落在 TARGET_HUNKS 或受影响上下文中。",
+                "如果工具信号和当前变更无关，rule_check_results.status 使用 not_applicable，不要输出 candidate_finding。",
+                "如果工具信号相关但缺少上下文，保留 candidate_finding，confidence=medium 或 low，并在 context_requests 说明缺什么。",
+                "如果工具信号相关且当前代码证据充分，输出 candidate_finding，adopted_tool_observations 必须填写 observation_id 或 tool:rule_id。",
+                "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS 或 TOOL_OBSERVATIONS 的同一文件/行；禁止使用不在输入中的文件。",
+                "本阶段结果会和专家通用扫描、绑定规范扫描取并集；不要因为不属于绑定规范就省略工具候选。",
+                f"专家: {expert.expert_id} / {expert.name_zh}",
+                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1200)}",
+                "",
+                "[TOOL_OBSERVATIONS]",
+                json.dumps(relevant_observations, ensure_ascii=False, indent=2),
+                "",
+                "[TARGET_HUNKS]",
+                json.dumps(targets, ensure_ascii=False, indent=2),
+                "",
+                "[COMPACT_CONTEXT]",
+                self._clip_diagnostic_text(
+                    self._build_repository_context_summary(repository_context or {}, []),
+                    10000,
+                ),
+                "",
+                "[OUTPUT_JSON]",
+                json.dumps(
+                    {
+                        "rule_check_results": [
+                            {
+                                "rule_id": "tool_or_observation_id",
+                                "status": "violated|passed|not_applicable|insufficient_context",
+                                "evidence": ["string"],
+                                "missing_context": ["string"],
+                                "reason": "string",
+                            }
+                        ],
+                        "candidate_findings": [
+                            {
+                                "rule_id": "tool_or_observation_id",
+                                "title": "string",
+                                "target_id": "必须从 TARGET_HUNKS[].target_id 原样选择",
+                                "file_path": "必须从 TARGET_HUNKS[].file_path 或 TOOL_OBSERVATIONS[].file_path 原样选择",
+                                "line": "必须取对应 hunk changed_lines 或 TOOL_OBSERVATIONS[].line_start",
+                                "method_name": "当前问题所在方法名；无法确认时留空字符串",
+                                "code_anchor": "当前代码中的最小问题片段，必须和 evidence 指向同一段代码",
+                                "change_understanding_refs": ["target_id、文件路径、工具 observation_id"],
+                                "evidence": "string",
+                                "confidence": "high|medium|low",
+                                "adopted_tool_observations": ["必须填写采纳的 observation_id 或 tool:rule_id"],
+                            }
+                        ],
+                        "context_requests": [],
+                        "self_check": {
+                            "checked_all_rules": True,
+                            "used_context_files": [],
+                            "unverified_assumptions": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "只输出一个 JSON 对象，不要输出 Markdown，不要添加额外解释。",
+            ]
+        )
+        system_prompt = (
+            "你是静态工具信号解释器。只判断工具候选是否和当前 diff 构成真实候选问题；"
+            "不要混入通用扫描或绑定规范扫描。只输出 JSON。"
+        )
+        prompt_contract = self._build_prompt_contract_metadata(
+            stage="expert_tool_observation_scan",
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            required_sections=["[TOOL_OBSERVATION_REVIEW_ONLY]", "[PROMPT_CONTRACT]", "[TOOL_OBSERVATIONS]", "[TARGET_HUNKS]", "[COMPACT_CONTEXT]", "[OUTPUT_JSON]"],
+            forbidden_sections=["[CUSTOM_RULE_BATCH]", "[GENERAL_EXPERT_PROFILE_REVIEW_ONLY]"],
+            required_rule_ids=[
+                str(item.get("observation_id") or f"{item.get('tool')}:{item.get('rule_id')}")
+                for item in relevant_observations
+                if str(item.get("observation_id") or item.get("rule_id") or "").strip()
+            ],
+            scope="tool observations only",
+        )
+        try:
+            result = self.llm_chat_service.complete_text(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                resolution=resolution,
+                runtime_settings=runtime_settings,
+                fallback_text=(
+                    '{"rule_check_results":[],"candidate_findings":[],"context_requests":[]'
+                    ',"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["tool observation scan fallback"]}}'
+                ),
+                allow_fallback=False,
+                timeout_seconds=max(20.0, min(float(timeout_seconds or 60), 75.0)),
+                max_attempts=1,
+                log_context={
+                    "review_id": review.review_id,
+                    "issue_id": "review_orchestration",
+                    "expert_id": expert.expert_id,
+                    "phase": "expert_tool_observation_scan",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "prompt_contract": prompt_contract,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - tool scan must not abort expert review.
+            metadata = {
+                "attempted": True,
+                "success": False,
+                "error": str(exc),
+                "tool_observation_count": len(relevant_observations),
+            }
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=expert.expert_id,
+                    message_type="expert_tool_observation_scan",
+                    content=f"{expert.name_zh} 工具信号解释失败，系统将继续执行通用扫描和绑定规范扫描。",
+                    metadata={
+                        "phase": "expert_review",
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "tool_observation_scan": metadata,
+                    },
+                )
+            )
+            return "", metadata
+
+        valid, errors = self._validate_rule_guided_llm_response_contract(
+            result.text,
+            required_rule_ids=[],
+            allow_general_candidate_rule_id=False,
+        )
+        payload = self._parse_json_payload(result.text)
+        candidate_count = (
+            len([item for item in list(payload.get("candidate_findings") or []) if isinstance(item, dict)])
+            if isinstance(payload, dict)
+            else 0
+        )
+        metadata = {
+            "attempted": True,
+            "success": valid,
+            "schema_errors": errors,
+            "tool_observation_count": len(relevant_observations),
+            "candidate_count": candidate_count,
+            "llm_call_id": result.call_id,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "total_tokens": result.total_tokens,
+            "prompt_snapshot_full": self._clip_diagnostic_text(prompt, 120000),
+            "raw_response_excerpt": self._clip_diagnostic_text(str(result.text or ""), 1600),
+            "raw_response_full": self._clip_diagnostic_text(str(result.text or ""), 120000),
+            "prompt_contract": prompt_contract,
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=expert.expert_id,
+                message_type="expert_tool_observation_scan",
+                content=(
+                    f"{expert.name_zh} 已完成工具信号解释，补充 {candidate_count} 条候选。"
+                    if valid
+                    else f"{expert.name_zh} 工具信号解释输出未满足结构合同。"
+                ),
+                metadata={
+                    "phase": "expert_review",
+                    "file_path": file_path,
+                    "line_start": line_start,
+                    "tool_observation_scan": metadata,
+                    "prompt_snapshot_full": metadata["prompt_snapshot_full"],
+                    "model_raw_response_excerpt": metadata["raw_response_excerpt"],
+                    "model_raw_response_full": metadata["raw_response_full"],
+                    "schema_errors": errors,
+                    **self._llm_message_metadata(result),
+                },
+            )
+        )
+        return (result.text if valid else ""), metadata
+
+    def _collect_tool_observations_for_scan(
+        self,
+        repository_context: dict[str, object],
+        normalized_batch_items: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        collected: list[dict[str, object]] = []
+        seen: set[str] = set()
+
+        def add_many(value: object) -> None:
+            for raw in list(value or []):
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                observation_id = str(item.get("observation_id") or "").strip()
+                if not observation_id:
+                    tool = str(item.get("tool") or "tool").strip()
+                    rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+                    line = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
+                    observation_id = f"{tool}:{rule_id}:{line}"
+                    item["observation_id"] = observation_id
+                if observation_id in seen:
+                    continue
+                seen.add(observation_id)
+                collected.append(item)
+
+        add_many((repository_context or {}).get("tool_observations"))
+        for batch_item in list(normalized_batch_items or []):
+            if isinstance(batch_item, dict) and isinstance(batch_item.get("repository_context"), dict):
+                add_many(dict(batch_item.get("repository_context") or {}).get("tool_observations"))
+        return collected[:20]
+
+    def _filter_tool_observations_for_expert(
+        self,
+        *,
+        expert_id: str,
+        tool_observations: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        expert = str(expert_id or "").strip()
+        filtered: list[dict[str, object]] = []
+        for item in list(tool_observations or []):
+            category = str(item.get("category") or "").strip().lower()
+            text = " ".join(
+                [
+                    str(item.get("tool") or ""),
+                    str(item.get("rule_id") or ""),
+                    str(item.get("message") or ""),
+                    str(item.get("why_it_matters") or ""),
+                    category,
+                ]
+            ).lower()
+            if expert == "security_compliance":
+                if category in {"security", "python_security"} or any(token in text for token in ["sql", "xss", "ssrf", "csrf", "injection", "auth", "secret", "password", "token", "crypto", "cwe"]):
+                    filtered.append(dict(item))
+                continue
+            if expert == "performance_reliability":
+                if any(token in text for token in ["performance", "n+1", "loop", "循环", "timeout", "resource", "资源", "jacoco"]):
+                    filtered.append(dict(item))
+                continue
+            if expert == "database_analysis":
+                if any(token in text for token in ["sql", "database", "jdbc", "query", "jpa", "mybatis"]):
+                    filtered.append(dict(item))
+                continue
+            if expert == "ddd_architecture":
+                if category == "architecture" or any(token in text for token in ["archunit", "architecture", "ddd", "layer", "依赖", "架构"]):
+                    filtered.append(dict(item))
+                continue
+            if expert == "test_verification":
+                if category == "test_coverage" or any(token in text for token in ["jacoco", "coverage", "uncovered", "测试", "覆盖"]):
+                    filtered.append(dict(item))
+                continue
+            if category in {"java_quality", "frontend_quality", "static_analysis"}:
+                filtered.append(dict(item))
+        return filtered[:12]
 
     def _run_rule_guided_custom_rule_scan_batches(
         self,
@@ -8530,6 +8884,17 @@ class ReviewRunner(
         rule_id = str(parsed.get("rule_id") or "").strip()
         if not rule_id:
             rule_id = next((str(item).strip() for item in list(parsed.get("matched_rules") or []) if str(item).strip()), "")
+        if rule_id and rule_id != "GENERAL-EXPERT-CHECKS" and rule_id not in rules_by_id and self._is_tool_rule_reference(rule_id, parsed):
+            rules_by_id[rule_id] = ReviewRuleCard(
+                rule_id=rule_id,
+                title=f"静态工具候选：{rule_id}",
+                scope=["tool_observation"],
+                must_check=["结合当前 diff 和上下文判断工具候选是否构成真实问题"],
+                required_context=["repository_context"],
+                evidence_required=["工具命中", "当前代码位置", "直接代码证据"],
+                false_positive_guards=["工具命中不在当前变更或影响路径时不要升级"],
+                normalized_issue_type=str(parsed.get("normalized_issue_type") or "tool_observation_candidate").strip(),
+            )
         if rule_id and rule_id != "GENERAL-EXPERT-CHECKS" and rule_id not in rules_by_id:
             known_rule_id = next(
                 (
@@ -10395,11 +10760,16 @@ class ReviewRunner(
         general_rules: list[str] = []
         valid_custom_rule_ids: list[str] = []
         invalid_custom_rule_ids: list[str] = []
+        tool_rule_ids: list[str] = []
         custom_rule_details: list[dict[str, object]] = []
 
         for rule in raw_rules:
             rule_text = str(rule or "").strip()
             if not rule_text:
+                continue
+            if self._is_tool_rule_reference(rule_text, parsed):
+                if rule_text not in tool_rule_ids:
+                    tool_rule_ids.append(rule_text)
                 continue
             extracted_ids = self._extract_additive_rule_ids(rule_text)
             matched_known_ids = [rule_id for rule_id in extracted_ids if rule_id.upper() in available_rules]
@@ -10437,7 +10807,7 @@ class ReviewRunner(
                 continue
             general_rules.append(rule_text)
 
-        normalized_matched_rules = self._dedupe_texts([*general_rules, *valid_custom_rule_ids])
+        normalized_matched_rules = self._dedupe_texts([*general_rules, *valid_custom_rule_ids, *tool_rule_ids])
         assumptions: list[str] = []
         if invalid_custom_rule_ids:
             assumptions.append(
@@ -10449,6 +10819,8 @@ class ReviewRunner(
             sources.append("expert_general")
         if valid_custom_rule_ids:
             sources.append("product_or_repo_custom")
+        if tool_rule_ids:
+            sources.append("tool_observation")
         if not sources:
             sources.append("unattributed")
 
@@ -10457,6 +10829,7 @@ class ReviewRunner(
             "sources": sources,
             "general_rules": self._dedupe_texts(general_rules),
             "valid_custom_rule_ids": valid_custom_rule_ids,
+            "tool_rule_ids": tool_rule_ids,
             "invalid_custom_rule_ids": self._dedupe_texts(invalid_custom_rule_ids),
             "custom_rule_details": custom_rule_details,
             "available_custom_rule_ids": [
@@ -10467,6 +10840,39 @@ class ReviewRunner(
             "normalized_matched_rules": normalized_matched_rules,
             "custom_rules_are_additive": True,
             "assumptions": assumptions,
+        }
+
+    def _is_tool_rule_reference(self, rule_text: str, parsed: dict[str, object]) -> bool:
+        text = str(rule_text or "").strip()
+        if not text:
+            return False
+        adopted = {
+            str(item).strip()
+            for item in self._normalize_text_list(parsed.get("adopted_tool_observations"), [])
+            if str(item).strip()
+        }
+        observation_ids = {
+            str(item).strip()
+            for item in self._normalize_text_list(parsed.get("observation_ids"), [])
+            if str(item).strip()
+        }
+        if text in adopted or text in observation_ids:
+            return True
+        if ":" not in text:
+            return False
+        tool_prefix = text.split(":", 1)[0].strip().lower()
+        return tool_prefix in {
+            "semgrep",
+            "pmd",
+            "checkstyle",
+            "spotbugs",
+            "archunit",
+            "jacoco",
+            "eslint",
+            "bandit",
+            "sast",
+            "sast_prescan",
+            "tool",
         }
 
     def _extract_additive_rule_ids(self, text: str) -> list[str]:

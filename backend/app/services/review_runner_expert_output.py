@@ -435,6 +435,13 @@ class ReviewRunnerExpertOutputMixin:
             if observation_id:
                 seen.add(observation_id)
             collected.append(item)
+        for item in self._normalize_tool_observations_as_review_observations(repository_context.get("tool_observations")):
+            observation_id = str(item.get("observation_id") or "").strip()
+            if observation_id and observation_id in seen:
+                continue
+            if observation_id:
+                seen.add(observation_id)
+            collected.append(item)
         for batch_item in batch_items:
             batch_context = batch_item.get("repository_context")
             if not isinstance(batch_context, dict):
@@ -446,7 +453,54 @@ class ReviewRunnerExpertOutputMixin:
                 if observation_id:
                     seen.add(observation_id)
                 collected.append(item)
+            for item in self._normalize_tool_observations_as_review_observations(batch_context.get("tool_observations")):
+                observation_id = str(item.get("observation_id") or "").strip()
+                if observation_id and observation_id in seen:
+                    continue
+                if observation_id:
+                    seen.add(observation_id)
+                collected.append(item)
         return collected
+
+    def _normalize_tool_observations_as_review_observations(self, value: object) -> list[dict[str, object]]:
+        normalized: list[dict[str, object]] = []
+        for raw in list(value or []):
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            tool = str(item.get("tool") or "tool").strip()
+            rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+            line_start = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
+            observation_id = str(item.get("observation_id") or "").strip() or f"{tool}:{rule_id}:{line_start}"
+            message = str(item.get("message") or item.get("summary") or "").strip()
+            why_it_matters = str(item.get("why_it_matters") or "").strip()
+            evidence = [
+                value
+                for value in [
+                    f"{tool}:{rule_id}" if tool or rule_id else "",
+                    message,
+                    why_it_matters,
+                ]
+                if value
+            ]
+            normalized.append(
+                {
+                    **item,
+                    "observation_id": observation_id,
+                    "kind": "tool_observation",
+                    "summary": message or f"静态工具命中 {tool}:{rule_id} 候选信号。",
+                    "evidence": evidence,
+                    "risk_hints": [
+                        str(value).strip()
+                        for value in list(item.get("evidence_required") or [])
+                        if str(value).strip()
+                    ],
+                    "source": str(item.get("source") or "sast_prescan").strip(),
+                    "observation_type": "tool_observation",
+                    "line_start": line_start,
+                }
+            )
+        return normalized[:20]
 
     def _find_uncovered_review_observations(
         self,
@@ -633,10 +687,46 @@ class ReviewRunnerExpertOutputMixin:
             observation_id = str(item.get("observation_id") or "").strip()
             evidence = [str(value).strip() for value in list(item.get("evidence") or []) if str(value).strip()]
             summary = str(item.get("summary") or "").strip()
+            why_it_matters = str(item.get("why_it_matters") or "").strip()
             related_symbols = [str(value).strip() for value in list(item.get("related_symbols") or []) if str(value).strip()]
             symbol_display = " / ".join(related_symbols[:2]) if related_symbols else "当前调用"
 
-            if expert.expert_id == "performance_reliability" and kind == "control_flow_with_external_call":
+            if kind == "tool_observation" or str(item.get("observation_type") or "").strip() == "tool_observation":
+                tool = str(item.get("tool") or "tool").strip()
+                rule_id = str(item.get("rule_id") or "rule").strip()
+                category = str(item.get("category") or "static_analysis").strip()
+                severity = str(item.get("severity") or "medium").strip().lower() or "medium"
+                forced.append(
+                    {
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "line_end": line_start,
+                        "title": f"静态工具候选需复核：{rule_id}",
+                        "finding_type": "risk_hypothesis",
+                        "normalized_issue_type": f"tool_observation_{category}".replace("-", "_"),
+                        "claim": f"{tool} 命中 {rule_id} 候选信号，当前变更需要由 {expert.name_zh} 结合上下文判断是否构成真实问题。",
+                        "severity": "high" if severity in {"error", "critical", "high"} else "medium" if severity in {"warning", "medium"} else "low",
+                        "matched_rules": [f"{tool}:{rule_id}"],
+                        "violated_guidelines": ["静态工具候选必须结合当前 diff、专家通用规范和绑定规范复核后才能升级"],
+                        "rule_based_reasoning": why_it_matters or "该命中来自静态扫描工具，只能作为候选证据；需要专家确认是否落在当前变更和真实可达路径上。",
+                        "evidence": evidence[:3] or [summary or f"{tool} 命中 {rule_id}"],
+                        "cross_file_evidence": [],
+                        "assumptions": ["工具信号尚未被专家主审输出明确覆盖，系统保留为待验证 finding，避免静默漏报。"],
+                        "context_files": [file_path] if file_path else [],
+                        "observation_ids": [observation_id] if observation_id else [],
+                        "adopted_tool_observations": [observation_id or f"{tool}:{rule_id}"],
+                        "fix_strategy": "先确认工具信号是否和本次变更相关，再按对应安全/质量规范修复代码并补充测试。",
+                        "suggested_fix": "结合具体工具规则和代码上下文修复该候选风险；若确认误报，在人工确认中说明误报依据。",
+                        "change_steps": ["确认工具命中是否位于本次变更或影响路径", "按对应安全/质量规范修复代码", "补充回归测试或静态规则验证"],
+                        "suggested_code": "",
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.62), 0.78),
+                        "verification_needed": True,
+                        "verification_plan": "验证重点：确认工具命中行是否为当前变更、输入/调用路径是否真实可达，以及是否已有上游防护或项目规则豁免。",
+                        "direct_evidence": False,
+                        "evidence_source": "tool_observation",
+                    }
+                )
+            elif expert.expert_id == "performance_reliability" and kind == "control_flow_with_external_call":
                 forced.append(
                     {
                         "file_path": file_path,
