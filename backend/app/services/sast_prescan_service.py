@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -10,6 +11,175 @@ from typing import Any
 
 class SastPreScanService:
     """Optional, best-effort SAST/linter pre-scan for changed files."""
+
+    COMMAND_TOOLS: tuple[dict[str, object], ...] = (
+        {
+            "tool": "semgrep",
+            "kind": "command",
+            "category": "security",
+            "purpose": "安全规则、SQL 注入、越权、敏感信息、项目自定义规则",
+            "verify_commands": ["semgrep --version", "where semgrep"],
+            "install": {
+                "windows": "py -m pip install semgrep",
+                "macos_linux": "python3 -m pip install semgrep",
+            },
+        },
+        {
+            "tool": "pmd",
+            "kind": "command",
+            "category": "java_quality",
+            "purpose": "Java 空 catch、复杂度、低效循环、坏味道",
+            "verify_commands": ["pmd --version", "where pmd"],
+            "install": {
+                "windows": "choco install pmd 或下载 PMD 并把 bin 加入 PATH",
+                "macos_linux": "brew install pmd 或下载 PMD 并把 bin 加入 PATH",
+            },
+        },
+        {
+            "tool": "checkstyle",
+            "kind": "command",
+            "category": "java_quality",
+            "purpose": "Java 编码规范、命名、导入、格式",
+            "verify_commands": ["checkstyle --version", "where checkstyle"],
+            "install": {
+                "windows": "choco install checkstyle 或下载 checkstyle jar 并配置 PATH 包装命令",
+                "macos_linux": "brew install checkstyle",
+            },
+        },
+        {
+            "tool": "eslint",
+            "kind": "command",
+            "category": "frontend_quality",
+            "purpose": "JS/TS linter 候选信号",
+            "verify_commands": ["eslint --version", "where eslint"],
+            "install": {
+                "windows": "npm install -g eslint",
+                "macos_linux": "npm install -g eslint",
+            },
+        },
+        {
+            "tool": "bandit",
+            "kind": "command",
+            "category": "python_security",
+            "purpose": "Python 安全候选信号",
+            "verify_commands": ["bandit --version", "where bandit"],
+            "install": {
+                "windows": "py -m pip install bandit",
+                "macos_linux": "python3 -m pip install bandit",
+            },
+        },
+    )
+
+    REPORT_TOOLS: tuple[dict[str, object], ...] = (
+        {
+            "tool": "spotbugs",
+            "kind": "report",
+            "category": "java_quality",
+            "purpose": "Java 空指针、资源泄漏、并发、安全 bug pattern",
+            "status": "requires_report",
+            "report_paths": [
+                "target/spotbugsXml.xml",
+                "target/spotbugs.xml",
+                "target/site/spotbugs.xml",
+                "build/reports/spotbugs/main.xml",
+                "build/reports/spotbugs/test.xml",
+                "spotbugs.xml",
+            ],
+            "install": {
+                "windows": "在 Maven/Gradle 中启用 SpotBugs 插件并生成 XML 报告",
+                "macos_linux": "在 Maven/Gradle 中启用 SpotBugs 插件并生成 XML 报告",
+            },
+        },
+        {
+            "tool": "archunit",
+            "kind": "report",
+            "category": "architecture",
+            "purpose": "分层依赖、包依赖方向、DDD 边界测试失败信号",
+            "status": "requires_report",
+            "report_paths": [
+                "target/surefire-reports/*.xml",
+                "target/failsafe-reports/*.xml",
+                "build/test-results/**/*.xml",
+            ],
+            "install": {
+                "windows": "项目测试中引入 ArchUnit，并运行 Maven/Gradle 测试生成报告",
+                "macos_linux": "项目测试中引入 ArchUnit，并运行 Maven/Gradle 测试生成报告",
+            },
+        },
+        {
+            "tool": "jacoco",
+            "kind": "report",
+            "category": "test_coverage",
+            "purpose": "测试覆盖率缺口候选信号",
+            "status": "requires_report",
+            "report_paths": [
+                "target/site/jacoco/jacoco.xml",
+                "target/site/jacoco-aggregate/jacoco.xml",
+                "build/reports/jacoco/test/jacocoTestReport.xml",
+                "build/reports/jacoco/testCodeCoverageReport/testCodeCoverageReport.xml",
+                "jacoco.xml",
+            ],
+            "install": {
+                "windows": "在 Maven/Gradle 中启用 JaCoCo 并生成 XML 报告",
+                "macos_linux": "在 Maven/Gradle 中启用 JaCoCo 并生成 XML 报告",
+            },
+        },
+    )
+
+    def tool_status(self, *, enabled: bool = False, repo_root: str | Path | None = None) -> dict[str, object]:
+        root = Path(str(repo_root or "")).expanduser() if repo_root else None
+        command_statuses = []
+        for item in self.COMMAND_TOOLS:
+            executable = shutil.which(str(item["tool"]))
+            command_statuses.append(
+                {
+                    **item,
+                    "status": "available" if executable else "missing",
+                    "executable": executable or "",
+                }
+            )
+        report_statuses = []
+        for item in self.REPORT_TOOLS:
+            report_paths = [str(path) for path in list(item.get("report_paths") or [])]
+            existing_reports = [
+                path
+                for path in report_paths
+                if root is not None and self._report_pattern_exists(root, path)
+            ]
+            report_statuses.append(
+                {
+                    **item,
+                    "status": "available" if existing_reports else str(item.get("status") or "requires_report"),
+                    "existing_report_paths": existing_reports[:8],
+                }
+            )
+        missing_command_count = sum(1 for item in command_statuses if item.get("status") == "missing")
+        available_command_count = sum(1 for item in command_statuses if item.get("status") == "available")
+        available_report_count = sum(1 for item in report_statuses if item.get("status") == "available")
+        limitations: list[str] = []
+        if not enabled:
+            limitations.append("SAST/linter 预扫描总开关未启用。")
+        if enabled and available_command_count <= 0 and available_report_count <= 0:
+            limitations.append("未发现可用命令类工具或报告类工具，本次检视会缺少静态工具候选信号。")
+        return {
+            "enabled": bool(enabled),
+            "platform": platform.system() or "",
+            "status": "enabled" if bool(enabled) else "disabled",
+            "repo_root": str(root) if root else "",
+            "command_tools": command_statuses,
+            "report_tools": report_statuses,
+            "summary": (
+                f"命令类工具可用 {available_command_count}/{len(command_statuses)}，"
+                f"报告类工具可用 {available_report_count}/{len(report_statuses)}。"
+            ),
+            "limitations": limitations,
+            "notes": [
+                "静态工具输出只进入 tool_observations，不会直接生成正式问题。",
+                "命令类工具需要后端进程 PATH 能找到对应命令。",
+                "SpotBugs、ArchUnit、JaCoCo 当前读取项目构建/测试生成的 XML 报告。",
+                f"缺失命令类工具数量: {missing_command_count}",
+            ],
+        }
 
     def scan_file(self, repo_root: str | Path, file_path: str, *, enabled: bool = False) -> dict[str, object]:
         if not enabled:
@@ -478,6 +648,14 @@ class SastPreScanService:
 
     def _has_any_report(self, root: Path, names: list[str]) -> bool:
         return any((root / name).exists() and (root / name).is_file() for name in names)
+
+    def _report_pattern_exists(self, root: Path, pattern: str) -> bool:
+        normalized = str(pattern or "").strip()
+        if not normalized:
+            return False
+        if any(token in normalized for token in ["*", "?", "["]):
+            return any(path.is_file() for path in root.glob(normalized))
+        return (root / normalized).exists() and (root / normalized).is_file()
 
     def _report_entry_matches_file(self, file_path: str, node: ET.Element) -> bool:
         source_path = str(node.get("sourcepath") or node.get("relSourcepath") or node.get("path") or "").replace("\\", "/")

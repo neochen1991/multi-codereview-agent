@@ -270,3 +270,22 @@ def test_sast_prescan_parses_jacoco_report_for_java(tmp_path: Path):
     assert payload["findings"][0]["tool"] == "jacoco"
     assert payload["findings"][0]["rule_id"] == "uncovered-lines"
     assert payload["findings"][0]["line_start"] == 23
+
+
+def test_sast_tool_status_reports_command_and_report_availability(tmp_path: Path):
+    repo = tmp_path / "repo"
+    report = repo / "target/site/jacoco/jacoco.xml"
+    report.parent.mkdir(parents=True)
+    report.write_text("<report />\n", encoding="utf-8")
+
+    with patch("app.services.sast_prescan_service.shutil.which", side_effect=lambda name: "C:/tools/semgrep.exe" if name == "semgrep" else None):
+        payload = SastPreScanService().tool_status(enabled=True, repo_root=repo)
+
+    assert payload["enabled"] is True
+    semgrep = next(item for item in payload["command_tools"] if item["tool"] == "semgrep")
+    assert semgrep["status"] == "available"
+    assert semgrep["executable"] == "C:/tools/semgrep.exe"
+    jacoco = next(item for item in payload["report_tools"] if item["tool"] == "jacoco")
+    assert jacoco["status"] == "available"
+    assert "target/site/jacoco/jacoco.xml" in jacoco["existing_report_paths"]
+    assert "命令类工具可用" in payload["summary"]

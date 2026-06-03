@@ -1020,6 +1020,10 @@ class MainAgentService(MainAgentPromptingMixin):
                 service.local_path,
                 file_path,
             ),
+            "sast_tool_status": self._sast_prescan_service.tool_status(
+                enabled=runtime_settings.enable_sast_prescan,
+                repo_root=service.local_path,
+            ),
             "sast_prescan": self._sast_prescan_service.scan_file(
                 service.local_path,
                 file_path,
@@ -1241,7 +1245,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 
 

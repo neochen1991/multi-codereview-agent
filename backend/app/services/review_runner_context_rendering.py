@@ -256,6 +256,18 @@ def build_repository_context_summary(
                 message = str(item.get("message") or "").strip()
                 if message:
                     lines.append(f"  * {tool}:{rule_id} L{line_start} {message}")
+        sast_tool_status = repository_context.get("sast_tool_status")
+        if isinstance(sast_tool_status, dict):
+            status_text = str(sast_tool_status.get("status") or "").strip()
+            summary_text = str(sast_tool_status.get("summary") or "").strip()
+            if status_text or summary_text:
+                lines.append(f"- SAST/linter 工具状态: {status_text or 'unknown'}；{summary_text or '未提供摘要'}")
+            for limitation in [
+                str(item).strip()
+                for item in list(sast_tool_status.get("limitations") or [])
+                if str(item).strip()
+            ][:3]:
+                lines.append(f"  * 工具降级: {limitation}")
         primary_context = repository_context.get("primary_context")
         if isinstance(primary_context, dict) and primary_context.get("snippet"):
             lines.append(f"- 目标文件: {primary_context.get('path')}")

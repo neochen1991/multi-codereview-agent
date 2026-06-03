@@ -188,6 +188,51 @@ def test_main_agent_command_includes_repository_context_when_repo_is_ready(tmp_p
     assert "字段语义兼容" in command["repository_context"]["repo_review_instructions"]["summary"]
 
 
+def test_main_agent_command_includes_sast_tool_status_snapshot(tmp_path: Path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    target = repo_root / "src/main/java/demo/UserController.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class UserController {}\n", encoding="utf-8")
+
+    monkeypatch.setattr("app.services.sast_prescan_service.shutil.which", lambda _name: None)
+    agent = MainAgentService()
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/security",
+        target_ref="main",
+        changed_files=["src/main/java/demo/UserController.java"],
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        enabled=True,
+        focus_areas=["安全"],
+        system_prompt="prompt",
+    )
+
+    command = agent.build_command(
+        subject,
+        expert,
+        RuntimeSettings(
+            code_repo_clone_url="https://github.com/example/repo.git",
+            code_repo_local_path=str(repo_root),
+            code_repo_default_branch="main",
+            enable_sast_prescan=True,
+        ),
+    )
+
+    status = command["repository_context"]["sast_tool_status"]
+    assert status["enabled"] is True
+    assert status["status"] == "enabled"
+    assert status["repo_root"] == str(repo_root)
+    assert "未发现可用命令类工具" in " / ".join(status["limitations"])
+    assert command["repository_context"]["sast_prescan"]["enabled"] is False
+
+
 def test_main_agent_command_includes_target_hunk_excerpt():
     agent = MainAgentService()
     subject = ReviewSubject(

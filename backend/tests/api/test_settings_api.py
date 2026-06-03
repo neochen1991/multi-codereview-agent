@@ -152,6 +152,8 @@ def test_sast_tools_status_exposes_install_and_runtime_state(client):
     assert semgrep["status"] in {"available", "missing"}
     assert "windows" in semgrep["install"]
     assert semgrep["verify_commands"]
+    assert "summary" in payload
+    assert isinstance(payload["limitations"], list)
     spotbugs = next(item for item in payload["report_tools"] if item["tool"] == "spotbugs")
     assert spotbugs["kind"] == "report"
     assert spotbugs["status"] == "requires_report"
