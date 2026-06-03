@@ -19,6 +19,7 @@ from app.services.main_agent_prompting import MainAgentPromptingMixin
 from app.services.repo_review_instruction_service import RepoReviewInstructionService
 from app.services.repository_context_service import RepositoryContextService
 from app.services.repository_config_resolver import RepositoryConfigResolver
+from app.services.risk_candidate_service import RiskCandidateService
 from app.services.sast_prescan_service import SastPreScanService
 
 
@@ -41,6 +42,7 @@ class MainAgentService(MainAgentPromptingMixin):
         self._java_quality_signal_extractor = CodeObservationExtractor()
         self._repo_review_instruction_service = RepoReviewInstructionService()
         self._sast_prescan_service = SastPreScanService()
+        self._risk_candidate_service = RiskCandidateService()
         self._repository_resolver = RepositoryConfigResolver()
         self._repo_context_cache: dict[tuple[str, str, str, tuple[str, ...]], dict[str, object]] = {}
 
@@ -94,6 +96,11 @@ class MainAgentService(MainAgentPromptingMixin):
             str(target_hunk.get("excerpt") or ""),
         )
         repo_context["change_understanding"] = self._collect_change_understanding(subject)
+        repo_context["tool_observations"] = self._collect_tool_observations(repo_context)
+        repo_context["risk_candidates"] = self._risk_candidate_service.build(
+            change_understanding=repo_context["change_understanding"],
+            tool_observations=list(repo_context.get("tool_observations") or []),
+        )
         if route_hint is not None:
             routeable = bool(target_focus.get("routeable", True))
             skip_reason = "" if routeable else str(target_focus.get("skip_reason") or "")
@@ -1035,6 +1042,25 @@ class MainAgentService(MainAgentPromptingMixin):
         business_files = [item for item in changed_files if not self._is_test_like_path(item)]
         return business_files or changed_files
 
+    def _collect_tool_observations(self, repository_context: dict[str, object]) -> list[dict[str, object]]:
+        observations: list[dict[str, object]] = []
+        sast_prescan = repository_context.get("sast_prescan")
+        if isinstance(sast_prescan, dict):
+            for item in list(sast_prescan.get("tool_observations") or []):
+                if isinstance(item, dict):
+                    observations.append(dict(item))
+            if not observations:
+                for item in list(sast_prescan.get("findings") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    observation = dict(item)
+                    observation["source"] = "sast_prescan"
+                    observation["observation_type"] = "tool_observation"
+                    observation["is_issue"] = False
+                    observation["expert_must_decide"] = True
+                    observations.append(observation)
+        return observations[:20]
+
     def _is_test_like_path(self, path: str) -> bool:
         normalized = Path(str(path or "").replace("\\", "/"))
         parts = normalized.parts
@@ -1215,8 +1241,6 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
-
 
 
 

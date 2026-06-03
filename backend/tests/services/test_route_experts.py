@@ -130,6 +130,41 @@ def test_route_experts_uses_change_understanding_risk_domains():
     assert "mq_analysis" in selected
 
 
+def test_route_experts_uses_risk_candidates_as_first_class_recall_source():
+    state = {
+        "selected_experts": ["change_impact_analysis"],
+        "risk_hints": [],
+        "changed_files": [],
+        "unified_diff": "",
+        "risk_candidates": [
+            {
+                "source": "tool_observation",
+                "risk_domain": "security",
+                "suggested_expert_id": "security_compliance",
+                "file_path": "src/main/java/app/order/OrderController.java",
+                "line_start": 42,
+                "message": "Semgrep 命中 SQL 注入线索，需要安全专家复核。",
+            },
+            {
+                "source": "hunk_signal",
+                "risk_domain": "ddd",
+                "suggested_expert_id": "ddd_architecture",
+                "file_path": "src/main/java/app/order/OrderService.java",
+                "line_start": 31,
+                "message": "领域事件时序风险，需要 DDD 专家复核。",
+            },
+        ],
+    }
+
+    routed = route_experts(state)
+
+    selected = routed["selected_experts"]
+    assert selected[0] == "change_impact_analysis"
+    assert "security_compliance" in selected
+    assert "ddd_architecture" in selected
+    assert "correctness_business" in selected
+
+
 def test_route_experts_adds_required_experts_from_repo_policy():
     state = {
         "selected_experts": ["correctness_business"],

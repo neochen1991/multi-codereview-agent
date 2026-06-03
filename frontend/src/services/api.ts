@@ -251,6 +251,9 @@ export interface DebateIssue {
   aggregated_remediation_strategies?: string[];
   aggregated_remediation_suggestions?: string[];
   aggregated_remediation_steps?: string[];
+  matched_rules?: string[];
+  violated_guidelines?: string[];
+  rule_based_reasoning?: string;
   remediation_strategy?: string;
   remediation_suggestion?: string;
   remediation_steps?: string[];

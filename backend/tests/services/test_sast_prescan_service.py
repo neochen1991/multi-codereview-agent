@@ -15,6 +15,7 @@ def test_sast_prescan_is_disabled_by_default(tmp_path: Path):
 
     assert payload["enabled"] is False
     assert payload["findings"] == []
+    assert payload["tool_observations"] == []
     assert payload["summary"] == ""
     which.assert_not_called()
 
@@ -30,6 +31,22 @@ def test_sast_prescan_skips_when_tools_are_unavailable(tmp_path: Path):
 
     assert payload["enabled"] is False
     assert payload["findings"] == []
+    assert payload["tool_observations"] == []
+    assert "未发现可用" in payload["limitations"][0]
+
+
+def test_sast_prescan_skips_java_when_no_tools_or_reports_are_available(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}\n", encoding="utf-8")
+
+    with patch("app.services.sast_prescan_service.shutil.which", return_value=None):
+        payload = SastPreScanService().scan_file(repo, "src/main/java/app/OrderService.java", enabled=True)
+
+    assert payload["enabled"] is False
+    assert payload["findings"] == []
+    assert payload["tool_observations"] == []
     assert "未发现可用" in payload["limitations"][0]
 
 
@@ -65,6 +82,10 @@ def test_sast_prescan_parses_semgrep_json(tmp_path: Path):
     assert payload["findings"][0]["rule_id"] == "python.lang.security.audit.eval"
     assert payload["findings"][0]["cwe"] == "CWE-95"
     assert "CWE-95" in payload["findings"][0]["why_it_matters"]
+    assert payload["tool_observations"][0]["source"] == "sast_prescan"
+    assert payload["tool_observations"][0]["observation_type"] == "tool_observation"
+    assert payload["tool_observations"][0]["is_issue"] is False
+    assert payload["tool_observations"][0]["expert_must_decide"] is True
     assert "Use of eval" in payload["summary"] or payload["findings"][0]["message"] == "Use of eval"
 
 
@@ -85,3 +106,163 @@ def test_sast_prescan_uses_project_semgrep_config(tmp_path: Path):
             payload = SastPreScanService().scan_file(repo, "src/app.py", enabled=True)
 
     assert payload["enabled"] is True
+
+
+def test_sast_prescan_parses_pmd_json_for_java(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}\n", encoding="utf-8")
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
+        assert command[:4] == ["pmd", "check", "-d", "src/main/java/app/OrderService.java"]
+        assert "-f" in command and "json" in command
+        return type(
+            "Completed",
+            (),
+            {
+                "stdout": (
+                    '{"files":[{"filename":"src/main/java/app/OrderService.java",'
+                    '"violations":[{"beginline":12,"rule":"EmptyCatchBlock",'
+                    '"priority":2,"description":"Avoid empty catch blocks"}]}]}'
+                ),
+                "stderr": "",
+                "returncode": 4,
+            },
+        )()
+
+    with patch(
+        "app.services.sast_prescan_service.shutil.which",
+        side_effect=lambda name: "/usr/bin/pmd" if name == "pmd" else None,
+    ):
+        with patch("app.services.sast_prescan_service.subprocess.run", side_effect=fake_run):
+            payload = SastPreScanService().scan_file(repo, "src/main/java/app/OrderService.java", enabled=True)
+
+    assert payload["enabled"] is True
+    assert payload["findings"][0]["tool"] == "pmd"
+    assert payload["findings"][0]["rule_id"] == "EmptyCatchBlock"
+    assert payload["findings"][0]["severity"] == "high"
+    assert payload["tool_observations"][0]["is_issue"] is False
+
+
+def test_sast_prescan_parses_checkstyle_xml_for_java(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}\n", encoding="utf-8")
+    (repo / "checkstyle.xml").write_text("<module name=\"Checker\" />\n", encoding="utf-8")
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None, **kwargs):
+        assert command[:4] == ["checkstyle", "-c", str(repo / "checkstyle.xml"), "-f"]
+        return type(
+            "Completed",
+            (),
+            {
+                "stdout": (
+                    '<checkstyle><file name="src/main/java/app/OrderService.java">'
+                    '<error line="7" severity="warning" message="Name must match pattern" '
+                    'source="com.puppycrawl.tools.checkstyle.checks.naming.MethodNameCheck"/>'
+                    "</file></checkstyle>"
+                ),
+                "stderr": "",
+                "returncode": 1,
+            },
+        )()
+
+    with patch(
+        "app.services.sast_prescan_service.shutil.which",
+        side_effect=lambda name: "/usr/bin/checkstyle" if name == "checkstyle" else None,
+    ):
+        with patch("app.services.sast_prescan_service.subprocess.run", side_effect=fake_run):
+            payload = SastPreScanService().scan_file(repo, "src/main/java/app/OrderService.java", enabled=True)
+
+    assert payload["enabled"] is True
+    assert payload["findings"][0]["tool"] == "checkstyle"
+    assert payload["findings"][0]["rule_id"] == "MethodNameCheck"
+    assert payload["findings"][0]["line_start"] == 7
+
+
+def test_sast_prescan_parses_spotbugs_report_for_java(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}\n", encoding="utf-8")
+    report = repo / "target/spotbugsXml.xml"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        """
+        <BugCollection>
+          <BugInstance type="NP_NULL_ON_SOME_PATH" priority="2">
+            <LongMessage>Possible null pointer dereference in OrderService.load</LongMessage>
+            <SourceLine sourcepath="src/main/java/app/OrderService.java" start="18" />
+          </BugInstance>
+        </BugCollection>
+        """,
+        encoding="utf-8",
+    )
+
+    with patch("app.services.sast_prescan_service.shutil.which", return_value=None):
+        payload = SastPreScanService().scan_file(repo, "src/main/java/app/OrderService.java", enabled=True)
+
+    assert payload["enabled"] is True
+    assert payload["findings"][0]["tool"] == "spotbugs"
+    assert payload["findings"][0]["rule_id"] == "NP_NULL_ON_SOME_PATH"
+    assert payload["findings"][0]["severity"] == "high"
+    assert payload["tool_observations"][0]["expert_must_decide"] is True
+
+
+def test_sast_prescan_parses_archunit_report_for_java(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/domain/OrderAggregate.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderAggregate {}\n", encoding="utf-8")
+    report = repo / "target/surefire-reports/TEST-app.ArchitectureTest.xml"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        """
+        <testsuite>
+          <testcase classname="app.ArchitectureTest" name="ArchUnit domain layer should not access repository">
+            <failure message="ArchRule violated: OrderAggregate depends on repository" />
+          </testcase>
+        </testsuite>
+        """,
+        encoding="utf-8",
+    )
+
+    with patch("app.services.sast_prescan_service.shutil.which", return_value=None):
+        payload = SastPreScanService().scan_file(repo, "src/main/java/app/domain/OrderAggregate.java", enabled=True)
+
+    assert payload["enabled"] is True
+    assert payload["findings"][0]["tool"] == "archunit"
+    assert payload["findings"][0]["severity"] == "high"
+    assert "DDD 架构专家" in payload["findings"][0]["why_it_matters"]
+
+
+def test_sast_prescan_parses_jacoco_report_for_java(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / "src/main/java/app/OrderService.java"
+    target.parent.mkdir(parents=True)
+    target.write_text("class OrderService {}\n", encoding="utf-8")
+    report = repo / "target/site/jacoco/jacoco.xml"
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        """
+        <report>
+          <package name="app">
+            <sourcefile name="OrderService.java">
+              <line nr="23" mi="1" ci="0" />
+              <line nr="24" mi="0" ci="1" />
+            </sourcefile>
+          </package>
+        </report>
+        """,
+        encoding="utf-8",
+    )
+
+    with patch("app.services.sast_prescan_service.shutil.which", return_value=None):
+        payload = SastPreScanService().scan_file(repo, "src/main/java/app/OrderService.java", enabled=True)
+
+    assert payload["enabled"] is True
+    assert payload["findings"][0]["tool"] == "jacoco"
+    assert payload["findings"][0]["rule_id"] == "uncovered-lines"
+    assert payload["findings"][0]["line_start"] == 23

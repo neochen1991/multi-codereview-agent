@@ -9,6 +9,7 @@ from app.services.diff_excerpt_service import DiffExcerptService
 RISK_DOMAIN_EXPERTS: dict[str, tuple[str, ...]] = {
     "security": ("security_compliance",),
     "business": ("correctness_business",),
+    "ddd": ("ddd_architecture", "correctness_business"),
     "database": ("database_analysis",),
     "transaction": ("correctness_business", "database_analysis", "performance_reliability"),
     "performance": ("performance_reliability", "database_analysis"),
@@ -217,6 +218,24 @@ class ChangeUnderstandingService:
             domains.append("security")
         if any(term in lower for term in self.BUSINESS_TERMS):
             domains.append("business")
+        if file_role in {"service", "entity", "repository"} and any(
+            token in lower
+            for token in (
+                "aggregate",
+                "domainservice",
+                "domainevent",
+                "domain event",
+                "eventpublisher",
+                "repository",
+                "factory",
+                ".create(",
+                "new order",
+                "new payment",
+                "/domain/",
+                "/application/",
+            )
+        ):
+            domains.append("ddd")
         if file_role in {"repository", "sql"} or any(
             token in lower
             for token in (

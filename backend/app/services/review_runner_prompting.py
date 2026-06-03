@@ -9,6 +9,7 @@ from app.services.context_block import ContextBlock
 from app.services.context_priority_policy import priority_for_block_type
 from app.services.model_prompt_profiles import resolve_model_prompt_profile
 from app.services.prompt_budget_planner import PromptBudgetPlanner
+from app.services.risk_candidate_service import RiskCandidateService
 
 if TYPE_CHECKING:
     from app.domain.models.expert_profile import ExpertProfile
@@ -253,13 +254,15 @@ class ReviewRunnerPromptingMixin:
             f"如果你的结论已有当前变更代码位置但缺少关联上下文，请保留该 finding，并设置 verification_needed=true、写清 verification_plan；"
             f"只有完全没有当前变更代码位置、纯靠猜测的结论才不要输出。\n"
             f"对“结构化观察点”要逐条复核：它们只是主Agent提炼的可疑代码现象，不等于已经确认的问题。你可以否定观察点；若确认其成立并输出 finding，必须把对应 observation_id 写入 observation_ids。\n"
+            f"必须按三段式深审：先观察当前 hunk 和风险候选，再判断是否构成真实问题，最后补齐文件/行号/代码锚点/影响/修复证据。\n"
+            f"工具观察、SAST/linter、风险候选池都只是辅助证据，不是最终问题；如果采纳工具线索，必须写入 adopted_tool_observations；如果不采纳，不要输出对应 finding。\n"
             f"输出必须是 JSON（不要输出 Markdown / 额外解释）。\n"
             f"该规则在标准模式和轻量模式都必须遵守。\n"
             f"除 normalized_issue_type、代码标识、文件路径、接口名、类名和方法名外，所有面向用户展示的文字字段必须使用中文；不要输出英文修复说明或英文证据说明。\n"
             f"如果只发现 1 个问题，输出单个 JSON 对象；如果发现多个互不重复的问题，可输出 JSON 数组或 {{\"findings\":[...]}}，最多 5 条。\n"
             f"当提供了多个 hunk 时，必须按 hunk 逐段审查：每条 finding 必须定位到某个具体 hunk，并给出对应 line_start/line_end；无法定位到具体 hunk 行号的结论不要输出。\n"
             f"每条 finding 的 JSON 字段要求:\n"
-            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","target_id":"必须从目标 hunk 的 target_id 原样选择","file_path":"必须从目标 hunk 的 file_path 原样选择","line_start":"必须取该 hunk changed_lines 中的当前代码行号","line_end":"必须取该 hunk changed_lines 中的当前代码行号","matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
+            f'{{"ack":"先回应主Agent派工","title":"一句话问题标题","finding_type":"direct_defect|test_gap|design_concern","normalized_issue_type":"从枚举中选择或给出稳定英文短语","claim":"必须落在当前文件/行号的确定性结论","severity":"blocker|high|medium|low","target_id":"必须从目标 hunk 的 target_id 原样选择","file_path":"必须从目标 hunk 的 file_path 原样选择","line_start":"必须取该 hunk changed_lines 中的当前代码行号","line_end":"必须取该 hunk changed_lines 中的当前代码行号","matched_rules":["命中的专家通用规范、语言通用规范或本轮真实附加规则 ID"],"violated_guidelines":["违反的具体规范"],"rule_based_reasoning":"说明为何违反规范以及规范如何约束当前改动；若引用附加规则必须写出真实规则 ID","evidence":["至少2条具体代码证据"],"cross_file_evidence":["跨文件佐证"],"assumptions":[],"context_files":["引用的目标分支文件"],"observation_ids":["若该 finding 来自结构化观察点，必须填写对应 observation_id；否则留空数组"],"adopted_tool_observations":["若采纳工具观察或风险候选，填写 tool:rule_id 或 candidate_id；否则留空数组"],{design_contract}"why_it_matters":"影响说明","fix_strategy":"一句话说明修改思路","suggested_fix":"详细说明应该怎么改","change_steps":["按顺序写清楚 2-4 个修改步骤"],"suggested_code":"给出建议修改后的完整代码片段","confidence":0.0,"verification_needed":false,"verification_plan":""}}'
         )
 
     def _build_rule_guided_expert_prompt(
@@ -400,6 +403,7 @@ class ReviewRunnerPromptingMixin:
                     "evidence": "string",
                     "confidence": "high|medium|low",
                     "observation_ids": ["string"],
+                    "adopted_tool_observations": ["采纳的工具观察或风险候选 ID；未采纳则为空数组"],
                 }
             ],
             "context_requests": [
@@ -426,9 +430,11 @@ class ReviewRunnerPromptingMixin:
             "必须同时遵守专家职责说明、专家审视规范、语言通用规范和 RULE_CARDS；绑定规范和专家画像都要参与检视，候选结果取并集。",
             "必须逐条检查 RULE_CARDS。每条适用规则都要输出 rule_check_results。",
             "如果 required_context 缺失或无法确认，规则状态必须是 insufficient_context，不能写 passed。",
+            "必须按三段式深审：观察阶段识别当前 hunk 和风险候选，判断阶段确认是否构成真实问题，证据阶段补齐代码锚点、影响和修复方向。",
             "第一阶段请高召回列出 candidate_findings；宁可列可疑候选，不要因为不确定直接省略。",
             "candidate_findings 必须绑定真实 rule_id、file_path、line 和代码证据。",
             "candidate_findings 应尽量填写 method_name、code_anchor、change_understanding_refs；change_understanding_refs 至少包含 target_id 或文件/方法标识。",
+            "工具观察、SAST/linter、风险候选池只是辅助证据，不是预设结论；采纳时必须填写 adopted_tool_observations，未采纳时不要输出对应候选。",
             "candidate_findings 的 file_path/line/target_id 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 中的占位说明或主任务默认文件。",
             "每条 candidate_finding 只能描述一个具体问题、一个主文件和一个主代码位置；不要把多个文件、多个风险点或多个修复方向合并成一条。",
             "如果同一 hunk 存在多个问题，请拆成多条 candidate_findings；每条的 title、evidence、reason、suggested_code 必须互相指向同一问题。",
@@ -867,6 +873,21 @@ class ReviewRunnerPromptingMixin:
         )
         context["prompt_context_section_order"] = section_order
         context["review_observations"] = focused_observations
+        context["risk_candidates"] = RiskCandidateService().build(
+            change_understanding=dict(context.get("change_understanding") or {}),
+            tool_observations=[
+                dict(item)
+                for item in list(context.get("tool_observations") or [])
+                if isinstance(item, dict)
+            ],
+            code_graph_context=context,
+            feedback_quality_profiles=dict(context.get("feedback_quality_profiles") or {}),
+            existing_candidates=[
+                dict(item)
+                for item in list(context.get("risk_candidates") or [])
+                if isinstance(item, dict)
+            ],
+        )
         if analysis_mode == "light":
             context = self._trim_prompt_repository_context_for_light(
                 context,

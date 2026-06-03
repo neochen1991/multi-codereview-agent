@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -12,22 +13,22 @@ class SastPreScanService:
 
     def scan_file(self, repo_root: str | Path, file_path: str, *, enabled: bool = False) -> dict[str, object]:
         if not enabled:
-            return {"enabled": False, "summary": "", "findings": [], "limitations": []}
+            return {"enabled": False, "summary": "", "findings": [], "tool_observations": [], "limitations": []}
         root = Path(str(repo_root or "")).expanduser()
         normalized_file = str(file_path or "").strip().replace("\\", "/")
         if not normalized_file or not root.exists() or not root.is_dir():
-            return {"enabled": False, "summary": "", "findings": [], "limitations": ["本地仓库路径不可用，未执行 SAST 预扫描。"]}
+            return {"enabled": False, "summary": "", "findings": [], "tool_observations": [], "limitations": ["本地仓库路径不可用，未执行 SAST 预扫描。"]}
         absolute_path = root / normalized_file
         if not absolute_path.exists() or not absolute_path.is_file():
-            return {"enabled": False, "summary": "", "findings": [], "limitations": ["目标文件不存在，未执行 SAST 预扫描。"]}
+            return {"enabled": False, "summary": "", "findings": [], "tool_observations": [], "limitations": ["目标文件不存在，未执行 SAST 预扫描。"]}
 
-        scanners = self._candidate_scanners(normalized_file)
+        scanners = self._candidate_scanners(root, normalized_file)
         if not scanners:
-            return {"enabled": False, "summary": "", "findings": [], "limitations": ["未发现可用 SAST/linter 工具，跳过预扫描。"]}
+            return {"enabled": False, "summary": "", "findings": [], "tool_observations": [], "limitations": ["未发现可用 SAST/linter 工具，跳过预扫描。"]}
 
         findings: list[dict[str, object]] = []
         limitations: list[str] = []
-        for scanner in scanners[:2]:
+        for scanner in scanners[:6]:
             try:
                 findings.extend(scanner(root, normalized_file)[:12])
             except Exception as error:
@@ -37,14 +38,48 @@ class SastPreScanService:
             "enabled": True,
             "summary": summary,
             "findings": findings[:12],
+            "tool_observations": self._as_tool_observations(findings[:12]),
             "limitations": limitations[:4],
         }
 
-    def _candidate_scanners(self, file_path: str):
+    def _candidate_scanners(self, root: Path, file_path: str):
         suffix = Path(file_path).suffix.lower()
         scanners = []
         if shutil.which("semgrep"):
             scanners.append(self._scan_semgrep)
+        if suffix == ".java" and shutil.which("pmd"):
+            scanners.append(self._scan_pmd)
+        if suffix == ".java" and shutil.which("checkstyle"):
+            scanners.append(self._scan_checkstyle)
+        if suffix == ".java" and self._has_any_report(
+            root,
+            [
+                "target/spotbugsXml.xml",
+                "target/spotbugs.xml",
+                "target/site/spotbugs.xml",
+                "build/reports/spotbugs/main.xml",
+                "build/reports/spotbugs/test.xml",
+                "spotbugs.xml",
+            ],
+        ):
+            scanners.append(self._scan_spotbugs_reports)
+        if suffix == ".java" and (
+            (root / "target" / "surefire-reports").exists()
+            or (root / "target" / "failsafe-reports").exists()
+            or (root / "build" / "test-results").exists()
+        ):
+            scanners.append(self._scan_archunit_reports)
+        if suffix == ".java" and self._has_any_report(
+            root,
+            [
+                "target/site/jacoco/jacoco.xml",
+                "target/site/jacoco-aggregate/jacoco.xml",
+                "build/reports/jacoco/test/jacocoTestReport.xml",
+                "build/reports/jacoco/testCodeCoverageReport/testCodeCoverageReport.xml",
+                "jacoco.xml",
+            ],
+        ):
+            scanners.append(self._scan_jacoco_reports)
         if suffix in {".js", ".jsx", ".ts", ".tsx"} and shutil.which("eslint"):
             scanners.append(self._scan_eslint)
         if suffix == ".py" and shutil.which("bandit"):
@@ -93,6 +128,218 @@ class SastPreScanService:
                     "line_start": int(start.get("line") or 1),
                 }
             )
+        return findings
+
+    def _scan_pmd(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        command = ["pmd", "check", "-d", file_path, "-f", "json"]
+        config = self._first_existing(root, ["pmd-ruleset.xml", ".pmd.xml", "ruleset.xml"])
+        if config:
+            command.extend(["-R", str(config)])
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        payload = self._loads_json(completed.stdout)
+        findings: list[dict[str, object]] = []
+        files_payload = payload.get("files") if isinstance(payload, dict) else []
+        for file_item in list(files_payload or []):
+            if not isinstance(file_item, dict):
+                continue
+            result_path = str(file_item.get("filename") or file_path)
+            for violation in list(file_item.get("violations") or []):
+                if not isinstance(violation, dict):
+                    continue
+                rule_id = str(violation.get("rule") or violation.get("ruleName") or "").strip()
+                message = str(violation.get("description") or violation.get("message") or "").strip()
+                priority = int(violation.get("priority") or 3)
+                findings.append(
+                    {
+                        "tool": "pmd",
+                        "rule_id": rule_id,
+                        "message": message,
+                        "severity": "high" if priority <= 2 else "medium" if priority == 3 else "low",
+                        "cwe": "",
+                        "why_it_matters": self._why_it_matters(tool="pmd", rule_id=rule_id, message=message),
+                        "file_path": result_path,
+                        "line_start": int(violation.get("beginline") or violation.get("line") or 1),
+                    }
+                )
+        return findings
+
+    def _scan_checkstyle(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        config = self._first_existing(
+            root,
+            ["checkstyle.xml", "config/checkstyle/checkstyle.xml", "google_checks.xml", "sun_checks.xml"],
+        )
+        if not config:
+            return []
+        completed = subprocess.run(
+            ["checkstyle", "-c", str(config), "-f", "xml", file_path],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        try:
+            root_xml = ET.fromstring(completed.stdout.strip() or "<checkstyle />")
+        except ET.ParseError:
+            return []
+        findings: list[dict[str, object]] = []
+        for file_node in root_xml.findall("file"):
+            result_path = str(file_node.get("name") or file_path)
+            if result_path.startswith(str(root)):
+                result_path = str(Path(result_path).relative_to(root))
+            for error in file_node.findall("error"):
+                source = str(error.get("source") or "").strip()
+                rule_id = source.rsplit(".", 1)[-1] if source else "checkstyle"
+                message = str(error.get("message") or "").strip()
+                severity = str(error.get("severity") or "warning").lower()
+                findings.append(
+                    {
+                        "tool": "checkstyle",
+                        "rule_id": rule_id,
+                        "message": message,
+                        "severity": "high" if severity == "error" else "medium",
+                        "cwe": "",
+                        "why_it_matters": self._why_it_matters(tool="checkstyle", rule_id=rule_id, message=message),
+                        "file_path": result_path,
+                        "line_start": int(error.get("line") or 1),
+                    }
+                )
+        return findings
+
+    def _scan_spotbugs_reports(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        report_paths = self._existing_report_paths(
+            root,
+            [
+                "target/spotbugsXml.xml",
+                "target/spotbugs.xml",
+                "target/site/spotbugs.xml",
+                "build/reports/spotbugs/main.xml",
+                "build/reports/spotbugs/test.xml",
+                "spotbugs.xml",
+            ],
+        )
+        findings: list[dict[str, object]] = []
+        for report in report_paths[:3]:
+            try:
+                root_xml = ET.fromstring(report.read_text(encoding="utf-8", errors="replace"))
+            except ET.ParseError:
+                continue
+            for bug in root_xml.findall(".//BugInstance"):
+                source_line = bug.find(".//SourceLine")
+                if source_line is None or not self._report_entry_matches_file(file_path, source_line):
+                    continue
+                rule_id = str(bug.get("type") or bug.get("category") or "spotbugs").strip()
+                priority = int(str(bug.get("priority") or "3").strip() or 3)
+                message = self._first_child_text(bug, "LongMessage") or self._first_child_text(bug, "ShortMessage") or rule_id
+                findings.append(
+                    {
+                        "tool": "spotbugs",
+                        "rule_id": rule_id,
+                        "message": message,
+                        "severity": "high" if priority <= 2 else "medium" if priority == 3 else "low",
+                        "cwe": "",
+                        "why_it_matters": self._why_it_matters(tool="spotbugs", rule_id=rule_id, message=message),
+                        "file_path": file_path,
+                        "line_start": int(source_line.get("start") or source_line.get("line") or 1),
+                    }
+                )
+        return findings
+
+    def _scan_archunit_reports(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        reports = list((root / "target" / "surefire-reports").glob("*.xml"))
+        reports.extend((root / "target" / "failsafe-reports").glob("*.xml"))
+        reports.extend((root / "build" / "test-results").glob("**/*.xml"))
+        class_name = Path(file_path).stem
+        findings: list[dict[str, object]] = []
+        for report in reports[:20]:
+            try:
+                root_xml = ET.fromstring(report.read_text(encoding="utf-8", errors="replace"))
+            except ET.ParseError:
+                continue
+            for testcase in root_xml.findall(".//testcase"):
+                failure = testcase.find("failure")
+                if failure is None:
+                    failure = testcase.find("error")
+                failure_message = str((failure.get("message") if failure is not None else "") or "")
+                blob = " ".join(
+                    [
+                        str(testcase.get("classname") or ""),
+                        str(testcase.get("name") or ""),
+                        failure_message,
+                        "".join(testcase.itertext()),
+                    ]
+                )
+                lowered = blob.lower()
+                if "archunit" not in lowered and "archrule" not in lowered and "architecture" not in lowered:
+                    continue
+                if class_name and class_name not in blob and file_path not in blob:
+                    continue
+                message = str(failure_message or blob).strip()
+                findings.append(
+                    {
+                        "tool": "archunit",
+                        "rule_id": str(testcase.get("name") or "archunit-rule").strip(),
+                        "message": self._compact_text(message, 360),
+                        "severity": "high",
+                        "cwe": "",
+                        "why_it_matters": "该命中来自项目架构测试，通常表示分层依赖、包依赖方向或 DDD 边界被破坏，应由 DDD 架构专家复核。",
+                        "file_path": file_path,
+                        "line_start": 1,
+                    }
+                )
+        return findings
+
+    def _scan_jacoco_reports(self, root: Path, file_path: str) -> list[dict[str, object]]:
+        reports = self._existing_report_paths(
+            root,
+            [
+                "target/site/jacoco/jacoco.xml",
+                "target/site/jacoco-aggregate/jacoco.xml",
+                "build/reports/jacoco/test/jacocoTestReport.xml",
+                "build/reports/jacoco/testCodeCoverageReport/testCodeCoverageReport.xml",
+                "jacoco.xml",
+            ],
+        )
+        source_name = Path(file_path).name
+        findings: list[dict[str, object]] = []
+        for report in reports[:3]:
+            try:
+                root_xml = ET.fromstring(report.read_text(encoding="utf-8", errors="replace"))
+            except ET.ParseError:
+                continue
+            for source_file in root_xml.findall(".//sourcefile"):
+                if str(source_file.get("name") or "") != source_name:
+                    continue
+                missed_lines = [
+                    int(line.get("nr") or 0)
+                    for line in source_file.findall("line")
+                    if int(line.get("mi") or 0) > 0 and int(line.get("ci") or 0) <= 0
+                ]
+                if not missed_lines:
+                    continue
+                findings.append(
+                    {
+                        "tool": "jacoco",
+                        "rule_id": "uncovered-lines",
+                        "message": f"JaCoCo 显示该文件仍有 {len(missed_lines)} 行未覆盖，示例行号：{missed_lines[:5]}。",
+                        "severity": "medium",
+                        "cwe": "",
+                        "why_it_matters": "该命中来自覆盖率报告，只能说明测试保护可能不足，应由测试验证专家结合本次变更风险判断是否需要补测试。",
+                        "file_path": file_path,
+                        "line_start": missed_lines[0],
+                    }
+                )
         return findings
 
     def _scan_eslint(self, root: Path, file_path: str) -> list[dict[str, object]]:
@@ -226,8 +473,42 @@ class SastPreScanService:
                 return candidate
         return None
 
+    def _existing_report_paths(self, root: Path, names: list[str]) -> list[Path]:
+        return [candidate for name in names if (candidate := root / name).exists() and candidate.is_file()]
+
+    def _has_any_report(self, root: Path, names: list[str]) -> bool:
+        return any((root / name).exists() and (root / name).is_file() for name in names)
+
+    def _report_entry_matches_file(self, file_path: str, node: ET.Element) -> bool:
+        source_path = str(node.get("sourcepath") or node.get("relSourcepath") or node.get("path") or "").replace("\\", "/")
+        source_file = str(node.get("sourcefile") or node.get("file") or "").replace("\\", "/")
+        normalized = file_path.replace("\\", "/")
+        return bool(
+            (source_path and (source_path == normalized or source_path.endswith("/" + normalized)))
+            or (source_file and source_file == Path(normalized).name)
+        )
+
+    def _first_child_text(self, node: ET.Element, child_name: str) -> str:
+        child = node.find(child_name)
+        return str(child.text or "").strip() if child is not None else ""
+
+    def _compact_text(self, value: str, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "..."
+
     def _loads_json(self, value: str) -> Any:
         try:
             return json.loads(str(value or "").strip() or "{}")
         except json.JSONDecodeError:
             return {}
+
+    def _as_tool_observations(self, findings: list[dict[str, object]]) -> list[dict[str, object]]:
+        observations: list[dict[str, object]] = []
+        for item in findings:
+            observation = dict(item)
+            observation["source"] = "sast_prescan"
+            observation["observation_type"] = "tool_observation"
+            observation["is_issue"] = False
+            observation["expert_must_decide"] = True
+            observations.append(observation)
+        return observations

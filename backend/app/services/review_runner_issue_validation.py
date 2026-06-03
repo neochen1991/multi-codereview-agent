@@ -1492,35 +1492,12 @@ class ReviewRunnerIssueValidationMixin:
                 for item in llm_batch:
                     issue = item["issue"]
                     baseline = item["baseline"]
-                    related_findings = item["related_findings"]
                     payload = payload_by_issue_id.get(issue.issue_id, {"issue_id": issue.issue_id, **baseline, "status": "validator_failed"})
                     validated_issue, validation_metadata = self._apply_issue_consistency_validation(
                         issue=issue,
                         baseline=baseline,
                         payload=payload,
                     )
-                    if not self._looks_like_concrete_suggested_code(
-                        validated_issue.suggested_code,
-                        file_path=validated_issue.file_path,
-                    ):
-                        repaired_suggested_code = self._repair_issue_suggested_code_with_judge(
-                            review=review,
-                            issue=validated_issue,
-                            baseline=baseline,
-                            related_findings=related_findings,
-                            runtime_settings=runtime_settings,
-                            llm_request_options=llm_request_options,
-                        )
-                        if repaired_suggested_code:
-                            validated_issue.suggested_code = repaired_suggested_code
-                            validated_issue.updated_at = datetime.now(UTC)
-                            validation_metadata["updated_fields"] = list(
-                                dict.fromkeys([*list(validation_metadata.get("updated_fields") or []), "suggested_code"])
-                            )
-                            repair_note = "Judge 已补全具体建议修改代码。"
-                            validation_metadata["summary"] = (
-                                f"{str(validation_metadata.get('summary') or '').strip()} {repair_note}"
-                            ).strip()
                     batch_validated_by_issue_id[issue.issue_id] = validated_issue
                     self.message_repo.append(
                         ConversationMessage(
@@ -2131,35 +2108,19 @@ class ReviewRunnerIssueValidationMixin:
             status = "validator_failed"
         # Judge 只做一致性门禁。弱模型在这里重写展示字段会让最终详情页
         # 与专家原始证据错位，因此正式 issue/finding baseline 永远优先。
-        next_issue.title = str(issue.title or baseline.get("title") or payload.get("title") or "").strip() or issue.title
-        issue_family = self._issue_root_family(issue)
-        issue_summary = str(issue.summary or "").strip()
-        baseline_summary = str(baseline.get("summary") or "").strip()
+        next_issue.title = str(issue.title or baseline.get("title") or "").strip() or issue.title
         next_issue.summary = self._first_sanitized_user_facing_text(
-            baseline_summary if self._issue_text_matches_family(issue_family, baseline_summary) else "",
-            issue_summary if self._issue_text_matches_family(issue_family, issue_summary) else "",
-            baseline_summary,
-            issue_summary,
-            payload.get("summary"),
+            issue.summary,
+            baseline.get("summary"),
             issue.title,
         )
-        next_issue.normalized_issue_type = str(
-            issue.normalized_issue_type or baseline.get("normalized_issue_type") or payload.get("normalized_issue_type") or ""
-        ).strip()
+        next_issue.normalized_issue_type = str(issue.normalized_issue_type or baseline.get("normalized_issue_type") or "").strip()
         baseline_file_path = str(baseline.get("file_path") or issue.file_path or "").strip()
         baseline_line_start = int(baseline.get("line_start") or issue.line_start or 1)
         next_issue.file_path = baseline_file_path or issue.file_path
         next_issue.line_start = baseline_line_start
-        next_issue.remediation_strategy = self._first_sanitized_user_facing_text(
-            issue.remediation_strategy,
-            baseline.get("remediation_strategy"),
-            payload.get("remediation_strategy"),
-        )
-        next_issue.remediation_suggestion = self._first_sanitized_user_facing_text(
-            issue.remediation_suggestion,
-            baseline.get("remediation_suggestion"),
-            payload.get("remediation_suggestion"),
-        )
+        next_issue.remediation_strategy = self._first_sanitized_user_facing_text(issue.remediation_strategy, baseline.get("remediation_strategy"))
+        next_issue.remediation_suggestion = self._first_sanitized_user_facing_text(issue.remediation_suggestion, baseline.get("remediation_suggestion"))
         baseline_steps = list(baseline.get("remediation_steps") or [])
         if issue.remediation_steps:
             next_issue.remediation_steps = [
@@ -2170,50 +2131,26 @@ class ReviewRunnerIssueValidationMixin:
                 item for item in self._normalize_text_list(baseline_steps, []) if self._sanitize_user_facing_issue_text(item)
             ]
         else:
-            next_issue.remediation_steps = [
-                item for item in self._normalize_text_list(payload.get("remediation_steps"), []) if self._sanitize_user_facing_issue_text(item)
-            ]
+            next_issue.remediation_steps = []
         next_issue.current_code = self._select_issue_current_code_from_anchor(
-            payload.get("current_code"),
+            "",
             baseline.get("current_code"),
             issue.current_code,
         )
-        candidate_suggested_code = str(issue.suggested_code or baseline.get("suggested_code") or payload.get("suggested_code") or "").strip()
+        candidate_suggested_code = str(issue.suggested_code or baseline.get("suggested_code") or "").strip()
         if self._looks_like_concrete_suggested_code(candidate_suggested_code, file_path=next_issue.file_path):
             next_issue.suggested_code = candidate_suggested_code
         else:
             next_issue.suggested_code = ""
-        self._apply_canonical_issue_family_summary(next_issue)
-        self._repair_cross_context_issue_summary(next_issue)
         next_issue.category_label = next_issue.category_label or self._category_label_for_issue_type(next_issue.normalized_issue_type)
         next_issue.consistency_check_status = status
         next_issue.consistency_conflicts = self._normalize_text_list(payload.get("consistency_conflicts"), [])
         next_issue.consistency_check_summary = str(payload.get("reason") or "").strip()
-        payload_current_code = str(payload.get("current_code") or "").strip()
-        payload_suggested_code = str(payload.get("suggested_code") or "").strip()
-        payload_anchor_conflicts: list[str] = []
-        if payload_current_code or payload_suggested_code:
-            payload_anchor_issue = next_issue.model_copy(
-                update={
-                    "current_code": payload_current_code or next_issue.current_code,
-                    "suggested_code": payload_suggested_code or next_issue.suggested_code,
-                },
-                deep=True,
-            )
-            payload_anchor_conflicts = self._detect_issue_anchor_conflicts(payload_anchor_issue)
-            next_issue.consistency_conflicts = list(
-                dict.fromkeys(
-                    [
-                        *next_issue.consistency_conflicts,
-                        *payload_anchor_conflicts,
-                    ]
-                )
-            )
         if not next_issue.consistency_check_summary:
             if status == "passed":
                 next_issue.consistency_check_summary = "已完成一致性校验，问题说明、代码片段和修改建议保持一致。"
             elif status == "repaired":
-                next_issue.consistency_check_summary = "已根据关联发现修正问题内容错位。"
+                next_issue.consistency_check_summary = "Judge 建议修正，但系统仅记录门禁结论并保留专家原始 issue 内容。"
             elif status == "downgraded":
                 next_issue.consistency_check_summary = "发现问题内容存在冲突，已降级为待人工校验。"
             else:
@@ -2223,9 +2160,18 @@ class ReviewRunnerIssueValidationMixin:
             next_issue.needs_human = True
             next_issue.resolution = "consistency_validation_failed"
             next_issue.verified = False
-        remediation_alignment = self._filter_issue_remediation_scope(next_issue)
+        remediation_probe = next_issue.model_copy(deep=True)
+        remediation_alignment = self._filter_issue_remediation_scope(remediation_probe)
+        next_issue.remediation_alignment_status = remediation_probe.remediation_alignment_status
+        next_issue.remediation_alignment_conflicts = list(remediation_probe.remediation_alignment_conflicts)
+        next_issue.remediation_filtered = remediation_probe.remediation_filtered
+        if remediation_probe.remediation_alignment_conflicts:
+            next_issue.status = "needs_human"
+            next_issue.needs_human = True
+            next_issue.resolution = "consistency_validation_failed"
+            next_issue.verified = False
         anchor_conflicts = self._detect_issue_anchor_conflicts(next_issue)
-        combined_anchor_conflicts = list(dict.fromkeys([*payload_anchor_conflicts, *anchor_conflicts]))
+        combined_anchor_conflicts = list(dict.fromkeys(anchor_conflicts))
         if combined_anchor_conflicts and status != "downgraded":
             next_issue.status = "needs_human"
             next_issue.needs_human = True

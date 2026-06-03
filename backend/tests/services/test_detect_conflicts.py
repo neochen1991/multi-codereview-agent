@@ -28,7 +28,7 @@ def test_detect_conflicts_skips_low_risk_hint_like_findings():
 
     assert result["conflicts"] == []
     assert len(result["issue_filter_decisions"]) == 1
-    assert result["issue_filter_decisions"][0]["rule_code"] == "hint_like_medium"
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
     assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
 
 
@@ -57,10 +57,9 @@ def test_detect_conflicts_keeps_high_risk_runtime_findings_as_findings_when_veri
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert len(result["issue_filter_decisions"]) == 1
-    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
-    assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_risk_1"
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_upgrades_empty_catch_with_direct_code_evidence():
@@ -73,7 +72,7 @@ def test_detect_conflicts_upgrades_empty_catch_with_direct_code_evidence():
                 "summary": "catch 块删除 printStackTrace 后变为空 catch，NoSuchMethodException 等反射异常没有日志、失败标记或补偿。",
                 "finding_type": "risk_hypothesis",
                 "severity": "high",
-                "confidence": 0.8,
+                "confidence": 0.86,
                 "verification_needed": True,
                 "file_path": "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
                 "line_start": 29,
@@ -332,9 +331,9 @@ def test_detect_conflicts_respects_issue_priority_threshold():
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "below_issue_priority_threshold"
-    assert "P1" in result["issue_filter_decisions"][0]["reason"]
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_medium_1"
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_respects_per_priority_confidence_thresholds():
@@ -374,8 +373,113 @@ def test_detect_conflicts_respects_per_priority_confidence_thresholds():
     result = detect_conflicts(state)
 
     assert result["conflicts"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
     assert "仅保留为 finding" in result["issue_filter_decisions"][0]["reason"]
+
+
+def test_detect_conflicts_promotes_high_confidence_finding_without_rewriting_details_even_if_verification_needed():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": True,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_auth_high_confidence",
+                "expert_id": "security_compliance",
+                "title": "订单详情接口缺少资源级鉴权",
+                "summary": "OrderController.detail 只按订单 id 查询，没有校验该订单是否属于当前登录用户。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "auth_bypass",
+                "severity": "high",
+                "confidence": 0.96,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 55,
+                "method_name": "detail",
+                "code_anchor": "orderService.detail(id)",
+                "code_excerpt": "55 | return orderService.detail(id);",
+                "suggested_code": "55 | return orderService.detail(currentUser.id(), id);",
+                "evidence": ["第 55 行只传入 id，未传入 currentUser 或 ownerId"],
+                "cross_file_evidence": [],
+                "context_files": ["src/app/controller/OrderController.java"],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["订单资源读取必须校验当前用户是否有权限访问"],
+                "remediation_strategy": "在查询订单详情前增加资源级鉴权。",
+                "remediation_suggestion": "把 currentUser.id() 传入服务层，并用 ownerId 校验订单归属。",
+                "remediation_steps": ["传入 currentUser.id()", "补充越权读取回归测试"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["issue_filter_decisions"] == []
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["issue_id"] == "fdg_auth_high_confidence"
+    assert conflict["title"] == "订单详情接口缺少资源级鉴权"
+    assert conflict["summary"] == "OrderController.detail 只按订单 id 查询，没有校验该订单是否属于当前登录用户。"
+    assert conflict["file_path"] == "src/app/controller/OrderController.java"
+    assert conflict["line_start"] == 55
+    assert conflict["method_name"] == "detail"
+    assert conflict["code_anchor"] == "orderService.detail(id)"
+    assert conflict["current_code"] == "55 | return orderService.detail(id);"
+    assert conflict["suggested_code"] == "55 | return orderService.detail(currentUser.id(), id);"
+    assert conflict["violated_guidelines"] == ["订单资源读取必须校验当前用户是否有权限访问"]
+    assert conflict["remediation_strategy"] == "在查询订单详情前增加资源级鉴权。"
+    assert conflict["remediation_suggestion"] == "把 currentUser.id() 传入服务层，并用 ownerId 校验订单归属。"
+    assert conflict["remediation_steps"] == ["传入 currentUser.id()", "补充越权读取回归测试"]
+
+
+def test_detect_conflicts_keeps_below_configured_confidence_threshold_as_finding_only():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.95,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_auth_low_confidence",
+                "expert_id": "security_compliance",
+                "title": "订单详情接口可能缺少资源级鉴权",
+                "summary": "当前入口没有显式传入用户上下文，但仍需确认服务层是否已有归属校验。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "auth_bypass",
+                "severity": "high",
+                "confidence": 0.94,
+                "verification_needed": False,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 55,
+                "evidence": ["入口层没有传入 currentUser"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["订单资源读取必须校验当前用户是否有权限访问"],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["conflicts"] == []
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
+    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_auth_low_confidence"]
 
 
 def test_detect_conflicts_upgrades_concrete_security_rule_finding_even_when_verification_is_requested():
@@ -445,7 +549,7 @@ def test_detect_conflicts_upgrades_security_direct_defect_with_context_gap_and_m
                 "finding_type": "direct_defect",
                 "normalized_issue_type": "query_semantics_regression",
                 "severity": "medium",
-                "confidence": 0.72,
+                "confidence": 0.82,
                 "verification_needed": True,
                 "file_path": "src/shared/HibernateCriteriaConverter.java",
                 "line_start": 16,
@@ -512,8 +616,9 @@ def test_detect_conflicts_keeps_verification_required_finding_out_of_issues_even
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_medium_2"
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_filters_verification_required_findings_even_when_confidence_is_high():
@@ -552,9 +657,9 @@ def test_detect_conflicts_filters_verification_required_findings_even_when_confi
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert len(result["issue_filter_decisions"]) == 1
-    assert result["issue_filter_decisions"][0]["rule_code"] == "conditional_conclusion"
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_verify_only_1"
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_promotes_strong_direct_ddd_factory_bypass_even_when_verification_is_requested():
@@ -658,13 +763,11 @@ def test_detect_conflicts_keeps_verification_required_group_as_findings_even_whe
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert len(result["issue_filter_decisions"]) == 2
-    assert {item["rule_code"] for item in result["issue_filter_decisions"]} == {"conditional_conclusion"}
-    assert {tuple(item["finding_ids"]) for item in result["issue_filter_decisions"]} == {
-        ("fdg_group_low",),
-        ("fdg_group_high",),
-    }
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["finding_ids"] == ["fdg_group_high"]
+    assert len(result["issue_filter_decisions"]) == 1
+    assert result["issue_filter_decisions"][0]["rule_code"] == "below_priority_confidence_threshold"
+    assert result["issue_filter_decisions"][0]["finding_ids"] == ["fdg_group_low"]
 
 
 def test_detect_conflicts_skips_non_code_review_scope_findings():
@@ -692,8 +795,9 @@ def test_detect_conflicts_skips_non_code_review_scope_findings():
 
     result = detect_conflicts(state)
 
-    assert result["conflicts"] == []
-    assert result["issue_filter_decisions"][0]["rule_code"] == "non_code_review_scope"
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_scope_1"
+    assert result["issue_filter_decisions"] == []
 
 
 def test_detect_conflicts_uses_weighted_confidence_with_consensus_and_evidence_bonus():
@@ -973,6 +1077,83 @@ def test_detect_conflicts_merges_same_line_same_problem_into_single_issue():
         "risk_hypothesis",
     ]
     assert all(view["normalized_issue_type"] for view in conflict["expert_views"])
+
+
+def test_detect_conflicts_promotes_issue_as_primary_finding_with_consistent_details():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": False,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_primary",
+                "expert_id": "security_compliance",
+                "title": "订单接口缺少资源级鉴权",
+                "summary": "OrderController.update 只校验登录态，没有校验订单归属，其他用户可修改不属于自己的订单。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "auth_bypass",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": False,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 42,
+                "method_name": "update",
+                "code_anchor": "@PostMapping(\"/orders/{id}\")",
+                "code_excerpt": "42 | orderService.update(id, payload);",
+                "suggested_code": "42 | orderService.update(id, currentUser.id(), payload);",
+                "evidence": ["第 42 行调用 update 时没有传入当前用户或 ownerId"],
+                "cross_file_evidence": [],
+                "context_files": ["src/app/controller/OrderController.java"],
+                "matched_rules": ["SEC-AUTH-001"],
+                "violated_guidelines": ["接口必须做资源级鉴权"],
+                "remediation_strategy": "在更新订单前校验当前用户是否拥有该订单。",
+                "remediation_suggestion": "把当前用户 id 传入服务层，并在服务层校验订单 ownerId。",
+                "remediation_steps": ["传入 currentUser.id()", "补充越权访问测试"],
+            },
+            {
+                "finding_id": "fdg_secondary",
+                "expert_id": "architecture_design",
+                "title": "入口层职责边界不清",
+                "summary": "入口层没有表达资源归属校验，鉴权边界不清晰。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "auth_bypass",
+                "severity": "medium",
+                "confidence": 0.76,
+                "verification_needed": True,
+                "file_path": "src/app/controller/OrderController.java",
+                "line_start": 42,
+                "evidence": ["入口层缺少 owner 校验"],
+                "cross_file_evidence": [],
+                "context_files": [],
+                "matched_rules": ["ARCH-LAYER-002"],
+                "violated_guidelines": ["入口层需要表达安全边界"],
+                "remediation_suggestion": "在入口层显式传递当前用户上下文。",
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    conflict = result["conflicts"][0]
+    assert conflict["issue_id"] == "fdg_primary"
+    assert conflict["finding_ids"] == ["fdg_primary", "fdg_secondary"]
+    assert conflict["title"] == "订单接口缺少资源级鉴权"
+    assert conflict["summary"] == "OrderController.update 只校验登录态，没有校验订单归属，其他用户可修改不属于自己的订单。"
+    assert conflict["file_path"] == "src/app/controller/OrderController.java"
+    assert conflict["line_start"] == 42
+    assert conflict["method_name"] == "update"
+    assert conflict["code_anchor"] == "@PostMapping(\"/orders/{id}\")"
+    assert conflict["current_code"] == "42 | orderService.update(id, payload);"
+    assert conflict["suggested_code"] == "42 | orderService.update(id, currentUser.id(), payload);"
+    assert conflict["remediation_strategy"] == "在更新订单前校验当前用户是否拥有该订单。"
+    assert conflict["remediation_suggestion"] == "把当前用户 id 传入服务层，并在服务层校验订单 ownerId。"
+    assert conflict["remediation_steps"] == ["传入 currentUser.id()", "补充越权访问测试"]
+    assert conflict["aggregated_titles"] == ["订单接口缺少资源级鉴权", "入口层职责边界不清"]
+    assert conflict["aggregated_summaries"] == [
+        "OrderController.update 只校验登录态，没有校验订单归属，其他用户可修改不属于自己的订单。",
+        "入口层没有表达资源归属校验，鉴权边界不清晰。",
+    ]
 
 
 def test_detect_conflicts_carries_change_understanding_refs_when_merging_findings():
@@ -1784,6 +1965,111 @@ def test_detect_conflicts_builds_specific_summary_for_inventory_todo_contract():
     assert conflict["title"] == "TODO 里的库存扣减未实现"
     assert "扣减库存" in conflict["summary"]
     assert "预占事件" in conflict["summary"]
+
+
+def test_detect_conflicts_does_not_merge_lock_removal_with_domain_event_issue():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_lock_removed",
+                "expert_id": "performance_reliability",
+                "title": "并发保护被移除",
+                "summary": "enrollBatch 删除 lockRegistry.lockFor 和 synchronized 块，同一课程批量报名失去互斥保护。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.88,
+                "verification_needed": True,
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                "line_start": 26,
+                "evidence": [
+                    "- Object lock = lockRegistry.lockFor(courseId.value());",
+                    "- synchronized (lock) {",
+                    "+ if (studentIds.isEmpty()) {",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/mooc/main/tv/codely/mooc/courses/domain/CourseLockRegistry.java"],
+                "matched_rules": ["CONCURRENCY-LOCK-001"],
+                "violated_guidelines": ["批量写入必须保留并发保护或等价替代方案"],
+                "normalized_issue_type": "lock_guard_removed",
+            },
+            {
+                "finding_id": "fdg_domain_event_order",
+                "expert_id": "ddd_architecture",
+                "title": "领域事件发布顺序早于聚合持久化",
+                "summary": "eventBus.publish 在保存语义之外执行，可能破坏领域事件发布顺序。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.93,
+                "verification_needed": True,
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                "line_start": 38,
+                "evidence": [
+                    "+ eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()))",
+                    "repository.save(enrollment)",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java"],
+                "matched_rules": ["DDD-EVENT-001"],
+                "violated_guidelines": ["领域事件应与聚合状态持久化顺序一致"],
+                "normalized_issue_type": "course_creation_semantics",
+            },
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["issue_filter_decisions"] == []
+    conflicts_by_id = {conflict["issue_id"]: conflict for conflict in result["conflicts"]}
+    assert set(conflicts_by_id) == {"fdg_lock_removed", "fdg_domain_event_order"}
+    assert conflicts_by_id["fdg_lock_removed"]["title"] == "并发保护被移除"
+    assert conflicts_by_id["fdg_lock_removed"]["normalized_issue_type"] == "lock_guard_removed"
+    assert conflicts_by_id["fdg_domain_event_order"]["title"] == "领域事件发布顺序早于聚合持久化"
+
+
+def test_detect_conflicts_promotes_inventory_todo_contract_with_structural_evidence_at_moderate_confidence():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_inventory_todo_threshold",
+                "expert_id": "correctness_business",
+                "title": "TODO 里的库存扣减未实现",
+                "summary": "TODO 承诺扣减库存并发送预占事件，但当前实现只发布 batchCreated 事件。",
+                "finding_type": "risk_hypothesis",
+                "severity": "high",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "file_path": "src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                "line_start": 37,
+                "evidence": [
+                    "+ // TODO 批量报名成功后扣减库存并发送预占事件",
+                    "+ eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()))",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java"],
+                "matched_rules": ["CORRECTNESS-CONTRACT-001"],
+                "violated_guidelines": ["注释、TODO、接口说明和方法意图必须与真实实现保持一致"],
+                "normalized_issue_type": "comment_contract_unimplemented",
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert result["issue_filter_decisions"] == []
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_inventory_todo_threshold"
 
 
 def test_detect_conflicts_does_not_upgrade_expert_failure_placeholder_even_when_filter_disabled():

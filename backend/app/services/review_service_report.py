@@ -548,6 +548,48 @@ class ReviewServiceReportMixin:
                     "title": "查询语义从精确匹配退化为模糊匹配",
                 }
             )
+        primary_issue_text = "\n".join(
+            [
+                str(issue.title or ""),
+                str(issue.summary or ""),
+                str(issue.normalized_issue_type or ""),
+            ]
+        ).lower()
+        primary_issue_compact = re.sub(r"\s+", "", primary_issue_text)
+        lock_display_signal = issue.normalized_issue_type in {"lock_guard_removed", "lock_removed", "concurrency_guard_removed"} or (
+            not comment_contract_signal
+            and any(token in primary_issue_compact for token in ("lock_guard_removed", "synchronized", "lockregistry", "并发保护", "锁保护"))
+            and any(token in primary_issue_compact for token in ("删除", "移除", "removed", "缺少", "不再"))
+        )
+        if lock_display_signal:
+            lock_summary = (
+                "BulkEnrollmentService 第 "
+                f"{int(update_payload.get('line_start') or issue.line_start or 1)} 行移除了原有并发保护，"
+                "原 `synchronized` 锁保护不再包住批量报名流程，并发调用时可能出现重复处理或状态竞争。"
+            )
+            lock_suggestion = (
+                "恢复原有锁保护，或补上等价的幂等、唯一约束、分布式锁等并发控制，并增加并发提交用例。"
+            )
+            lock_evidence = [
+                "删除 synchronized 锁保护",
+                "新增代码没有看到等价的并发控制",
+            ]
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "lock_guard_removed",
+                    "title": "批量报名的锁保护被移除",
+                    "primary_expert_id": "performance_reliability",
+                    "category_label": "性能与可靠性",
+                    "summary": lock_summary,
+                    "remediation_suggestion": lock_suggestion,
+                    "evidence": lock_evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, "批量报名的锁保护被移除", lock_evidence),
+                    "aggregated_titles": ["原有锁保护被删除，并发调用时缺少保护"],
+                    "aggregated_summaries": [lock_summary],
+                    "aggregated_remediation_suggestions": [lock_suggestion],
+                }
+            )
         if (
             not comment_contract_signal
             and not performance_loop_signal

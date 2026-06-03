@@ -34,3 +34,10 @@ def test_slice_change_builds_hunk_level_risk_slices():
     assert "loop_call_amplification" in signals
     assert "security_surface" in result["risk_hints"]
     assert "database_migration" in result["risk_hints"]
+    assert result["risk_candidates"]
+    candidate_domains = {item["risk_domain"] for item in result["risk_candidates"]}
+    candidate_experts = {item["suggested_expert_id"] for item in result["risk_candidates"]}
+    assert "security" in candidate_domains
+    assert "performance" in candidate_domains
+    assert "security_compliance" in candidate_experts
+    assert "performance_reliability" in candidate_experts

@@ -192,6 +192,8 @@ def route_experts(state: ReviewState) -> ReviewState:
             _append_once(selected, expert_id)
     for expert_id in _match_experts_by_change_understanding(next_state):
         _append_once(selected, expert_id)
+    for expert_id in _match_experts_by_risk_candidates(next_state):
+        _append_once(selected, expert_id)
     for expert_id in _match_experts_by_risk_signals(next_state):
         _append_once(selected, expert_id)
     for expert_id in _match_experts_by_diff(next_state):
@@ -236,6 +238,24 @@ def _match_experts_by_change_understanding(state: ReviewState) -> list[str]:
             normalized = str(expert_id or "").strip()
             if normalized and normalized not in matched:
                 matched.append(normalized)
+    return matched
+
+
+def _match_experts_by_risk_candidates(state: ReviewState) -> list[str]:
+    """Risk candidates are expert-facing recall hints, not final findings."""
+
+    matched: list[str] = []
+    for candidate in list(state.get("risk_candidates") or []):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("suggested_expert_id", "expert_id", "primary_expert_id"):
+            expert_id = str(candidate.get(key) or "").strip()
+            if expert_id and expert_id not in matched:
+                matched.append(expert_id)
+        domain = str(candidate.get("risk_domain") or "").strip()
+        for expert_id in RISK_DOMAIN_EXPERTS.get(domain, ()):
+            if expert_id not in matched:
+                matched.append(expert_id)
     return matched
 
 

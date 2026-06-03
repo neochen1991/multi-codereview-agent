@@ -48,9 +48,6 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
             if str(anchor_result.get("status") or "") == "warning":
                 next_issue["verified"] = False
                 next_issue["tool_verified"] = False
-                next_issue["status"] = "needs_verification"
-                next_issue["resolution"] = "evidence_anchor_needs_verification"
-                next_issue["needs_human"] = False
         text_blob = "\n".join(
             [
                 str(issue.get("title") or ""),
@@ -159,11 +156,7 @@ def judge_and_merge(state: ReviewState) -> ReviewState:
                 continue
         prefer_needs_verification = bool(feedback_adjustment.get("prefer_needs_verification")) if feedback_adjustment else False
         tightened_human_confidence = float(feedback_adjustment.get("needs_human_confidence") or 0.8) if feedback_adjustment else 0.8
-        if anchor_warning:
-            next_issue["status"] = "needs_verification"
-            next_issue["resolution"] = "evidence_anchor_needs_verification"
-            next_issue["needs_human"] = False
-        elif issue.get("needs_human"):
+        if issue.get("needs_human"):
             next_issue["status"] = "needs_human"
             next_issue["resolution"] = next_issue.get("resolution") or "needs_human_review"
             next_issue["needs_human"] = True

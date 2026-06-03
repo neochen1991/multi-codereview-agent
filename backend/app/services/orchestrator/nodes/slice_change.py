@@ -5,6 +5,7 @@ import re
 from app.services.change_understanding_service import ChangeUnderstandingService
 from app.services.diff_excerpt_service import DiffExcerptService
 from app.services.orchestrator.state import ReviewState
+from app.services.risk_candidate_service import RiskCandidateService
 
 
 STATIC_DIFF_RISK_TOKENS = (
@@ -93,6 +94,12 @@ def slice_change(state: ReviewState) -> ReviewState:
     next_state["change_understanding"] = change_understanding
     next_state["risk_domains"] = list(change_understanding.get("risk_domains") or [])
     next_state["expert_hints"] = list(change_understanding.get("expert_hints") or [])
+    next_state["risk_candidates"] = RiskCandidateService().build(
+        change_understanding=change_understanding,
+        change_slices=change_slices,
+        tool_observations=list(next_state.get("tool_observations") or []),
+        feedback_quality_profiles=dict(next_state.get("feedback_quality_profiles") or {}),
+    )
     return next_state
 
 

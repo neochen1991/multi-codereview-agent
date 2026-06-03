@@ -96,10 +96,48 @@ class SqliteReviewRepository:
             WITH issue_counts AS (
                 SELECT
                     review_id,
-                    COUNT(1) AS issue_count,
                     SUM(
                         CASE
-                            WHEN json_array_length(json_extract(payload_json, '$.evidence_chain')) > 0 THEN 1
+                            WHEN COALESCE(LOWER(json_extract(payload_json, '$.human_decision')), '') != 'rejected'
+                                AND COALESCE(LOWER(json_extract(payload_json, '$.status')), '') NOT IN (
+                                    'needs_verification',
+                                    'comment',
+                                    'abstain',
+                                    'rejected_after_debate'
+                                )
+                                AND COALESCE(LOWER(json_extract(payload_json, '$.resolution')), '') NOT IN (
+                                    'human_rejected',
+                                    'needs_verification',
+                                    'llm_judge_needs_verification',
+                                    'targeted_debate_needs_verification',
+                                    'feedback_profile_requires_more_evidence',
+                                    'comment',
+                                    'abstain'
+                                )
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) AS issue_count,
+                    SUM(
+                        CASE
+                            WHEN COALESCE(LOWER(json_extract(payload_json, '$.human_decision')), '') != 'rejected'
+                                AND COALESCE(LOWER(json_extract(payload_json, '$.status')), '') NOT IN (
+                                    'needs_verification',
+                                    'comment',
+                                    'abstain',
+                                    'rejected_after_debate'
+                                )
+                                AND COALESCE(LOWER(json_extract(payload_json, '$.resolution')), '') NOT IN (
+                                    'human_rejected',
+                                    'needs_verification',
+                                    'llm_judge_needs_verification',
+                                    'targeted_debate_needs_verification',
+                                    'feedback_profile_requires_more_evidence',
+                                    'comment',
+                                    'abstain'
+                                )
+                                AND COALESCE(json_array_length(json_extract(payload_json, '$.evidence_chain')), 0) > 0
+                            THEN 1
                             ELSE 0
                         END
                     ) AS evidence_chain_issue_count

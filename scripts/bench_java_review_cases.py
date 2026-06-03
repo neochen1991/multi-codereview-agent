@@ -205,6 +205,26 @@ def _quality_eval_case_from_benchmark(case: JavaReviewCase) -> dict[str, object]
     }
 
 
+def _final_issue_report_for_quality_eval(report: dict[str, object]) -> dict[str, object]:
+    """Evaluate the published effective issue list, not raw expert observations.
+
+    The benchmark score already checks raw findings for recall, expert coverage
+    and rule traversal. Precision, duplicate rate and display quality should be
+    measured on final issues because that is what developers act on.
+    """
+
+    return {
+        "issues": [item for item in list(report.get("issues") or []) if isinstance(item, dict)],
+        "findings": [],
+        "metadata": dict(report.get("metadata") or {}) if isinstance(report.get("metadata"), dict) else {},
+        "metrics": dict(report.get("metrics") or {}) if isinstance(report.get("metrics"), dict) else {},
+        "runtime_seconds": report.get("runtime_seconds"),
+        "elapsed_seconds": report.get("elapsed_seconds"),
+        "token_cost_usd": report.get("token_cost_usd"),
+        "total_token_cost_usd": report.get("total_token_cost_usd"),
+    }
+
+
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1141,7 +1161,7 @@ def submit_case(
     score = evaluate_case_result(materialized.case, report if isinstance(report, dict) else {}, replay if isinstance(replay, dict) else {})
     quality_eval = evaluate_quality_case(
         _quality_eval_case_from_benchmark(materialized.case),
-        report if isinstance(report, dict) else {},
+        _final_issue_report_for_quality_eval(report if isinstance(report, dict) else {}),
     )
     windows_quality_report: dict[str, object] | None = None
     if windows_quality_gate:

@@ -32,10 +32,11 @@ diff --git a/src/main/java/app/order/OrderRepository.java b/src/main/java/app/or
         unified_diff=diff,
     )
 
-    assert result["risk_domains"] == ["security", "business", "database", "transaction", "mq"]
+    assert result["risk_domains"] == ["security", "business", "ddd", "database", "transaction", "mq"]
     assert "security_compliance" in result["expert_hints"]
     assert "correctness_business" in result["expert_hints"]
     assert "database_analysis" in result["expert_hints"]
+    assert "ddd_architecture" in result["expert_hints"]
     assert "performance_reliability" in result["expert_hints"]
     assert "mq_analysis" in result["expert_hints"]
     assert "userId" in result["changed_symbols"]

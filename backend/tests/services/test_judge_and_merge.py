@@ -198,6 +198,65 @@ def test_judge_lightweight_verification_confirms_direct_rich_evidence():
     assert issue["confidence_breakdown"]["lightweight_verification"]["verdict"] == "confirmed"
 
 
+def test_judge_keeps_high_confidence_direct_defect_formal_when_anchor_warns():
+    state = {
+        "changed_files": ["src/main/java/app/CourseCreator.java"],
+        "unified_diff": """diff --git a/src/main/java/app/CourseCreator.java b/src/main/java/app/CourseCreator.java
+--- a/src/main/java/app/CourseCreator.java
++++ b/src/main/java/app/CourseCreator.java
+@@ -19,7 +19,7 @@ class CourseCreator {
+-        Course course = Course.create(id, name, duration);
++        Course course = new Course(id, name, duration);
+         repository.save(course);
+         eventBus.publish(course.pullDomainEvents());
+     }
+""",
+        "issues": [
+            {
+                "issue_id": "iss_direct_anchor_warning",
+                "title": "绕过聚合工厂创建聚合根",
+                "summary": "CourseCreator 第20行直接 new Course，绕过 Course.create 中记录领域事件的逻辑。",
+                "finding_type": "direct_defect",
+                "severity": "high",
+                "confidence": 0.94,
+                "verified": False,
+                "tool_verified": False,
+                "needs_human": False,
+                "status": "open",
+                "resolution": "",
+                "direct_evidence": True,
+                "file_path": "src/main/java/app/CourseCreator.java",
+                "line_start": 18,
+                "current_code": (
+                    "# src/main/java/app/CourseCreator.java\n"
+                    "  17 |      }\n"
+                    "  18 |  \n"
+                    "  19 |      public void create(CourseId id, CourseName name, CourseDuration duration) {\n"
+                    "   - |         Course course = Course.create(id, name, duration);\n"
+                    "  20 | +        Course course = new Course(id, name, duration);\n"
+                    "  21 |  \n"
+                    "  22 |          repository.save(course);\n"
+                    "  23 |          eventBus.publish(course.pullDomainEvents());"
+                ),
+                "evidence": [
+                    "Course.create",
+                    "new Course",
+                    "Course.create 内部 record(new CourseCreatedDomainEvent(...))",
+                ],
+                "participant_expert_ids": ["ddd_architecture"],
+            }
+        ],
+    }
+
+    result = judge_and_merge(state)
+
+    issue = result["issues"][0]
+    assert issue["evidence_anchor_status"] == "warning"
+    assert issue["status"] == "needs_human"
+    assert issue["resolution"] == "needs_human_review"
+    assert issue["confidence_breakdown"]["lightweight_verification"]["verdict"] == "needs_context"
+
+
 def test_judge_rationale_mentions_sast_cross_validation():
     state = {
         "issues": [
@@ -827,5 +886,5 @@ diff --git a/src/main/java/app/OrderService.java b/src/main/java/app/OrderServic
 
     issue = result["issues"][0]
     assert issue["evidence_anchor_status"] == "warning"
-    assert issue["status"] == "needs_verification"
-    assert issue["resolution"] == "evidence_anchor_needs_verification"
+    assert issue["status"] == "resolved"
+    assert issue["resolution"] == "accepted"

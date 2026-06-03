@@ -167,7 +167,7 @@ class CodeObservationExtractor:
         code_blob = "\n".join(line for line in lines if line not in comment_lines).lower()
         contract_pairs = [
             (("扣减库存", "库存", "deduct inventory", "reserve"), ("inventory", "reserve", "deduct", "库存")),
-            (("发送事件", "事件", "publish event", "domain event"), ("publish", "eventbus", "emit", "dispatch", "outbox")),
+            (("发送事件", "事件", "publish event", "domain event"), ("publish", "eventbus", "event", "emit", "dispatch", "outbox")),
             (("发送通知", "notify", "通知"), ("notify", "message", "publish", "send")),
             (("缓存", "cache"), ("cache", "redis", "set", "put")),
             (("调用接口", "调用下游", "remote", "invoke", "call api"), ("client", "api", "gateway", "fetch", "request", "axios")),

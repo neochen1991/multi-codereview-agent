@@ -1,0 +1,86 @@
+{
+  "subject_type": "mr",
+  "analysis_mode": "light",
+  "repo_id": "java-ddd-example",
+  "project_id": "java-eval-suite",
+  "source_ref": "bench/java-ddd-course-creator-bypasses-domain-events",
+  "target_ref": "main",
+  "title": "Course creation bypasses aggregate factory and drops domain event recording",
+  "repo_url": "https://github.com/CodelyTV/java-ddd-example.git",
+  "selected_experts": [
+    "ddd_architecture"
+  ],
+  "changed_files": [
+    "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java"
+  ],
+  "unified_diff": "diff --git a/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java b/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\nindex 93b8611..d6d778f 100644\n--- a/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n+++ b/src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n@@ -17,7 +17,7 @@ public final class CourseCreator {\n     }\n \n     public void create(CourseId id, CourseName name, CourseDuration duration) {\n-        Course course = Course.create(id, name, duration);\n+        Course course = new Course(id, name, duration);\n \n         repository.save(course);\n         eventBus.publish(course.pullDomainEvents());\n",
+  "metadata": {
+    "trigger_source": "manual_real_case_test",
+    "java_eval_case_id": "java-ddd-course-creator-bypasses-domain-events",
+    "java_eval_category": "architecture",
+    "java_review_mode_hint": "ddd_enhanced",
+    "business_context": "课程创建流程为了绕过一个构造器问题，直接 new Course，跳过了 aggregate factory 与领域事件录制。",
+    "workspace_repo_path": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events",
+    "expected_rule_ids_any_of": [
+      "DDD-JDDD-001",
+      "ARCH-JDDD-002"
+    ],
+    "expected_finding_keywords": [
+      "Course.create",
+      "aggregate",
+      "domain event",
+      "factory"
+    ],
+    "local_graph_build": {
+      "tree_sitter": {
+        "status": "ready",
+        "state": "ready",
+        "repository_id": "java-ddd-example",
+        "selected_file_count": 25,
+        "indexed_file_count": 25,
+        "skipped_unchanged_file_count": 0,
+        "failed_file_count": 0,
+        "failed_files": [],
+        "node_count": 70,
+        "edge_count": 98,
+        "graph_db_path": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.code-review-graph/graph.db"
+      },
+      "gitnexus": {
+        "status": "ready",
+        "message": "GitNexus 本地模拟仓图谱已创建。",
+        "graph_dir": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.gitnexus",
+        "command": "/Users/neochen/.npm-global/bin/gitnexus analyze",
+        "return_code": 0,
+        "timeout_seconds": 180,
+        "stdout_tail": "\n  GitNexus Analyzer\n\n\n  Repository indexed successfully (1.8s)\n\n  163 nodes | 338 edges | 7 clusters | 1 flows\n  /private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events\n\n",
+        "stderr_tail": ""
+      }
+    },
+    "tree_sitter_graph_result": {
+      "status": "ready",
+      "state": "ready",
+      "repository_id": "java-ddd-example",
+      "selected_file_count": 25,
+      "indexed_file_count": 25,
+      "skipped_unchanged_file_count": 0,
+      "failed_file_count": 0,
+      "failed_files": [],
+      "node_count": 70,
+      "edge_count": 98,
+      "graph_db_path": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.code-review-graph/graph.db"
+    },
+    "gitnexus_graph_result": {
+      "status": "ready",
+      "message": "GitNexus 本地模拟仓图谱已创建。",
+      "graph_dir": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.gitnexus",
+      "command": "/Users/neochen/.npm-global/bin/gitnexus analyze",
+      "return_code": 0,
+      "timeout_seconds": 180,
+      "stdout_tail": "\n  GitNexus Analyzer\n\n\n  Repository indexed successfully (1.8s)\n\n  163 nodes | 338 edges | 7 clusters | 1 flows\n  /private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events\n\n",
+      "stderr_tail": ""
+    },
+    "code_graph_db_path": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.code-review-graph/graph.db",
+    "gitnexus_graph_dir": "/private/tmp/mcra-realrun-workspaces-20260602/java-ddd-course-creator-bypasses-domain-events/.gitnexus",
+    "realrun_payload_id": "2026-06-02-ddd-bypass-same-payload"
+  }
+}

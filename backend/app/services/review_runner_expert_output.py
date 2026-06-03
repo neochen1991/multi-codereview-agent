@@ -183,6 +183,7 @@ class ReviewRunnerExpertOutputMixin:
                     "method_name": str(item.get("method_name") or "").strip(),
                     "code_anchor": str(item.get("code_anchor") or evidence_text).strip(),
                     "change_understanding_refs": change_refs,
+                    "adopted_tool_observations": self._normalize_text_list(item.get("adopted_tool_observations"), []),
                     "matched_rules": matched_rules,
                     "violated_guidelines": violated_guidelines,
                     "rule_based_reasoning": reason or f"命中规则 {rule_id}，候选证据需要进入后续校验。",
@@ -704,7 +705,7 @@ class ReviewRunnerExpertOutputMixin:
                         "suggested_fix": "使用聚合工厂创建对象，保存成功后再发布该聚合产生的领域事件，并补充创建行为测试。",
                         "change_steps": ["恢复原有聚合工厂/静态工厂创建入口", "先保存聚合状态，再发布聚合产生的领域事件", "补充聚合创建、事件记录和持久化顺序的回归测试"],
                         "suggested_code": "",
-                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.82), 0.92),
+                        "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.86), 0.92),
                         "verification_needed": False,
                         "verification_plan": "",
                         "direct_evidence": True,
@@ -1930,6 +1931,23 @@ class ReviewRunnerExpertOutputMixin:
             for item in list(java_quality.get("signals") or [])
             if str(item).strip()
         }
+        parsed_text = "\n".join(
+            [
+                str(parsed.get("title") or ""),
+                str(parsed.get("claim") or ""),
+                str(parsed.get("summary") or ""),
+                str(target_hunk.get("excerpt") or ""),
+                *[str(item) for item in list(parsed.get("evidence") or [])],
+                *[str(item) for item in list(parsed.get("matched_rules") or [])],
+                *[str(item) for item in list(parsed.get("violated_guidelines") or [])],
+            ]
+        ).lower()
+        if (
+            "printstacktrace" in parsed_text
+            and any(token in parsed_text for token in ("catch", "exception", "异常"))
+            and any(token in parsed_text for token in ("+}", "+\t\t\t}", "+    }", "空 catch", "静默吞"))
+        ):
+            signal_set.add("exception_swallowed")
         if not signal_set:
             return parsed
 

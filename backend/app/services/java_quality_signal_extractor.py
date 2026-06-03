@@ -1341,7 +1341,7 @@ class JavaQualitySignalExtractor:
         code_blob = "\n".join(line for line in context_lines if line not in comment_lines).lower()
         implementation_blob = self._implementation_only_blob(context_lines, comment_lines)
         contract_pairs = [
-            (["审计事件", "审计日志", "audit event", "audit log", "audit"], ["audit", "auditlogger", "recordaudit", "appendaudit", "writeaudit"]),
+            (["审计事件", "审计日志", "audit event", "audit log", "audit"], ["audit", "auditlogger", "recordaudit", "appendaudit", "writeaudit", "eventbus", "publish", "outbox"]),
             (["操作日志", "行为日志", "operation log"], ["operationlog", "audit", "logger", "logservice"]),
             (["扣减库存", "库存", "deduct inventory", "reserve"], ["库存", "inventory", "reserve", "deduct"]),
             (["发送事件", "事件", "publish event", "domain event"], ["publish", "eventbus", "domain event", "outbox"]),
@@ -1495,7 +1495,7 @@ class JavaQualitySignalExtractor:
         intent_to_impl_patterns = [
             (
                 ("审计事件", "审计日志", "audit event", "audit log", "audit"),
-                (r"\baudit\b", r"\bauditlogger\b", r"\.\s*(recordaudit|appendaudit|writeaudit)\s*\("),
+                (r"\baudit\b", r"\bauditlogger\b", r"\beventbus\s*\.", r"\.\s*publish\s*\(", r"\boutbox\b", r"\.\s*(recordaudit|appendaudit|writeaudit)\s*\("),
             ),
             (
                 ("操作日志", "行为日志", "operation log"),

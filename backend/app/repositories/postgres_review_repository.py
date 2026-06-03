@@ -111,10 +111,47 @@ class PostgresReviewRepository:
                     WITH issue_counts AS (
                         SELECT
                             review_id,
-                            COUNT(1) AS issue_count,
                             SUM(
                                 CASE
-                                    WHEN jsonb_array_length(COALESCE(payload_json::jsonb -> 'evidence_chain', '[]'::jsonb)) > 0
+                                    WHEN COALESCE(LOWER(payload_json::jsonb ->> 'human_decision'), '') <> 'rejected'
+                                        AND COALESCE(LOWER(payload_json::jsonb ->> 'status'), '') NOT IN (
+                                            'needs_verification',
+                                            'comment',
+                                            'abstain',
+                                            'rejected_after_debate'
+                                        )
+                                        AND COALESCE(LOWER(payload_json::jsonb ->> 'resolution'), '') NOT IN (
+                                            'human_rejected',
+                                            'needs_verification',
+                                            'llm_judge_needs_verification',
+                                            'targeted_debate_needs_verification',
+                                            'feedback_profile_requires_more_evidence',
+                                            'comment',
+                                            'abstain'
+                                        )
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS issue_count,
+                            SUM(
+                                CASE
+                                    WHEN COALESCE(LOWER(payload_json::jsonb ->> 'human_decision'), '') <> 'rejected'
+                                        AND COALESCE(LOWER(payload_json::jsonb ->> 'status'), '') NOT IN (
+                                            'needs_verification',
+                                            'comment',
+                                            'abstain',
+                                            'rejected_after_debate'
+                                        )
+                                        AND COALESCE(LOWER(payload_json::jsonb ->> 'resolution'), '') NOT IN (
+                                            'human_rejected',
+                                            'needs_verification',
+                                            'llm_judge_needs_verification',
+                                            'targeted_debate_needs_verification',
+                                            'feedback_profile_requires_more_evidence',
+                                            'comment',
+                                            'abstain'
+                                        )
+                                        AND jsonb_array_length(COALESCE(payload_json::jsonb -> 'evidence_chain', '[]'::jsonb)) > 0
                                     THEN 1
                                     ELSE 0
                                 END

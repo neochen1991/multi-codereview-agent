@@ -288,6 +288,107 @@ def test_list_issues_hides_same_current_and_suggested_code(storage_root: Path):
     assert service.list_issues(review.review_id) == []
 
 
+def test_build_report_keeps_lock_issue_from_being_rewritten_as_domain_event(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_lock_display",
+            "project_id": "proj_lock_display",
+            "source_ref": "feature/lock-display",
+            "target_ref": "main",
+            "title": "lock display issue",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="fdg_lock_display",
+                title="批量报名的锁保护被移除",
+                summary="BulkEnrollmentService 第 26 行移除了原有 synchronized 锁保护。",
+                normalized_issue_type="lock_guard_removed",
+                file_path="src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                line_start=26,
+                current_code=(
+                    "# src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java\n"
+                    "  27 |      public void enrollBatch(CourseId courseId, List<StudentId> studentIds) {\n"
+                    "   - |         Object lock = lockRegistry.lockFor(courseId.value());\n"
+                    "   - |         synchronized (lock) {\n"
+                    "  28 | +        if (studentIds.isEmpty()) {\n"
+                    "  38 | +        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));"
+                ),
+                suggested_code=(
+                    "Object lock = lockRegistry.lockFor(courseId.value());\n"
+                    "synchronized (lock) {\n"
+                    "    repository.saveAll(enrollments);\n"
+                    "    eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));\n"
+                    "}"
+                ),
+                finding_ids=["fdg_lock_display"],
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.issue_count == 1
+    issue = report.issues[0]
+    assert issue.issue_id == "fdg_lock_display"
+    assert issue.normalized_issue_type == "lock_guard_removed"
+    assert issue.title == "批量报名的锁保护被移除"
+    assert "领域事件发布顺序" not in issue.title
+    assert "领域事件发布顺序" not in issue.summary
+
+
+def test_build_report_keeps_todo_contract_when_aggregated_summary_mentions_lock(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_todo_display",
+            "project_id": "proj_todo_display",
+            "source_ref": "feature/todo-display",
+            "target_ref": "main",
+            "title": "todo display issue",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="fdg_todo_display",
+                title="TODO 里的库存扣减未实现",
+                summary="BulkEnrollmentService 第 37 行的 TODO 承诺扣减库存并发送预占事件，但当前实现没有对应业务动作。",
+                normalized_issue_type="comment_contract_unimplemented",
+                file_path="src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java",
+                line_start=37,
+                current_code=(
+                    "# src/mooc/main/tv/codely/mooc/courses/application/enroll/BulkEnrollmentService.java\n"
+                    "  37 | +        // TODO 批量报名成功后扣减库存并发送预占事件\n"
+                    "  38 | +        eventBus.publish(CourseEnrollmentEvent.batchCreated(courseId, enrollments.size()));"
+                ),
+                suggested_code="inventoryReservationService.reserve(courseId, studentIds);",
+                aggregated_summaries=[
+                    "当前 diff 还展示了并发保护被删除，但本 issue 的主问题是 TODO 承诺没有实现。"
+                ],
+                finding_ids=["fdg_todo_display"],
+            )
+        ],
+    )
+
+    report = service.build_report(review.review_id)
+
+    assert report.issue_count == 1
+    issue = report.issues[0]
+    assert issue.issue_id == "fdg_todo_display"
+    assert issue.normalized_issue_type == "comment_contract_unimplemented"
+    assert issue.title == "TODO 里的库存扣减未实现"
+    assert "锁保护" not in issue.title
+
+
 def test_list_issues_hides_loop_issue_when_current_code_has_no_loop(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

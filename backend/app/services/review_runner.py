@@ -6057,6 +6057,11 @@ class ReviewRunner(
                 code_context = dict(finding.code_context or {})
                 code_context["observation_ids"] = observation_ids
                 finding.code_context = code_context
+            adopted_tool_observations = self._normalize_text_list(parsed.get("adopted_tool_observations"), [])
+            if adopted_tool_observations:
+                code_context = dict(finding.code_context or {})
+                code_context["adopted_tool_observations"] = adopted_tool_observations
+                finding.code_context = code_context
             if rule_attribution:
                 code_context = dict(finding.code_context or {})
                 code_context["rule_attribution"] = rule_attribution

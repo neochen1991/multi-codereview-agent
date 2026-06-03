@@ -12,6 +12,8 @@ class ReviewState(TypedDict, total=False):
     changed_files: list[str]
     change_understanding: dict[str, Any]
     change_slices: list[dict[str, Any]]
+    risk_candidates: list[dict[str, Any]]
+    tool_observations: list[dict[str, Any]]
     unified_diff: str
     selected_experts: list[str]
     issue_filter_config: dict[str, Any]

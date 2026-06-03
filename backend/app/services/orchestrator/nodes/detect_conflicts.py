@@ -609,6 +609,14 @@ def _is_same_problem_type(candidate: dict[str, object], grouped_items: list[dict
         if str(item.get("normalized_issue_type") or "").strip()
     ]
     candidate_families = _build_problem_family_set(candidate)
+    grouped_family_sets = [_build_problem_family_set(item) for item in grouped_items]
+    grouped_families: set[str] = set()
+    for family_set in grouped_family_sets:
+        grouped_families.update(family_set)
+    if candidate_explicit and grouped_explicit:
+        if candidate_explicit not in grouped_explicit and candidate_families and grouped_families:
+            if not (candidate_families & grouped_families):
+                return False
     if candidate_families:
         for item in grouped_items:
             if candidate_families & _build_problem_family_set(item):
@@ -725,6 +733,24 @@ def _select_primary_item(items: list[dict[str, object]], preferred_expert_id: st
     return sorted(items, key=_score)[0]
 
 
+def _primary_first_finding_ids(primary: dict[str, object], items: list[dict[str, object]]) -> list[str]:
+    primary_id = str(primary.get("finding_id") or "").strip()
+    ordered_ids = [primary_id] if primary_id else []
+    for item in items:
+        finding_id = str(item.get("finding_id") or "").strip()
+        if finding_id and finding_id not in ordered_ids:
+            ordered_ids.append(finding_id)
+    return ordered_ids
+
+
+def _first_non_empty_text(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _select_responsible_expert_id(items: list[dict[str, object]]) -> str:
     participant_ids = {
         str(item.get("expert_id") or "").strip()
@@ -834,37 +860,43 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
         line_start = int(eligible_items[0].get("line_start", 1) or 1)
         responsible_expert_id = _select_responsible_expert_id(eligible_items)
         first = _select_primary_item(eligible_items, preferred_expert_id=responsible_expert_id)
+        issue_items = [first, *[item for item in eligible_items if item is not first]]
         normalized_issue_type = _build_single_problem_type(first)
         key = f"{file_path}::{line_start}::{normalized_issue_type or 'unknown'}"
 
         highest_severity = "medium"
-        if any(str(item.get("severity")) in {"critical", "high"} for item in eligible_items):
+        if any(str(item.get("severity")) in {"critical", "high"} for item in issue_items):
             highest_severity = "high"
-        if any(str(item.get("severity")) == "blocker" for item in eligible_items):
+        if any(str(item.get("severity")) == "blocker" for item in issue_items):
             highest_severity = "blocker"
-        confidence, confidence_breakdown = _score_issue_confidence(eligible_items, feedback_quality_profiles)
-        aggregated_finding_types = _collect_unique_finding_types(eligible_items)
-        aggregated_titles = _collect_unique_values(eligible_items, "title")
-        aggregated_summaries = _collect_unique_values(eligible_items, "summary")
+        confidence, confidence_breakdown = _score_issue_confidence(issue_items, feedback_quality_profiles)
+        aggregated_finding_types = _collect_unique_finding_types(issue_items)
+        aggregated_titles = _collect_unique_values(issue_items, "title")
+        aggregated_summaries = _collect_unique_values(issue_items, "summary")
         aggregated_remediation_strategies = _collect_unique_values(
-            eligible_items,
+            issue_items,
             "remediation_strategy",
         )
         aggregated_remediation_suggestions = _collect_unique_values(
-            eligible_items,
+            issue_items,
             "remediation_suggestion",
         )
         aggregated_remediation_steps = _collect_unique_list_values(
-            eligible_items,
+            issue_items,
             "remediation_steps",
         )
-        sast_prescan_matches = _collect_sast_prescan_matches(eligible_items)
-        evidence = [e for item in eligible_items for e in item.get("evidence", [])]
+        matched_rules = _collect_unique_list_values(issue_items, "matched_rules")
+        violated_guidelines = _collect_unique_list_values(issue_items, "violated_guidelines")
+        sast_prescan_matches = _collect_sast_prescan_matches(issue_items)
+        evidence = [e for item in issue_items for e in item.get("evidence", [])]
         if sast_prescan_matches:
             evidence.extend(_format_sast_evidence(item) for item in sast_prescan_matches)
-        change_understanding_refs = _collect_unique_list_values(eligible_items, "change_understanding_refs")
-        issue_title = _build_issue_title(aggregated_titles)
-        issue_summary = _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions)
+        change_understanding_refs = _collect_unique_list_values(issue_items, "change_understanding_refs")
+        issue_title = _first_non_empty_text(first.get("title"), _build_issue_title(aggregated_titles))
+        issue_summary = _first_non_empty_text(
+            first.get("summary"),
+            _build_issue_summary(aggregated_summaries, aggregated_remediation_suggestions),
+        )
         canonical_comment = _canonical_comment_contract_issue(
             file_path=file_path,
             normalized_issue_type=normalized_issue_type,
@@ -881,7 +913,7 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "topic": key,
                 "title": issue_title,
                 "summary": issue_summary,
-                "finding_type": _select_primary_finding_type(eligible_items),
+                "finding_type": _select_primary_finding_type(issue_items),
                 "normalized_issue_type": normalized_issue_type,
                 "risk_domain": str(first.get("risk_domain") or _risk_domain_for_issue_type(normalized_issue_type, responsible_expert_id)),
                 "aggregated_finding_types": aggregated_finding_types,
@@ -893,22 +925,22 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "current_code": str(first.get("code_excerpt") or ""),
                 "evidence_anchor_status": str(first.get("evidence_anchor_status") or "unchecked"),
                 "evidence_anchor_reason": str(first.get("evidence_anchor_reason") or ""),
-                "finding_ids": [item.get("finding_id") for item in eligible_items],
+                "finding_ids": _primary_first_finding_ids(first, issue_items),
                 "participant_expert_ids": list(
                     dict.fromkeys(
                         str(item.get("expert_id") or "").strip()
-                        for item in eligible_items
+                        for item in issue_items
                         if str(item.get("expert_id") or "").strip()
                     )
                 ),
-                "expert_views": _build_expert_views(eligible_items),
+                "expert_views": _build_expert_views(issue_items),
                 "primary_expert_id": responsible_expert_id,
                 "supporting_expert_ids": [
                     expert_id
                     for expert_id in list(
                         dict.fromkeys(
                             str(item.get("expert_id") or "").strip()
-                            for item in eligible_items
+                            for item in issue_items
                             if str(item.get("expert_id") or "").strip()
                         )
                     )
@@ -919,11 +951,22 @@ def detect_conflicts(state: ReviewState) -> ReviewState:
                 "aggregated_remediation_strategies": aggregated_remediation_strategies,
                 "aggregated_remediation_suggestions": aggregated_remediation_suggestions,
                 "aggregated_remediation_steps": aggregated_remediation_steps,
+                "matched_rules": matched_rules,
+                "violated_guidelines": violated_guidelines,
+                "rule_based_reasoning": str(first.get("rule_based_reasoning") or ""),
+                "remediation_strategy": str(first.get("remediation_strategy") or ""),
+                "remediation_suggestion": str(first.get("remediation_suggestion") or ""),
+                "remediation_steps": [
+                    str(value)
+                    for value in list(first.get("remediation_steps") or [])
+                    if str(value).strip()
+                ],
+                "suggested_code": str(first.get("suggested_code") or ""),
                 "evidence": list(dict.fromkeys(str(item).strip() for item in evidence if str(item).strip())),
-                "cross_file_evidence": [e for item in eligible_items for e in item.get("cross_file_evidence", [])],
-                "assumptions": [e for item in eligible_items for e in item.get("assumptions", [])],
-                "context_files": [e for item in eligible_items for e in item.get("context_files", [])],
-                "direct_evidence": _has_direct_code_evidence(eligible_items),
+                "cross_file_evidence": [e for item in issue_items for e in item.get("cross_file_evidence", [])],
+                "assumptions": [e for item in issue_items for e in item.get("assumptions", [])],
+                "context_files": [e for item in issue_items for e in item.get("context_files", [])],
+                "direct_evidence": _has_direct_code_evidence(issue_items),
                 "sast_cross_validated": bool(sast_prescan_matches),
                 "sast_prescan_matches": sast_prescan_matches,
                 "tool_name": "sast_prescan" if sast_prescan_matches else "",
@@ -1141,7 +1184,7 @@ def _classify_issue_candidate(
     config: dict[str, object],
     feedback_quality_profiles: dict[str, object] | None = None,
 ) -> dict[str, str] | None:
-    """判断当前 finding 组是否应仅保留为 finding，并返回治理原因。"""
+    """判断当前 finding 是否满足配置的 issue 升级置信度。"""
 
     if not items:
         return {
@@ -1159,6 +1202,7 @@ def _classify_issue_candidate(
         }
     if not bool(config.get("issue_filter_enabled", True)):
         return None
+
     severities = [str(item.get("severity") or "medium").lower() for item in items]
     highest_severity = "medium"
     if any(level == "blocker" for level in severities):
@@ -1167,171 +1211,71 @@ def _classify_issue_candidate(
         highest_severity = "high"
     elif all(level == "low" for level in severities):
         highest_severity = "low"
-    min_priority_level = str(config.get("issue_min_priority_level", "P2") or "P2").upper()
-
-    if highest_severity == "low" and bool(config.get("suppress_low_risk_hint_issues", True)):
-        return {
-            "rule_code": "low_severity_hint",
-            "rule_label": "低风险提示保留为 finding",
-            "reason": "当前问题整体风险较低，仅保留在 findings 中提示，不升级为 issue。",
-            "severity": highest_severity,
-        }
-
-    finding_types = {str(item.get("finding_type") or "risk_hypothesis") for item in items}
-    direct_evidence = _has_direct_code_evidence(items)
-    participant_count = len({str(item.get("expert_id") or "").strip() for item in items if str(item.get("expert_id") or "").strip()})
-    evidence_strength = sum(
-        len([value for value in list(item.get("evidence") or []) if str(value).strip()])
-        + len([value for value in list(item.get("cross_file_evidence") or []) if str(value).strip()])
-        + len([value for value in list(item.get("context_files") or []) if str(value).strip()])
-        for item in items
-    )
-    average_confidence = sum(float(item.get("confidence") or 0.0) for item in items) / max(len(items), 1)
-    max_confidence = max(float(item.get("confidence") or 0.0) for item in items)
-    aggregate_confidence, _ = _score_issue_confidence(items, feedback_quality_profiles)
-    effective_confidence = max(average_confidence, max_confidence, aggregate_confidence)
-    all_need_verification = all(bool(item.get("verification_needed", True)) for item in items)
-    text_blob = "\n".join(
-        [
-            str(item.get("title") or "")
-            for item in items
-        ]
-        + [
-            str(item.get("summary") or "")
-            for item in items
-        ]
-        + [
-            str(rule)
-            for item in items
-            for rule in list(item.get("matched_rules") or [])
-        ]
-        + [
-            str(rule)
-            for item in items
-            for rule in list(item.get("violated_guidelines") or [])
-        ]
-    ).lower()
-    hint_like = any(token in text_blob for token in LOW_RISK_HINT_TOKENS)
-    high_value_contract_mismatch = any(token in text_blob for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS)
-    high_value_design_concern = any(token in text_blob for token in HIGH_VALUE_DESIGN_CONCERN_TOKENS)
-    high_priority_override = any(token in text_blob for token in HIGH_PRIORITY_OVERRIDE_TOKENS)
-    non_code_review_scope = any(token in text_blob for token in NON_CODE_REVIEW_SCOPE_TOKENS)
-    observation_signal = _has_observation_signal(items)
-    sast_cross_validated = bool(_collect_sast_prescan_matches(items))
-    concrete_security_issue = _has_concrete_security_issue_evidence(items, evidence_strength)
-
-    if non_code_review_scope and not direct_evidence:
-        return {
-            "rule_code": "non_code_review_scope",
-            "rule_label": "非代码检视范围问题不升级为 issue",
-            "reason": "当前问题主要是在追问业务背景、需求说明或产品上下文，不属于代码检视应升级处理的 issue，已仅保留为 finding。",
-            "severity": highest_severity,
-        }
-
-    highest_priority_rank = PRIORITY_ORDER.get(highest_severity, 2)
-    min_priority_rank = {
-        "P0": 0,
-        "P1": 1,
-        "P2": 2,
-        "P3": 3,
-    }.get(min_priority_level, 2)
-
-    if highest_priority_rank > min_priority_rank:
-        return {
-            "rule_code": "below_issue_priority_threshold",
-            "rule_label": "低于 issue 升级优先级阈值",
-            "reason": f"当前问题最高仅达到 {highest_severity.upper()} / { _severity_to_priority_label(highest_severity) }，低于设置页配置的 issue 升级阈值 {min_priority_level}，因此仅保留为 finding。",
-            "severity": highest_severity,
-        }
-
-    if (
-        bool(config.get("suppress_low_risk_hint_issues", True))
-        and finding_types <= {"design_concern"}
-        and highest_severity in {"low", "medium"}
-        and not high_value_design_concern
-        and not high_priority_override
-        and not observation_signal
-        and not sast_cross_validated
-    ):
-        return {
-            "rule_code": "design_concern_only",
-            "rule_label": "设计关注项保留为 finding",
-            "reason": "当前仅属于设计关注或建议项，缺少需要进入 debate 的直接风险证据。",
-            "severity": highest_severity,
-        }
-
-    if (
-        bool(config.get("suppress_low_risk_hint_issues", True))
-        and
-        highest_severity == "medium"
-        and not direct_evidence
-        and participant_count <= 1
-        and all_need_verification
-        and average_confidence < float(config.get("hint_issue_confidence_threshold", 0.85) or 0.85)
-        and evidence_strength <= int(config.get("hint_issue_evidence_cap", 2) or 2)
-        and hint_like
-        and not high_value_contract_mismatch
-        and not high_value_design_concern
-        and not high_priority_override
-        and not observation_signal
-        and not sast_cross_validated
-    ):
-        return {
-            "rule_code": "hint_like_medium",
-            "rule_label": "提示性中风险问题保留为 finding",
-            "reason": (
-                "当前问题更偏命名、注释、风格、日志补充等提示性建议，证据较弱且置信度未达到升级 issue 的阈值，"
-                "因此仅保留为 finding。"
-            ),
-            "severity": highest_severity,
-        }
 
     priority_label = _severity_to_priority_label(highest_severity)
     priority_confidence_threshold = _priority_confidence_threshold(config, priority_label)
-    concrete_security_confidence_threshold = _concrete_security_confidence_threshold(
+    priority_confidence_threshold = _effective_issue_confidence_threshold(
         items,
         priority_confidence_threshold,
     )
-    concrete_security_issue_supported = (
-        concrete_security_issue
-        and effective_confidence >= concrete_security_confidence_threshold
-    )
-    strong_direct_code_issue = (
-        direct_evidence
-        and highest_severity in {"blocker", "critical", "high"}
-        and effective_confidence >= priority_confidence_threshold
-        and evidence_strength >= 3
-    )
-    verification_supported_issue = (
-        (direct_evidence and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
-        or (sast_cross_validated and evidence_strength >= 1 and effective_confidence >= priority_confidence_threshold)
-        or concrete_security_issue_supported
-        or (observation_signal and evidence_strength >= 3 and effective_confidence >= priority_confidence_threshold)
-        or (
-            high_value_design_concern
-            and finding_types <= {"design_concern"}
-            and evidence_strength >= 2
-            and effective_confidence >= priority_confidence_threshold
-        )
-    )
+    finding_confidence = max(_coerce_confidence(item.get("confidence")) for item in items)
 
-    if all_need_verification and not (strong_direct_code_issue or verification_supported_issue):
-        return {
-            "rule_code": "conditional_conclusion",
-            "rule_label": "证据未闭环，保留为观察项",
-            "reason": "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考，仅保留为 finding。",
-            "severity": highest_severity,
-        }
-
-    if effective_confidence < priority_confidence_threshold and not concrete_security_issue_supported:
+    if finding_confidence < priority_confidence_threshold:
         return {
             "rule_code": "below_priority_confidence_threshold",
             "rule_label": "低于当前 P 级 issue 置信度阈值",
-            "reason": f"当前问题已达到 {priority_label}，但分组有效置信度仅为 {effective_confidence:.2f}，低于该级别配置的 issue 置信度阈值 {priority_confidence_threshold:.2f}，因此仅保留为 finding。",
+            "reason": f"当前 finding 达到 {priority_label}，但置信度 {finding_confidence:.2f} 低于该级别配置的 issue 置信度阈值 {priority_confidence_threshold:.2f}，因此仅保留为 finding。",
             "severity": highest_severity,
         }
 
     return None
+
+
+def _effective_issue_confidence_threshold(items: list[dict[str, object]], default_threshold: float) -> float:
+    threshold = float(default_threshold)
+    evidence_strength = len(_collect_issue_evidence_signals(items))
+    if _has_high_value_direct_issue_evidence(items, evidence_strength):
+        threshold = min(threshold, 0.78)
+    return threshold
+
+
+def _has_high_value_direct_issue_evidence(items: list[dict[str, object]], evidence_strength: int) -> bool:
+    if evidence_strength <= 0:
+        return False
+    for item in items:
+        issue_type = str(item.get("normalized_issue_type") or _build_single_problem_type(item) or "").strip().lower()
+        has_code_anchor = int(item.get("line_start") or 0) > 0 and bool(str(item.get("file_path") or "").strip())
+        if not has_code_anchor:
+            continue
+        if issue_type in {
+            "lock_guard_removed",
+            "concurrency_guard_removed",
+            "lock_scope_risk",
+            "comment_contract_unimplemented",
+            "declared_intent_without_implementation",
+            "comment_promise_unimplemented",
+            "n_plus_one",
+            "loop_call_amplification",
+            "bulk_processing_boundary_missing",
+        } and _has_structural_code_anchor_evidence(item):
+            return True
+        text = "\n".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("summary") or ""),
+                str(item.get("normalized_issue_type") or ""),
+                *[str(value) for value in list(item.get("evidence") or [])],
+                *[str(value) for value in list(item.get("matched_rules") or [])],
+                *[str(value) for value in list(item.get("violated_guidelines") or [])],
+            ]
+        ).lower()
+        if any(token.lower() in text for token in HIGH_PRIORITY_OVERRIDE_TOKENS):
+            if _has_structural_code_anchor_evidence(item):
+                return True
+        if any(token.lower() in text for token in HIGH_VALUE_CONTRACT_MISMATCH_TOKENS):
+            if _has_structural_code_anchor_evidence(item):
+                return True
+    return False
 
 
 def _severity_to_priority_label(severity: str) -> str:

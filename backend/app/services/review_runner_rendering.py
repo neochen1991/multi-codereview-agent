@@ -159,11 +159,45 @@ class ReviewRunnerRenderingMixin:
                     ]
                     if formatted_gaps:
                         lines.append(f"  * 测试覆盖缺口: {' / '.join(formatted_gaps)}")
+            risk_candidates = [
+                item
+                for item in list(repository_context.get("risk_candidates") or [])
+                if isinstance(item, dict)
+            ]
+            if risk_candidates:
+                lines.append("- 风险候选池（仅为召回线索，不是预设结论；专家必须独立判断是否构成问题）:")
+                for item in risk_candidates[:6]:
+                    source = str(item.get("source") or "").strip()
+                    domain = str(item.get("risk_domain") or "").strip()
+                    expert_id = str(item.get("suggested_expert_id") or "").strip()
+                    path = str(item.get("file_path") or "").strip()
+                    line_start = int(item.get("line_start") or 0)
+                    message = str(item.get("message") or "").strip()
+                    line_text = f"L{line_start}" if line_start > 0 else "文件级"
+                    if message:
+                        lines.append(
+                            f"  * [{domain or 'risk'} / {expert_id or 'expert'} / {source or 'source'}] "
+                            f"{path}:{line_text} {message}"
+                        )
+            tool_observations = [
+                item
+                for item in list(repository_context.get("tool_observations") or [])
+                if isinstance(item, dict)
+            ]
+            if tool_observations:
+                lines.append("- 工具观察（只作为辅助证据，不能直接当作问题发布）:")
+                for item in tool_observations[:5]:
+                    tool = str(item.get("tool") or "tool").strip()
+                    rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+                    message = str(item.get("message") or "").strip()
+                    line_start = int(item.get("line_start") or item.get("line") or 1)
+                    if message:
+                        lines.append(f"  * {tool}:{rule_id} L{line_start} {message}")
             sast_prescan = repository_context.get("sast_prescan")
             if isinstance(sast_prescan, dict):
                 sast_summary = str(sast_prescan.get("summary") or "").strip()
                 if sast_summary:
-                    lines.append(f"- SAST/linter 预扫描: {sast_summary}")
+                    lines.append(f"- SAST/linter 预扫描摘要: {sast_summary}")
                 for item in list(sast_prescan.get("findings") or [])[:5]:
                     if not isinstance(item, dict):
                         continue

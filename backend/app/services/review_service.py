@@ -548,7 +548,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return review
         try:
             finding_count = len(self.list_display_findings(review_id))
-            issue_count = len(self.list_issues(review_id))
+            issue_count = len([issue for issue in self.list_issues(review_id) if _is_formal_issue(issue)])
         except Exception:
             return review
         next_review = dict(review)

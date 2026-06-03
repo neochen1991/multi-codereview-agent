@@ -398,10 +398,23 @@ def test_submit_case_can_attach_windows_quality_gate_result(tmp_path: Path, monk
                         },
                     }
                 ],
-                "issues": [
-                    {
-                        "primary_expert_id": "correctness_business",
-                        "participant_expert_ids": ["security_compliance"],
+                    "issues": [
+                        {
+                            "primary_expert_id": "security_compliance",
+                            "participant_expert_ids": ["security_compliance"],
+                            "title": "查询语义放宽可能扩大数据访问范围",
+                            "summary": "OrderService 使用 like 放宽查询范围。",
+                            "normalized_issue_type": "query_semantics_regression",
+                            "file_path": "src/main/java/com/example/OrderService.java",
+                            "line_start": 20,
+                            "current_code": "20 | +        return builder.like(root.get(\"ownerId\"), value);",
+                            "evidence_anchor_status": "valid",
+                            "evidence_chain": [{"step": "anchor", "status": "anchored"}],
+                            "remediation_suggestion": "恢复精确匹配，或为模糊查询增加明确授权和分页约束。",
+                        },
+                        {
+                            "primary_expert_id": "correctness_business",
+                            "participant_expert_ids": ["security_compliance"],
                         "title": "TODO 里的库存扣减未实现",
                         "summary": "OrderService 第 31 行 TODO 承诺扣减库存，但当前实现没有对应动作。",
                         "normalized_issue_type": "comment_contract_unimplemented",
@@ -433,6 +446,97 @@ def test_submit_case_can_attach_windows_quality_gate_result(tmp_path: Path, monk
     assert result["quality_eval"]["precision"] == 1.0
     assert result["quality_eval"]["anchor_accuracy"] == 1.0
     assert result["quality_eval"]["display_quality_rate"] == 1.0
+
+
+def test_submit_case_quality_eval_scores_final_issues_not_raw_findings(tmp_path: Path, monkeypatch) -> None:
+    module = _load_benchmark_module()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True, text=True)
+    case = module.JavaReviewCase(
+        case_id="effective-issue-quality-case",
+        repo_key="local-java-demo",
+        category="correctness",
+        scenario="Effective issue quality should ignore duplicate raw findings",
+        business_context="same issue appears in raw findings and final issues",
+        tags=("java",),
+        patch_operations=(),
+        expected=module.ExpectedOutcome(
+            required_experts=("correctness_business",),
+            rule_ids_any_of=("CORR-JDDD-001",),
+            finding_keywords=("TODO", "扣减库存"),
+            problem_markers=(
+                {
+                    "file_path": "src/main/java/com/example/BulkEnrollmentService.java",
+                    "keywords": ("TODO", "扣减库存"),
+                },
+            ),
+            min_findings=1,
+            min_issues=1,
+        ),
+    )
+    materialized = module.MaterializedCase(
+        case=case,
+        repository=module.RepoDefinition(
+            repo_key="local-java-demo",
+            clone_url="https://example.invalid/local-java-demo.git",
+            default_branch="main",
+            review_mode="general",
+        ),
+        workspace_repo=workspace,
+        changed_files=("src/main/java/com/example/BulkEnrollmentService.java",),
+        unified_diff="diff --git a/src/main/java/com/example/BulkEnrollmentService.java b/src/main/java/com/example/BulkEnrollmentService.java\n",
+        graph_metadata={},
+    )
+
+    def fake_request_json(method: str, url: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        if method == "POST" and url.endswith("/reviews"):
+            return {"review_id": "rev_effective"}
+        if method == "POST" and url.endswith("/reviews/rev_effective/start"):
+            return {"review_id": "rev_effective"}
+        if method == "GET" and url.endswith("/reviews/rev_effective"):
+            return {"review_id": "rev_effective", "status": "completed", "phase": "completed"}
+        if method == "GET" and url.endswith("/reviews/rev_effective/report"):
+            final_issue = {
+                "primary_expert_id": "correctness_business",
+                "participant_expert_ids": ["correctness_business"],
+                "title": "TODO 里的库存扣减未实现",
+                "summary": "BulkEnrollmentService 第 31 行 TODO 承诺扣减库存，但当前实现没有对应动作。",
+                "normalized_issue_type": "comment_contract_unimplemented",
+                "file_path": "src/main/java/com/example/BulkEnrollmentService.java",
+                "line_start": 31,
+                "current_code": "31 | +        // TODO 批量报名成功后扣减库存并发送预占事件",
+                "code_anchor": "TODO 批量报名成功后扣减库存并发送预占事件",
+                "evidence_anchor_status": "valid",
+                "evidence_chain": [{"step": "anchor", "status": "anchored"}],
+                "remediation_suggestion": "补齐库存扣减逻辑和事件发送，或删除该 TODO 承诺。",
+            }
+            raw_duplicate = {
+                **final_issue,
+                "expert_id": "correctness_business",
+                "title": "候选观察：TODO 里的库存扣减未实现",
+            }
+            return {
+                "findings": [raw_duplicate, raw_duplicate],
+                "issues": [final_issue],
+            }
+        if method == "GET" and url.endswith("/reviews/rev_effective/replay"):
+            return {
+                "messages": [
+                    {"expert_id": "correctness_business", "message_type": "expert_analysis", "metadata": {}}
+                ]
+            }
+        raise AssertionError(f"{method} {url}")
+
+    monkeypatch.setattr(module, "request_json", fake_request_json)
+
+    result = module.submit_case(materialized)
+
+    assert result["finding_count"] == 2
+    assert result["issue_count"] == 1
+    assert result["quality_eval"]["precision"] == 1.0
+    assert result["quality_eval"]["duplicate_rate"] == 0.0
+    assert result["quality_eval"]["false_positive_rate"] == 0.0
 
 
 def test_benchmark_exit_code_fails_when_windows_quality_gate_fails() -> None:

@@ -222,6 +222,40 @@ def build_repository_context_summary(
                         f"  * {file_path} · role={role or 'code'} · "
                         f"methods={','.join(methods[:4]) or 'unknown'} · domains={'/'.join(domains[:6]) or 'none'}"
                     )
+        risk_candidates = [
+            item
+            for item in list(repository_context.get("risk_candidates") or [])
+            if isinstance(item, dict)
+        ]
+        if risk_candidates:
+            lines.append("- 风险候选池（召回线索，不是最终问题；专家必须独立判断）:")
+            for item in risk_candidates[:6]:
+                source = str(item.get("source") or "").strip()
+                domain = str(item.get("risk_domain") or "").strip()
+                expert_id = str(item.get("suggested_expert_id") or "").strip()
+                file_path = str(item.get("file_path") or "").strip()
+                line_start = int(item.get("line_start") or 0)
+                message = str(item.get("message") or "").strip()
+                location = f"L{line_start}" if line_start > 0 else "文件级"
+                if message:
+                    lines.append(
+                        f"  * [{domain or 'risk'} / {expert_id or 'expert'} / {source or 'source'}] "
+                        f"{file_path}:{location} {message}"
+                    )
+        tool_observations = [
+            item
+            for item in list(repository_context.get("tool_observations") or [])
+            if isinstance(item, dict)
+        ]
+        if tool_observations:
+            lines.append("- 工具观察（辅助证据，不直接构成问题）:")
+            for item in tool_observations[:5]:
+                tool = str(item.get("tool") or "tool").strip()
+                rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+                line_start = int(item.get("line_start") or item.get("line") or 1)
+                message = str(item.get("message") or "").strip()
+                if message:
+                    lines.append(f"  * {tool}:{rule_id} L{line_start} {message}")
         primary_context = repository_context.get("primary_context")
         if isinstance(primary_context, dict) and primary_context.get("snippet"):
             lines.append(f"- 目标文件: {primary_context.get('path')}")

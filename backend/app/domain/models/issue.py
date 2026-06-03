@@ -54,6 +54,9 @@ class DebateIssue(BaseModel):
     aggregated_remediation_strategies: list[str] = Field(default_factory=list)
     aggregated_remediation_suggestions: list[str] = Field(default_factory=list)
     aggregated_remediation_steps: list[str] = Field(default_factory=list)
+    matched_rules: list[str] = Field(default_factory=list)
+    violated_guidelines: list[str] = Field(default_factory=list)
+    rule_based_reasoning: str = ""
     remediation_strategy: str = ""
     remediation_suggestion: str = ""
     remediation_steps: list[str] = Field(default_factory=list)
