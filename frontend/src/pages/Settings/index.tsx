@@ -19,6 +19,7 @@ import {
   type ProjectSettings,
   type ReviewWorkspaceCleanupResult,
   type RuntimeSettings,
+  type SastToolsStatus,
 } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
@@ -234,6 +235,7 @@ const SettingsPage: React.FC = () => {
   const [reviewWorkspaceCleanupRunning, setReviewWorkspaceCleanupRunning] = React.useState(false);
   const [reviewWorkspaceCleanupResult, setReviewWorkspaceCleanupResult] = React.useState<ReviewWorkspaceCleanupResult | null>(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = React.useState<RuntimeSettings | null>(null);
+  const [sastToolsStatus, setSastToolsStatus] = React.useState<SastToolsStatus | null>(null);
 
   const refreshRepositoryGitNexusStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
     const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
@@ -320,13 +322,14 @@ const SettingsPage: React.FC = () => {
     // 系统设置和专家列表要一起加载，才能在一页内完成全局与专家级配置。
     setLoading(true);
     try {
-      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, impactTemplatePayload] = await Promise.all([
+      const [runtime, expertList, skills, tools, gitnexus, gitnexusDiagnostic, sastStatus, impactTemplatePayload] = await Promise.all([
         settingsApi.getRuntime(),
         expertApi.list(),
         settingsApi.listExtensionSkills(),
         settingsApi.listExtensionTools(),
         settingsApi.getGitNexusIndexStatus().catch(() => null),
         settingsApi.getGitNexusPreflight().catch(() => null),
+        settingsApi.getSastToolsStatus().catch(() => null),
         settingsApi.getImpactReportTemplate(),
       ]);
       const projectRepositories = currentProjectRepositories(runtime);
@@ -348,6 +351,7 @@ const SettingsPage: React.FC = () => {
         },
       );
       setGitnexusPreflight(gitnexusDiagnostic);
+      setSastToolsStatus(sastStatus);
       setImpactTemplate(impactTemplatePayload);
       setImpactTemplateContent(impactTemplatePayload.content || "");
       setImpactTemplateSchemaContent(impactTemplatePayload.schema_content || "");
@@ -682,6 +686,62 @@ const SettingsPage: React.FC = () => {
       return { color: "error", label: "未安装", path: commandCheck.message || "当前机器未发现 gitnexus 可执行命令" };
     }
     return { color: "default", label: "未确认", path: status?.gitnexus_path || "刷新后显示 gitnexus 命令路径" };
+  };
+
+  const sastStatusColor = (state?: string) => {
+    if (state === "available" || state === "enabled") return "success";
+    if (state === "requires_report" || state === "disabled") return "warning";
+    if (state === "missing") return "error";
+    return "default";
+  };
+
+  const renderSastToolStatus = () => {
+    const status = sastToolsStatus;
+    if (!status) {
+      return <Alert type="info" showIcon message="SAST/linter 工具状态暂不可用" description="刷新设置页后会重新检测本机命令和报告类工具要求。" />;
+    }
+    const commandTools = status.command_tools || [];
+    const reportTools = status.report_tools || [];
+    return (
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        <Alert
+          type={status.enabled ? "success" : "warning"}
+          showIcon
+          message={status.enabled ? "SAST/linter 预扫描已启用" : "SAST/linter 预扫描未启用"}
+          description="工具输出只作为专家 Agent 的辅助观察点，不会直接生成正式问题。Windows 下必须让后端进程 PATH 能找到命令。"
+        />
+        <Descriptions size="small" column={1} bordered>
+          <Descriptions.Item label="当前平台">{status.platform || "unknown"}</Descriptions.Item>
+          <Descriptions.Item label="命令类工具">
+            <Space direction="vertical" size={4}>
+              {commandTools.map((tool) => (
+                <div key={tool.tool}>
+                  <Tag color={sastStatusColor(tool.status)}>{`${tool.tool}: ${tool.status}`}</Tag>
+                  {tool.category ? <Tag>{tool.category}</Tag> : null}
+                  <span>{tool.executable || tool.purpose}</span>
+                  {tool.install?.windows ? <div className="settings-muted">{`Windows 安装：${tool.install.windows}`}</div> : null}
+                  {tool.verify_commands?.length ? <div className="settings-muted">{`校验命令：${tool.verify_commands.join(" / ")}`}</div> : null}
+                </div>
+              ))}
+            </Space>
+          </Descriptions.Item>
+          <Descriptions.Item label="报告类工具">
+            <Space direction="vertical" size={4}>
+              {reportTools.map((tool) => (
+                <div key={tool.tool}>
+                  <Tag color={sastStatusColor(tool.status)}>{`${tool.tool}: ${tool.status}`}</Tag>
+                  {tool.category ? <Tag>{tool.category}</Tag> : null}
+                  <span>{tool.purpose}</span>
+                  {tool.report_paths?.length ? (
+                    <div className="settings-muted">{`报告路径：${tool.report_paths.slice(0, 3).join(" / ")}${tool.report_paths.length > 3 ? " / ..." : ""}`}</div>
+                  ) : null}
+                </div>
+              ))}
+            </Space>
+          </Descriptions.Item>
+        </Descriptions>
+      </Space>
+    );
   };
 
   const renderGitNexusPreflight = (diagnostic?: GitNexusPreflightStatus | null) => {
@@ -1248,6 +1308,7 @@ const SettingsPage: React.FC = () => {
               });
               void refreshRepositoryGitNexusStatuses(projectRepositories);
               void refreshRepositoryCodeGraphStatuses(projectRepositories);
+              void settingsApi.getSastToolsStatus().then(setSastToolsStatus).catch(() => null);
               form.setFieldValue("default_llm_api_key", "");
               form.setFieldValue("storage_pg_password", "");
               form.setFieldValue("code_repo_access_token", "");
@@ -1746,11 +1807,12 @@ const SettingsPage: React.FC = () => {
                           name="enable_sast_prescan"
                           label="启用 SAST/linter 预扫描"
                           valuePropName="checked"
-                          extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为检查角色补充工具候选信号。"
+                          extra="默认关闭。开启后才会调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告，为检查角色补充工具候选信号。"
                         >
                           <Switch />
                         </Form.Item>
                       </Col>
+                      <Col xs={24}>{renderSastToolStatus()}</Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
                           name="enable_review_workspace_realtime_graph"

@@ -718,6 +718,30 @@ export interface RuntimeSettings {
   ca_bundle_path: string;
 }
 
+export interface SastToolStatusItem {
+  tool: string;
+  kind: "command" | "report";
+  category?: string;
+  purpose: string;
+  status: "available" | "missing" | "requires_report" | string;
+  executable?: string;
+  report_paths?: string[];
+  verify_commands?: string[];
+  install?: {
+    windows?: string;
+    macos_linux?: string;
+  };
+}
+
+export interface SastToolsStatus {
+  enabled: boolean;
+  platform: string;
+  status: "enabled" | "disabled" | string;
+  command_tools: SastToolStatusItem[];
+  report_tools: SastToolStatusItem[];
+  notes: string[];
+}
+
 export interface CodeRepositorySettings {
   repository_id: string;
   name?: string;

@@ -506,9 +506,54 @@ class SastPreScanService:
         observations: list[dict[str, object]] = []
         for item in findings:
             observation = dict(item)
+            tool = str(observation.get("tool") or "tool").strip()
+            rule_id = str(observation.get("rule_id") or "unknown").strip()
+            line_start = int(observation.get("line_start") or 1)
+            observation["observation_id"] = f"{tool}:{rule_id}:{line_start}"
             observation["source"] = "sast_prescan"
             observation["observation_type"] = "tool_observation"
+            observation["category"] = self._category_for_tool(
+                tool,
+                str(observation.get("message") or ""),
+                rule_id,
+                str(observation.get("cwe") or ""),
+            )
+            observation["confidence"] = self._confidence_for_tool_signal(tool, str(observation.get("severity") or ""))
+            observation["evidence_required"] = [
+                "必须确认该工具信号落在本次 diff 或受影响上下文中。",
+                "必须结合专家通用规范或绑定规范判断是否形成真实风险。",
+                "必须给出精确代码位置和直接代码证据后才能升级为正式问题。",
+            ]
             observation["is_issue"] = False
             observation["expert_must_decide"] = True
             observations.append(observation)
         return observations
+
+    def _category_for_tool(self, tool: str, message: str, rule_id: str, cwe: str = "") -> str:
+        lowered = " ".join([tool, message, rule_id, cwe]).lower()
+        if str(cwe or "").strip():
+            return "security"
+        if any(token in lowered for token in ["sql", "xss", "ssrf", "csrf", "injection", "secret", "password", "token", "auth", "crypto"]):
+            return "security"
+        if tool in {"spotbugs", "pmd", "checkstyle"}:
+            return "java_quality"
+        if tool == "archunit":
+            return "architecture"
+        if tool == "jacoco":
+            return "test_coverage"
+        if tool == "bandit":
+            return "python_security"
+        if tool == "eslint":
+            return "frontend_quality"
+        return "static_analysis"
+
+    def _confidence_for_tool_signal(self, tool: str, severity: str) -> float:
+        normalized = str(severity or "").lower()
+        base = 0.78 if tool in {"semgrep", "spotbugs", "bandit"} else 0.7
+        if normalized in {"error", "critical", "high"}:
+            return min(0.9, base + 0.08)
+        if normalized in {"medium", "warning", "warn"}:
+            return base
+        if normalized == "low":
+            return max(0.55, base - 0.12)
+        return base

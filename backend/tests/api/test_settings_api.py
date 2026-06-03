@@ -138,6 +138,26 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert "default_llm_api_key" not in payload
 
 
+def test_sast_tools_status_exposes_install_and_runtime_state(client):
+    response = client.get("/api/settings/sast-tools/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] in {"enabled", "disabled"}
+    assert isinstance(payload["command_tools"], list)
+    assert isinstance(payload["report_tools"], list)
+    semgrep = next(item for item in payload["command_tools"] if item["tool"] == "semgrep")
+    assert semgrep["kind"] == "command"
+    assert semgrep["category"] == "security"
+    assert semgrep["status"] in {"available", "missing"}
+    assert "windows" in semgrep["install"]
+    assert semgrep["verify_commands"]
+    spotbugs = next(item for item in payload["report_tools"] if item["tool"] == "spotbugs")
+    assert spotbugs["kind"] == "report"
+    assert spotbugs["status"] == "requires_report"
+    assert spotbugs["report_paths"]
+
+
 def test_gitnexus_preflight_endpoint_returns_diagnostics(client):
     response = client.get("/api/settings/gitnexus/preflight")
 

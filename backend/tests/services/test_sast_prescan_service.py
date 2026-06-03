@@ -84,6 +84,10 @@ def test_sast_prescan_parses_semgrep_json(tmp_path: Path):
     assert "CWE-95" in payload["findings"][0]["why_it_matters"]
     assert payload["tool_observations"][0]["source"] == "sast_prescan"
     assert payload["tool_observations"][0]["observation_type"] == "tool_observation"
+    assert payload["tool_observations"][0]["observation_id"] == "semgrep:python.lang.security.audit.eval:1"
+    assert payload["tool_observations"][0]["category"] == "security"
+    assert payload["tool_observations"][0]["confidence"] >= 0.8
+    assert payload["tool_observations"][0]["evidence_required"]
     assert payload["tool_observations"][0]["is_issue"] is False
     assert payload["tool_observations"][0]["expert_must_decide"] is True
     assert "Use of eval" in payload["summary"] or payload["findings"][0]["message"] == "Use of eval"

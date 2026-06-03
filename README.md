@@ -17,6 +17,7 @@
 - Windows：需要 PowerShell，建议安装 Python Launcher `py`
 - 可选：GitNexus，用于生成 MR 关联影响分析报告
 - 推荐：Tree-sitter Python 依赖，用于 Java 代码图谱和更准确的关联上下文
+- 可选：SAST/linter 工具，用于为专家 Agent 提供确定性候选信号，详见“可选：开启 SAST/linter 预扫描”
 
 Python 依赖会通过 `pip install -e ".[code-graph]"` 安装，前端依赖会通过 `npm install` 安装。GitNexus 属于可选增强能力；Tree-sitter 不需要单独安装系统命令，本工具通过 Python 包 `tree-sitter` 和 `tree-sitter-language-pack` 使用它。
 
@@ -166,6 +167,74 @@ Windows 后端：
 ```bash
 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
+
+## 可选：开启 SAST/linter 预扫描
+
+SAST/linter 预扫描用于提升检视召回率。它不会直接生成正式问题，而是把工具命中的风险统一转换为 `tool_observations`，再交给专家 Agent 结合 diff、关联上下文、代码语言通用规范和专家绑定规范判断。未安装工具时检视不会失败，但会少一类确定性候选信号。
+
+在设置页 `/settings` 的“检视质量治理”区域可以打开“启用 SAST/linter 预扫描”，并查看“静态分析工具”状态。状态含义如下：
+
+- `available`：后端进程的 PATH 能找到该命令，会在检视时尝试调用。
+- `missing`：当前机器未发现该命令，需要安装并加入后端进程 PATH。
+- `requires_report`：该工具由 Maven/Gradle/测试流程生成 XML 报告，本工具只读取报告，不直接启动该工具。
+- `disabled`：总开关未启用，不会调用命令或读取报告。
+
+当前支持的命令类工具：
+
+| 工具 | 主要用途 | Windows 安装示例 | 校验命令 |
+| --- | --- | --- | --- |
+| Semgrep | Java/SQL/通用安全规则、项目自定义规则 | `py -m pip install semgrep` | `where semgrep`、`semgrep --version` |
+| PMD | Java 空 catch、复杂度、低效循环、坏味道 | `choco install pmd`，或下载 PMD 后把 `bin` 加入 PATH | `where pmd`、`pmd --version` |
+| Checkstyle | Java 编码规范、命名、导入、格式 | `choco install checkstyle`，或配置 checkstyle jar 包装命令 | `where checkstyle`、`checkstyle --version` |
+| ESLint | JavaScript/TypeScript linter 候选信号 | `npm install -g eslint` | `where eslint`、`eslint --version` |
+| Bandit | Python 安全候选信号 | `py -m pip install bandit` | `where bandit`、`bandit --version` |
+
+macOS / Linux 可参考：
+
+```bash
+python3 -m pip install semgrep bandit
+brew install pmd checkstyle
+npm install -g eslint
+which semgrep
+semgrep --version
+```
+
+Windows PowerShell 可参考：
+
+```powershell
+py -m pip install semgrep bandit
+npm install -g eslint
+where semgrep
+where bandit
+where eslint
+semgrep --version
+```
+
+Java 报告类工具需要项目构建先生成 XML：
+
+| 工具 | 读取的常见报告路径 | 作用 |
+| --- | --- | --- |
+| SpotBugs | `target/spotbugsXml.xml`、`target/spotbugs.xml`、`build/reports/spotbugs/main.xml` | 空指针、资源泄漏、并发、安全 bug pattern |
+| ArchUnit | `target/surefire-reports/*.xml`、`target/failsafe-reports/*.xml`、`build/test-results/**/*.xml` | 分层依赖、包依赖方向、DDD 边界测试失败信号 |
+| JaCoCo | `target/site/jacoco/jacoco.xml`、`build/reports/jacoco/test/jacocoTestReport.xml` | 测试覆盖率缺口候选信号 |
+
+后端调用命令时使用参数数组和仓库根目录 `cwd`，避免 Windows 路径空格、中文目录和盘符路径被 shell 拼接破坏。典型调用方式：
+
+```text
+semgrep --json --quiet [--config .semgrep.yml] <changed-file>
+pmd check -d <changed-file> -f json [-R pmd-ruleset.xml]
+checkstyle -c checkstyle.xml -f xml <changed-file>
+eslint --format json [--config eslint.config.js] <changed-file>
+bandit -q -f json <changed-file>
+```
+
+检视链路中，工具结果只作为候选源之一。最终候选来自：
+
+```text
+工具候选信号 ∪ 专家通用规范扫描 ∪ 专家绑定规范分批扫描
+```
+
+因此，即使自定义规范未命中，也应继续按代码语言通用规范和专家画像进行全量扫描。
 
 ## 可选：开启 GitNexus
 

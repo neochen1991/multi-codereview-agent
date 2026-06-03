@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import platform
+import shutil
+
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import AliasChoices, BaseModel, Field
 from typing import Literal
@@ -49,6 +52,144 @@ def _gitnexus_preflight(repository_id: str = "") -> dict[str, object]:
     payload = GitNexusImpactService(review_service_module.review_service.storage_root).preflight(subject, runtime)
     payload["repository_id"] = normalized_repository_id or str(repository.repository_id if repository is not None else "")
     return payload
+
+
+def _sast_tool_status() -> dict[str, object]:
+    runtime = review_service_module.review_service.get_runtime_settings()
+    command_tools = [
+        {
+            "tool": "semgrep",
+            "kind": "command",
+            "category": "security",
+            "purpose": "安全规则、SQL 注入、越权、敏感信息、项目自定义规则",
+            "verify_commands": ["semgrep --version", "where semgrep"],
+            "install": {
+                "windows": "py -m pip install semgrep",
+                "macos_linux": "python3 -m pip install semgrep",
+            },
+        },
+        {
+            "tool": "pmd",
+            "kind": "command",
+            "category": "java_quality",
+            "purpose": "Java 空 catch、复杂度、低效循环、坏味道",
+            "verify_commands": ["pmd --version", "where pmd"],
+            "install": {
+                "windows": "choco install pmd 或下载 PMD 并把 bin 加入 PATH",
+                "macos_linux": "brew install pmd 或下载 PMD 并把 bin 加入 PATH",
+            },
+        },
+        {
+            "tool": "checkstyle",
+            "kind": "command",
+            "category": "java_quality",
+            "purpose": "Java 编码规范、命名、导入、格式",
+            "verify_commands": ["checkstyle --version", "where checkstyle"],
+            "install": {
+                "windows": "choco install checkstyle 或下载 checkstyle jar 并配置 PATH 包装命令",
+                "macos_linux": "brew install checkstyle",
+            },
+        },
+        {
+            "tool": "eslint",
+            "kind": "command",
+            "category": "frontend_quality",
+            "purpose": "JS/TS linter 候选信号",
+            "verify_commands": ["eslint --version", "where eslint"],
+            "install": {
+                "windows": "npm install -g eslint",
+                "macos_linux": "npm install -g eslint",
+            },
+        },
+        {
+            "tool": "bandit",
+            "kind": "command",
+            "category": "python_security",
+            "purpose": "Python 安全候选信号",
+            "verify_commands": ["bandit --version", "where bandit"],
+            "install": {
+                "windows": "py -m pip install bandit",
+                "macos_linux": "python3 -m pip install bandit",
+            },
+        },
+    ]
+    report_tools = [
+        {
+            "tool": "spotbugs",
+            "kind": "report",
+            "category": "java_quality",
+            "purpose": "Java 空指针、资源泄漏、并发、安全 bug pattern",
+            "status": "requires_report",
+            "report_paths": [
+                "target/spotbugsXml.xml",
+                "target/spotbugs.xml",
+                "target/site/spotbugs.xml",
+                "build/reports/spotbugs/main.xml",
+                "build/reports/spotbugs/test.xml",
+                "spotbugs.xml",
+            ],
+            "install": {
+                "windows": "在 Maven/Gradle 中启用 SpotBugs 插件并生成 XML 报告",
+                "macos_linux": "在 Maven/Gradle 中启用 SpotBugs 插件并生成 XML 报告",
+            },
+        },
+        {
+            "tool": "archunit",
+            "kind": "report",
+            "category": "architecture",
+            "purpose": "分层依赖、包依赖方向、DDD 边界测试失败信号",
+            "status": "requires_report",
+            "report_paths": [
+                "target/surefire-reports/*.xml",
+                "target/failsafe-reports/*.xml",
+                "build/test-results/**/*.xml",
+            ],
+            "install": {
+                "windows": "项目测试中引入 ArchUnit，并运行 Maven/Gradle 测试生成报告",
+                "macos_linux": "项目测试中引入 ArchUnit，并运行 Maven/Gradle 测试生成报告",
+            },
+        },
+        {
+            "tool": "jacoco",
+            "kind": "report",
+            "category": "test_coverage",
+            "purpose": "测试覆盖率缺口候选信号",
+            "status": "requires_report",
+            "report_paths": [
+                "target/site/jacoco/jacoco.xml",
+                "target/site/jacoco-aggregate/jacoco.xml",
+                "build/reports/jacoco/test/jacocoTestReport.xml",
+                "build/reports/jacoco/testCodeCoverageReport/testCodeCoverageReport.xml",
+                "jacoco.xml",
+            ],
+            "install": {
+                "windows": "在 Maven/Gradle 中启用 JaCoCo 并生成 XML 报告",
+                "macos_linux": "在 Maven/Gradle 中启用 JaCoCo 并生成 XML 报告",
+            },
+        },
+    ]
+    command_statuses = []
+    for item in command_tools:
+        executable = shutil.which(str(item["tool"]))
+        command_statuses.append(
+            {
+                **item,
+                "status": "available" if executable else "missing",
+                "executable": executable or "",
+            }
+        )
+    return {
+        "enabled": bool(runtime.enable_sast_prescan),
+        "platform": platform.system() or "",
+        "status": "enabled" if bool(runtime.enable_sast_prescan) else "disabled",
+        "command_tools": command_statuses,
+        "report_tools": report_tools,
+        "notes": [
+            "静态工具输出只进入 tool_observations，不会直接生成正式问题。",
+            "命令类工具需要后端进程 PATH 能找到对应命令。",
+            "SpotBugs、ArchUnit、JaCoCo 当前读取项目构建/测试生成的 XML 报告。",
+        ],
+    }
 
 
 class RuntimeSettingsRequest(BaseModel):
@@ -232,6 +373,13 @@ def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object
     response["auto_review_repo_url"] = str(runtime.code_repo_clone_url or runtime.auto_review_repo_url or "").strip()
     response["config_path"] = str(settings.CONFIG_PATH)
     return response
+
+
+@router.get("/settings/sast-tools/status")
+def get_sast_tools_status() -> dict[str, object]:
+    """返回 SAST/linter 预扫描工具安装和启用状态。"""
+
+    return _sast_tool_status()
 
 
 @router.get("/settings/gitnexus/index/status")

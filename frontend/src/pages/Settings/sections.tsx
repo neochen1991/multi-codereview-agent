@@ -437,10 +437,24 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               name="enable_sast_prescan"
               label="启用 SAST/linter 预扫描"
               valuePropName="checked"
-              extra="默认关闭。开启后才会调用本机 semgrep、eslint、bandit，为专家提示补充工具候选信号。"
+              extra="默认关闭。开启后才会调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告，为专家提示补充工具候选信号。"
             >
               <Switch />
             </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Alert
+              type="info"
+              showIcon
+              message="静态分析工具接入方式"
+              description={
+                <Space direction="vertical" size={6}>
+                  <span>命令类工具需要后端进程 PATH 可识别：semgrep、pmd、checkstyle、eslint、bandit。Windows 可用 where semgrep / where pmd 检查。</span>
+                  <span>报告类工具读取项目生成的 XML：SpotBugs、ArchUnit/Surefire、JaCoCo。未安装或未生成报告时不会阻断检视，但会减少确定性候选信号。</span>
+                  <span>工具输出只作为 tool_observations 进入专家 Agent，正式问题仍由专家结合 diff、上下文、通用规范和绑定规范判断。</span>
+                </Space>
+              }
+            />
           </Col>
           <Col xs={24} xl={8}>
             <Form.Item
