@@ -1,3 +1,6 @@
+import json
+
+
 def test_runtime_settings_can_be_read_and_updated(client):
     initial = client.get("/api/settings/runtime")
     assert initial.status_code == 200
@@ -140,6 +143,45 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["ca_bundle_path"] == "C:/certs/corp-ca.pem"
     assert payload["config_path"].endswith("config.json")
     assert "default_llm_api_key" not in payload
+
+
+def test_runtime_settings_partial_update_preserves_config_managed_repository_fields(client, storage_root):
+    configure = client.put(
+        "/api/settings/runtime",
+        json={
+            "default_target_branch": "develop",
+            "default_analysis_mode": "light",
+            "code_repo_clone_url": "https://github.com/example/repo.git",
+            "code_repo_local_path": "/tmp/example-repo",
+            "code_repo_default_branch": "release",
+            "code_repo_auto_sync": True,
+            "auto_review_enabled": True,
+            "auto_review_poll_interval_seconds": 300,
+            "default_llm_provider": "dashscope-openai-compatible",
+            "default_llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+            "default_llm_model": "kimi-k2.5",
+        },
+    )
+    assert configure.status_code == 200
+
+    update = client.put("/api/settings/runtime", json={"default_analysis_mode": "standard"})
+
+    assert update.status_code == 200
+    payload = update.json()
+    assert payload["default_analysis_mode"] == "standard"
+    assert payload["code_repo_clone_url"] == "https://github.com/example/repo.git"
+    assert payload["code_repo_local_path"] == "/tmp/example-repo"
+    assert payload["code_repo_default_branch"] == "release"
+    assert payload["code_repo_auto_sync"] is True
+    assert payload["auto_review_enabled"] is True
+    assert payload["default_llm_model"] == "kimi-k2.5"
+
+    config_payload = json.loads((storage_root.parent / "config.json").read_text(encoding="utf-8"))
+    assert config_payload["code_repo"]["clone_url"] == "https://github.com/example/repo.git"
+    assert config_payload["code_repo"]["local_path"] == "/tmp/example-repo"
+    assert config_payload["code_repo"]["default_branch"] == "release"
+    assert config_payload["code_repo"]["auto_sync"] is True
+    assert config_payload["llm"]["default_model"] == "kimi-k2.5"
 
 
 def test_sast_tools_status_exposes_install_and_runtime_state(client):

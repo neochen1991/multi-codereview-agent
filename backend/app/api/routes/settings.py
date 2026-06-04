@@ -222,7 +222,7 @@ def get_runtime_settings() -> dict[str, object]:
 def update_runtime_settings(payload: RuntimeSettingsRequest) -> dict[str, object]:
     """更新运行时配置并返回脱敏后的最新值。"""
 
-    update_payload = payload.model_dump()
+    update_payload = payload.model_dump(mode="json", exclude_unset=True)
     if update_payload.get("storage_pg_password") in (None, ""):
         update_payload = {key: value for key, value in update_payload.items() if key != "storage_pg_password"}
     if str(update_payload.get("code_repo_clone_url") or "").strip():

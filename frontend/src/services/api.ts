@@ -1442,7 +1442,7 @@ export const settingsApi = {
     const { data } = await api.get("/settings/runtime");
     return data;
   },
-  async updateRuntime(payload: RuntimeSettings): Promise<RuntimeSettings> {
+  async updateRuntime(payload: Partial<RuntimeSettings>): Promise<RuntimeSettings> {
     const { data } = await api.put("/settings/runtime", payload);
     return data;
   },
