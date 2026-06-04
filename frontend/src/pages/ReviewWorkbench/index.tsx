@@ -35,6 +35,7 @@ import {
 import { subscribeReviewEventStream } from "@/services/stream";
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 import { getReviewStatusColor, getReviewStatusLabel } from "@/utils/reviewStatus";
+import { getEffectiveIssueCount, resolveDisplayedEffectiveIssueCount } from "@/components/review/effectiveIssues";
 
 const CodeReviewConclusionPanel = lazy(() => import("@/components/review/CodeReviewConclusionPanel"));
 const DiffPreviewPanel = lazy(() => import("@/components/review/DiffPreviewPanel"));
@@ -325,21 +326,6 @@ const parseFindingCountFromSummary = (value?: string | null): number => {
   const count = Number(match[1]);
   return Number.isFinite(count) ? count : 0;
 };
-
-const isFormalIssueForDisplay = (issue: DebateIssue): boolean =>
-  String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
-  !["needs_verification", "comment", "abstain", "rejected_after_debate"].includes(
-    String(issue.status || "").trim().toLowerCase(),
-  ) &&
-  ![
-    "human_rejected",
-    "needs_verification",
-    "llm_judge_needs_verification",
-    "targeted_debate_needs_verification",
-    "feedback_profile_requires_more_evidence",
-    "comment",
-    "abstain",
-  ].includes(String(issue.resolution || "").trim().toLowerCase());
 
 const toOverviewExpertSelectionSummary = (
   summary: ExpertSelectionSummary | null,
@@ -1077,14 +1063,18 @@ const ReviewWorkbenchPage: React.FC = () => {
       }),
     [findings, issueByFindingId, issueFilterDecisionByFindingId],
   );
-  const formalIssueCount = useMemo(() => issues.filter(isFormalIssueForDisplay).length, [issues]);
+  const formalIssueCount = useMemo(() => getEffectiveIssueCount(issues), [issues]);
   const artifactIssueCount = useMemo(
     () => Math.max(artifacts?.summary_comment?.issue_count || 0, artifacts?.check_run?.issues?.length || 0),
     [artifacts?.check_run?.issues?.length, artifacts?.summary_comment?.issue_count],
   );
   const resultDetailsMissing = artifactIssueCount > formalIssueCount && formalIssueCount === 0;
   const reportIssueCount = Number(report?.issue_count || 0);
-  const displayFormalIssueCount = resultDetailsMissing ? artifactIssueCount : Math.max(formalIssueCount, reportIssueCount);
+  const displayFormalIssueCount = resolveDisplayedEffectiveIssueCount({
+    issues,
+    reportedIssueCount: reportIssueCount,
+    artifactIssueCount,
+  });
   const failedExpertCount = useMemo(() => {
     const expertExecution = review?.subject?.metadata?.expert_execution as { failed_experts?: unknown[] } | undefined;
     return Array.isArray(expertExecution?.failed_experts) ? expertExecution.failed_experts.length : 0;
@@ -1106,9 +1096,9 @@ const ReviewWorkbenchPage: React.FC = () => {
       ? ` 本轮另有 ${failedExpertCount} 个检查角色执行失败，已保留其余检视结果。`
       : "";
     if (resultDetailsMissing) {
-      return `审核报告已生成，产物快照记录形成 ${artifactIssueCount} 个正式问题，但当前没有恢复出每条问题的详情。请先恢复或重新生成结果，再处理问题清单。${failedExpertSuffix}`;
+      return `审核报告已生成，产物快照记录形成 ${artifactIssueCount} 个有效问题，但当前没有恢复出每条问题的详情。请先恢复或重新生成结果，再处理问题清单。${failedExpertSuffix}`;
     }
-    return `审核报告已生成，共收敛 ${overviewFindingCount} 条检视发现，形成 ${displayFormalIssueCount} 个正式问题，其中 ${pendingHumanCount} 个待人工确认。${failedExpertSuffix}`;
+    return `审核报告已生成，共收敛 ${overviewFindingCount} 条检视发现，形成 ${displayFormalIssueCount} 个有效问题，其中 ${pendingHumanCount} 个待人工确认。${failedExpertSuffix}`;
   }, [
     artifactIssueCount,
     displayFormalIssueCount,

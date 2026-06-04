@@ -69,3 +69,21 @@ def test_http_client_factory_uses_system_trust_store(monkeypatch):
 
     assert load_default_certs_called["value"] is True
     assert captured["verify"].__class__.__name__ == "DummyContext"
+
+
+def test_http_client_factory_can_disable_environment_proxy_settings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    HttpClientFactory.create(
+        timeout=httpx.Timeout(5.0),
+        runtime_settings=RuntimeSettings(),
+        trust_env=False,
+    )
+
+    assert captured["trust_env"] is False

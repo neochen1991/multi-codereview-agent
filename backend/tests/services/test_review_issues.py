@@ -79,6 +79,39 @@ def test_list_issues_realigns_issue_location_from_linked_finding(storage_root: P
     assert report.issues[0].line_start == 88
 
 
+def test_display_normalization_preserves_course_factory_bypass_issue_details(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    issue = DebateIssue(
+        review_id="rev_course_factory",
+        issue_id="fdg_course_factory",
+        title="绕过聚合工厂创建聚合根",
+        summary="CourseCreator.java 第 20 行把 Course.create(id, name, duration) 改成 new Course(id, name, duration)，可能绕过工厂封装的不变量校验和领域事件记录。",
+        normalized_issue_type="aggregate_factory_bypass",
+        primary_expert_id="ddd_architecture",
+        file_path="src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+        line_start=20,
+        remediation_suggestion="恢复使用 Course.create(id, name, duration)，并确认工厂内的校验与领域事件记录仍被执行。",
+        current_code=(
+            "# src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java\n"
+            "  19 |      public void create(CourseId id, CourseName name, CourseDuration duration) {\n"
+            "  20 | +        Course course = new Course(id, name, duration);\n"
+            "  21 |          repository.save(course);"
+        ),
+        evidence=["原代码使用 Course.create，新增代码直接 new Course。"],
+    )
+
+    normalized = service._normalize_report_issue_family(issue)
+    light = service._build_light_report_issue(normalized)
+
+    assert normalized.title == "绕过聚合工厂创建聚合根"
+    assert normalized.normalized_issue_type == "aggregate_factory_bypass"
+    assert "查询" not in normalized.title
+    assert "领域事件发布顺序早于聚合持久化" not in normalized.title
+    assert "Course.create" in normalized.summary
+    assert light.title == "绕过聚合工厂创建聚合根"
+    assert light.normalized_issue_type == "aggregate_factory_bypass"
+
+
 def test_list_issues_normalizes_display_code_and_suggested_code(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
@@ -655,7 +688,7 @@ def test_list_issues_keeps_comment_contract_when_summary_mentions_other_exceptio
     assert "扣减库存" in issue.summary
 
 
-def test_list_display_issues_hides_stale_consistency_failure_after_repair(storage_root: Path):
+def test_list_display_issues_keeps_consistency_downgraded_issue_for_human_review(storage_root: Path):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(
         {
@@ -694,12 +727,11 @@ def test_list_display_issues_hides_stale_consistency_failure_after_repair(storag
 
     issue = service.list_issues(review.review_id)[0]
 
-    assert issue.resolution == "accepted"
-    assert issue.status == "resolved"
-    assert issue.needs_human is False
-    assert issue.consistency_check_status == "repaired"
-    assert issue.consistency_conflicts == []
-    assert "enrollments" not in issue.consistency_check_summary
+    assert issue.resolution == "consistency_validation_failed"
+    assert issue.status == "needs_human"
+    assert issue.needs_human is True
+    assert issue.consistency_check_status == "downgraded"
+    assert issue.consistency_conflicts == ["suggested_code 中的变量 enrollments 在当前作用域不存在"]
 
 
 def test_list_issues_normalizes_accepted_issue_as_not_needing_human(storage_root: Path):
@@ -787,11 +819,105 @@ def test_list_issues_builds_generic_ddd_creation_suggestion_for_non_course_aggre
 
     issue = service.list_issues(review.review_id)[0]
 
-    assert issue.title == "领域事件发布顺序早于聚合持久化"
+    assert issue.title == "绕过聚合工厂创建聚合根"
     assert "Order.create(id, amount);" in issue.suggested_code
     assert "orderRepository.save(order);" in issue.suggested_code
     assert issue.suggested_code.index("orderRepository.save(order);") < issue.suggested_code.index("eventBus.publish(order.pullDomainEvents());")
     assert "Course.create" not in issue.suggested_code
+
+
+def test_list_issues_does_not_rewrite_event_consumer_anchor_to_ddd_event_order(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_event_consumer_anchor",
+            "project_id": "proj_event_consumer_anchor",
+            "source_ref": "feature/event-consumer-batch",
+            "target_ref": "main",
+            "title": "event consumer batch boundary",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_event_consumer_batch",
+                title="事件消费批量查询边界被移除",
+                summary="MySqlDomainEventsConsumer 的查询不再使用固定批次限制，事件堆积时可能一次拉取过多记录。",
+                normalized_issue_type="course_creation_semantics",
+                primary_expert_id="ddd_architecture",
+                file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+                line_start=19,
+                current_code=(
+                    "# src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+                    "  16 |      private final SessionFactory sessionFactory;\n"
+                    "  17 |\n"
+                    "  18 | -    private final Integer CHUNKS = 200;\n"
+                    "  19 | +    private final Integer CHUNKS_TMP = 200;\n"
+                    "  20 |\n"
+                    "  21 |      public void consume() {\n"
+                    "  22 | -        query.setMaxResults(CHUNKS);\n"
+                    "  23 | +        query.list();"
+                ),
+                suggested_code="query.setMaxResults(CHUNKS);",
+                confidence=0.92,
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.file_path.endswith("MySqlDomainEventsConsumer.java")
+    assert issue.line_start == 19
+    assert "领域事件发布顺序" not in issue.title
+    assert "CourseCreator" not in issue.summary
+    assert "先发布领域事件" not in issue.summary
+    assert issue.normalized_issue_type == "event_consumer_batch_boundary"
+
+
+def test_list_issues_labels_mysql_event_consumer_query_boundary_consistently(storage_root: Path):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_event_consumer_query",
+            "project_id": "proj_event_consumer_query",
+            "source_ref": "feature/event-consumer-query",
+            "target_ref": "main",
+            "title": "event consumer query boundary",
+        }
+    )
+    service.issue_repo.save_all(
+        review.review_id,
+        [
+            DebateIssue(
+                review_id=review.review_id,
+                issue_id="iss_event_consumer_query",
+                title="查询没有分页限制",
+                summary="MySqlDomainEventsConsumer 的事件消费查询缺少固定批次边界。",
+                normalized_issue_type="query_bound_removed",
+                primary_expert_id="database_analysis",
+                file_path="src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+                line_start=16,
+                current_code=(
+                    "# src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java\n"
+                    "   7 |  public final class MySqlDomainEventsConsumer {\n"
+                    "   8 |      private final SessionFactory sessionFactory;"
+                ),
+                suggested_code="query.setMaxResults(CHUNKS);",
+                confidence=0.96,
+            )
+        ],
+    )
+
+    issue = service.list_issues(review.review_id)[0]
+
+    assert issue.normalized_issue_type == "event_consumer_batch_boundary"
+    assert issue.title == "事件消费查询边界被移除"
+    assert "事件消费" in issue.summary
+    assert "固定批次边界" in issue.summary
 
 
 def test_build_report_supplements_display_finding_when_linked_finding_family_differs(storage_root: Path):

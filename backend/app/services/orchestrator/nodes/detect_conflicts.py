@@ -1236,6 +1236,8 @@ def _effective_issue_confidence_threshold(items: list[dict[str, object]], defaul
     evidence_strength = len(_collect_issue_evidence_signals(items))
     if _has_high_value_direct_issue_evidence(items, evidence_strength):
         threshold = min(threshold, 0.78)
+    if _has_concrete_security_issue_evidence(items, evidence_strength):
+        threshold = _concrete_security_confidence_threshold(items, threshold)
     return threshold
 
 
@@ -1643,7 +1645,7 @@ def _has_concrete_security_issue_evidence(items: list[dict[str, object]], eviden
             return True
         if evidence_strength < 2:
             continue
-        if _has_security_rule_prefix(item) or _has_security_code_evidence_signal(item):
+        if _has_security_code_evidence_signal(item):
             return True
     return False
 

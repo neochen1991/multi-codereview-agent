@@ -37,7 +37,7 @@ from app.services.code_graph.java_tree_sitter_parser import JavaTreeSitterParser
 from app.services.code_graph.storage import CodeGraphStorage
 from app.services.knowledge_service import KnowledgeService
 from app.services.gitnexus_impact_service import GitNexusImpactService
-from app.services.llm_chat_service import LLMChatService
+from app.services.llm_chat_service import LLMChatService, LLMTextResult
 from app.services.main_agent_service import MainAgentService
 from app.services.memory_probe import MemoryProbe
 from app.services.model_prompt_profiles import resolve_model_prompt_profile
@@ -133,6 +133,7 @@ class ReviewRunner(
         self._source_excerpt_cache: dict[tuple[object, str, int, int], str] = {}
         self._target_diff_cache: dict[tuple[object, str], str] = {}
         self._related_diff_cache: dict[tuple[object, str], str] = {}
+        self._code_graph_context_bundle_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._problem_context_cache: dict[tuple[object, str, int, int, int, tuple[int, ...]], dict[str, object]] = {}
         self._last_gc_at = 0.0
         self._gc_interval_seconds = max(30.0, float(os.getenv("REVIEW_GC_INTERVAL_SECONDS", "60") or 60))
@@ -823,6 +824,10 @@ class ReviewRunner(
                 payload=routing_summary,
             )
         )
+
+        self._append_sast_prescan_summary_message(review, expert_jobs)
+        self._append_fast_tool_observation_findings(review, expert_jobs, finding_payloads)
+        self._abort_if_closed(review_id)
 
         expert_execution_started_at = time.perf_counter()
         expert_failures = self._execute_expert_jobs(expert_jobs, effective_runtime_settings, analysis_mode) or []
@@ -2054,17 +2059,39 @@ class ReviewRunner(
         graph_storage = self._build_code_graph_storage_for_repository(repository_service, review)
         if graph_storage is not None:
             planner = CodeGraphContextPlanner(code_graph_service=graph_storage)
-        return planner.build_context_bundle(
+        changed_symbols = self._derive_code_graph_changed_symbols(
+            file_path=normalized_file_path,
+            repository_context=repository_context,
+        )
+        changed_ranges = self._code_graph_changed_ranges_for_file(review, normalized_file_path)
+        cache_key = (
+            str(review.review_id or ""),
+            repository_id,
+            normalized_file_path,
+            json.dumps(
+                {
+                    "changed_symbols": changed_symbols,
+                    "changed_ranges": changed_ranges,
+                    "workspace_repo_path": str(dict(review.subject.metadata or {}).get("workspace_repo_path") or ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+        )
+        cached = self._code_graph_context_bundle_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+        bundle = planner.build_context_bundle(
             review_id=review.review_id,
             repository_id=repository_id,
             changed_files=[normalized_file_path],
-            changed_symbols=self._derive_code_graph_changed_symbols(
-                file_path=normalized_file_path,
-                repository_context=repository_context,
-            ),
-            changed_ranges=self._code_graph_changed_ranges_for_file(review, normalized_file_path),
+            changed_symbols=changed_symbols,
+            changed_ranges=changed_ranges,
             repository_context_service=repository_service,
         )
+        self._code_graph_context_bundle_cache[cache_key] = dict(bundle or {})
+        return bundle
 
     def _code_graph_changed_ranges_for_file(self, review: ReviewTask, file_path: str) -> dict[str, list[tuple[int, int]]]:
         ranges_by_file = self.diff_excerpt_service.changed_line_ranges_by_file(str(review.subject.unified_diff or ""))
@@ -2414,6 +2441,20 @@ class ReviewRunner(
                 "remediation_steps": ["补齐 TODO 或注释中承诺的业务动作", "如果本轮不交付该动作，删除误导性承诺并拆出任务", "增加覆盖该业务动作的回归测试"],
                 "confidence": 0.84,
             },
+            "naming_convention_violation": {
+                "expert_id": "architecture_design",
+                "title": "常量命名退化为临时变量风格",
+                "normalized_issue_type": "naming_convention_violation",
+                "category_label": "code_quality",
+                "summary": "本次 diff 把表达批量边界的常量命名改成 chunksTmp 这类临时变量风格，削弱了批量大小语义，也不符合 Java 常量命名规范。",
+                "matched_rules": ["CODE-JAVA-001"],
+                "violated_guidelines": ["常量和关键业务参数命名必须稳定表达语义，避免 tmp、temp 等临时命名"],
+                "rule_based_reasoning": "删除行出现全大写常量名，新增行出现 chunksTmp 这类 camelCase + tmp 后缀，属于可由静态 diff 直接确认的命名语义退化。",
+                "remediation_strategy": "恢复稳定、语义明确的常量命名，并确保批量边界参数仍被实际使用。",
+                "remediation_suggestion": "将 chunksTmp 改回 CHUNKS 或 EVENT_CHUNK_SIZE，并同步确认查询仍使用该批量边界。",
+                "remediation_steps": ["恢复常量命名", "确认 LIMIT 或 setMaxResults 继续引用该常量", "补充批量消费边界回归测试"],
+                "confidence": 0.86,
+            },
             "exception_swallowed": {
                 "expert_id": "correctness_business",
                 "title": "失败被当成成功返回",
@@ -2489,6 +2530,7 @@ class ReviewRunner(
                     "lock_guard_removed",
                     "loop_call_amplification",
                     "comment_contract_unimplemented",
+                    "naming_convention_violation",
                     "exception_swallowed",
                     "exception_semantics_weakened",
                     "factory_bypass",
@@ -2848,19 +2890,262 @@ class ReviewRunner(
                 )
             )
 
+    def _append_sast_prescan_summary_message(
+        self,
+        review: ReviewTask,
+        expert_jobs: list[dict[str, object]],
+    ) -> None:
+        observations = self._collect_fast_tool_observations_from_expert_jobs(expert_jobs)
+        if not observations:
+            return
+        by_tool: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for item in observations:
+            tool = str(item.get("tool") or "tool").strip()
+            category = str(item.get("category") or "static_analysis").strip()
+            by_tool[tool] = by_tool.get(tool, 0) + 1
+            by_category[category] = by_category.get(category, 0) + 1
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="sast_prescan_summary",
+                content=(
+                    f"SAST 预扫描已汇总 {len(observations)} 条与当前 diff 相关的工具候选，"
+                    "系统会先生成高置信候选 finding，再交给专家审查和收敛层复核。"
+                ),
+                metadata={
+                    "phase": "sast_prescan",
+                    "tool_observation_count": len(observations),
+                    "by_tool": by_tool,
+                    "by_category": by_category,
+                    "observation_ids": [str(item.get("observation_id") or "") for item in observations[:20]],
+                },
+            )
+        )
+
+    def _append_fast_tool_observation_findings(
+        self,
+        review: ReviewTask,
+        expert_jobs: list[dict[str, object]],
+        finding_payloads: list[dict[str, object]],
+    ) -> None:
+        observations = self._collect_fast_tool_observations_from_expert_jobs(expert_jobs)
+        if not observations:
+            return
+        for observation in observations:
+            confidence = self._safe_float(observation.get("confidence"), 0.0)
+            if confidence < 0.78:
+                continue
+            file_path = str(observation.get("file_path") or observation.get("path") or "").strip()
+            if not file_path:
+                continue
+            line_start = int(self._normalize_optional_line_value(observation.get("line_start") or observation.get("line")) or 1)
+            rule_id = str(observation.get("rule_id") or observation.get("check_id") or "rule").strip()
+            observation_id = self._canonical_tool_observation_id(observation)
+            normalized_issue_type = self._tool_observation_issue_type(observation)
+            title = f"静态工具候选需复核：{rule_id}"
+            if self._has_matching_deterministic_finding(
+                finding_payloads,
+                file_path=file_path,
+                line_start=line_start,
+                normalized_issue_type=normalized_issue_type,
+                title=title,
+            ):
+                continue
+            message = str(observation.get("message") or "").strip()
+            tool = str(observation.get("tool") or "sast").strip()
+            finding = ReviewFinding(
+                review_id=review.review_id,
+                expert_id=self._tool_observation_expert_id(observation),
+                title=title,
+                summary=message or f"{tool}:{rule_id} 命中当前变更位置，需要专家复核是否构成真实问题。",
+                finding_type="direct_defect",
+                normalized_issue_type=normalized_issue_type,
+                category_label=self._category_label_for_finding(
+                    finding_type="direct_defect",
+                    issue_type=normalized_issue_type,
+                    expert_id=self._tool_observation_expert_id(observation),
+                ),
+                severity=self._tool_observation_severity(observation),
+                confidence=min(0.92, max(confidence, 0.78)),
+                confidence_rationale="SAST/linter 工具候选已落在当前 diff 相关代码行，作为快速检视候选进入收敛。",
+                file_path=file_path,
+                line_start=line_start,
+                evidence=[
+                    self._format_sast_prescan_evidence(
+                        {
+                            **observation,
+                            "tool": tool,
+                            "rule_id": rule_id,
+                            "line_start": line_start,
+                            "message": message,
+                        }
+                    )
+                ],
+                matched_rules=[rule_id],
+                violated_guidelines=[
+                    text
+                    for text in [str(observation.get("why_it_matters") or message or rule_id).strip()]
+                    if text
+                ],
+                rule_based_reasoning="工具候选与当前 diff 文件和行号对齐，先作为高置信静态候选保留，后续由专家与收敛层复核。",
+                verification_needed=True,
+                verification_plan="复核工具命中的 sink/source、数据流或规则语义是否与当前变更一致。",
+                remediation_strategy="优先按工具命中的具体规则收紧当前变更代码，再补充对应回归测试。",
+                remediation_suggestion=self._tool_observation_remediation_suggestion(observation, file_path),
+                remediation_steps=[
+                    "确认工具命中的代码行是否属于当前 diff 的新增或修改路径。",
+                    "按规则语义修正当前代码位置，避免只调整配置或报告文件。",
+                    "补充能覆盖该风险路径的回归测试或安全测试。",
+                ],
+                code_excerpt=self._build_code_excerpt(review.subject, file_path, line_start, self._tool_observation_expert_id(observation)),
+                code_context={
+                    "sast_fast_lane": True,
+                    "sast_cross_validated": True,
+                    "adopted_tool_observations": [observation_id],
+                    "sast_prescan_matches": [
+                        {
+                            "tool": tool,
+                            "rule_id": rule_id,
+                            "file_path": file_path,
+                            "line_start": line_start,
+                            "message": message,
+                            "category": str(observation.get("category") or "").strip(),
+                        }
+                    ],
+                },
+                suggested_code_language=self._infer_code_language(file_path),
+            )
+            self.finding_repo.save(review.review_id, finding)
+            finding_payloads.append(finding.model_dump(mode="json"))
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="finding_created",
+                    phase="sast_prescan",
+                    message=f"SAST fast lane 生成工具候选 finding：{title}",
+                    payload={
+                        "finding_id": finding.finding_id,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "observation_id": observation_id,
+                    },
+                )
+            )
+
+    def _collect_fast_tool_observations_from_expert_jobs(
+        self,
+        expert_jobs: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        collected: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for job in expert_jobs:
+            if not isinstance(job, dict):
+                continue
+            job_context = dict(job.get("repository_context") or {})
+            job_items = [dict(item) for item in list(job.get("batch_items") or []) if isinstance(item, dict)]
+            for observation in self._collect_tool_observations_for_scan(job_context, job_items):
+                observation_id = self._canonical_tool_observation_id(observation)
+                if observation_id in seen:
+                    continue
+                seen.add(observation_id)
+                collected.append({**observation, "observation_id": observation_id, "id": observation_id})
+            for item in job_items:
+                item_context = dict(item.get("repository_context") or {})
+                for observation in self._collect_tool_observations_for_scan(item_context, [item]):
+                    observation_id = self._canonical_tool_observation_id(observation)
+                    if observation_id in seen:
+                        continue
+                    seen.add(observation_id)
+                    collected.append({**observation, "observation_id": observation_id, "id": observation_id})
+        return collected[:40]
+
+    def _tool_observation_expert_id(self, observation: dict[str, object]) -> str:
+        category = str(observation.get("category") or "").strip().lower()
+        text = " ".join(
+            [
+                str(observation.get("tool") or ""),
+                str(observation.get("rule_id") or ""),
+                str(observation.get("message") or ""),
+                category,
+            ]
+        ).lower()
+        if category in {"security", "python_security"} or any(token in text for token in ("sql", "xss", "injection", "auth", "token", "secret", "password", "cwe")):
+            return "security_compliance"
+        if category == "test_coverage" or "coverage" in text or "jacoco" in text:
+            return "test_verification"
+        if any(token in text for token in ("query", "jdbc", "database", "jpa", "mybatis")):
+            return "database_analysis"
+        if any(token in text for token in ("loop", "performance", "timeout", "resource")):
+            return "performance_reliability"
+        return "architecture_design"
+
+    def _tool_observation_issue_type(self, observation: dict[str, object]) -> str:
+        text = " ".join(
+            [
+                str(observation.get("rule_id") or ""),
+                str(observation.get("message") or ""),
+                str(observation.get("category") or ""),
+            ]
+        ).lower()
+        if any(token in text for token in ("sql", "injection", "eval", "xss", "command")):
+            return "sql_injection_risk" if "sql" in text else "code_injection_risk"
+        if any(token in text for token in ("auth", "authorization", "permission")):
+            return "authorization_boundary_risk"
+        if any(token in text for token in ("token", "secret", "password", "credential")):
+            return "secret_leak_risk"
+        if "coverage" in text or "jacoco" in text:
+            return "test_coverage_gap"
+        return "static_tool_candidate"
+
+    def _tool_observation_severity(self, observation: dict[str, object]) -> str:
+        text = str(observation.get("severity") or observation.get("priority") or "").strip().lower()
+        if text in {"critical", "blocker", "high", "medium", "low"}:
+            return "high" if text in {"critical", "blocker"} else text
+        issue_type = self._tool_observation_issue_type(observation)
+        if issue_type in {"sql_injection_risk", "code_injection_risk", "authorization_boundary_risk", "secret_leak_risk"}:
+            return "high"
+        return "medium"
+
+    def _tool_observation_remediation_suggestion(self, observation: dict[str, object], file_path: str) -> str:
+        issue_type = self._tool_observation_issue_type(observation)
+        if issue_type == "sql_injection_risk":
+            return f"在 {file_path} 改用参数化查询或 ORM 绑定参数，避免把用户输入拼接进 SQL。"
+        if issue_type == "code_injection_risk":
+            return f"在 {file_path} 移除动态执行入口，或对输入做严格白名单映射。"
+        if issue_type == "secret_leak_risk":
+            return f"在 {file_path} 删除敏感字段日志输出，并使用脱敏后的审计字段。"
+        if issue_type == "authorization_boundary_risk":
+            return f"在 {file_path} 的业务入口增加显式鉴权和越权拒绝分支。"
+        return f"在 {file_path} 按工具规则修正当前命中的代码位置，并补充回归验证。"
+
     def _collect_observations_from_expert_jobs(self, expert_jobs: list[dict[str, object]]) -> list[dict[str, object]]:
         collected: list[dict[str, object]] = []
         seen: set[tuple[str, str, int, str]] = set()
         for job in expert_jobs:
             if not isinstance(job, dict):
                 continue
-            collected.extend(self._dedupe_observation_items(self._normalize_review_observations(dict(job.get("repository_context") or {}).get("review_observations")), seen))
+            job_context = dict(job.get("repository_context") or {})
+            collected.extend(
+                self._dedupe_observation_items(
+                    [
+                        *self._normalize_review_observations(job_context.get("review_observations")),
+                        *self._normalize_tool_observations_as_review_observations(job_context.get("tool_observations")),
+                    ],
+                    seen,
+                )
+            )
             batch_items = [dict(item) for item in list(job.get("batch_items") or []) if isinstance(item, dict)]
             for item in batch_items:
                 repository_context = dict(item.get("repository_context") or {})
                 collected.extend(
                     self._dedupe_observation_items(
-                        self._normalize_review_observations(repository_context.get("review_observations")),
+                        [
+                            *self._normalize_review_observations(repository_context.get("review_observations")),
+                            *self._normalize_tool_observations_as_review_observations(repository_context.get("tool_observations")),
+                        ],
                         seen,
                     )
                 )
@@ -3245,9 +3530,13 @@ class ReviewRunner(
         command_metadata = dict(getattr(command_message, "metadata", {}) or {})
         repository_context = dict(job.get("repository_context") or command_metadata.get("repository_context") or {})
         target_hunk = dict(job.get("target_hunk") or command_metadata.get("target_hunk") or {})
+        fallback_observations = [
+            *self._normalize_review_observations(repository_context.get("review_observations")),
+            *self._normalize_tool_observations_as_review_observations(repository_context.get("tool_observations")),
+        ]
         forced_candidates = self._build_forced_observation_candidates(
             expert=expert,
-            uncovered_observations=self._normalize_review_observations(repository_context.get("review_observations")),
+            uncovered_observations=fallback_observations,
             max_findings=1,
         )
         if forced_candidates:
@@ -5213,9 +5502,17 @@ class ReviewRunner(
             rule_screening or {},
             max_rules_per_prompt=prompt_profile.max_rules_per_prompt,
         )
+        thorough_review_enabled = self._review_thorough_mode_enabled(runtime_settings, prompt_profile)
+        split_pipeline_replaces_main = (
+            thorough_review_enabled
+            and prompt_profile.require_rule_check_results
+            and analysis_mode == "standard"
+            and str(os.getenv("REVIEW_THOROUGH_KEEP_MAIN_EXPERT_REVIEW", "") or "").strip().lower()
+            not in {"1", "true", "yes"}
+        )
         rule_prepass_text = ""
         rule_prepass_metadata: dict[str, object] = {}
-        should_run_rule_prepass = self._should_run_rule_guided_prepass(
+        should_run_rule_prepass = (not split_pipeline_replaces_main) and self._should_run_rule_guided_prepass(
             prompt_profile=prompt_profile,
             rule_screening=rule_screening or {},
             required_rule_ids=required_rule_ids,
@@ -5298,12 +5595,35 @@ class ReviewRunner(
             model_name=llm_resolution.model,
             prompt_profile_name=effective_prompt_profile_name,
         )
-        thorough_review_enabled = self._review_thorough_mode_enabled(runtime_settings, prompt_profile)
         fast_light_mode = (
             analysis_mode == "light"
             and not thorough_review_enabled
             and str(os.getenv("REVIEW_LIGHT_EXTRA_LLM_SCANS", "") or "").strip().lower() not in {"1", "true", "yes"}
         )
+        should_scan_review_targets = self._should_retry_empty_rule_guided_candidate_response(
+            target_hunk=target_hunk,
+            target_hunks=target_hunks,
+            repository_context=repository_context,
+            rule_screening=rule_screening or {},
+        )
+        tool_scan_text = ""
+        tool_scan_metadata: dict[str, object] = {}
+        if (
+            prompt_profile.require_rule_check_results
+            and not fast_light_mode
+            and should_scan_review_targets
+        ):
+            tool_scan_text, tool_scan_metadata = self._run_rule_guided_tool_observation_scan(
+                review=review,
+                expert=expert,
+                runtime_settings=runtime_settings,
+                resolution=llm_resolution,
+                normalized_batch_items=normalized_batch_items,
+                repository_context=repository_context,
+                file_path=file_path,
+                line_start=line_start,
+                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+            )
         main_prompt_contract = self._build_prompt_contract_metadata(
             stage="expert_main_rule_guided_review" if prompt_profile.require_rule_check_results else "expert_main_legacy_review",
             system_prompt=expert_system_prompt,
@@ -5316,76 +5636,109 @@ class ReviewRunner(
             required_rule_ids=required_rule_ids,
             scope="main expert review: rule checks plus high-recall candidates",
         )
-        try:
-            llm_result = self.llm_chat_service.complete_text(
-                system_prompt=expert_system_prompt,
-                user_prompt=user_prompt,
-                resolution=llm_resolution,
-                runtime_settings=runtime_settings,
-                fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
-                allow_fallback=self._allow_llm_fallback(runtime_settings),
-                timeout_seconds=float(llm_request_options["timeout_seconds"]),
-                max_attempts=int(llm_request_options["max_attempts"]),
-                log_context={
-                    "review_id": review.review_id,
-                    "issue_id": "review_orchestration",
-                    "expert_id": expert.expert_id,
-                    "phase": "expert_review",
-                    "analysis_mode": analysis_mode,
-                    "file_path": file_path,
-                    "line_start": line_start,
-                    "prompt_budget": prompt_budget_metadata,
-                    "prompt_contract": main_prompt_contract,
-                },
-            )
-        except Exception as exc:
-            if not prompt_profile.require_rule_check_results:
-                raise
+        if split_pipeline_replaces_main:
             self.message_repo.append(
                 ConversationMessage(
                     review_id=review.review_id,
                     issue_id="review_orchestration",
                     expert_id=expert.expert_id,
-                    message_type="expert_timeout_deterministic_fallback",
+                    message_type="expert_main_review_replaced_by_split_pipeline",
                     content=(
-                        f"{expert.name_zh} 主审查调用失败，系统将基于已命中规则、上下文包和静态观察"
-                        "生成确定性兜底 finding，避免弱模型或网络超时阻塞整轮检视。"
+                        f"{expert.name_zh} 已跳过旧的综合主审查 prompt，改由工具信号、绑定规则批量扫描"
+                        "和专家通用扫描分别产出候选，降低弱模型长 prompt 冲突和超时风险。"
                     ),
                     metadata={
                         "phase": "expert_review",
                         "file_path": file_path,
                         "line_start": line_start,
                         "prompt_profile": effective_prompt_profile_name,
-                        "timeout_error": str(exc),
+                        "review_quality_mode": str(getattr(runtime_settings, "review_quality_mode", "") or ""),
                         "required_rule_ids": required_rule_ids,
-                        "rule_screening": self._build_rule_screening_metadata(rule_screening),
-                        "input_completeness": input_completeness,
-                        "repository_context": self._build_repository_context_metadata(repository_context),
-                        "target_hunk": target_hunk,
+                        "prompt_contract": main_prompt_contract,
                         **self._expert_llm_metadata(expert, runtime_settings),
                     },
                 )
             )
-            self._record_expert_job_failure(
-                {
-                    "review": review,
-                    "expert": expert,
-                    "command_message": command_message,
-                    "file_path": file_path,
-                    "line_start": line_start,
-                    "repository_context": repository_context,
-                    "target_hunk": target_hunk,
-                    "target_hunks": target_hunks,
-                    "bound_documents": bound_documents,
-                    "rule_screening": rule_screening,
-                    "finding_payloads": finding_payloads,
-                },
-                exc,
+            llm_result = LLMTextResult(
+                text='{"rule_check_results":[],"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":false,"used_context_files":[],"unverified_assumptions":["main expert review replaced by split scans"]}}',
+                mode="skipped_split_pipeline",
+                provider=llm_resolution.provider,
+                model=llm_resolution.model,
+                base_url=llm_resolution.base_url,
+                api_key_env=llm_resolution.api_key_env,
+                call_id=f"skip_{uuid4().hex[:12]}",
             )
-            return
+        else:
+            try:
+                llm_result = self.llm_chat_service.complete_text(
+                    system_prompt=expert_system_prompt,
+                    user_prompt=user_prompt,
+                    resolution=llm_resolution,
+                    runtime_settings=runtime_settings,
+                    fallback_text=self._build_expert_fallback(review.subject, expert, file_path, line_start),
+                    allow_fallback=self._allow_llm_fallback(runtime_settings),
+                    timeout_seconds=float(llm_request_options["timeout_seconds"]),
+                    max_attempts=int(llm_request_options["max_attempts"]),
+                    log_context={
+                        "review_id": review.review_id,
+                        "issue_id": "review_orchestration",
+                        "expert_id": expert.expert_id,
+                        "phase": "expert_review",
+                        "analysis_mode": analysis_mode,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "prompt_budget": prompt_budget_metadata,
+                        "prompt_contract": main_prompt_contract,
+                    },
+                )
+            except Exception as exc:
+                if not prompt_profile.require_rule_check_results:
+                    raise
+                self.message_repo.append(
+                    ConversationMessage(
+                        review_id=review.review_id,
+                        issue_id="review_orchestration",
+                        expert_id=expert.expert_id,
+                        message_type="expert_timeout_deterministic_fallback",
+                        content=(
+                            f"{expert.name_zh} 主审查调用失败，系统将基于已命中规则、上下文包和静态观察"
+                            "生成确定性兜底 finding，避免弱模型或网络超时阻塞整轮检视。"
+                        ),
+                        metadata={
+                            "phase": "expert_review",
+                            "file_path": file_path,
+                            "line_start": line_start,
+                            "prompt_profile": effective_prompt_profile_name,
+                            "timeout_error": str(exc),
+                            "required_rule_ids": required_rule_ids,
+                            "rule_screening": self._build_rule_screening_metadata(rule_screening),
+                            "input_completeness": input_completeness,
+                            "repository_context": self._build_repository_context_metadata(repository_context),
+                            "target_hunk": target_hunk,
+                            **self._expert_llm_metadata(expert, runtime_settings),
+                        },
+                    )
+                )
+                self._record_expert_job_failure(
+                    {
+                        "review": review,
+                        "expert": expert,
+                        "command_message": command_message,
+                        "file_path": file_path,
+                        "line_start": line_start,
+                        "repository_context": repository_context,
+                        "target_hunk": target_hunk,
+                        "target_hunks": target_hunks,
+                        "bound_documents": bound_documents,
+                        "rule_screening": rule_screening,
+                        "finding_payloads": finding_payloads,
+                    },
+                    exc,
+                )
+                return
         llm_text_for_parse = llm_result.text
         schema_contract_metadata: dict[str, object] = {}
-        if prompt_profile.require_rule_check_results:
+        if prompt_profile.require_rule_check_results and not split_pipeline_replaces_main:
             contract_valid, contract_errors = self._validate_rule_guided_llm_response_contract(
                 llm_text_for_parse,
                 required_rule_ids=required_rule_ids,
@@ -5496,6 +5849,8 @@ class ReviewRunner(
         )
         empty_retry_metadata: dict[str, object] = {}
         if (
+            not split_pipeline_replaces_main
+            and
             not fast_light_mode
             and
             prompt_profile.require_rule_check_results
@@ -5539,47 +5894,24 @@ class ReviewRunner(
                         retry_candidates,
                         max_findings=max_findings_cap,
                     )
-        should_scan_review_targets = self._should_retry_empty_rule_guided_candidate_response(
-            target_hunk=target_hunk,
-            target_hunks=target_hunks,
-            repository_context=repository_context,
-            rule_screening=rule_screening or {},
-        )
-        tool_scan_metadata: dict[str, object] = {}
-        if (
-            prompt_profile.require_rule_check_results
-            and not fast_light_mode
-            and should_scan_review_targets
-        ):
-            tool_scan_text, tool_scan_metadata = self._run_rule_guided_tool_observation_scan(
-                review=review,
-                expert=expert,
-                runtime_settings=runtime_settings,
-                resolution=llm_resolution,
-                normalized_batch_items=normalized_batch_items,
-                repository_context=repository_context,
-                file_path=file_path,
-                line_start=line_start,
-                timeout_seconds=float(llm_request_options["timeout_seconds"]),
+        if tool_scan_metadata:
+            expert_llm_diagnostics["tool_observation_scan"] = tool_scan_metadata
+        if tool_scan_text:
+            tool_candidates = self._parse_expert_analyses(
+                tool_scan_text,
+                review.subject,
+                expert,
+                file_path,
+                line_start,
+                max_findings=max_findings_cap,
+                require_rule_guided=True,
             )
-            if tool_scan_metadata:
-                expert_llm_diagnostics["tool_observation_scan"] = tool_scan_metadata
-            if tool_scan_text:
-                tool_candidates = self._parse_expert_analyses(
-                    tool_scan_text,
-                    review.subject,
-                    expert,
-                    file_path,
-                    line_start,
+            if tool_candidates:
+                parsed_candidates = self._merge_expert_analysis_candidates(
+                    parsed_candidates,
+                    tool_candidates,
                     max_findings=max_findings_cap,
-                    require_rule_guided=True,
                 )
-                if tool_candidates:
-                    parsed_candidates = self._merge_expert_analysis_candidates(
-                        parsed_candidates,
-                        tool_candidates,
-                        max_findings=max_findings_cap,
-                    )
         if fast_light_mode:
             custom_scan_texts: list[str] = []
             custom_scan_metadata = {"attempted": False, "skipped_reason": "light_mode_fast_path"}
@@ -5616,11 +5948,15 @@ class ReviewRunner(
                     max_findings=max_findings_cap,
                 )
         general_scan_metadata: dict[str, object] = {}
+        general_scan_env = str(os.getenv("REVIEW_THOROUGH_ALWAYS_GENERAL_SCAN", "") or "").strip().lower()
+        always_run_general_scan = (
+            runtime_settings.review_quality_mode == "thorough_review" and general_scan_env not in {"0", "false", "no"}
+        ) or general_scan_env in {"1", "true", "yes"}
         if (
             prompt_profile.require_rule_check_results
             and not fast_light_mode
             and should_scan_review_targets
-            and (thorough_review_enabled or not parsed_candidates)
+            and (not parsed_candidates or always_run_general_scan)
         ):
             general_scan_text, general_scan_metadata = self._run_rule_guided_general_expert_profile_scan(
                 review=review,
@@ -6349,13 +6685,18 @@ class ReviewRunner(
                     expert.expert_id,
                     knowledge_context,
                 )
+                debate_fallback_text = self._build_debate_fallback(
+                    issue,
+                    expert,
+                    previous_expert_id,
+                    file_path,
+                    line_start,
+                )
+                debate_max_attempts = int(llm_request_options["max_attempts"])
+                if str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower() == "thorough_review":
+                    debate_max_attempts = 1
                 llm_result = self.llm_chat_service.complete_text(
-                    system_prompt=self._build_expert_system_prompt(
-                        expert,
-                        bound_documents,
-                        [],
-                        analysis_mode=analysis_mode,
-                    ),
+                    system_prompt=self._build_debate_system_prompt(expert),
                     user_prompt=self._build_debate_prompt(
                         review.subject,
                         issue,
@@ -6367,16 +6708,10 @@ class ReviewRunner(
                     ),
                     resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
                     runtime_settings=runtime_settings,
-                    fallback_text=self._build_debate_fallback(
-                        issue,
-                        expert,
-                        previous_expert_id,
-                        file_path,
-                        line_start,
-                    ),
-                    allow_fallback=self._allow_llm_fallback(runtime_settings),
+                    fallback_text=debate_fallback_text,
+                    allow_fallback=True,
                     timeout_seconds=float(llm_request_options["timeout_seconds"]),
-                    max_attempts=int(llm_request_options["max_attempts"]),
+                    max_attempts=debate_max_attempts,
                     log_context={
                         "review_id": review.review_id,
                         "issue_id": issue.issue_id,
@@ -6421,6 +6756,17 @@ class ReviewRunner(
                     )
                 )
                 previous_expert_id = participant_id
+
+    @staticmethod
+    def _build_debate_system_prompt(expert: ExpertProfile) -> str:
+        """Debate is conversational evidence review, not structured finding output."""
+
+        return (
+            f"你是{expert.name_zh}，只在自己的专家职责范围内参与问题裁决讨论。\n"
+            "本阶段是 debate/定向辩论，不是专家 finding 生成阶段。\n"
+            "请输出一段中文辩论意见：明确同意/反驳/需要补充上下文，并说明代码证据。\n"
+            "不要输出 JSON，不要输出 rule_check_results、candidate_findings、context_requests 或 self_check。"
+        )
 
         self._abort_if_closed(review.review_id)
         self.message_repo.append(
@@ -7283,6 +7629,161 @@ class ReviewRunner(
                 added_lines.append(line)
         return added_lines[:24]
 
+    def _stage_prompt_budget(self, prompt_profile) -> dict[str, int]:
+        """为拆分后的 LLM 阶段设置更小的输入预算，避免弱模型被长上下文拖垮。"""
+
+        profile_name = str(getattr(prompt_profile, "name", "") or "").strip()
+        if profile_name in {"strict-json-small-context", "rule-guided-compact"}:
+            return {
+                "context_chars": 1800,
+                "target_excerpt_chars": 900,
+                "max_targets": 2,
+                "max_rules_per_batch": 2,
+                "max_tool_observations": 3,
+                "expert_profile_chars": 450,
+                "review_spec_chars": 550,
+                "language_guidance_chars": 500,
+            }
+        if profile_name == "long-context-capable":
+            return {
+                "context_chars": 12000,
+                "target_excerpt_chars": 3200,
+                "max_targets": 8,
+                "max_rules_per_batch": 8,
+                "max_tool_observations": 10,
+                "expert_profile_chars": 1800,
+                "review_spec_chars": 2200,
+                "language_guidance_chars": 1600,
+            }
+        return {
+            "context_chars": 8000,
+            "target_excerpt_chars": 2400,
+            "max_targets": 6,
+            "max_rules_per_batch": 6,
+            "max_tool_observations": 8,
+            "expert_profile_chars": 1200,
+            "review_spec_chars": 1600,
+            "language_guidance_chars": 1200,
+        }
+
+    def _compact_stage_targets(
+        self,
+        targets: list[dict[str, object]],
+        *,
+        budget: dict[str, int],
+    ) -> list[dict[str, object]]:
+        compact_targets: list[dict[str, object]] = []
+        max_targets = max(1, int(budget.get("max_targets") or 3))
+        excerpt_limit = max(400, int(budget.get("target_excerpt_chars") or 1400))
+        for target in list(targets or [])[:max_targets]:
+            item = dict(target)
+            if "excerpt" in item:
+                item["excerpt"] = self._clip_diagnostic_text(str(item.get("excerpt") or ""), excerpt_limit)
+            current_added = [
+                self._clip_diagnostic_text(str(line or ""), 240)
+                for line in list(item.get("current_added_lines") or [])[:16]
+                if str(line or "").strip()
+            ]
+            if current_added:
+                item["current_added_lines"] = current_added
+            compact_targets.append(item)
+        return compact_targets or targets[:1]
+
+    def _compact_stage_repository_context(
+        self,
+        repository_context: dict[str, object],
+        *,
+        budget: dict[str, int],
+    ) -> str:
+        return self._clip_diagnostic_text(
+            self._build_repository_context_summary(repository_context or {}, []),
+            max(1200, int(budget.get("context_chars") or 4200)),
+        )
+
+    def _compact_stage_tool_observations(
+        self,
+        observations: list[dict[str, object]],
+        *,
+        targets: list[dict[str, object]],
+        budget: dict[str, int],
+    ) -> list[dict[str, object]]:
+        target_files = {str(item.get("file_path") or "").strip() for item in list(targets or []) if isinstance(item, dict)}
+        target_lines: dict[str, set[int]] = {}
+        for target in list(targets or []):
+            if not isinstance(target, dict):
+                continue
+            path = str(target.get("file_path") or "").strip()
+            if not path:
+                continue
+            lines = target_lines.setdefault(path, set())
+            for value in list(target.get("changed_lines") or []):
+                if isinstance(value, int):
+                    lines.add(value)
+            line_start = self._normalize_optional_line_value(target.get("line_start"))
+            if line_start:
+                lines.add(int(line_start))
+
+        def score(item: dict[str, object]) -> tuple[int, int]:
+            path = str(item.get("file_path") or "").strip()
+            line = self._normalize_optional_line_value(item.get("line_start") or item.get("line"))
+            same_file = 0 if path in target_files else 1
+            near_line = 1
+            if path and line and path in target_lines:
+                near_line = min((abs(int(line) - int(anchor)) for anchor in target_lines[path]), default=999)
+            return same_file, near_line
+
+        max_items = max(1, int(budget.get("max_tool_observations") or 4))
+        compacted: list[dict[str, object]] = []
+        for raw in sorted([dict(item) for item in list(observations or []) if isinstance(item, dict)], key=score)[:max_items]:
+            compacted.append(
+                {
+                    "observation_id": raw.get("observation_id"),
+                    "tool": raw.get("tool"),
+                    "rule_id": raw.get("rule_id") or raw.get("check_id"),
+                    "category": raw.get("category"),
+                    "file_path": raw.get("file_path"),
+                    "line_start": raw.get("line_start") or raw.get("line"),
+                    "message": self._clip_diagnostic_text(str(raw.get("message") or raw.get("title") or ""), 500),
+                    "evidence": self._clip_diagnostic_text(str(raw.get("evidence") or raw.get("snippet") or ""), 500),
+                    "confidence": raw.get("confidence"),
+                }
+            )
+        return compacted
+
+    def _compact_stage_rule_cards(
+        self,
+        rules: list[dict[str, object]],
+        *,
+        prompt_profile,
+    ) -> list[dict[str, object]]:
+        profile_name = str(getattr(prompt_profile, "name", "") or "").strip()
+        item_limit = 3 if profile_name in {"strict-json-small-context", "rule-guided-compact"} else 6
+
+        def compact_list(value: object) -> list[str]:
+            return [
+                self._clip_diagnostic_text(str(item or "").strip(), 260)
+                for item in list(value or [])[:item_limit]
+                if str(item or "").strip()
+            ]
+
+        compacted: list[dict[str, object]] = []
+        for raw in list(rules or []):
+            if not isinstance(raw, dict):
+                continue
+            compacted.append(
+                {
+                    "rule_id": str(raw.get("rule_id") or raw.get("id") or "").strip(),
+                    "title": self._clip_diagnostic_text(str(raw.get("title") or "").strip(), 220),
+                    "severity": str(raw.get("severity") or raw.get("priority") or "P2").strip(),
+                    "must_check": compact_list(raw.get("must_check") or raw.get("must_check_items")),
+                    "required_context": compact_list(raw.get("required_context")),
+                    "evidence_required": compact_list(raw.get("evidence_required")),
+                    "false_positive_guards": compact_list(raw.get("false_positive_guards")),
+                    "normalized_issue_type": str(raw.get("normalized_issue_type") or "").strip(),
+                }
+            )
+        return compacted
+
     def _run_rule_guided_general_expert_profile_scan(
         self,
         *,
@@ -7296,11 +7797,17 @@ class ReviewRunner(
         line_start: int,
         timeout_seconds: float,
     ) -> tuple[str, dict[str, object]]:
+        prompt_profile = resolve_model_prompt_profile(
+            resolution.model,
+            profile_name=runtime_settings.review_prompt_profile,
+        )
+        stage_budget = self._stage_prompt_budget(prompt_profile)
         targets = self._build_empty_candidate_retry_targets(
             normalized_batch_items=normalized_batch_items,
             fallback_file_path=file_path,
             fallback_line_start=line_start,
         )
+        targets = self._compact_stage_targets(targets, budget=stage_budget)
         language = self._infer_code_language(file_path)
         prompt = "\n".join(
             [
@@ -7338,20 +7845,17 @@ class ReviewRunner(
                 "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS；禁止照抄 OUTPUT_JSON 的占位说明，禁止使用不在 TARGET_HUNKS 中的文件。",
                 "不要输出专家绑定规范结论，不要编造产品规则 ID。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
-                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1800)}",
-                f"专家审视规范:\n{self._compact_prompt_block(self._build_review_spec_summary(str(expert.review_spec or '')), 2200)}",
+                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), int(stage_budget['expert_profile_chars']))}",
+                f"专家审视规范:\n{self._compact_prompt_block(self._build_review_spec_summary(str(expert.review_spec or '')), int(stage_budget['review_spec_chars']))}",
                 f"代码语言: {language or 'unknown'}",
-                f"语言通用规范:\n{self._compact_prompt_block(self._build_expert_language_general_guidance(language, expert.expert_id), 1600)}",
+                f"语言通用规范:\n{self._compact_prompt_block(self._build_expert_language_general_guidance(language, expert.expert_id), int(stage_budget['language_guidance_chars']))}",
                 "REQUIRED_RULE_IDS: [\"GENERAL-EXPERT-CHECKS\"]",
                 "",
                 "[TARGET_HUNKS]",
                 json.dumps(targets, ensure_ascii=False, indent=2),
                 "",
                 "[COMPACT_CONTEXT]",
-                self._clip_diagnostic_text(
-                    self._build_repository_context_summary(repository_context or {}, []),
-                    12000,
-                ),
+                self._compact_stage_repository_context(repository_context or {}, budget=stage_budget),
                 "",
                 "[OUTPUT_JSON]",
                 json.dumps(
@@ -7504,6 +8008,11 @@ class ReviewRunner(
         line_start: int,
         timeout_seconds: float,
     ) -> tuple[str, dict[str, object]]:
+        prompt_profile = resolve_model_prompt_profile(
+            resolution.model,
+            profile_name=runtime_settings.review_prompt_profile,
+        )
+        stage_budget = self._stage_prompt_budget(prompt_profile)
         tool_observations = self._collect_tool_observations_for_scan(repository_context, normalized_batch_items)
         if not tool_observations:
             return "", {"attempted": False, "reason": "no_tool_observations"}
@@ -7513,9 +8022,15 @@ class ReviewRunner(
             fallback_file_path=file_path,
             fallback_line_start=line_start,
         )
+        targets = self._compact_stage_targets(targets, budget=stage_budget)
         relevant_observations = self._filter_tool_observations_for_expert(
             expert_id=expert.expert_id,
             tool_observations=tool_observations,
+        )
+        relevant_observations = self._compact_stage_tool_observations(
+            relevant_observations,
+            targets=targets,
+            budget=stage_budget,
         )
         if not relevant_observations:
             return "", {
@@ -7558,7 +8073,7 @@ class ReviewRunner(
                 "candidate_finding 的 target_id、file_path、line 必须来自 TARGET_HUNKS 或 TOOL_OBSERVATIONS 的同一文件/行；禁止使用不在输入中的文件。",
                 "本阶段结果会和专家通用扫描、绑定规范扫描取并集；不要因为不属于绑定规范就省略工具候选。",
                 f"专家: {expert.expert_id} / {expert.name_zh}",
-                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), 1200)}",
+                f"专家画像:\n{self._compact_prompt_block(str(expert.system_prompt or expert.role or ''), int(stage_budget['expert_profile_chars']))}",
                 "",
                 "[TOOL_OBSERVATIONS]",
                 json.dumps(relevant_observations, ensure_ascii=False, indent=2),
@@ -7567,10 +8082,7 @@ class ReviewRunner(
                 json.dumps(targets, ensure_ascii=False, indent=2),
                 "",
                 "[COMPACT_CONTEXT]",
-                self._clip_diagnostic_text(
-                    self._build_repository_context_summary(repository_context or {}, []),
-                    10000,
-                ),
+                self._compact_stage_repository_context(repository_context or {}, budget=stage_budget),
                 "",
                 "[OUTPUT_JSON]",
                 json.dumps(
@@ -7678,7 +8190,11 @@ class ReviewRunner(
 
         valid, errors = self._validate_rule_guided_llm_response_contract(
             result.text,
-            required_rule_ids=[],
+            required_rule_ids=[
+                str(item.get("observation_id") or f"{item.get('tool')}:{item.get('rule_id')}")
+                for item in relevant_observations
+                if str(item.get("observation_id") or item.get("rule_id") or "").strip()
+            ],
             allow_general_candidate_rule_id=False,
         )
         payload = self._parse_json_payload(result.text)
@@ -7736,28 +8252,127 @@ class ReviewRunner(
         collected: list[dict[str, object]] = []
         seen: set[str] = set()
 
-        def add_many(value: object) -> None:
+        def add_many(value: object, target_hunks: list[dict[str, object]]) -> None:
             for raw in list(value or []):
                 if not isinstance(raw, dict):
                     continue
                 item = dict(raw)
-                observation_id = str(item.get("observation_id") or "").strip()
-                if not observation_id:
-                    tool = str(item.get("tool") or "tool").strip()
-                    rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
-                    line = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
-                    observation_id = f"{tool}:{rule_id}:{line}"
-                    item["observation_id"] = observation_id
+                if not self._tool_observation_matches_target_hunks(item, target_hunks):
+                    continue
+                observation_id = self._canonical_tool_observation_id(item)
+                if str(item.get("observation_id") or "").strip() and str(item.get("observation_id") or "").strip() != observation_id:
+                    item["legacy_observation_id"] = str(item.get("observation_id") or "").strip()
+                item["id"] = observation_id
+                item["observation_id"] = observation_id
                 if observation_id in seen:
                     continue
                 seen.add(observation_id)
                 collected.append(item)
 
-        add_many((repository_context or {}).get("tool_observations"))
+        root_target_hunks = self._collect_tool_observation_target_hunks(repository_context, normalized_batch_items)
+        add_many((repository_context or {}).get("tool_observations"), root_target_hunks)
         for batch_item in list(normalized_batch_items or []):
             if isinstance(batch_item, dict) and isinstance(batch_item.get("repository_context"), dict):
-                add_many(dict(batch_item.get("repository_context") or {}).get("tool_observations"))
+                batch_context = dict(batch_item.get("repository_context") or {})
+                batch_target_hunks = self._collect_tool_observation_target_hunks(batch_context, [batch_item])
+                add_many(batch_context.get("tool_observations"), batch_target_hunks)
         return collected[:20]
+
+    def _collect_tool_observation_target_hunks(
+        self,
+        repository_context: dict[str, object],
+        normalized_batch_items: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        target_hunks: list[dict[str, object]] = []
+        for item in list((repository_context or {}).get("target_hunks") or []):
+            if isinstance(item, dict):
+                target_hunks.append(dict(item))
+        target_hunk = (repository_context or {}).get("target_hunk")
+        if isinstance(target_hunk, dict):
+            target_hunks.append(dict(target_hunk))
+        for batch_item in list(normalized_batch_items or []):
+            if not isinstance(batch_item, dict):
+                continue
+            for key in ("target_hunk",):
+                value = batch_item.get(key)
+                if isinstance(value, dict):
+                    target_hunks.append(dict(value))
+            for value in list(batch_item.get("target_hunks") or []):
+                if isinstance(value, dict):
+                    target_hunks.append(dict(value))
+            batch_context = dict(batch_item.get("repository_context") or {})
+            for value in list(batch_context.get("target_hunks") or []):
+                if isinstance(value, dict):
+                    target_hunks.append(dict(value))
+            value = batch_context.get("target_hunk")
+            if isinstance(value, dict):
+                target_hunks.append(dict(value))
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in target_hunks:
+            file_path = str(item.get("file_path") or "").strip().replace("\\", "/")
+            changed_lines = ",".join(str(line) for line in list(item.get("changed_lines") or []))
+            excerpt = str(item.get("excerpt") or "")[:120]
+            key = (file_path, changed_lines, excerpt)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _tool_observation_matches_target_hunks(
+        self,
+        observation: dict[str, object],
+        target_hunks: list[dict[str, object]],
+    ) -> bool:
+        if not target_hunks:
+            return True
+        file_path = self._normalize_path_for_match(
+            str(observation.get("file_path") or observation.get("path") or "")
+        )
+        line_start = int(self._normalize_optional_line_value(observation.get("line_start") or observation.get("line")) or 1)
+        for hunk in target_hunks:
+            hunk_file = self._normalize_path_for_match(
+                str(hunk.get("file_path") or hunk.get("path") or file_path)
+            )
+            if hunk_file and file_path and hunk_file != file_path:
+                continue
+            changed_lines = {
+                int(normalized_line)
+                for line in list(hunk.get("changed_lines") or [])
+                for normalized_line in [self._normalize_optional_line_value(line)]
+                if normalized_line is not None
+            }
+            if changed_lines:
+                if line_start in changed_lines or any(abs(line_start - changed_line) <= 2 for changed_line in changed_lines):
+                    return True
+                continue
+            start_line = self._normalize_optional_line_value(hunk.get("start_line"))
+            end_line = self._normalize_optional_line_value(hunk.get("end_line"))
+            if start_line is not None and end_line is not None and int(start_line) <= line_start <= int(end_line):
+                return True
+            excerpt = str(hunk.get("excerpt") or "").lower()
+            rule_text = " ".join(
+                [
+                    str(observation.get("rule_id") or ""),
+                    str(observation.get("message") or ""),
+                    str(observation.get("category") or ""),
+                ]
+            ).lower()
+            if excerpt and self._sast_semantic_categories(excerpt) & self._sast_semantic_categories(rule_text):
+                return True
+        return False
+
+    def _canonical_tool_observation_id(self, item: dict[str, object]) -> str:
+        existing = str(item.get("id") or item.get("observation_id") or "").strip()
+        if existing.startswith("sast:"):
+            return existing
+        tool = str(item.get("tool") or "tool").strip()
+        rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+        file_path = str(item.get("file_path") or item.get("path") or "unknown").strip().replace("\\", "/")
+        line = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
+        item["legacy_observation_id"] = existing or f"{tool}:{rule_id}:{line}"
+        return f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line}"
 
     def _filter_tool_observations_for_expert(
         self,
@@ -7817,9 +8432,18 @@ class ReviewRunner(
         line_start: int,
         timeout_seconds: float,
     ) -> tuple[list[str], dict[str, object]]:
+        prompt_profile = resolve_model_prompt_profile(
+            resolution.model,
+            profile_name=runtime_settings.review_prompt_profile,
+        )
+        stage_budget = self._stage_prompt_budget(prompt_profile)
+        effective_max_rules_per_batch = min(
+            max(1, int(max_rules_per_batch or 1)),
+            max(1, int(stage_budget.get("max_rules_per_batch") or 3)),
+        )
         rule_batches = self._split_custom_rule_scan_batches(
             rule_screening or {},
-            max_rules_per_batch=max_rules_per_batch,
+            max_rules_per_batch=effective_max_rules_per_batch,
         )
         if not rule_batches:
             return [], {"attempted": False, "reason": "no_custom_rules"}
@@ -7829,16 +8453,15 @@ class ReviewRunner(
             fallback_file_path=file_path,
             fallback_line_start=line_start,
         )
-        compact_context = self._clip_diagnostic_text(
-            self._build_repository_context_summary(repository_context or {}, []),
-            10000,
-        )
+        targets = self._compact_stage_targets(targets, budget=stage_budget)
+        compact_context = self._compact_stage_repository_context(repository_context or {}, budget=stage_budget)
         valid_texts: list[str] = []
         batch_metadata: list[dict[str, object]] = []
         for batch_index, rules in enumerate(rule_batches, start=1):
+            compact_rules = self._compact_stage_rule_cards(rules, prompt_profile=prompt_profile)
             required_rule_ids = [
                 str(item.get("rule_id") or item.get("id") or "").strip()
-                for item in rules
+                for item in compact_rules
                 if str(item.get("rule_id") or item.get("id") or "").strip()
             ]
             if not required_rule_ids:
@@ -7882,7 +8505,7 @@ class ReviewRunner(
                     f"REQUIRED_RULE_IDS: {json.dumps(required_rule_ids, ensure_ascii=False)}",
                     "",
                     "[CUSTOM_RULE_BATCH]",
-                    json.dumps(rules, ensure_ascii=False, indent=2),
+                    json.dumps(compact_rules, ensure_ascii=False, indent=2),
                     "",
                     "[TARGET_HUNKS]",
                     json.dumps(targets, ensure_ascii=False, indent=2),
@@ -9060,7 +9683,7 @@ class ReviewRunner(
             rule_id = str(item.get("rule_id") or "").strip()
             message = str(item.get("message") or "").strip()
             text_matches = bool(rule_id and rule_id.lower() in text_blob) or self._has_sast_text_overlap(text_blob, message)
-            if line_matches and (text_matches or not message):
+            if line_matches and (text_matches or not message) and self._sast_match_semantically_aligns(parsed, item):
                 matches.append(
                     {
                         "tool": str(item.get("tool") or "sast").strip(),
@@ -9074,6 +9697,83 @@ class ReviewRunner(
                     }
                 )
         return matches[:4]
+
+    def _sast_match_semantically_aligns(self, parsed: dict[str, object], item: dict[str, object]) -> bool:
+        issue_text = " ".join(
+            [
+                str(parsed.get("normalized_issue_type") or ""),
+                str(parsed.get("finding_type") or ""),
+                str(parsed.get("title") or ""),
+                str(parsed.get("claim") or ""),
+                str(parsed.get("summary") or ""),
+                *[str(value) for value in list(parsed.get("evidence") or [])],
+                *[str(value) for value in list(parsed.get("matched_rules") or [])],
+            ]
+        )
+        sast_text = " ".join(
+            [
+                str(item.get("tool") or ""),
+                str(item.get("rule_id") or ""),
+                str(item.get("message") or ""),
+                str(item.get("category") or ""),
+                str(item.get("cwe") or ""),
+                str(item.get("why_it_matters") or ""),
+            ]
+        )
+        issue_type_categories = self._sast_issue_type_categories(str(parsed.get("normalized_issue_type") or ""))
+        issue_categories = issue_type_categories or self._sast_semantic_categories(issue_text)
+        sast_categories = self._sast_semantic_categories(sast_text)
+        if issue_categories and sast_categories:
+            return bool(issue_categories & sast_categories)
+        if sast_categories and not issue_categories:
+            issue_blob = issue_text.lower()
+            return any(token in issue_blob for token in ("安全", "漏洞", "注入", "鉴权", "权限", "泄露", "校验", "输入"))
+        if issue_categories and not sast_categories:
+            sast_blob = sast_text.lower()
+            return any(token in sast_blob for token in issue_categories)
+        return True
+
+    def _sast_issue_type_categories(self, issue_type: str) -> set[str]:
+        normalized = str(issue_type or "").strip().lower()
+        if not normalized:
+            return set()
+        mappings = {
+            "injection": ("injection", "xss", "eval", "command_execution", "code_execution"),
+            "auth": ("auth", "authorization", "permission", "access_control", "tenant", "scope"),
+            "secret": ("secret", "credential", "password", "token", "sensitive_data"),
+            "validation": ("validation", "sanitize", "input"),
+            "null": ("null", "npe", "none"),
+            "query": ("query", "pagination", "unbounded", "bound"),
+            "concurrency": ("race", "lock", "deadlock", "concurrency"),
+            "exception": ("exception", "catch", "error_handling"),
+            "architecture": ("architecture", "ddd", "aggregate", "domain_event", "layer"),
+            "coverage": ("coverage", "test_gap", "missing_test"),
+        }
+        return {
+            category
+            for category, tokens in mappings.items()
+            if any(token in normalized for token in tokens)
+        }
+
+    def _sast_semantic_categories(self, text: str) -> set[str]:
+        lowered = str(text or "").lower()
+        category_tokens = {
+            "injection": ("injection", "eval", "sql", "xss", "command", "ldap", "注入", "cwe-79", "cwe-89", "cwe-78", "cwe-95"),
+            "auth": ("auth", "authorization", "permission", "unauthorized", "越权", "鉴权", "权限", "cwe-862", "cwe-863"),
+            "secret": ("secret", "password", "token", "credential", "key leak", "泄露", "凭证", "cwe-798"),
+            "validation": ("validation", "sanitize", "校验", "输入", "cwe-20"),
+            "null": ("null", "none", "空指针", "npe", "dereference", "cwe-476"),
+            "query": ("query", "limit", "pagination", "分页", "无界查询", "全量查询"),
+            "concurrency": ("race", "deadlock", "lock", "并发", "竞态", "死锁", "cwe-362"),
+            "exception": ("exception", "catch", "吞异常", "printstacktrace"),
+            "architecture": ("archunit", "architecture", "layer", "ddd", "依赖", "架构", "aggregate"),
+            "coverage": ("jacoco", "coverage", "uncovered", "测试", "覆盖"),
+        }
+        categories: set[str] = set()
+        for category, tokens in category_tokens.items():
+            if any(token in lowered for token in tokens):
+                categories.add(category)
+        return categories
 
     def _has_sast_text_overlap(self, text_blob: str, message: str) -> bool:
         tokens = [
@@ -11251,13 +11951,69 @@ class ReviewRunner(
             return True
         return bool(re.search(r"(Test|Tests|Spec|Specs|IT|ITCase)$", stem))
 
+    def _is_static_tooling_evidence_path(self, path: str) -> bool:
+        normalized = str(path or "").strip().replace("\\", "/").lstrip("./").lower()
+        name = normalized.rsplit("/", 1)[-1]
+        if not normalized:
+            return False
+        if name in {
+            ".semgrep.yml",
+            ".semgrep.yaml",
+            "semgrep.yml",
+            "semgrep.yaml",
+            "pmd-ruleset.xml",
+            "checkstyle.xml",
+            ".checkstyle.xml",
+            "eslint.config.js",
+            "eslint.config.mjs",
+            "eslint.config.cjs",
+            ".eslintrc",
+            ".eslintrc.js",
+            ".eslintrc.cjs",
+            ".eslintrc.json",
+            ".bandit",
+            "bandit.yaml",
+            "spotbugsxml.xml",
+            "jacoco.xml",
+        }:
+            return True
+        evidence_dirs = (
+            "target/",
+            "build/reports/",
+            "build/test-results/",
+            "coverage/",
+            ".scannerwork/",
+            "reports/",
+        )
+        if normalized.startswith(evidence_dirs) or any(f"/{prefix}" in normalized for prefix in evidence_dirs):
+            return any(
+                token in normalized
+                for token in (
+                    "spotbugs",
+                    "checkstyle",
+                    "pmd",
+                    "jacoco",
+                    "surefire-reports",
+                    "eslint",
+                    "semgrep",
+                    "coverage",
+                    "test-results",
+                )
+            )
+        return False
+
     def _business_changed_files(self, subject: ReviewSubject) -> list[str]:
         business_files = [
             item
             for item in subject.changed_files
-            if item and not self._is_test_like_path(item)
+            if item and not self._is_test_like_path(item) and not self._is_static_tooling_evidence_path(item)
         ]
-        return business_files or [item for item in subject.changed_files if item]
+        non_tool_files = [
+            item
+            for item in subject.changed_files
+            if item and not self._is_static_tooling_evidence_path(item)
+        ]
+        return business_files or non_tool_files or [item for item in subject.changed_files if item]
 
     def _extract_design_alignment(self, runtime_tool_results: list[dict[str, object]]) -> dict[str, object]:
         """从 design_spec_alignment tool 结果里提取设计一致性信息。"""

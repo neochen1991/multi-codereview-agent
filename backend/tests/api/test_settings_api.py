@@ -53,9 +53,11 @@ def test_runtime_settings_can_be_read_and_updated(client):
             "enable_llm_issue_judge": True,
             "llm_issue_judge_confidence_threshold": 0.77,
             "llm_issue_judge_timeout_seconds": 44,
+            "enable_sast_prescan": True,
             "rule_screening_mode": "llm",
             "rule_screening_batch_size": 10,
             "rule_screening_llm_timeout_seconds": 150,
+            "review_quality_mode": "thorough_review",
             "enable_llm_targeted_debate": True,
             "llm_targeted_debate_timeout_seconds": 80,
             "default_max_debate_rounds": 3,
@@ -113,9 +115,11 @@ def test_runtime_settings_can_be_read_and_updated(client):
     assert payload["enable_llm_issue_judge"] is True
     assert payload["llm_issue_judge_confidence_threshold"] == 0.77
     assert payload["llm_issue_judge_timeout_seconds"] == 44
+    assert payload["enable_sast_prescan"] is True
     assert payload["rule_screening_mode"] == "llm"
     assert payload["rule_screening_batch_size"] == 10
     assert payload["rule_screening_llm_timeout_seconds"] == 150
+    assert payload["review_quality_mode"] == "thorough_review"
     assert payload["enable_llm_targeted_debate"] is True
     assert payload["llm_targeted_debate_timeout_seconds"] == 80
     assert payload["standard_llm_timeout_seconds"] == 75
@@ -139,11 +143,23 @@ def test_runtime_settings_can_be_read_and_updated(client):
 
 
 def test_sast_tools_status_exposes_install_and_runtime_state(client):
+    update = client.put(
+        "/api/settings/runtime",
+        json={
+            "default_target_branch": "main",
+            "default_analysis_mode": "standard",
+            "enable_sast_prescan": True,
+        },
+    )
+    assert update.status_code == 200
+    assert update.json()["enable_sast_prescan"] is True
+
     response = client.get("/api/settings/sast-tools/status")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] in {"enabled", "disabled"}
+    assert payload["enabled"] is True
+    assert payload["status"] in {"enabled", "warning"}
     assert isinstance(payload["command_tools"], list)
     assert isinstance(payload["report_tools"], list)
     semgrep = next(item for item in payload["command_tools"] if item["tool"] == "semgrep")

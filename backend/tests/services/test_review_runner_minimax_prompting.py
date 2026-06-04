@@ -4,7 +4,7 @@ from app.domain.models.expert_profile import ExpertProfile
 from app.domain.models.message import ConversationMessage
 from app.domain.models.review import ReviewSubject, ReviewTask
 from app.domain.models.runtime_settings import RuntimeSettings
-from app.services.llm_chat_service import LLMTextResult
+from app.services.llm_chat_service import LLMResolution, LLMTextResult
 from app.services.model_prompt_profiles import resolve_model_prompt_profile
 from app.services.review_runner import ReviewRunner
 
@@ -469,7 +469,7 @@ def test_empty_rule_guided_response_retries_and_preserves_candidate(storage_root
         related_files=[],
         expected_checks=["敏感信息输出"],
         disallowed_inference=[],
-        runtime_settings=runner.runtime_settings_service.get(),
+        runtime_settings=RuntimeSettings(review_quality_mode="standard"),
         analysis_mode="standard",
         llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
         bound_documents=[],
@@ -821,20 +821,14 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
     )
     tool_candidate = (
-        '{"rule_check_results":[{"rule_id":"semgrep:java.spring.security.audit.token-log:20","status":"violated",'
+        '{"rule_check_results":[{"rule_id":"sast:semgrep:java.spring.security.audit.token-log:src/main/java/demo/UserController.java:20","status":"violated",'
         '"evidence":["semgrep 命中 Authorization header 进入日志"],"missing_context":[],'
         '"reason":"工具信号与本次新增日志行一致"}],'
-        '"candidate_findings":[{"rule_id":"semgrep:java.spring.security.audit.token-log:20","title":"工具确认 Authorization token 日志风险",'
+        '"candidate_findings":[{"rule_id":"sast:semgrep:java.spring.security.audit.token-log:src/main/java/demo/UserController.java:20","title":"工具确认 Authorization token 日志风险",'
         '"file_path":"src/main/java/demo/UserController.java","line":20,'
         '"evidence":"log.info(\\"token={}\\", request.getHeader(\\"Authorization\\"))",'
-        '"confidence":"high","adopted_tool_observations":["semgrep:java.spring.security.audit.token-log:20"]}],'
+        '"confidence":"high","adopted_tool_observations":["sast:semgrep:java.spring.security.audit.token-log:src/main/java/demo/UserController.java:20"]}],'
         '"context_requests":[],"self_check":{"checked_all_rules":true,'
-        '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
-    )
-    custom_batch_empty = (
-        '{"rule_check_results":[{"rule_id":"SEC-JAVA-LOOP-IO-001","status":"passed",'
-        '"evidence":[],"missing_context":[],"reason":"主审已经覆盖"}],'
-        '"candidate_findings":[],"context_requests":[],"self_check":{"checked_all_rules":true,'
         '"used_context_files":["src/main/java/demo/UserController.java"],"unverified_assumptions":[]}}'
     )
     phases: list[str] = []
@@ -847,9 +841,9 @@ def test_thorough_review_runs_general_scan_even_when_main_review_finds_custom_ru
         elif phase == "expert_tool_observation_scan":
             text = tool_candidate
         elif phase == "expert_custom_rule_batch_scan":
-            text = custom_batch_empty
-        else:
             text = custom_candidate
+        else:
+            raise AssertionError(f"unexpected LLM phase in split pipeline test: {phase}")
         return LLMTextResult(
             text=text,
             mode="mock",
@@ -969,8 +963,607 @@ def test_tool_observations_are_forced_into_uncovered_followup_candidates(storage
     assert observations[0]["kind"] == "tool_observation"
     assert forced
     assert forced[0]["evidence_source"] == "tool_observation"
-    assert forced[0]["adopted_tool_observations"] == ["semgrep:java.sql-injection:42"]
+    assert forced[0]["normalized_issue_type"] == "sql_injection_risk"
+    assert "SQL/命令注入" in forced[0]["violated_guidelines"][0]
+    assert forced[0]["adopted_tool_observations"] == [
+        "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    ]
     assert forced[0]["verification_needed"] is True
+
+
+def test_tool_observation_scan_builds_canonical_sast_ids_when_missing(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    observations = runner._collect_tool_observations_for_scan(
+        {
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql-injection",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 42,
+                    "message": "User input is concatenated into SQL.",
+                }
+            ]
+        },
+        [],
+    )
+
+    assert observations[0]["id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["observation_id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["legacy_observation_id"] == "semgrep:java.sql-injection:42"
+
+
+def test_tool_observation_scan_filters_observations_outside_target_diff(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    observations = runner._collect_tool_observations_for_scan(
+        {
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql.concat-user-input",
+                    "file_path": "src/main/java/demo/UserController.java",
+                    "line_start": 9,
+                    "message": "String concatenation reaches SQL sink.",
+                },
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.logging.authorization-token",
+                    "file_path": "src/main/java/demo/UserController.java",
+                    "line_start": 20,
+                    "message": "Authorization header reaches application log.",
+                },
+            ],
+            "target_hunks": [
+                {
+                    "file_path": "src/main/java/demo/UserController.java",
+                    "changed_lines": [20, 21],
+                    "excerpt": '+ log.info("token={}", request.getHeader("Authorization"));\n',
+                }
+            ],
+        },
+        [],
+    )
+
+    rule_ids = {str(item.get("rule_id") or "") for item in observations}
+    assert "java.logging.authorization-token" in rule_ids
+    assert "java.sql.concat-user-input" not in rule_ids
+
+
+def test_batch_review_observations_build_canonical_sast_ids_when_missing(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    observations = runner._collect_batch_review_observations(
+        {
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql-injection",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 42,
+                    "message": "User input is concatenated into SQL.",
+                }
+            ]
+        },
+        [],
+    )
+
+    assert observations[0]["kind"] == "tool_observation"
+    assert observations[0]["id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["observation_id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["legacy_observation_id"] == "semgrep:java.sql-injection:42"
+
+
+def test_business_changed_files_excludes_static_tool_config_and_reports(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    subject = ReviewSubject(
+        subject_type="mr",
+        repo_id="repo",
+        project_id="proj",
+        source_ref="feature/static-tooling",
+        target_ref="main",
+        title="Static tooling files",
+        changed_files=[
+            ".semgrep.yml",
+            "eslint.config.js",
+            "target/spotbugsXml.xml",
+            "src/main/java/demo/UserController.java",
+            "src/main/java/demo/UserControllerTest.java",
+        ],
+        unified_diff="",
+    )
+
+    assert runner._business_changed_files(subject) == ["src/main/java/demo/UserController.java"]
+
+
+def test_sast_prescan_summary_and_fast_lane_create_visible_tool_finding(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_sast_fast_lane",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/security",
+            target_ref="main",
+            title="SAST fast lane",
+            changed_files=["src/main/java/demo/UserDao.java"],
+            unified_diff="",
+        ),
+    )
+    finding_payloads: list[dict[str, object]] = []
+    expert_jobs = [
+        {
+            "expert": ExpertProfile(
+                expert_id="security_compliance",
+                name="Security",
+                name_zh="安全专家",
+                role="security",
+            ),
+            "repository_context": {
+                "tool_observations": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "category": "security",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 42,
+                        "message": "User input is concatenated into SQL.",
+                        "confidence": 0.88,
+                    }
+                ],
+                "target_hunks": [
+                    {
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "changed_lines": [42],
+                        "excerpt": '+ statement.executeQuery("select * from user where id=" + userId);\n',
+                    }
+                ],
+            },
+        }
+    ]
+
+    runner._append_sast_prescan_summary_message(review, expert_jobs)
+    runner._append_fast_tool_observation_findings(review, expert_jobs, finding_payloads)
+
+    messages = runner.message_repo.list(review.review_id)
+    findings = runner.finding_repo.list(review.review_id)
+
+    assert any(message.message_type == "sast_prescan_summary" for message in messages)
+    assert [finding.title for finding in findings] == ["静态工具候选需复核：java.sql-injection"]
+    assert findings[0].code_context["adopted_tool_observations"] == [
+        "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    ]
+    assert finding_payloads and finding_payloads[0]["code_context"]["sast_fast_lane"] is True
+
+
+def test_tool_observation_scan_fails_when_expert_omits_relevant_observation(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_tool_observation_coverage",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/security",
+            target_ref="main",
+            title="Tool observation coverage",
+            changed_files=["src/main/java/demo/UserDao.java"],
+            unified_diff="",
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+    )
+
+    def fake_complete_text(**_kwargs):
+        return LLMTextResult(
+            text=(
+                '{"rule_check_results":[{"rule_id":"sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42",'
+                '"status":"violated","evidence":["sql concat"],"missing_context":[],'
+                '"reason":"sql concat"}],"candidate_findings":[],"context_requests":[],'
+                '"self_check":{"checked_all_rules":true,"used_context_files":[],'
+                '"unverified_assumptions":[]}}'
+            ),
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id="call-tool-observation-coverage",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    text, metadata = runner._run_rule_guided_tool_observation_scan(
+        review=review,
+        expert=expert,
+        runtime_settings=RuntimeSettings(review_quality_mode="standard"),
+        resolution=LLMResolution(
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        ),
+        normalized_batch_items=[],
+        repository_context={
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql-injection",
+                    "observation_id": "semgrep:java.sql-injection:42",
+                    "category": "security",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 42,
+                    "message": "User input is concatenated into SQL.",
+                },
+                {
+                    "tool": "bandit",
+                    "rule_id": "B105",
+                    "observation_id": "bandit:B105:45",
+                    "category": "python_security",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 45,
+                    "message": "Possible hardcoded password.",
+                },
+            ]
+        },
+        file_path="src/main/java/demo/UserDao.java",
+        line_start=42,
+        timeout_seconds=60,
+    )
+
+    assert text == ""
+    assert metadata["success"] is False
+    assert "rule_coverage_missing:sast:bandit:B105:src/main/java/demo/UserDao.java:45" in metadata["schema_errors"]
+
+
+def test_sast_prescan_match_requires_semantic_alignment_even_on_same_line(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    matches = runner._match_sast_prescan_findings(
+        parsed={
+            "title": "空指针风险提到了 python.lang.security.audit.eval",
+            "claim": "这里讨论的是 None dereference，不是 eval 注入。",
+            "normalized_issue_type": "null_pointer_risk",
+            "evidence": ["python.lang.security.audit.eval"],
+            "matched_rules": [],
+        },
+        file_path="src/app.py",
+        line_start=12,
+        repository_context={
+            "sast_prescan": {
+                "enabled": True,
+                "findings": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "python.lang.security.audit.eval",
+                        "message": "Use of eval",
+                        "category": "security",
+                        "cwe": "CWE-95",
+                        "file_path": "src/app.py",
+                        "line_start": 12,
+                    }
+                ],
+            }
+        },
+    )
+
+    assert matches == []
+
+
+def test_sast_prescan_match_accepts_semantically_aligned_security_issue(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    matches = runner._match_sast_prescan_findings(
+        parsed={
+            "title": "eval 调用存在注入风险",
+            "claim": "新增代码直接 eval 用户输入。",
+            "normalized_issue_type": "code_injection_risk",
+            "evidence": ["eval(user_input)", "Use of eval"],
+            "matched_rules": [],
+        },
+        file_path="src/app.py",
+        line_start=12,
+        repository_context={
+            "sast_prescan": {
+                "enabled": True,
+                "findings": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "python.lang.security.audit.eval",
+                        "message": "Use of eval",
+                        "category": "security",
+                        "cwe": "CWE-95",
+                        "file_path": "src/app.py",
+                        "line_start": 12,
+                    }
+                ],
+            }
+        },
+    )
+
+    assert len(matches) == 1
+    assert matches[0]["rule_id"] == "python.lang.security.audit.eval"
+
+
+def test_expert_job_observation_collection_includes_tool_observations(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    observations = runner._collect_observations_from_expert_jobs(
+        [
+            {
+                "repository_context": {
+                    "tool_observations": [
+                        {
+                            "tool": "semgrep",
+                            "rule_id": "java.sql-injection",
+                            "observation_id": "semgrep:java.sql-injection:42",
+                            "category": "security",
+                            "file_path": "src/main/java/demo/UserDao.java",
+                            "line_start": 42,
+                            "message": "User input is concatenated into SQL.",
+                            "confidence": 0.88,
+                        }
+                    ]
+                },
+                "batch_items": [
+                    {
+                        "repository_context": {
+                            "tool_observations": [
+                                {
+                                    "tool": "pmd",
+                                    "rule_id": "AvoidCatchingGenericException",
+                                    "observation_id": "pmd:AvoidCatchingGenericException:51",
+                                    "category": "java_quality",
+                                    "file_path": "src/main/java/demo/Worker.java",
+                                    "line_start": 51,
+                                    "message": "Generic exception is swallowed.",
+                                    "confidence": 0.74,
+                                }
+                            ]
+                        }
+                    }
+                ],
+            }
+        ]
+    )
+
+    ids = {str(item.get("observation_id") or "") for item in observations}
+    assert "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42" in ids
+    assert "sast:pmd:AvoidCatchingGenericException:src/main/java/demo/Worker.java:51" in ids
+    assert all(item.get("kind") == "tool_observation" for item in observations)
+
+
+def test_observation_followup_uses_dedicated_non_conflicting_system_prompt(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_observation_followup_system",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/security",
+            target_ref="main",
+            title="Observation followup",
+            changed_files=["src/main/java/demo/UserDao.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/demo/UserDao.java b/src/main/java/demo/UserDao.java\n"
+                "--- a/src/main/java/demo/UserDao.java\n"
+                "+++ b/src/main/java/demo/UserDao.java\n"
+                "@@ -42,1 +42,1 @@\n"
+                '+ String sql = "select * from user where name = " + name;\n'
+            ),
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="security_compliance",
+        name="Security",
+        name_zh="安全专家",
+        role="security",
+        model="minimax-2.5",
+        review_spec="绑定规范：本轮只审查自定义 SQL 模板，不要输出工具候选。",
+    )
+    captured: dict[str, str] = {}
+
+    def fake_complete_text(**kwargs):
+        captured["system_prompt"] = str(kwargs.get("system_prompt") or "")
+        return LLMTextResult(
+            text=(
+                '{"rule_check_results":[],"candidate_findings":[],"context_requests":[],'
+                '"self_check":{"checked_all_rules":true,"used_context_files":[],"unverified_assumptions":[]}}'
+            ),
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id="call-observation-followup",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    runner._append_observation_followup_candidates(
+        review=review,
+        subject=review.subject,
+        expert=expert,
+        file_path="src/main/java/demo/UserDao.java",
+        line_start=42,
+        repository_context={
+            "tool_observations": [
+                {
+                    "tool": "semgrep",
+                    "rule_id": "java.sql-injection",
+                    "observation_id": "semgrep:java.sql-injection:42",
+                    "category": "security",
+                    "file_path": "src/main/java/demo/UserDao.java",
+                    "line_start": 42,
+                    "message": "User input is concatenated into SQL.",
+                    "confidence": 0.86,
+                }
+            ]
+        },
+        normalized_batch_items=[],
+        runtime_settings=RuntimeSettings(review_quality_mode="standard"),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
+        bound_documents=[],
+        active_skills=[],
+        rule_screening={"matched_rules_for_llm": []},
+        initial_candidates=[],
+        max_findings=5,
+    )
+
+    assert "静态观察信号复核专家" in captured["system_prompt"]
+    assert "只复核本轮给出的 observation" in captured["system_prompt"]
+    assert "绑定规范：本轮只审查自定义 SQL 模板" not in captured["system_prompt"]
+    assert "不要输出工具候选" not in captured["system_prompt"]
+
+
+def test_tool_observation_candidate_keeps_tool_issue_type_during_anchor_refinement(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+
+    candidate = {
+        "title": "静态工具候选需复核：java.lang.security.audit.unsafe-reflection.unsafe-reflection",
+        "claim": "semgrep 命中 unsafe-reflection 候选信号，需要安全专家确认是否真实可达。",
+        "normalized_issue_type": "authorization_bypass_risk",
+        "matched_rules": ["semgrep:java.lang.security.audit.unsafe-reflection.unsafe-reflection"],
+        "violated_guidelines": ["涉及用户、租户、资源归属或管理操作的入口必须做鉴权和越权校验。"],
+        "evidence": [
+            "semgrep:java.lang.security.audit.unsafe-reflection.unsafe-reflection",
+            "Class.forName(row.toString())",
+        ],
+        "adopted_tool_observations": ["semgrep:java.lang.security.audit.unsafe-reflection.unsafe-reflection:23"],
+        "evidence_source": "tool_observation",
+    }
+
+    sanitized = runner._sanitize_candidate_to_current_anchor(
+        candidate,
+        "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java",
+        19,
+        {
+            "excerpt": (
+                '# MySqlDomainEventsConsumer.java\n'
+                '18 | NativeQuery query = sessionFactory.getCurrentSession().createNativeQuery(\n'
+                '19 | + "SELECT * FROM domain_events ORDER BY occurred_on ASC"\n'
+            )
+        },
+    )
+    result = runner._normalize_candidate_for_refined_anchor(
+        sanitized,
+        expert_id="correctness_business",
+        line_start=19,
+    )
+
+    assert result["normalized_issue_type"] == "authorization_bypass_risk"
+    assert result["title"].startswith("静态工具候选需复核")
+
+
+def test_observation_followup_uses_fast_deterministic_path_after_initial_candidates(storage_root: Path, monkeypatch) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_observation_fast_path",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/db",
+            target_ref="main",
+            title="Observation fast path",
+            changed_files=["src/main/java/demo/Consumer.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/demo/Consumer.java b/src/main/java/demo/Consumer.java\n"
+                "@@ -19,1 +19,1 @@\n"
+                '+ "SELECT * FROM domain_events ORDER BY occurred_on ASC"\n'
+            ),
+        ),
+    )
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库专家",
+        role="database",
+        model="minimax-2.5",
+    )
+
+    calls = {"count": 0}
+
+    def fake_complete_text(**_kwargs):
+        calls["count"] += 1
+        return LLMTextResult(
+            text=(
+                '{"rule_check_results":[],"candidate_findings":[],"context_requests":[],'
+                '"self_check":{"checked_all_rules":true,"used_context_files":[],"unverified_assumptions":[]}}'
+            ),
+            mode="mock",
+            provider="test",
+            model="minimax-2.5",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+            call_id="call-observation-followup",
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", fake_complete_text)
+    merged = runner._append_observation_followup_candidates(
+        review=review,
+        subject=review.subject,
+        expert=expert,
+        file_path="src/main/java/demo/Consumer.java",
+        line_start=19,
+        repository_context={
+            "review_observations": [
+                {
+                    "observation_id": "obs_query_bound",
+                    "kind": "query_without_bound",
+                    "file_path": "src/main/java/demo/Consumer.java",
+                    "line_start": 19,
+                    "summary": "LIMIT :chunk 被删除，查询缺少边界。",
+                    "evidence": ['+ "SELECT * FROM domain_events ORDER BY occurred_on ASC"'],
+                    "confidence": 0.82,
+                }
+            ]
+        },
+        normalized_batch_items=[],
+        runtime_settings=RuntimeSettings(review_quality_mode="thorough_review"),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 60, "max_attempts": 1},
+        bound_documents=[],
+        active_skills=[],
+        rule_screening={"matched_rules_for_llm": []},
+        initial_candidates=[
+            {
+                "title": "已有查询候选",
+                "file_path": "src/main/java/demo/Consumer.java",
+                "line_start": 18,
+                "claim": "已有候选",
+                "confidence": 0.72,
+            }
+        ],
+        max_findings=5,
+    )
+
+    assert calls["count"] == 0
+    assert any(item.get("normalized_issue_type") == "query_bound_removed" for item in merged)
 
 
 def test_custom_rule_scan_batches_use_all_bound_rules_not_only_screening_hits(storage_root: Path) -> None:

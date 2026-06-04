@@ -148,7 +148,9 @@ def test_export_issues_to_codehub_replaces_internal_fallback_text(client):
     assert "当前代码锚点" not in exported_text
     assert "按当前代码片段" not in exported_text
     assert "识别批量输入规模" not in exported_text
-    assert "BulkEnrollmentService.java 第 37 行 的注释或 TODO 已承诺业务动作" in exported["problem_description"]
+    assert "BulkEnrollmentService.java 第 37 行" in exported["problem_description"]
+    assert "TODO 已承诺" in exported["problem_description"]
+    assert "扣减库存并发送预占事件" in exported["problem_description"]
     assert "补齐 BulkEnrollmentService.java 第 37 行 注释或 TODO 中承诺的业务动作" in exported["remediation_suggestion"]
 
 

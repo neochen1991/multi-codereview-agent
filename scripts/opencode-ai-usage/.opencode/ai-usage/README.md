@@ -25,6 +25,7 @@
   .opencode\
     plugins\
       ai-code-usage.js
+      token-usage-probe.js
     ai-usage\
       README.md
 ```
@@ -33,6 +34,7 @@
 
 ```text
 .opencode\plugins\ai-code-usage.js
+.opencode\plugins\token-usage-probe.js
 ```
 
 然后在这个项目根目录里正常运行 OpenCode：
@@ -42,6 +44,10 @@ opencode
 ```
 
 OpenCode 运行过程中，插件会自动监听文件修改事件并统计数据。
+
+`ai-code-usage.js` 负责统计 AI 生成/修改的代码行数。
+
+`token-usage-probe.js` 负责探测 OpenCode 事件里是否包含 token usage，并在能提取到 token 时上报服务端。
 
 ## 工号怎么配置
 
@@ -92,6 +98,9 @@ unknown-employee-id
 .opencode\ai-usage\state.json
 .opencode\ai-usage\pending-upload.json
 .opencode\ai-usage\diagnostics.json
+.opencode\ai-usage\token-event-probe.jsonl
+.opencode\ai-usage\token-usage.jsonl
+.opencode\ai-usage\pending-token-upload.json
 ```
 
 说明：
@@ -102,6 +111,9 @@ summary.json          本地汇总结果
 state.json            session baseline 和状态
 pending-upload.json   未成功上报的事件队列
 diagnostics.json      最近一次 git 统计诊断信息
+token-event-probe.jsonl   token 探针事件记录，不包含完整消息内容
+token-usage.jsonl         已提取到的 token 使用事件
+pending-token-upload.json 未成功上报的 token 事件队列
 ```
 
 查看本地汇总：
@@ -121,6 +133,60 @@ type .opencode\ai-usage\summary.json
 ```
 
 下次 OpenCode 产生事件时会继续重试上报。
+
+## Token 排行榜采集
+
+当前没有统一模型网关时，token 排行榜先通过 `token-usage-probe.js` 探针插件采集。
+
+探针会监听这些 OpenCode 事件：
+
+```text
+message.updated
+session.updated
+session.idle
+session.status
+session.compacted
+```
+
+它会递归查找事件里的字段，例如：
+
+```text
+usage
+token
+tokens
+prompt_tokens
+completion_tokens
+input_tokens
+output_tokens
+total_tokens
+```
+
+如果事件里能找到 token usage，会写入：
+
+```text
+.opencode\ai-usage\token-usage.jsonl
+```
+
+并上报到服务端：
+
+```text
+POST /api/token-usage/events
+```
+
+如果事件里没有 token usage，则只会写探针记录：
+
+```text
+.opencode\ai-usage\token-event-probe.jsonl
+```
+
+这用于判断 OpenCode 当前版本是否暴露 token 字段。
+
+查看 token 探针结果：
+
+```powershell
+type .opencode\ai-usage\token-event-probe.jsonl
+type .opencode\ai-usage\token-usage.jsonl
+```
 
 ## 前置要求
 

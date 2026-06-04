@@ -262,17 +262,43 @@ class ReviewRunnerExpertOutputMixin:
         initial_candidates: list[dict[str, object]],
         max_findings: int,
     ) -> list[dict[str, object]]:
-        observations = self._collect_batch_review_observations(repository_context, normalized_batch_items)
+        observations = self._filter_observations_for_batch_context(
+            self._collect_batch_review_observations(repository_context, normalized_batch_items),
+            normalized_batch_items,
+        )
         uncovered_observations = self._find_uncovered_review_observations(initial_candidates, observations)
         if not uncovered_observations:
             return list(initial_candidates)
 
-        if analysis_mode == "light":
-            fallback_candidates = self._build_forced_observation_candidates(
-                expert=expert,
-                uncovered_observations=uncovered_observations,
+        deterministic_candidates = self._build_forced_observation_candidates(
+            expert=expert,
+            uncovered_observations=uncovered_observations,
+            max_findings=max_findings,
+        )
+        quality_mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
+        if deterministic_candidates and (initial_candidates or quality_mode == "thorough_review"):
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_observation_followup_fast_path",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} 已用结构化 observation 快速补充候选，跳过额外 LLM 复核以控制耗时。",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "observation_count": len(uncovered_observations),
+                        "generated_candidate_count": len(deterministic_candidates),
+                        "analysis_mode": analysis_mode,
+                    },
+                )
+            )
+            return self._merge_expert_analysis_candidates(
+                initial_candidates,
+                deterministic_candidates,
                 max_findings=max_findings,
             )
+
+        if analysis_mode == "light":
+            fallback_candidates = deterministic_candidates
             if not fallback_candidates:
                 return list(initial_candidates)
             self.event_repo.append(
@@ -294,6 +320,27 @@ class ReviewRunnerExpertOutputMixin:
                 fallback_candidates,
                 max_findings=max_findings,
             )
+
+        if initial_candidates and self._observations_covered_by_existing_candidates(
+            initial_candidates,
+            uncovered_observations,
+        ):
+            self.event_repo.append(
+                ReviewEvent(
+                    review_id=review.review_id,
+                    event_type="expert_observation_followup_skipped",
+                    phase="expert_review",
+                    message=f"{expert.name_zh} observation 已被首轮候选覆盖，跳过额外 LLM 增量复核",
+                    payload={
+                        "expert_id": expert.expert_id,
+                        "reason": "covered_by_existing_candidates",
+                        "observation_count": len(uncovered_observations),
+                        "candidate_count": len(initial_candidates),
+                        "analysis_mode": analysis_mode,
+                    },
+                )
+            )
+            return list(initial_candidates)
 
         batch_files = sorted(
             {
@@ -348,13 +395,7 @@ class ReviewRunnerExpertOutputMixin:
         )
         try:
             followup_result = self.llm_chat_service.complete_text(
-                system_prompt=self._build_expert_system_prompt(
-                    expert,
-                    bound_documents,
-                    active_skills,
-                    rule_screening,
-                    analysis_mode=analysis_mode,
-                ),
+                system_prompt=self._build_observation_followup_system_prompt(expert),
                 user_prompt=followup_prompt,
                 resolution=self.llm_chat_service.resolve_expert(expert, runtime_settings),
                 runtime_settings=runtime_settings,
@@ -421,6 +462,15 @@ class ReviewRunnerExpertOutputMixin:
             max_findings=max_findings,
         )
 
+    def _build_observation_followup_system_prompt(self, expert: ExpertProfile) -> str:
+        return (
+            f"你是静态观察信号复核专家，当前专家职责是 {expert.expert_id} / {expert.name_zh}。"
+            "本阶段只复核本轮给出的 observation 是否被已有候选覆盖，以及是否需要补充新的候选 finding。"
+            "不要执行绑定规范批量校验，不要执行专家画像全量扫描，不要输出最终问题清单。"
+            "如果 observation 与当前 diff 或上下文相关但证据不足，仍应输出待验证候选并写明缺失上下文。"
+            "只输出符合 user prompt 中 OUTPUT_JSON 合同的 JSON 对象。"
+        )
+
     def _collect_batch_review_observations(
         self,
         repository_context: dict[str, object],
@@ -462,6 +512,91 @@ class ReviewRunnerExpertOutputMixin:
                 collected.append(item)
         return collected
 
+    def _filter_observations_for_batch_context(
+        self,
+        observations: list[dict[str, object]],
+        batch_items: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        if not observations or not batch_items:
+            return list(observations or [])
+        scoped: list[dict[str, object]] = []
+        for observation in observations:
+            if self._observation_matches_any_batch_hunk(observation, batch_items):
+                scoped.append(dict(observation))
+        return scoped
+
+    def _observation_matches_any_batch_hunk(
+        self,
+        observation: dict[str, object],
+        batch_items: list[dict[str, object]],
+    ) -> bool:
+        observation_file = str(observation.get("file_path") or "").strip().replace("\\", "/").lower()
+        if not observation_file:
+            return False
+        for batch_item in batch_items:
+            batch_file = str(batch_item.get("file_path") or "").strip().replace("\\", "/").lower()
+            if batch_file != observation_file:
+                continue
+            target_hunks = [
+                dict(item)
+                for item in list(batch_item.get("target_hunks") or [])
+                if isinstance(item, dict)
+            ]
+            target_hunk = batch_item.get("target_hunk")
+            if isinstance(target_hunk, dict) and target_hunk:
+                target_hunks.append(dict(target_hunk))
+            if not target_hunks:
+                return True
+            if any(self._observation_matches_target_hunk(observation, hunk) for hunk in target_hunks):
+                return True
+        return False
+
+    def _observation_matches_target_hunk(
+        self,
+        observation: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> bool:
+        observation_line = self._normalize_optional_line_value(observation.get("line_start"))
+        changed_lines = self._normalize_changed_line_values(target_hunk.get("changed_lines"))
+        if observation_line is not None and changed_lines and int(observation_line) in set(changed_lines):
+            return True
+        text_matches = self._observation_matches_hunk_text(observation, target_hunk)
+        if text_matches:
+            return True
+        start_line = (
+            self._normalize_optional_line_value(target_hunk.get("start_line"))
+            or self._normalize_optional_line_value(target_hunk.get("line_start"))
+        )
+        end_line = self._normalize_optional_line_value(target_hunk.get("end_line")) or start_line
+        if observation_line is None or start_line is None or end_line is None:
+            return False
+        return int(start_line) - 1 <= int(observation_line) <= int(end_line) + 1 and text_matches
+
+    def _observation_matches_hunk_text(
+        self,
+        observation: dict[str, object],
+        target_hunk: dict[str, object],
+    ) -> bool:
+        hunk_text = str(target_hunk.get("excerpt") or target_hunk.get("content") or "").lower()
+        if not hunk_text:
+            return False
+        terms = self._tokenize_observation_text(observation)
+        if not terms:
+            return False
+        distinctive_terms = {
+            term
+            for term in terms
+            if len(term) >= 4 or term in {"sql", "like", "save", "query", "event", "new"}
+        }
+        if not distinctive_terms:
+            distinctive_terms = terms
+        matched = [term for term in distinctive_terms if term.lower() in hunk_text]
+        return len(matched) >= min(2, len(distinctive_terms)) or any(
+            term in {"like", "eventbus", "repository", "save", "query", "catch"}
+            and term.lower() in hunk_text
+            for term in distinctive_terms
+        )
+
     def _normalize_tool_observations_as_review_observations(self, value: object) -> list[dict[str, object]]:
         normalized: list[dict[str, object]] = []
         for raw in list(value or []):
@@ -471,7 +606,13 @@ class ReviewRunnerExpertOutputMixin:
             tool = str(item.get("tool") or "tool").strip()
             rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
             line_start = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
-            observation_id = str(item.get("observation_id") or "").strip() or f"{tool}:{rule_id}:{line_start}"
+            if hasattr(self, "_canonical_tool_observation_id"):
+                observation_id = self._canonical_tool_observation_id(item)  # type: ignore[attr-defined]
+            else:
+                file_path = str(item.get("file_path") or item.get("path") or "unknown").strip().replace("\\", "/")
+                existing = str(item.get("id") or item.get("observation_id") or "").strip()
+                observation_id = existing if existing.startswith("sast:") else f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line_start}"
+                item["legacy_observation_id"] = existing or f"{tool}:{rule_id}:{line_start}"
             message = str(item.get("message") or item.get("summary") or "").strip()
             why_it_matters = str(item.get("why_it_matters") or "").strip()
             evidence = [
@@ -486,6 +627,7 @@ class ReviewRunnerExpertOutputMixin:
             normalized.append(
                 {
                     **item,
+                    "id": observation_id,
                     "observation_id": observation_id,
                     "kind": "tool_observation",
                     "summary": message or f"静态工具命中 {tool}:{rule_id} 候选信号。",
@@ -533,6 +675,141 @@ class ReviewRunnerExpertOutputMixin:
                     continue
             uncovered.append(dict(item))
         return uncovered[:8]
+
+    def _observations_covered_by_existing_candidates(
+        self,
+        candidates: list[dict[str, object]],
+        observations: list[dict[str, object]],
+    ) -> bool:
+        if not observations:
+            return True
+        if not candidates:
+            return False
+        return all(
+            self._observation_covered_by_existing_candidate(candidates, observation)
+            for observation in observations
+        )
+
+    def _observation_covered_by_existing_candidate(
+        self,
+        candidates: list[dict[str, object]],
+        observation: dict[str, object],
+    ) -> bool:
+        observation_id = str(observation.get("observation_id") or "").strip()
+        observation_file = str(observation.get("file_path") or "").strip().lower()
+        observation_line = self._normalize_optional_line_value(observation.get("line_start"))
+        observation_terms = self._tokenize_observation_text(observation)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if observation_id and observation_id in self._normalize_text_list(candidate.get("observation_ids"), []):
+                return True
+            candidate_file = str(candidate.get("file_path") or "").strip().lower()
+            if not observation_file or candidate_file != observation_file:
+                continue
+            text_matches = bool(observation_terms) and self._candidate_text_matches_observation(candidate, observation_terms)
+            candidate_line = self._normalize_optional_line_value(candidate.get("line_start"))
+            if observation_line is not None and candidate_line is not None:
+                if abs(int(candidate_line) - int(observation_line)) <= 3 and text_matches:
+                    return True
+                if abs(int(candidate_line) - int(observation_line)) <= 5 and self._candidate_and_observation_share_risk_domain(
+                    candidate,
+                    observation,
+                ):
+                    return True
+            if text_matches:
+                return True
+        return False
+
+    def _tokenize_observation_text(self, observation: dict[str, object]) -> set[str]:
+        text_parts = [
+            str(observation.get("kind") or ""),
+            str(observation.get("summary") or ""),
+        ]
+        text_parts.extend(str(item) for item in list(observation.get("evidence") or [])[:4])
+        text_parts.extend(str(item) for item in list(observation.get("risk_hints") or [])[:4])
+        text = " ".join(text_parts).lower()
+        raw_terms = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}|[\u4e00-\u9fff]{2,}", text)
+        stop_terms = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "this",
+            "that",
+            "当前",
+            "代码",
+            "问题",
+            "风险",
+            "存在",
+            "可能",
+            "导致",
+        }
+        return {term for term in raw_terms if term not in stop_terms}
+
+    def _candidate_text_matches_observation(
+        self,
+        candidate: dict[str, object],
+        observation_terms: set[str],
+    ) -> bool:
+        candidate_text = " ".join(
+            [
+                str(candidate.get("title") or ""),
+                str(candidate.get("claim") or ""),
+                str(candidate.get("rule_based_reasoning") or ""),
+                " ".join(str(item) for item in list(candidate.get("evidence") or [])[:5]),
+                " ".join(str(item) for item in list(candidate.get("violated_guidelines") or [])[:5]),
+            ]
+        ).lower()
+        if not candidate_text:
+            return False
+        matches = [term for term in observation_terms if term in candidate_text]
+        return len(matches) >= min(2, len(observation_terms))
+
+    def _candidate_and_observation_share_risk_domain(
+        self,
+        candidate: dict[str, object],
+        observation: dict[str, object],
+    ) -> bool:
+        candidate_domains = self._risk_domains_from_text(
+            " ".join(
+                [
+                    str(candidate.get("title") or ""),
+                    str(candidate.get("claim") or ""),
+                    str(candidate.get("rule_based_reasoning") or ""),
+                    " ".join(str(item) for item in list(candidate.get("evidence") or [])[:5]),
+                    " ".join(str(item) for item in list(candidate.get("violated_guidelines") or [])[:5]),
+                ]
+            )
+        )
+        observation_domains = self._risk_domains_from_text(
+            " ".join(
+                [
+                    str(observation.get("kind") or ""),
+                    str(observation.get("summary") or ""),
+                    " ".join(str(item) for item in list(observation.get("evidence") or [])[:5]),
+                    " ".join(str(item) for item in list(observation.get("risk_hints") or [])[:5]),
+                ]
+            )
+        )
+        return bool(candidate_domains and observation_domains and candidate_domains.intersection(observation_domains))
+
+    def _risk_domains_from_text(self, value: str) -> set[str]:
+        text = str(value or "").lower()
+        domains: set[str] = set()
+        if any(term in text for term in ("like", "模糊匹配", "精确匹配", "查询语义", "query_plan", "索引", "全表扫描")):
+            domains.add("query_semantics")
+        if any(term in text for term in ("权限", "租户", "越权", "authorization", "scope_broadened", "数据范围")):
+            domains.add("authorization_scope")
+        if any(term in text for term in ("eventbus", "domain_event", "领域事件", "事件发布", "publish", "repository.save")):
+            domains.add("domain_event_ordering")
+        if any(term in text for term in ("工厂", "factory", "new course", "聚合根", "不变量")):
+            domains.add("aggregate_factory")
+        if any(term in text for term in ("catch", "exception", "异常", "吞掉", "静默")):
+            domains.add("exception_handling")
+        if any(term in text for term in ("循环", "loop", "for_each", "foreach", "逐条", "批量")):
+            domains.add("loop_or_batching")
+        return domains
 
     def _merge_expert_analysis_candidates(
         self,
@@ -669,6 +946,78 @@ class ReviewRunnerExpertOutputMixin:
         )
         return "\n".join(lines)
 
+    def _classify_tool_observation_candidate(
+        self,
+        *,
+        tool: str,
+        rule_id: str,
+        category: str,
+        message: str,
+        why_it_matters: str,
+        evidence: list[str],
+    ) -> tuple[str, str, str]:
+        text = "\n".join([tool, rule_id, category, message, why_it_matters, *evidence]).lower()
+        compact = re.sub(r"[\s_.]+", "-", text)
+        if any(token in compact for token in ("sql-injection", "injection", "jdbc-injection", "jpa-injection")):
+            return (
+                "sql_injection_risk",
+                "SQL/命令注入风险必须使用参数化查询、白名单校验或安全 API，禁止把外部输入直接拼接进 SQL/查询表达式。",
+                "确认输入来源和查询构造路径，改为参数绑定或 Criteria 参数化表达式，并补充恶意输入回归测试。",
+            )
+        if any(token in compact for token in ("xss", "cross-site-scripting")):
+            return (
+                "xss_output_encoding_risk",
+                "用户可控内容输出到页面、模板或响应前必须按上下文编码，禁止未转义直接输出。",
+                "按 HTML/JS/URL/CSS 上下文做编码或使用安全模板 API，并补充包含特殊字符的安全测试。",
+            )
+        if any(token in compact for token in ("ssrf", "server-side-request-forgery")):
+            return (
+                "ssrf_risk",
+                "外部可控 URL、主机或路径发起服务端请求前必须做白名单、协议和内网地址校验。",
+                "限制目标协议和域名/IP 范围，禁止访问内网与元数据地址，并补充绕过用例测试。",
+            )
+        if any(token in compact for token in ("secret", "password", "credential", "apikey", "api-key", "token-log", "token")):
+            return (
+                "sensitive_data_exposure",
+                "敏感凭据、token、密码和个人敏感信息不得写入日志、异常信息或明文响应。",
+                "移除明文输出或改为脱敏/哈希展示，补充日志断言防止敏感字段再次泄露。",
+            )
+        if any(token in compact for token in ("auth", "permission", "authorization", "access-control", "idor", "tenant")):
+            return (
+                "authorization_bypass_risk",
+                "涉及用户、租户、资源归属或管理操作的入口必须做鉴权和越权校验。",
+                "在服务入口或查询条件中补齐身份、角色、租户和资源归属校验，并增加越权访问测试。",
+            )
+        if any(token in compact for token in ("empty-catch", "emptycatch", "swallow", "catch-generic", "generic-exception")):
+            return (
+                "exception_swallowed",
+                "异常处理不能静默吞掉，至少需要日志、重新抛出、补偿或明确失败状态。",
+                "恢复异常日志和失败传播语义，按业务语义选择重试、补偿或抛出异常，并补充异常路径测试。",
+            )
+        if any(token in compact for token in ("n-plus-one", "n+1", "loop", "performance")):
+            return (
+                "loop_call_amplification",
+                "循环体内不应逐条执行数据库、远程接口或消息发送等外部依赖调用。",
+                "改为批量查询、批量提交或循环外聚合后统一处理，并补充大批量输入场景测试。",
+            )
+        if any(token in compact for token in ("unbounded-query", "limit", "pagination", "pageable", "full-table")):
+            return (
+                "unbounded_query_risk",
+                "列表、批处理和消费查询必须有稳定边界、分页或批量上限，禁止无界查询。",
+                "补充分页、limit 或固定批次窗口，并为大数据量场景补充回归测试。",
+            )
+        if str(category or "").strip().lower() == "security":
+            return (
+                "security_tool_observation",
+                "安全工具候选必须结合当前 diff、代码上下文、语言通用安全规范和绑定安全规范复核。",
+                "确认工具命中是否为当前变更引入，并按对应安全规范修复代码和补充测试。",
+            )
+        return (
+            f"tool_observation_{str(category or 'static_analysis').strip()}".replace("-", "_"),
+            "静态工具候选必须结合当前 diff、专家通用规范和绑定规范复核后才能升级。",
+            "结合具体工具规则和代码上下文修复该候选风险；若确认误报，在人工确认中说明误报依据。",
+        )
+
     def _build_forced_observation_candidates(
         self,
         *,
@@ -696,6 +1045,14 @@ class ReviewRunnerExpertOutputMixin:
                 rule_id = str(item.get("rule_id") or "rule").strip()
                 category = str(item.get("category") or "static_analysis").strip()
                 severity = str(item.get("severity") or "medium").strip().lower() or "medium"
+                issue_type, guideline, remediation_hint = self._classify_tool_observation_candidate(
+                    tool=tool,
+                    rule_id=rule_id,
+                    category=category,
+                    message=summary,
+                    why_it_matters=why_it_matters,
+                    evidence=evidence,
+                )
                 forced.append(
                     {
                         "file_path": file_path,
@@ -703,11 +1060,11 @@ class ReviewRunnerExpertOutputMixin:
                         "line_end": line_start,
                         "title": f"静态工具候选需复核：{rule_id}",
                         "finding_type": "risk_hypothesis",
-                        "normalized_issue_type": f"tool_observation_{category}".replace("-", "_"),
+                        "normalized_issue_type": issue_type,
                         "claim": f"{tool} 命中 {rule_id} 候选信号，当前变更需要由 {expert.name_zh} 结合上下文判断是否构成真实问题。",
                         "severity": "high" if severity in {"error", "critical", "high"} else "medium" if severity in {"warning", "medium"} else "low",
                         "matched_rules": [f"{tool}:{rule_id}"],
-                        "violated_guidelines": ["静态工具候选必须结合当前 diff、专家通用规范和绑定规范复核后才能升级"],
+                        "violated_guidelines": [guideline],
                         "rule_based_reasoning": why_it_matters or "该命中来自静态扫描工具，只能作为候选证据；需要专家确认是否落在当前变更和真实可达路径上。",
                         "evidence": evidence[:3] or [summary or f"{tool} 命中 {rule_id}"],
                         "cross_file_evidence": [],
@@ -715,8 +1072,8 @@ class ReviewRunnerExpertOutputMixin:
                         "context_files": [file_path] if file_path else [],
                         "observation_ids": [observation_id] if observation_id else [],
                         "adopted_tool_observations": [observation_id or f"{tool}:{rule_id}"],
-                        "fix_strategy": "先确认工具信号是否和本次变更相关，再按对应安全/质量规范修复代码并补充测试。",
-                        "suggested_fix": "结合具体工具规则和代码上下文修复该候选风险；若确认误报，在人工确认中说明误报依据。",
+                        "fix_strategy": remediation_hint,
+                        "suggested_fix": remediation_hint,
                         "change_steps": ["确认工具命中是否位于本次变更或影响路径", "按对应安全/质量规范修复代码", "补充回归测试或静态规则验证"],
                         "suggested_code": "",
                         "confidence": min(max(self._normalize_confidence(item.get("confidence"), 0.0), 0.62), 0.78),
@@ -1269,6 +1626,8 @@ class ReviewRunnerExpertOutputMixin:
         """把弱模型混入的其它文件/其它问题证据收回到当前 finding 锚点。"""
 
         result = dict(parsed)
+        if self._is_tool_observation_candidate(result):
+            return result
         anchor_domains = self._candidate_anchor_issue_domains(target_hunk, line_start)
         hunk_domains = anchor_domains if anchor_domains != {"general"} else self._candidate_issue_domains(str((target_hunk or {}).get("excerpt") or ""))
         metadata_domain_blob = "\n".join(
@@ -1481,6 +1840,16 @@ class ReviewRunnerExpertOutputMixin:
             return True
         return bool(unrelated and len(domains) > max(1, len(issue_domains)))
 
+    def _is_tool_observation_candidate(self, parsed: dict[str, object]) -> bool:
+        if str(parsed.get("evidence_source") or "").strip() == "tool_observation":
+            return True
+        if self._normalize_text_list(parsed.get("adopted_tool_observations"), []):
+            return True
+        for rule in self._normalize_text_list(parsed.get("matched_rules"), []):
+            if self._is_tool_rule_reference(rule, parsed):
+                return True
+        return False
+
     def _build_anchor_specific_claim(self, parsed: dict[str, object], file_path: str, line_start: int) -> str:
         title = str(parsed.get("title") or "当前变更存在代码质量问题").strip()
         basename = str(file_path or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
@@ -1561,6 +1930,10 @@ class ReviewRunnerExpertOutputMixin:
             "query_authorization_scope_broadened",
             "sql_injection_risk",
             "sensitive_data_exposure",
+            "authorization_bypass_risk",
+            "security_tool_observation",
+            "ssrf_risk",
+            "xss_output_encoding_risk",
             "security_guard_removed",
             "aggregate_factory_bypass",
             "aggregate_factory_bypassed",

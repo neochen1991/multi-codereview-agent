@@ -539,6 +539,10 @@ export interface GovernanceMetrics {
   review_count: number;
   issue_count: number;
   tool_confirmation_rate: number;
+  tool_observation_count: number;
+  tool_adoption_rate: number;
+  sast_cross_validated_issue_count: number;
+  tool_false_positive_rate: number;
   debate_survival_rate: number;
   needs_human_count: number;
   false_positive_count: number;
@@ -679,6 +683,7 @@ export interface RuntimeSettings {
   rule_screening_mode: "heuristic" | "llm";
   rule_screening_batch_size: number;
   rule_screening_llm_timeout_seconds: number;
+  review_quality_mode: "standard" | "thorough_review";
   enable_llm_targeted_debate: boolean;
   llm_targeted_debate_timeout_seconds: number;
   enable_sast_prescan: boolean;

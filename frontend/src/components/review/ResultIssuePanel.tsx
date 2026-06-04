@@ -10,6 +10,7 @@ import {
   issueTextMatchesIssueType,
   issueTypeDisplayLabel,
 } from "./issueDisplayQuality";
+import { getEffectiveIssues } from "./effectiveIssues";
 import ReviewResultListTable, { classifySpecificIssueType, type ReviewResultListRow } from "./ReviewResultListTable";
 
 const { Paragraph, Text } = Typography;
@@ -261,26 +262,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
     return map;
   }, [findings]);
 
-  const formalIssues = useMemo(
-    () =>
-      issues.filter(
-        (issue) =>
-          String(issue.human_decision || "").trim().toLowerCase() !== "rejected" &&
-          !["needs_verification", "comment", "abstain", "rejected_after_debate"].includes(
-            String(issue.status || "").trim().toLowerCase(),
-          ) &&
-          ![
-            "human_rejected",
-            "needs_verification",
-            "llm_judge_needs_verification",
-            "targeted_debate_needs_verification",
-            "feedback_profile_requires_more_evidence",
-            "comment",
-            "abstain",
-          ].includes(String(issue.resolution || "").trim().toLowerCase()),
-      ),
-    [issues],
-  );
+  const formalIssues = useMemo(() => getEffectiveIssues(issues), [issues]);
 
   const rows = useMemo<ReviewResultListRow[]>(
     () => {
@@ -371,7 +353,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
       const result = await reviewApi.exportIssuesToCodehub(reviewId, { issue_ids: selectedIssueIds });
       setExportResult(result);
       setPreviewOpen(true);
-      message.success(`已模拟提交 ${result.submitted_count} 条正式问题到缺陷平台`);
+      message.success(`已模拟提交 ${result.submitted_count} 条有效问题到缺陷平台`);
     } catch (error: any) {
       message.error(error?.message || "模拟提交到缺陷平台失败");
     } finally {
@@ -390,7 +372,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
           type="warning"
           style={{ marginBottom: 12 }}
           message="问题明细没有恢复出来"
-          description={`产物快照里记录了 ${expectedIssueCount} 个有效问题，但当前任务没有返回每个问题的详情。为避免误导，这里不会展示成“没有正式问题”，也暂不允许提交到缺陷平台。`}
+          description={`产物快照里记录了 ${expectedIssueCount} 个有效问题，但当前任务没有返回每个问题的详情。为避免误导，这里不会展示成“没有有效问题”，也暂不允许提交到缺陷平台。`}
         />
       ) : null}
       <ReviewResultListTable
@@ -419,7 +401,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         emptyText={
           detailsMissing
             ? "产物快照显示本次审核有有效问题，但问题详情没有恢复出来。请重新生成结果或恢复明细文件后再查看。"
-            : "当前没有正式问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
+            : "当前没有有效问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
         }
         disableHorizontalScroll
       />

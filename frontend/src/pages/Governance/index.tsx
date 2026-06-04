@@ -120,6 +120,26 @@ const GovernancePage: React.FC = () => {
           </Col>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
+              <Statistic title="工具观察数" value={metrics?.tool_observation_count || 0} />
+            </Card>
+          </Col>
+          <Col xs={24} md={8} xl={4}>
+            <Card className="module-card">
+              <Statistic title="工具采纳率" value={((metrics?.tool_adoption_rate || 0) * 100).toFixed(0)} suffix="%" />
+            </Card>
+          </Col>
+          <Col xs={24} md={8} xl={4}>
+            <Card className="module-card">
+              <Statistic title="SAST 交叉验证" value={metrics?.sast_cross_validated_issue_count || 0} />
+            </Card>
+          </Col>
+          <Col xs={24} md={8} xl={4}>
+            <Card className="module-card">
+              <Statistic title="工具误报率" value={((metrics?.tool_false_positive_rate || 0) * 100).toFixed(0)} suffix="%" />
+            </Card>
+          </Col>
+          <Col xs={24} md={8} xl={4}>
+            <Card className="module-card">
               <Statistic title="复核保留率" value={((metrics?.debate_survival_rate || 0) * 100).toFixed(0)} suffix="%" />
             </Card>
           </Col>

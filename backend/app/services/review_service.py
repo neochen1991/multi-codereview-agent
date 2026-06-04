@@ -516,9 +516,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             ]
         rows = [self._ensure_waiting_human_summary_duration(item) for item in rows]
         rows = [self._sanitize_light_review_summary(item) for item in rows]
-        if current_project_id or len(rows) <= 3:
-            return [self._apply_display_review_summary(item) for item in rows]
-        return rows
+        return [self._apply_display_review_summary(item) for item in rows]
 
     def _sanitize_light_review_summary(self, review: dict[str, object]) -> dict[str, object]:
         """轻量历史列表也要避免暴露内部/旧口径文案。"""
@@ -548,7 +546,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return review
         try:
             finding_count = len(self.list_display_findings(review_id))
-            issue_count = len([issue for issue in self.list_issues(review_id) if _is_formal_issue(issue)])
+            issue_count = len(self.list_display_issues(review_id))
         except Exception:
             return review
         next_review = dict(review)
@@ -558,7 +556,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         if finding_count or issue_count or str(next_review.get("report_summary") or "").strip():
             next_review["report_summary"] = (
                 f"审核报告已生成，共收敛 {finding_count} 条检视发现，"
-                f"形成 {issue_count} 个正式问题，其中 {pending_human_count} 个待人工确认。"
+                f"形成 {issue_count} 个有效问题，其中 {pending_human_count} 个待人工确认。"
             )
         return next_review
 
@@ -1305,17 +1303,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         resolution = str(issue.resolution or "").strip().lower()
         if status != "downgraded" and resolution != "consistency_validation_failed":
             return issue
-        return issue.model_copy(
-            update={
-                "status": "resolved",
-                "resolution": "accepted",
-                "needs_human": False,
-                "needs_debate": False,
-                "consistency_check_status": "repaired",
-                "consistency_check_summary": "系统已按当前代码片段重新整理问题说明和修改建议，展示内容已完成一致性修正。",
-                "consistency_conflicts": [],
-            }
-        )
+        return issue.model_copy(update={"status": "needs_human", "needs_human": True})
 
     @staticmethod
     def _normalize_user_visible_issue_state(issue: DebateIssue) -> DebateIssue:
@@ -1524,6 +1512,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 "query_bound_removed",
                 "query_boundary_missing",
                 "n_plus_one",
+                "sql_injection_risk",
+                "code_injection_risk",
+                "secret_leak_risk",
+                "authorization_boundary_risk",
             }:
                 continue
             key = (str(issue.file_path or "").strip(), family)
@@ -1611,6 +1603,23 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             if not current_code:
                 return any(token in text for token in ("query", "search", "find", "pagerequest", "pageable", "分页", "limit"))
             return any(token in current_code for token in ("query", "search", "find", "pagerequest", "pageable", "分页", "limit"))
+        if family == "event_consumer_batch_boundary":
+            return "mysqldomaineventsconsumer" in str(issue.file_path or "").strip().lower() and any(
+                token in text
+                for token in (
+                    "chunk",
+                    "chunks",
+                    "chunkstmp",
+                    "setmaxresults",
+                    "nativequery",
+                    "createquery",
+                    "query",
+                    "limit",
+                    "固定批次",
+                    "事件消费",
+                    "边界",
+                )
+            )
         if family == "n_plus_one":
             if not current_code:
                 return any(token in text for token in ("for (", ".foreach", "while (", "循环", "逐条", "n+1", "repository.", ".save", "查库"))
@@ -1652,6 +1661,20 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return not any(token in current_code for token in ("catch", "runtimeexception", "exception", "ignored", "异常"))
         if family in {"query_bound_removed", "query_boundary_missing"}:
             return not any(token in current_code for token in ("query", "search", "find", "pagerequest", "pageable", "limit"))
+        if family == "event_consumer_batch_boundary":
+            text = "\n".join(
+                [
+                    current_code,
+                    str(issue.title or "").strip().lower(),
+                    str(issue.summary or "").strip().lower(),
+                    str(issue.remediation_suggestion or "").strip().lower(),
+                    str(issue.suggested_code or "").strip().lower(),
+                ]
+            )
+            return not any(
+                token in text
+                for token in ("chunk", "chunks", "chunkstmp", "setmaxresults", "nativequery", "createquery", "limit", "固定批次", "事件消费")
+            )
         return False
 
     @staticmethod
@@ -1682,8 +1705,18 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return "exception_swallowed"
         if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
             return "query_bound_removed"
+        if issue_type == "event_consumer_batch_boundary":
+            return "event_consumer_batch_boundary"
         if issue_type in {"n_plus_one", "loop_call_amplification", "bulk_processing_boundary_missing"}:
             return "n_plus_one"
+        if issue_type in {"sql_injection_risk", "sql_injection", "command_injection_risk"}:
+            return "sql_injection_risk"
+        if issue_type in {"code_injection_risk", "eval_injection_risk", "xss_risk"}:
+            return "code_injection_risk"
+        if issue_type in {"secret_leak_risk", "sensitive_data_leak", "credential_leak_risk"}:
+            return "secret_leak_risk"
+        if issue_type in {"authorization_boundary_risk", "auth_bypass_risk", "access_control_risk"}:
+            return "authorization_boundary_risk"
         if any(token in compact for token in ("承诺未落地", "todo", "扣减库存", "未实现")):
             return "comment_contract_unimplemented"
         if any(token in compact for token in ("锁", "并发保护", "synchronized", "lockregistry", "lockfor")):
@@ -1694,6 +1727,12 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             return "n_plus_one"
         if any(token in compact for token in ("异常", "catch", "runtimeexception", "返回成功")):
             return "exception_swallowed"
+        if any(token in compact for token in ("sql", "注入", "injection", "preparedstatement")):
+            return "sql_injection_risk"
+        if any(token in compact for token in ("token", "secret", "password", "credential", "凭证", "敏感")):
+            return "secret_leak_risk"
+        if any(token in compact for token in ("auth", "authorization", "鉴权", "权限", "越权")):
+            return "authorization_boundary_risk"
         return issue_type
 
     def list_issue_messages(self, review_id: str, issue_id: str) -> list[ConversationMessage]:

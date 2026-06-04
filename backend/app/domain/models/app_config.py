@@ -110,7 +110,7 @@ class RuntimeConfig(BaseModel):
     llm_issue_judge_timeout_seconds: int = 45
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
-    enable_sast_prescan: bool = False
+    enable_sast_prescan: bool = True
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 60
     standard_llm_retry_count: int = 3

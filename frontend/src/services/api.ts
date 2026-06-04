@@ -549,6 +549,10 @@ export interface GovernanceMetrics {
   review_count: number;
   issue_count: number;
   tool_confirmation_rate: number;
+  tool_observation_count: number;
+  tool_adoption_rate: number;
+  sast_cross_validated_issue_count: number;
+  tool_false_positive_rate: number;
   debate_survival_rate: number;
   needs_human_count: number;
   false_positive_count: number;
@@ -715,6 +719,7 @@ export interface RuntimeSettings {
   rule_screening_mode: "heuristic" | "llm";
   rule_screening_batch_size: number;
   rule_screening_llm_timeout_seconds: number;
+  review_quality_mode: "standard" | "thorough_review";
   enable_llm_targeted_debate: boolean;
   llm_targeted_debate_timeout_seconds: number;
   enable_sast_prescan: boolean;
@@ -762,6 +767,7 @@ export interface SastToolStatusItem {
   status: "available" | "missing" | "requires_report" | string;
   executable?: string;
   report_paths?: string[];
+  existing_report_paths?: string[];
   verify_commands?: string[];
   install?: {
     windows?: string;
@@ -775,6 +781,8 @@ export interface SastToolsStatus {
   status: "enabled" | "disabled" | string;
   command_tools: SastToolStatusItem[];
   report_tools: SastToolStatusItem[];
+  summary?: string;
+  limitations?: string[];
   notes: string[];
 }
 

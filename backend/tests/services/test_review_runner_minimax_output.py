@@ -206,6 +206,29 @@ def test_rule_guided_contract_enforces_required_rule_coverage(storage_root: Path
     assert "rule_coverage_missing:PERF-SQL-001" in errors
 
 
+def test_tool_observation_contract_requires_every_observation_to_be_explained(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    payload = """
+    {
+      "rule_check_results": [
+        {"rule_id": "semgrep:java.sql-injection:42", "status": "violated", "evidence": ["x"], "reason": "x"}
+      ],
+      "candidate_findings": [],
+      "context_requests": [],
+      "self_check": {"checked_all_rules": true, "used_context_files": [], "unverified_assumptions": []}
+    }
+    """
+
+    valid, errors = runner._validate_rule_guided_llm_response_contract(
+        payload,
+        required_rule_ids=["semgrep:java.sql-injection:42", "pmd:EmptyCatchBlock:51"],
+        allow_general_candidate_rule_id=False,
+    )
+
+    assert valid is False
+    assert "rule_coverage_missing:pmd:EmptyCatchBlock:51" in errors
+
+
 def test_rule_guided_contract_requires_self_check_all_rules(storage_root: Path) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     payload = """

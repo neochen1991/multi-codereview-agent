@@ -121,6 +121,25 @@ def test_review_runner_emits_finding_created_event(storage_root: Path):
     assert any(event.event_type == "finding_created" for event in events)
 
 
+def test_review_runner_debate_system_prompt_does_not_conflict_with_debate_output_contract(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="ddd_architecture",
+        name="DDD Architecture",
+        name_zh="DDD架构专家",
+        role="关注聚合边界、上下文边界、分层职责和依赖方向。",
+    )
+
+    prompt = runner._build_debate_system_prompt(expert)
+
+    assert "本阶段是 debate/定向辩论" in prompt
+    assert "不要输出 JSON" in prompt
+    assert "rule_check_results" in prompt
+    assert "必须输出 rule_check_results" not in prompt
+    assert "candidate_findings" in prompt
+    assert "必须输出 candidate_findings" not in prompt
+
+
 def test_review_runner_records_code_graph_context_events_in_process_flow(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review_id = runner.bootstrap_demo_review()
@@ -1948,8 +1967,10 @@ def test_review_runner_runs_observation_followup_when_first_pass_misses_observat
         item for item in findings if (item.code_context or {}).get("observation_ids") == ["obs_loop_001"]
     )
     assert followup_finding.file_path == "src/main/java/com/acme/OrderService.java"
-    assert any(item.message_type == "expert_observation_followup" for item in messages)
-    assert "expert_observation_followup" in llm_calls
+    events = runner.event_repo.list(review.review_id)
+    assert any(item.event_type == "expert_observation_followup_fast_path" for item in events)
+    assert not any(item.message_type == "expert_observation_followup" for item in messages)
+    assert "expert_observation_followup" not in llm_calls
 
 
 def test_review_runner_adds_loop_risk_when_llm_misses_observation(storage_root: Path, monkeypatch):
@@ -2112,6 +2133,304 @@ def test_review_runner_observation_followup_keeps_multiple_distinct_findings(sto
 
     assert len(merged) == 2
     assert {item["title"] for item in merged} == {"循环内逐条远程调用", "注释承诺未落地"}
+
+
+def test_review_runner_skips_observation_followup_when_existing_candidate_covers_observation(
+    storage_root: Path,
+    monkeypatch,
+):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="database_analysis",
+        name="Database",
+        name_zh="数据库专家",
+        role="database",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_observation_skip_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/obs-skip",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/UserRepository.java"],
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+
+    def _unexpected_llm_call(**_kwargs):
+        raise AssertionError("covered observation should not trigger an LLM followup")
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _unexpected_llm_call)
+
+    initial_candidates = [
+        {
+            "file_path": "src/main/java/com/acme/UserRepository.java",
+            "title": "LIKE 前后通配符导致索引失效",
+            "claim": "builder.like(name, \"%\" + keyword + \"%\") 会让普通索引难以生效并造成全表扫描风险。",
+            "finding_type": "risk_hypothesis",
+            "severity": "medium",
+            "line_start": 42,
+            "evidence": ["新增 LIKE '%keyword%' 查询条件"],
+            "confidence": 0.82,
+        }
+    ]
+    result = runner._append_observation_followup_candidates(
+        review=review,
+        subject=review.subject,
+        expert=expert,
+        file_path="src/main/java/com/acme/UserRepository.java",
+        line_start=40,
+        repository_context={
+            "review_observations": [
+                {
+                    "observation_id": "obs_like_scan_001",
+                    "kind": "query_semantics",
+                    "file_path": "src/main/java/com/acme/UserRepository.java",
+                    "line_start": 44,
+                    "line_end": 44,
+                    "summary": "LIKE 前后通配符查询可能导致索引失效",
+                    "evidence": ["builder.like(..., \"%\" + keyword + \"%\")"],
+                    "risk_hints": ["全表扫描风险"],
+                }
+            ]
+        },
+        normalized_batch_items=[],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        active_skills=[],
+        rule_screening={},
+        initial_candidates=initial_candidates,
+        max_findings=8,
+    )
+
+    events = runner.event_repo.list(review.review_id)
+
+    assert result == initial_candidates
+    assert any(
+        item.event_type == "expert_observation_followup_skipped"
+        and (item.payload or {}).get("reason") == "covered_by_existing_candidates"
+        for item in events
+    )
+
+
+def test_review_runner_filters_observation_followup_to_current_batch_hunks(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+
+    observations = [
+        {
+            "observation_id": "obs_wrong_like",
+            "kind": "query_plan_risk",
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "line_start": 17,
+            "summary": "检测到查询计划可能退化的现象：like",
+            "evidence": ["like"],
+            "risk_hints": ["索引失配", "扫描范围扩大"],
+        },
+        {
+            "observation_id": "obs_event_order",
+            "kind": "domain_event_ordering_risk",
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "line_start": 22,
+            "summary": "检测到事件发布与持久化顺序变化现象",
+            "evidence": ["eventBus.publish", "repository.save"],
+            "risk_hints": ["领域事件顺序变化"],
+        },
+        {
+            "observation_id": "obs_like_scope",
+            "kind": "query_authorization_scope_broadened",
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 13,
+            "summary": "检测到共享过滤条件从精确匹配放宽为模糊匹配：equal_to_like",
+            "evidence": ["equal_to_like", "builder.like"],
+            "risk_hints": ["数据范围扩大"],
+        },
+    ]
+
+    course_batch = [
+        {
+            "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+            "line_start": 20,
+            "target_hunks": [
+                {
+                    "file_path": "src/mooc/main/tv/codely/mooc/courses/application/create/CourseCreator.java",
+                    "start_line": 17,
+                    "end_line": 24,
+                    "changed_lines": [20, 23],
+                    "excerpt": (
+                        "public void create(CourseId id, CourseName name, CourseDuration duration) {\n"
+                        "+ Course course = new Course(id, name, duration);\n"
+                        "  eventBus.publish(course.pullDomainEvents());\n"
+                        "+ repository.save(course);\n"
+                        "}"
+                    ),
+                }
+            ],
+        }
+    ]
+    hibernate_batch = [
+        {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 16,
+            "target_hunks": [
+                {
+                    "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+                    "start_line": 15,
+                    "end_line": 17,
+                    "changed_lines": [16],
+                    "excerpt": (
+                        "private Predicate equalsPredicateTransformer(Filter filter, Root<T> root) {\n"
+                        "+ return builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()));\n"
+                        "}"
+                    ),
+                }
+            ],
+        }
+    ]
+
+    course_scoped = runner._filter_observations_for_batch_context(observations, course_batch)
+    hibernate_scoped = runner._filter_observations_for_batch_context(observations, hibernate_batch)
+
+    assert [item["observation_id"] for item in course_scoped] == ["obs_event_order"]
+    assert [item["observation_id"] for item in hibernate_scoped] == ["obs_like_scope"]
+
+
+def test_review_runner_treats_same_hunk_query_semantic_candidate_as_covering_observation(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    candidates = [
+        {
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 16,
+            "title": "模糊匹配查询导致索引失效性能风险",
+            "claim": "查询语义从精确匹配改为模糊匹配，LIKE '%value%' 模式会导致全表扫描。",
+            "evidence": [
+                "builder.like(root.get(filter.field().value()), String.format(\"%%%s%%\", filter.value().value()))"
+            ],
+            "confidence": 0.91,
+        }
+    ]
+    observations = [
+        {
+            "observation_id": "obs_like_scope",
+            "kind": "query_authorization_scope_broadened",
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 13,
+            "summary": "检测到共享过滤条件从精确匹配放宽为模糊匹配：equal_to_like / shared_criteria",
+            "evidence": ["equal_to_like", "shared_criteria"],
+            "risk_hints": ["数据范围扩大", "权限/租户过滤弱化", "越权读取风险"],
+        },
+        {
+            "observation_id": "obs_query_plan",
+            "kind": "query_plan_risk",
+            "file_path": "src/shared/main/tv/codely/shared/infrastructure/hibernate/HibernateCriteriaConverter.java",
+            "line_start": 16,
+            "summary": "检测到查询计划可能退化的现象：like",
+            "evidence": ["like"],
+            "risk_hints": ["索引失配", "扫描范围扩大"],
+        },
+    ]
+
+    assert runner._observations_covered_by_existing_candidates(candidates, observations) is True
+
+
+def test_review_runner_observation_followup_calls_llm_for_uncovered_non_deterministic_observation(
+    storage_root: Path,
+    monkeypatch,
+):
+    runner = ReviewRunner(storage_root=storage_root)
+    expert = ExpertProfile(
+        expert_id="correctness_business",
+        name="Correctness",
+        name_zh="正确性专家",
+        role="correctness",
+        enabled=True,
+        system_prompt="prompt",
+    )
+    review = ReviewTask(
+        review_id="rev_observation_llm_demo",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/obs-llm",
+            target_ref="main",
+            changed_files=["src/main/java/com/acme/BillingService.java"],
+        ),
+        selected_experts=[expert.expert_id],
+    )
+    runner.review_repo.save(review)
+
+    llm_called = False
+
+    def _fake_complete_text(**kwargs):
+        nonlocal llm_called
+        phase = str((kwargs.get("log_context") or {}).get("phase") or "")
+        if phase == "expert_observation_followup":
+            llm_called = True
+        return LLMTextResult(
+            text=(
+                '{"findings":['
+                '{"file_path":"src/main/java/com/acme/BillingService.java","title":"金额状态更新缺少前置校验","claim":"新增状态更新前没有校验账单是否处于可修改状态。",'
+                '"finding_type":"risk_hypothesis","severity":"medium","line_start":58,"line_end":58,'
+                '"matched_rules":["CORR-STATE-001"],"violated_guidelines":["状态迁移前必须校验当前状态"],'
+                '"rule_based_reasoning":"状态机边界需要业务前置条件。","evidence":["status = PAID"],"cross_file_evidence":[],"assumptions":[],"context_files":[],'
+                '"observation_ids":["obs_state_001"],"fix_strategy":"增加状态机校验","suggested_fix":"更新前检查当前账单状态","change_steps":["查询当前状态","非法状态直接拒绝"],'
+                '"suggested_code":"if (!bill.canPay()) { throw new IllegalStateException(); }","confidence":0.78,"verification_needed":true,"verification_plan":"补充状态机测试"}'
+                ']}'
+            ),
+            mode="mock",
+            provider="test",
+            model="test",
+            base_url="http://llm.test",
+            api_key_env="TEST_KEY",
+        )
+
+    monkeypatch.setattr(runner.llm_chat_service, "complete_text", _fake_complete_text)
+
+    result = runner._append_observation_followup_candidates(
+        review=review,
+        subject=review.subject,
+        expert=expert,
+        file_path="src/main/java/com/acme/BillingService.java",
+        line_start=56,
+        repository_context={
+            "review_observations": [
+                {
+                    "observation_id": "obs_state_001",
+                    "kind": "business_state_transition",
+                    "file_path": "src/main/java/com/acme/BillingService.java",
+                    "line_start": 58,
+                    "line_end": 58,
+                    "summary": "业务状态迁移缺少前置状态校验",
+                    "evidence": ["status = PAID"],
+                    "risk_hints": ["非法重复支付风险"],
+                }
+            ]
+        },
+        normalized_batch_items=[],
+        runtime_settings=runner.runtime_settings_service.get(),
+        analysis_mode="standard",
+        llm_request_options={"timeout_seconds": 1, "max_attempts": 1},
+        bound_documents=[],
+        active_skills=[],
+        rule_screening={},
+        initial_candidates=[],
+        max_findings=8,
+    )
+
+    assert llm_called is True
+    assert len(result) == 1
+    assert result[0]["observation_ids"] == ["obs_state_001"]
 
 
 def test_review_runner_observation_merge_accepts_label_confidence(storage_root: Path):
@@ -2339,6 +2658,7 @@ def test_review_runner_keeps_selected_security_expert_executable(storage_root: P
 
 def test_thorough_review_overrides_router_skip_and_scans_all_hunks(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
+    runner.runtime_settings_service.update({"review_quality_mode": "thorough_review"})
     review_id = runner.bootstrap_demo_review()
     review = runner.review_repo.get(review_id)
     review.subject = ReviewSubject(
@@ -8938,6 +9258,44 @@ def test_review_runner_appends_deterministic_query_bound_finding(storage_root: P
     assert "确定性规则信号" in findings[0].confidence_rationale
     assert findings[0].line_start == 37
     assert "LIMIT" in " ".join(findings[0].evidence)
+    assert len(finding_payloads) == 1
+
+
+def test_review_runner_appends_deterministic_naming_convention_finding(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_chunks_tmp_demo",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/chunks-tmp",
+            target_ref="main",
+            changed_files=[
+                "src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java"
+            ],
+            unified_diff="""diff --git a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+--- a/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
++++ b/src/shared/main/tv/codely/shared/infrastructure/bus/event/mysql/MySqlDomainEventsConsumer.java
+@@ -9,7 +9,7 @@ public class MySqlDomainEventsConsumer {
+-\tprivate final Integer CHUNKS = 200;
++\tprivate final Integer chunksTmp = 200;
+}
+""",
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    finding_payloads: list[dict[str, object]] = []
+
+    runner._append_deterministic_java_quality_findings(review, finding_payloads)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].expert_id == "architecture_design"
+    assert findings[0].normalized_issue_type == "naming_convention_violation"
+    assert "chunksTmp" in findings[0].summary
+    assert "CODE-JAVA-001" in findings[0].matched_rules
     assert len(finding_payloads) == 1
 
 

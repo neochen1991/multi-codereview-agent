@@ -419,6 +419,20 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
           </Col>
           <Col xs={24} xl={8}>
             <Form.Item
+              name="review_quality_mode"
+              label="检视质量模式"
+              extra="普通模式只执行主 Agent 选中的专家；深度模式会补入核心质量专家以提高召回。"
+            >
+              <Select
+                options={[
+                  { label: "普通模式", value: "standard" },
+                  { label: "深度检视", value: "thorough_review" },
+                ]}
+              />
+            </Form.Item>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Form.Item
               name="enable_llm_targeted_debate"
               label="启用模型定向复核"
               valuePropName="checked"
@@ -437,7 +451,7 @@ const buildRuntimeItems = (form: FormInstance<RuntimeSettings>): CollapseProps["
               name="enable_sast_prescan"
               label="启用 SAST/linter 预扫描"
               valuePropName="checked"
-              extra="默认关闭。开启后才会调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告，为专家提示补充工具候选信号。"
+              extra="默认开启且 best-effort：会尝试调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告；未安装或无报告时只在诊断中提示，不阻断检视。"
             >
               <Switch />
             </Form.Item>
@@ -990,6 +1004,7 @@ export const sanitizeRuntimeSettingsPayload = (values: RuntimeSettings): Partial
   rule_screening_mode: values.rule_screening_mode || "llm",
   rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
   rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
+  review_quality_mode: values.review_quality_mode || "standard",
   enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
   llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
   enable_sast_prescan: Boolean(values.enable_sast_prescan),

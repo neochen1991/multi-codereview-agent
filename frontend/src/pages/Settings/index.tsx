@@ -1,6 +1,7 @@
 import React from "react";
 import { Alert, Button, Card, Col, Collapse, Descriptions, Form, Input, InputNumber, Row, Select, Space, Switch, Tabs, Tag, Typography, Upload, message } from "antd";
 import type { UploadProps } from "antd";
+import { CopyOutlined, FileSearchOutlined, ReloadOutlined, ToolOutlined } from "@ant-design/icons";
 
 import {
   expertApi,
@@ -19,11 +20,12 @@ import {
   type ProjectSettings,
   type ReviewWorkspaceCleanupResult,
   type RuntimeSettings,
+  type SastToolStatusItem,
   type SastToolsStatus,
 } from "@/services/api";
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
-const { Paragraph, Title } = Typography;
+const { Paragraph, Text, Title } = Typography;
 
 const stringifyList = (value?: string[]) => (Array.isArray(value) ? value.join(", ") : "");
 const parseList = (value: string) =>
@@ -100,6 +102,113 @@ const buildRuntimeProjectsWithRepositories = (runtime: RuntimeSettings, reposito
 };
 
 const collapseExpandIconPosition = "end" as const;
+
+const fallbackSastCommandTools: SastToolStatusItem[] = [
+  {
+    tool: "semgrep",
+    kind: "command",
+    category: "security",
+    purpose: "通用语义规则和安全规则扫描，适合发现 SQL 注入、越权、敏感信息暴露以及项目自定义规则命中。",
+    status: "unknown",
+    verify_commands: ["semgrep --version", "where semgrep"],
+    install: {
+      windows: "py -m pip install semgrep",
+      macos_linux: "python3 -m pip install semgrep",
+    },
+  },
+  {
+    tool: "pmd",
+    kind: "command",
+    category: "java_quality",
+    purpose: "Java 代码质量扫描，适合发现空 catch、复杂度过高、低效循环、重复逻辑和常见坏味道。",
+    status: "unknown",
+    verify_commands: ["pmd --version", "where pmd"],
+    install: {
+      windows: "choco install pmd 或下载 PMD 并把 bin 加入 PATH",
+      macos_linux: "brew install pmd 或下载 PMD 并把 bin 加入 PATH",
+    },
+  },
+  {
+    tool: "checkstyle",
+    kind: "command",
+    category: "java_quality",
+    purpose: "Java 编码规范扫描，适合检查命名、导入、格式、注释和团队约定的风格规则。",
+    status: "unknown",
+    verify_commands: ["checkstyle --version", "where checkstyle"],
+    install: {
+      windows: "choco install checkstyle 或下载 checkstyle jar 并配置 PATH 包装命令",
+      macos_linux: "brew install checkstyle",
+    },
+  },
+  {
+    tool: "eslint",
+    kind: "command",
+    category: "frontend_quality",
+    purpose: "JavaScript/TypeScript 静态检查，适合发现 React Hook 误用、未处理 Promise、可疑依赖和前端质量问题。",
+    status: "unknown",
+    verify_commands: ["eslint --version", "where eslint"],
+    install: {
+      windows: "npm install -g eslint",
+      macos_linux: "npm install -g eslint",
+    },
+  },
+  {
+    tool: "bandit",
+    kind: "command",
+    category: "python_security",
+    purpose: "Python 安全扫描，适合发现危险函数调用、弱加密、硬编码密钥、命令注入和不安全反序列化。",
+    status: "unknown",
+    verify_commands: ["bandit --version", "where bandit"],
+    install: {
+      windows: "py -m pip install bandit",
+      macos_linux: "python3 -m pip install bandit",
+    },
+  },
+];
+
+const fallbackSastReportTools: SastToolStatusItem[] = [
+  {
+    tool: "spotbugs",
+    kind: "report",
+    category: "java_quality",
+    purpose: "读取 Java 字节码缺陷报告，适合补充空指针、资源泄漏、并发缺陷和安全 bug pattern 信号。",
+    status: "requires_report",
+    report_paths: ["target/spotbugsXml.xml", "target/spotbugs.xml", "target/site/spotbugs.xml", "build/reports/spotbugs/main.xml", "build/reports/spotbugs/test.xml", "spotbugs.xml"],
+  },
+  {
+    tool: "archunit",
+    kind: "report",
+    category: "architecture",
+    purpose: "读取架构测试报告，适合发现分层依赖反向、包边界穿透、DDD 边界破坏等架构约束失败。",
+    status: "requires_report",
+    report_paths: ["target/surefire-reports/*.xml", "target/failsafe-reports/*.xml", "build/test-results/**/*.xml"],
+  },
+  {
+    tool: "jacoco",
+    kind: "report",
+    category: "test_coverage",
+    purpose: "读取测试覆盖率报告，适合提示本次变更附近的未覆盖行，作为补测试和风险复核候选信号。",
+    status: "requires_report",
+    report_paths: [
+      "target/site/jacoco/jacoco.xml",
+      "target/site/jacoco-aggregate/jacoco.xml",
+      "build/reports/jacoco/test/jacocoTestReport.xml",
+      "build/reports/jacoco/testCodeCoverageReport/testCodeCoverageReport.xml",
+      "jacoco.xml",
+    ],
+  },
+];
+
+const sastToolIntroductions: Record<string, string> = {
+  semgrep: "Semgrep 用规则匹配代码语义模式，偏安全和项目自定义规则；它的命中适合作为专家复核的强候选线索。",
+  pmd: "PMD 聚焦 Java 代码质量和可维护性，能补充复杂度、低效实现和坏味道类问题的确定性提示。",
+  checkstyle: "Checkstyle 聚焦 Java 团队规范，适合把命名、导入、格式和注释类规则沉淀为可重复检查。",
+  eslint: "ESLint 覆盖前端 JavaScript/TypeScript 质量规则，尤其适合 React、异步处理和依赖声明类问题。",
+  bandit: "Bandit 面向 Python 安全风险，适合给危险 API、弱加密、注入和密钥暴露提供预扫描线索。",
+  spotbugs: "SpotBugs 通过构建产物分析 Java bug pattern，当前设置页读取已有 XML 报告，不直接启动构建。",
+  archunit: "ArchUnit 通过测试报告暴露架构约束失败，适合把分层、依赖方向和领域边界问题交给架构专家确认。",
+  jacoco: "JaCoCo 通过覆盖率报告提示测试保护缺口，当前只作为风险线索，不会单独升级为正式问题。",
+};
 
 const formatBeijingTime = (value?: string) => {
   const text = String(value || "").trim();
@@ -692,54 +801,182 @@ const SettingsPage: React.FC = () => {
     if (state === "available" || state === "enabled") return "success";
     if (state === "requires_report" || state === "disabled") return "warning";
     if (state === "missing") return "error";
+    if (state === "unknown") return "default";
     return "default";
+  };
+
+  const copySastToolText = async (text: string, label: string) => {
+    const value = String(text || "").trim();
+    if (!value) return;
+    if (!navigator.clipboard) {
+      message.warning("当前浏览器不支持自动复制，请手动复制。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      message.success(`${label}已复制`);
+    } catch {
+      message.warning("复制失败，请手动复制。");
+    }
+  };
+
+  const refreshSastToolsStatus = async () => {
+    try {
+      const status = await settingsApi.getSastToolsStatus();
+      setSastToolsStatus(status);
+      message.success("静态工具状态已刷新");
+    } catch (error: any) {
+      message.error(error?.message || "刷新静态工具状态失败");
+    }
+  };
+
+  const renderSastToolEntry = (tool: SastToolStatusItem, kindLabel: string) => {
+    const verifyCommands = tool.verify_commands || [];
+    const reportPaths = tool.report_paths || [];
+    const existingReportPaths = tool.existing_report_paths || [];
+    const installEntries = Object.entries(tool.install || {}).filter(([, value]) => String(value || "").trim());
+    const copyText = verifyCommands.length ? verifyCommands.join("\n") : reportPaths.join("\n");
+    return {
+      key: `${tool.kind}-${tool.tool}`,
+      label: (
+        <Space wrap>
+          {tool.kind === "command" ? <ToolOutlined /> : <FileSearchOutlined />}
+          <strong>{tool.tool}</strong>
+          <Tag color={sastStatusColor(tool.status)}>{tool.status}</Tag>
+          <Tag>{kindLabel}</Tag>
+          {tool.category ? <Tag>{tool.category}</Tag> : null}
+        </Space>
+      ),
+      children: (
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          <Paragraph style={{ marginBottom: 0 }}>{sastToolIntroductions[tool.tool] || tool.purpose}</Paragraph>
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <div>
+              <Text type="secondary">用途</Text>
+              <Paragraph style={{ marginBottom: 0 }}>{tool.purpose}</Paragraph>
+            </div>
+            {tool.executable ? (
+              <div>
+                <Text type="secondary">命令路径</Text>
+                <Paragraph code copyable style={{ marginBottom: 0 }}>
+                  {tool.executable}
+                </Paragraph>
+              </div>
+            ) : null}
+            {verifyCommands.length ? (
+              <div>
+                <Text type="secondary">校验命令</Text>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  {verifyCommands.map((command) => (
+                    <Paragraph key={command} code copyable style={{ marginBottom: 0 }}>
+                      {command}
+                    </Paragraph>
+                  ))}
+                </Space>
+              </div>
+            ) : null}
+            {installEntries.length ? (
+              <div>
+                <Text type="secondary">安装方式</Text>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  {installEntries.map(([platformName, command]) => (
+                    <Paragraph key={platformName} style={{ marginBottom: 0 }}>
+                      <Text strong>{platformName}</Text>
+                      {`: ${command}`}
+                    </Paragraph>
+                  ))}
+                </Space>
+              </div>
+            ) : null}
+            {reportPaths.length ? (
+              <div>
+                <Text type="secondary">报告路径</Text>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  {reportPaths.map((path) => (
+                    <Paragraph key={path} code copyable style={{ marginBottom: 0 }}>
+                      {path}
+                    </Paragraph>
+                  ))}
+                </Space>
+              </div>
+            ) : null}
+            {existingReportPaths.length ? (
+              <div>
+                <Text type="secondary">已发现报告</Text>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  {existingReportPaths.map((path) => (
+                    <Paragraph key={path} code copyable style={{ marginBottom: 0 }}>
+                      {path}
+                    </Paragraph>
+                  ))}
+                </Space>
+              </div>
+            ) : null}
+          </Space>
+          {copyText ? (
+            <Button icon={<CopyOutlined />} size="small" onClick={() => void copySastToolText(copyText, verifyCommands.length ? "校验命令" : "报告路径")}>
+              复制{verifyCommands.length ? "校验命令" : "报告路径"}
+            </Button>
+          ) : null}
+        </Space>
+      ),
+    };
   };
 
   const renderSastToolStatus = () => {
     const status = sastToolsStatus;
-    if (!status) {
-      return <Alert type="info" showIcon message="SAST/linter 工具状态暂不可用" description="刷新设置页后会重新检测本机命令和报告类工具要求。" />;
-    }
-    const commandTools = status.command_tools || [];
-    const reportTools = status.report_tools || [];
+    const commandTools = status?.command_tools?.length ? status.command_tools : fallbackSastCommandTools;
+    const reportTools = status?.report_tools?.length ? status.report_tools : fallbackSastReportTools;
     return (
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         <Alert
-          type={status.enabled ? "success" : "warning"}
+          type={status?.enabled ? "success" : "warning"}
           showIcon
-          message={status.enabled ? "SAST/linter 预扫描已启用" : "SAST/linter 预扫描未启用"}
-          description="工具输出只作为专家 Agent 的辅助观察点，不会直接生成正式问题。Windows 下必须让后端进程 PATH 能找到命令。"
+          message={status ? (status.enabled ? "SAST/linter 预扫描已启用" : "SAST/linter 预扫描未启用") : "SAST/linter 工具状态暂不可用"}
+          description={
+            <Space direction="vertical" size={6}>
+              <span>{status?.summary || "下面仍展示已支持的静态工具入口；刷新设置页后会重新检测本机命令和报告类工具要求。"}</span>
+              <span>工具输出只作为专家 Agent 的辅助观察点，不会直接生成正式问题。Windows 下必须让后端进程 PATH 能找到命令。</span>
+              {status?.limitations?.length ? <span>{`限制：${status.limitations.join(" / ")}`}</span> : null}
+            </Space>
+          }
+          action={
+            <Button icon={<ReloadOutlined />} size="small" onClick={() => void refreshSastToolsStatus()}>
+              刷新
+            </Button>
+          }
         />
         <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="当前平台">{status.platform || "unknown"}</Descriptions.Item>
-          <Descriptions.Item label="命令类工具">
-            <Space direction="vertical" size={4}>
-              {commandTools.map((tool) => (
-                <div key={tool.tool}>
-                  <Tag color={sastStatusColor(tool.status)}>{`${tool.tool}: ${tool.status}`}</Tag>
-                  {tool.category ? <Tag>{tool.category}</Tag> : null}
-                  <span>{tool.executable || tool.purpose}</span>
-                  {tool.install?.windows ? <div className="settings-muted">{`Windows 安装：${tool.install.windows}`}</div> : null}
-                  {tool.verify_commands?.length ? <div className="settings-muted">{`校验命令：${tool.verify_commands.join(" / ")}`}</div> : null}
-                </div>
-              ))}
-            </Space>
-          </Descriptions.Item>
-          <Descriptions.Item label="报告类工具">
-            <Space direction="vertical" size={4}>
-              {reportTools.map((tool) => (
-                <div key={tool.tool}>
-                  <Tag color={sastStatusColor(tool.status)}>{`${tool.tool}: ${tool.status}`}</Tag>
-                  {tool.category ? <Tag>{tool.category}</Tag> : null}
-                  <span>{tool.purpose}</span>
-                  {tool.report_paths?.length ? (
-                    <div className="settings-muted">{`报告路径：${tool.report_paths.slice(0, 3).join(" / ")}${tool.report_paths.length > 3 ? " / ..." : ""}`}</div>
-                  ) : null}
-                </div>
-              ))}
-            </Space>
-          </Descriptions.Item>
+          <Descriptions.Item label="当前平台">{status?.platform || "unknown"}</Descriptions.Item>
+          <Descriptions.Item label="状态说明">{status?.notes?.join(" / ") || "命令类工具需要后端 PATH 可识别；报告类工具需要项目先生成 XML 报告。"}</Descriptions.Item>
         </Descriptions>
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: "command-tools",
+              label: (
+                <Space wrap>
+                  <ToolOutlined />
+                  <strong>命令类静态工具设置</strong>
+                  <Tag>{commandTools.length}</Tag>
+                </Space>
+              ),
+              children: <Collapse size="small" items={commandTools.map((tool) => renderSastToolEntry(tool, "命令类"))} />,
+            },
+            {
+              key: "report-tools",
+              label: (
+                <Space wrap>
+                  <FileSearchOutlined />
+                  <strong>报告类静态工具设置</strong>
+                  <Tag>{reportTools.length}</Tag>
+                </Space>
+              ),
+              children: <Collapse size="small" items={reportTools.map((tool) => renderSastToolEntry(tool, "报告类"))} />,
+            },
+          ]}
+        />
       </Space>
     );
   };
@@ -1267,6 +1504,7 @@ const SettingsPage: React.FC = () => {
                 rule_screening_mode: values.rule_screening_mode || "llm",
                 rule_screening_batch_size: Number(values.rule_screening_batch_size || 12),
                 rule_screening_llm_timeout_seconds: Number(values.rule_screening_llm_timeout_seconds || 90),
+                review_quality_mode: values.review_quality_mode || "standard",
                 enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
                 llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
                 enable_sast_prescan: Boolean(values.enable_sast_prescan),
@@ -1789,6 +2027,20 @@ const SettingsPage: React.FC = () => {
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
+                          name="review_quality_mode"
+                          label="检视质量模式"
+                          extra="普通模式只执行主 Agent 选中的检查角色；深度模式会补入核心质量角色以提高召回。"
+                        >
+                          <Select
+                            options={[
+                              { label: "普通模式", value: "standard" },
+                              { label: "深度检视", value: "thorough_review" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
                           name="enable_llm_targeted_debate"
                           label="启用模型定向复核"
                           valuePropName="checked"
@@ -1807,7 +2059,7 @@ const SettingsPage: React.FC = () => {
                           name="enable_sast_prescan"
                           label="启用 SAST/linter 预扫描"
                           valuePropName="checked"
-                          extra="默认关闭。开启后才会调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告，为检查角色补充工具候选信号。"
+                          extra="默认开启且 best-effort：会尝试调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告；未安装或无报告时只在诊断中提示，不阻断检视。"
                         >
                           <Switch />
                         </Form.Item>

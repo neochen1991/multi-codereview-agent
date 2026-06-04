@@ -114,7 +114,7 @@ class LLMChatService:
         endpoint = resolution.base_url.rstrip("/") + "/chat/completions"
         payload = None
         last_error = ""
-        safe_attempts = self._effective_max_attempts(max_attempts, runtime_settings)
+        safe_attempts = self._effective_max_attempts(max_attempts, runtime_settings, log_context=log_context)
         safe_timeout = max(10.0, float(timeout_seconds or 60.0))
         client_timeout = self._build_http_timeout(safe_timeout)
         call_id = f"llm_{uuid4().hex[:12]}"
@@ -407,10 +407,22 @@ class LLMChatService:
         self,
         max_attempts: int,
         runtime_settings: RuntimeSettings | None,
+        log_context: dict[str, object] | None = None,
     ) -> int:
         safe_attempts = max(1, int(max_attempts or 1))
         quality_mode = str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower()
         if quality_mode != "thorough_review":
+            return safe_attempts
+        phase = str((log_context or {}).get("phase") or "").strip()
+        if phase in {
+            "expert_tool_observation_scan",
+            "expert_custom_rule_batch_scan",
+            "expert_general_profile_scan",
+            "expert_observation_followup",
+            "expert_context_request_followup",
+            "expert_repair_suggested_code",
+            "debate",
+        }:
             return safe_attempts
         retry_floor = max(1, int(os.getenv("REVIEW_THOROUGH_LLM_MIN_ATTEMPTS", "2") or 2))
         return max(safe_attempts, retry_floor)

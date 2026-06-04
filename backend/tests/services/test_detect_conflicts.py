@@ -527,6 +527,63 @@ def test_detect_conflicts_upgrades_concrete_security_rule_finding_even_when_veri
     assert result["issue_filter_decisions"] == []
 
 
+def test_detect_conflicts_upgrades_security_tool_candidate_with_code_evidence():
+    state = {
+        "issue_filter_config": {
+            "issue_filter_enabled": True,
+            "issue_min_priority_level": "P2",
+            "suppress_low_risk_hint_issues": False,
+            "hint_issue_confidence_threshold": 0.85,
+            "hint_issue_evidence_cap": 2,
+            "issue_confidence_threshold_p0": 0.98,
+            "issue_confidence_threshold_p1": 0.9,
+            "issue_confidence_threshold_p2": 0.8,
+            "issue_confidence_threshold_p3": 0.7,
+        },
+        "findings": [
+            {
+                "finding_id": "fdg_semgrep_sql_injection",
+                "expert_id": "security_compliance",
+                "title": "静态工具候选需复核：java.sql-injection",
+                "summary": "semgrep 命中 java.sql-injection 候选信号，当前变更需要由安全专家结合上下文判断是否构成真实问题。",
+                "finding_type": "risk_hypothesis",
+                "normalized_issue_type": "tool_observation_security",
+                "severity": "high",
+                "confidence": 0.78,
+                "verification_needed": True,
+                "file_path": "src/main/java/demo/UserDao.java",
+                "line_start": 42,
+                "evidence": [
+                    "semgrep:java.sql-injection",
+                    'String sql = "select * from user where name = " + name',
+                    "User input is concatenated into SQL.",
+                ],
+                "cross_file_evidence": [],
+                "context_files": ["src/main/java/demo/UserDao.java"],
+                "matched_rules": ["semgrep:java.sql-injection"],
+                "violated_guidelines": ["静态工具候选必须结合当前 diff、专家通用规范和绑定规范复核后才能升级"],
+                "adopted_tool_observations": ["semgrep:java.sql-injection:42"],
+                "sast_prescan_matches": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "message": "User input is concatenated into SQL.",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 42,
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = detect_conflicts(state)
+
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["issue_id"] == "fdg_semgrep_sql_injection"
+    assert result["conflicts"][0]["sast_cross_validated"] is True
+    assert result["issue_filter_decisions"] == []
+
+
 def test_detect_conflicts_upgrades_security_direct_defect_with_context_gap_and_moderate_confidence():
     state = {
         "issue_filter_config": {

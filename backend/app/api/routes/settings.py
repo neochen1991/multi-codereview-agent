@@ -114,12 +114,14 @@ class RuntimeSettingsRequest(BaseModel):
     enable_llm_issue_judge: bool = False
     llm_issue_judge_confidence_threshold: float = 0.78
     llm_issue_judge_timeout_seconds: int = 45
+    enable_sast_prescan: bool = True
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
     enable_review_workspace_realtime_graph: bool = False
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150
+    review_quality_mode: Literal["standard", "thorough_review"] = "standard"
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3

@@ -69,7 +69,7 @@ const OverviewCards: React.FC<OverviewCardsProps> = ({
       <Col xs={24} md={8} xl={4}>
         <button type="button" className={`overview-stat-button ${onIssueClick ? "overview-stat-button-clickable" : ""}`} onClick={onIssueClick}>
           <Card className="module-card">
-            <Statistic title="正式问题" value={issueCount} />
+            <Statistic title="有效问题" value={issueCount} />
           </Card>
         </button>
       </Col>

@@ -350,7 +350,7 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
-      title: "正式问题数",
+      title: "有效问题数",
       dataIndex: "issue_count",
       key: "issue_count",
       width: 120,

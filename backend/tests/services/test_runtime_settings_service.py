@@ -101,6 +101,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
             "default_analysis_mode": "light",
             "standard_llm_timeout_seconds": 90,
             "runtime_tool_allowlist": ["repo_context_search"],
+            "review_quality_mode": "thorough_review",
             "light_llm_max_prompt_chars": 88000,
             "light_llm_max_input_tokens": 98000,
         }
@@ -114,6 +115,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert runtime.default_analysis_mode == "light"
     assert runtime.standard_llm_timeout_seconds == 90
     assert runtime.runtime_tool_allowlist == ["repo_context_search", "gitnexus_impact_analysis"]
+    assert runtime.review_quality_mode == "thorough_review"
     assert runtime.light_llm_max_prompt_chars == 88000
     assert runtime.light_llm_max_input_tokens == 98000
 
@@ -136,6 +138,7 @@ def test_runtime_settings_service_splits_config_and_sqlite_persistence(storage_r
     assert sqlite_payload["default_analysis_mode"] == "light"
     assert sqlite_payload["standard_llm_timeout_seconds"] == 90
     assert sqlite_payload["runtime_tool_allowlist"] == ["repo_context_search"]
+    assert sqlite_payload["review_quality_mode"] == "thorough_review"
     assert sqlite_payload["light_llm_max_prompt_chars"] == 88000
     assert sqlite_payload["light_llm_max_input_tokens"] == 98000
     assert "code_repo_clone_url" not in sqlite_payload
@@ -231,17 +234,17 @@ def test_runtime_settings_service_persists_rule_screening_fields_in_sqlite(stora
     assert sqlite_payload["rule_screening_llm_timeout_seconds"] == 150
 
 
-def test_runtime_settings_service_keeps_sast_prescan_disabled_by_default(storage_root: Path) -> None:
+def test_runtime_settings_service_enables_sast_prescan_by_default(storage_root: Path) -> None:
     runtime = RuntimeSettingsService(storage_root).get()
 
-    assert runtime.enable_sast_prescan is False
+    assert runtime.enable_sast_prescan is True
 
 
 def test_runtime_settings_service_persists_sast_prescan_toggle_in_sqlite(storage_root: Path) -> None:
     service = RuntimeSettingsService(storage_root)
 
-    runtime = service.update({"enable_sast_prescan": True})
+    runtime = service.update({"enable_sast_prescan": False})
 
-    assert runtime.enable_sast_prescan is True
+    assert runtime.enable_sast_prescan is False
     sqlite_payload = SqliteRuntimeSettingsRepository(storage_root / "app.db").get_payload() or {}
-    assert sqlite_payload["enable_sast_prescan"] is True
+    assert sqlite_payload["enable_sast_prescan"] is False

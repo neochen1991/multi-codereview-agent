@@ -25,6 +25,10 @@ class ReviewServiceProjectionMixin:
         reviews = self.list_reviews()
         total_issues = 0
         tool_verified = 0
+        tool_observation_count = 0
+        tool_adopted_count = 0
+        sast_cross_validated_issue_count = 0
+        tool_false_positive_count = 0
         debated = 0
         surviving = 0
         needs_human = 0
@@ -32,8 +36,14 @@ class ReviewServiceProjectionMixin:
         for review in reviews:
             issues = self.list_issues(review.review_id)
             feedback_labels = self.list_feedback_labels(review.review_id)
+            tool_issue_ids = {
+                item.issue_id
+                for item in issues
+                if item.tool_verified or item.sast_cross_validated or item.tool_name or item.sast_prescan_matches
+            }
             total_issues += len(issues)
             tool_verified += len([item for item in issues if item.tool_verified])
+            sast_cross_validated_issue_count += len([item for item in issues if item.sast_cross_validated])
             debated += len([item for item in issues if item.needs_debate])
             surviving += len(
                 [
@@ -44,12 +54,31 @@ class ReviewServiceProjectionMixin:
             )
             needs_human += len([item for item in issues if item.needs_human])
             false_positive += len([item for item in feedback_labels if item.label == "false_positive"])
+            tool_false_positive_count += len(
+                [
+                    item
+                    for item in feedback_labels
+                    if item.label == "false_positive" and item.issue_id in tool_issue_ids
+                ]
+            )
+            for message in self.list_all_messages(review.review_id):
+                metadata = dict(message.metadata or {})
+                scan = metadata.get("tool_observation_scan")
+                if not isinstance(scan, dict):
+                    continue
+                tool_observation_count += int(scan.get("tool_observation_count") or 0)
+                tool_adopted_count += int(scan.get("candidate_count") or 0)
         denominator = total_issues or 1
         debated_denominator = debated or 1
+        observation_denominator = tool_observation_count or 1
         return {
             "review_count": len(reviews),
             "issue_count": total_issues,
             "tool_confirmation_rate": round(tool_verified / denominator, 2),
+            "tool_observation_count": tool_observation_count,
+            "tool_adoption_rate": round(tool_adopted_count / observation_denominator, 2),
+            "sast_cross_validated_issue_count": sast_cross_validated_issue_count,
+            "tool_false_positive_rate": round(tool_false_positive_count / observation_denominator, 2),
             "debate_survival_rate": round(surviving / debated_denominator, 2),
             "needs_human_count": needs_human,
             "false_positive_count": false_positive,

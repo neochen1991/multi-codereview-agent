@@ -686,8 +686,13 @@ class SastPreScanService:
             observation = dict(item)
             tool = str(observation.get("tool") or "tool").strip()
             rule_id = str(observation.get("rule_id") or "unknown").strip()
+            file_path = str(observation.get("file_path") or observation.get("path") or "").strip().replace("\\", "/")
             line_start = int(observation.get("line_start") or 1)
-            observation["observation_id"] = f"{tool}:{rule_id}:{line_start}"
+            legacy_observation_id = f"{tool}:{rule_id}:{line_start}"
+            observation_id = f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line_start}"
+            observation["id"] = observation_id
+            observation["observation_id"] = observation_id
+            observation["legacy_observation_id"] = legacy_observation_id
             observation["source"] = "sast_prescan"
             observation["observation_type"] = "tool_observation"
             observation["category"] = self._category_for_tool(

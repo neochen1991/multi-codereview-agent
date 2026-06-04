@@ -522,4 +522,8 @@ class ReviewRunnerCommonMixin:
                 floor = max(1, int(os.getenv("REVIEW_THOROUGH_LIGHT_MIN_PARALLEL_EXPERTS", "2") or 2))
                 return min(max(configured, floor), cap)
             return configured
-        return max(1, int(getattr(runtime_settings, "standard_max_parallel_experts", 4) or 4))
+        configured = max(1, int(getattr(runtime_settings, "standard_max_parallel_experts", 4) or 4))
+        if str(getattr(runtime_settings, "review_quality_mode", "") or "").strip().lower() == "thorough_review":
+            cap = max(1, int(os.getenv("REVIEW_THOROUGH_STANDARD_MAX_PARALLEL_EXPERTS", "2") or 2))
+            return min(configured, cap)
+        return configured

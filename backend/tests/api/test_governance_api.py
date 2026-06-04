@@ -7,6 +7,10 @@ def test_governance_endpoint_returns_quality_metrics(client):
     assert response.status_code == 200
     payload = response.json()
     assert "tool_confirmation_rate" in payload
+    assert "tool_observation_count" in payload
+    assert "tool_adoption_rate" in payload
+    assert "sast_cross_validated_issue_count" in payload
+    assert "tool_false_positive_rate" in payload
     assert "debate_survival_rate" in payload
 
 

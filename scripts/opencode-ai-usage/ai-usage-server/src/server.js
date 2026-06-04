@@ -49,6 +49,28 @@ const batchSchema = z.object({
   events: z.array(usageEventSchema).min(1).max(500),
 });
 
+const tokenUsageEventSchema = z.object({
+  eventId: z.string().min(1),
+  ts: z.string().min(1),
+  source: z.string().optional().default("opencode-plugin-probe"),
+  sessionId: z.string().min(1),
+  messageId: z.string().optional().default(""),
+  clientId: z.string().min(1),
+  project: z.string().min(1),
+  user: z.string().min(1),
+  employeeId: z.string().min(1),
+  model: z.string().optional().default("unknown-model"),
+  provider: z.string().optional().default("unknown-provider"),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  rawUsage: z.record(z.any()).optional().default({}),
+});
+
+const tokenBatchSchema = z.object({
+  events: z.array(tokenUsageEventSchema).min(1).max(500),
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -127,6 +149,46 @@ app.get("/api/usage/events", (req, res) => {
   res.json({ events: rows });
 });
 
+app.post("/api/token-usage/events", (req, res) => {
+  const parsed = tokenBatchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: {
+        message: parsed.error.message,
+        type: "invalid_request_error",
+      },
+    });
+  }
+
+  const result = insertTokenEvents(parsed.data.events);
+  res.json({
+    ok: true,
+    inserted: result.inserted,
+    duplicates: result.duplicates,
+  });
+});
+
+app.get("/api/token-usage/ranking", (req, res) => {
+  res.json({
+    metric: "ai_token_usage",
+    generatedAt: new Date().toISOString(),
+    ranking: queryTokenRanking(req.query),
+  });
+});
+
+app.get("/api/token-usage/summary", (req, res) => {
+  res.json({
+    metric: "ai_token_usage",
+    generatedAt: new Date().toISOString(),
+    total: queryTokenTotal(req.query),
+    byDate: queryTokenGroup("date(ts)", req.query),
+    byEmployeeId: queryTokenGroup("employee_id", req.query),
+    byProject: queryTokenGroup("project", req.query),
+    byModel: queryTokenGroup("model", req.query),
+    byProvider: queryTokenGroup("provider", req.query),
+  });
+});
+
 app.listen(port, host, () => {
   console.log(`AI usage server listening on http://${host}:${port}`);
 });
@@ -158,6 +220,33 @@ function initDb() {
     create index if not exists idx_usage_events_user on usage_events(user_name);
     create index if not exists idx_usage_events_employee_id on usage_events(employee_id);
     create index if not exists idx_usage_events_session on usage_events(session_id);
+
+    create table if not exists token_usage_events (
+      event_id text primary key,
+      ts text not null,
+      received_at text not null,
+      source text not null,
+      client_id text not null,
+      project text not null,
+      user_name text not null,
+      employee_id text not null,
+      session_id text not null,
+      message_id text not null default '',
+      model text not null,
+      provider text not null,
+      prompt_tokens integer not null,
+      completion_tokens integer not null,
+      total_tokens integer not null,
+      raw_usage text not null,
+      raw_json text not null
+    );
+
+    create index if not exists idx_token_usage_events_ts on token_usage_events(ts);
+    create index if not exists idx_token_usage_events_employee_id on token_usage_events(employee_id);
+    create index if not exists idx_token_usage_events_project on token_usage_events(project);
+    create index if not exists idx_token_usage_events_user on token_usage_events(user_name);
+    create index if not exists idx_token_usage_events_model on token_usage_events(model);
+    create index if not exists idx_token_usage_events_session on token_usage_events(session_id);
   `);
 
   ensureColumn("usage_events", "employee_id", "text not null default 'unknown-employee-id'");
@@ -215,6 +304,60 @@ function insertEvents(events) {
   return { inserted, duplicates: events.length - inserted };
 }
 
+function insertTokenEvents(events) {
+  const insert = db.prepare(`
+    insert or ignore into token_usage_events (
+      event_id,
+      ts,
+      received_at,
+      source,
+      client_id,
+      project,
+      user_name,
+      employee_id,
+      session_id,
+      message_id,
+      model,
+      provider,
+      prompt_tokens,
+      completion_tokens,
+      total_tokens,
+      raw_usage,
+      raw_json
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  let inserted = 0;
+  const tx = db.transaction((items) => {
+    for (const event of items) {
+      const info = insert.run(
+        event.eventId,
+        event.ts,
+        new Date().toISOString(),
+        event.source,
+        event.clientId,
+        event.project,
+        event.user,
+        event.employeeId,
+        event.sessionId,
+        event.messageId || "",
+        event.model,
+        event.provider,
+        event.promptTokens,
+        event.completionTokens,
+        event.totalTokens,
+        JSON.stringify(event.rawUsage || {}),
+        JSON.stringify(event),
+      );
+
+      inserted += info.changes;
+    }
+  });
+
+  tx(events);
+  return { inserted, duplicates: events.length - inserted };
+}
+
 function queryTotal(filters) {
   const where = whereClause(filters);
   return normalizeTotals(
@@ -229,6 +372,66 @@ function queryTotal(filters) {
       )
       .get(...where.params),
   );
+}
+
+function queryTokenRanking(filters) {
+  const where = tokenWhereClause(filters);
+  const limit = Math.min(parsePositiveInt(filters.limit, 100), 500);
+  return db
+    .prepare(
+      `select employee_id as employeeId,
+              user_name as user,
+              coalesce(sum(prompt_tokens), 0) as promptTokens,
+              coalesce(sum(completion_tokens), 0) as completionTokens,
+              coalesce(sum(total_tokens), 0) as totalTokens,
+              count(*) as requestCount,
+              count(distinct session_id) as sessionCount,
+              count(distinct project) as projectCount
+         from token_usage_events
+        ${where.sql}
+        group by employee_id, user_name
+        order by totalTokens desc, requestCount desc
+        limit ?`,
+    )
+    .all(...where.params, limit)
+    .map(normalizeTokenRankingRow);
+}
+
+function queryTokenTotal(filters) {
+  const where = tokenWhereClause(filters);
+  return normalizeTokenTotals(
+    db
+      .prepare(
+        `select coalesce(sum(prompt_tokens), 0) as promptTokens,
+                coalesce(sum(completion_tokens), 0) as completionTokens,
+                coalesce(sum(total_tokens), 0) as totalTokens,
+                count(*) as requestCount,
+                count(distinct session_id) as sessionCount
+           from token_usage_events
+          ${where.sql}`,
+      )
+      .get(...where.params),
+  );
+}
+
+function queryTokenGroup(column, filters) {
+  const where = tokenWhereClause(filters);
+  const rows = db
+    .prepare(
+      `select ${column} as key,
+              coalesce(sum(prompt_tokens), 0) as promptTokens,
+              coalesce(sum(completion_tokens), 0) as completionTokens,
+              coalesce(sum(total_tokens), 0) as totalTokens,
+              count(*) as requestCount,
+              count(distinct session_id) as sessionCount
+         from token_usage_events
+        ${where.sql}
+        group by ${column}
+        order by totalTokens desc`,
+    )
+    .all(...where.params);
+
+  return Object.fromEntries(rows.map((row) => [row.key, normalizeTokenTotals(row)]));
 }
 
 function queryGroup(column, filters) {
@@ -271,6 +474,40 @@ function queryLanguage(filters) {
   return result;
 }
 
+function tokenWhereClause(filters) {
+  const clauses = [];
+  const params = [];
+
+  addFilter("client_id", filters.clientId);
+  addFilter("project", filters.project);
+  addFilter("user_name", filters.user);
+  addFilter("employee_id", filters.employeeId);
+  addFilter("session_id", filters.sessionId);
+  addFilter("model", filters.model);
+  addFilter("provider", filters.provider);
+
+  if (filters.from) {
+    clauses.push("ts >= ?");
+    params.push(String(filters.from));
+  }
+
+  if (filters.to) {
+    clauses.push("ts <= ?");
+    params.push(String(filters.to));
+  }
+
+  return {
+    sql: clauses.length ? `where ${clauses.join(" and ")}` : "",
+    params,
+  };
+
+  function addFilter(column, value) {
+    if (!value) return;
+    clauses.push(`${column} = ?`);
+    params.push(String(value));
+  }
+}
+
 function whereClause(filters) {
   const clauses = [];
   const params = [];
@@ -308,6 +545,29 @@ function ensureColumn(table, column, definition) {
   if (columns.some((item) => item.name === column)) return;
 
   db.exec(`alter table ${table} add column ${column} ${definition}`);
+}
+
+function normalizeTokenRankingRow(row) {
+  return {
+    employeeId: row.employeeId,
+    user: row.user,
+    promptTokens: Number(row.promptTokens || 0),
+    completionTokens: Number(row.completionTokens || 0),
+    totalTokens: Number(row.totalTokens || 0),
+    requestCount: Number(row.requestCount || 0),
+    sessionCount: Number(row.sessionCount || 0),
+    projectCount: Number(row.projectCount || 0),
+  };
+}
+
+function normalizeTokenTotals(row) {
+  return {
+    promptTokens: Number(row?.promptTokens || 0),
+    completionTokens: Number(row?.completionTokens || 0),
+    totalTokens: Number(row?.totalTokens || 0),
+    requestCount: Number(row?.requestCount || 0),
+    sessionCount: Number(row?.sessionCount || 0),
+  };
 }
 
 function normalizeTotals(row) {

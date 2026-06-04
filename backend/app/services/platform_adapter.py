@@ -13,6 +13,12 @@ from app.services.http_client_factory import HttpClientFactory
 logger = logging.getLogger(__name__)
 
 
+def _should_bypass_proxy_env(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    hostname = str(parsed.hostname or "").strip().lower()
+    return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
+
+
 @dataclass(frozen=True)
 class ReviewPlatformProvider:
     """代码平台 provider 抽象。"""
@@ -104,6 +110,7 @@ class GitHubReviewProvider(ReviewPlatformProvider):
                 timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
                 runtime_settings=runtime_settings,
                 follow_redirects=False,
+                trust_env=not _should_bypass_proxy_env(review_url),
             ) as client:
                 for candidate_url in candidate_urls:
                     try:
@@ -222,6 +229,7 @@ class GitLabReviewProvider(ReviewPlatformProvider):
                 timeout=httpx.Timeout(45.0, connect=10.0, read=45.0),
                 runtime_settings=runtime_settings,
                 follow_redirects=False,
+                trust_env=not _should_bypass_proxy_env(review_url),
             ) as client:
                 for candidate_url in candidate_urls:
                     try:

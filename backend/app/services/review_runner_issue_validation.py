@@ -225,6 +225,10 @@ class ReviewRunnerIssueValidationMixin:
             normalized_type in {"query_bound_removed", "query_boundary_missing", "naming_misleading"}
             or query_claim_signal
             or any(token in compact for token in ("chunk", "chunks", "chunkstmp", "limit", "批量", "边界"))
+            or any(
+                token in current_code_text
+                for token in ("chunk", "chunks", "chunkstmp", "limit", "setmaxresults", "query.list", "createquery")
+            )
         ):
             return "event_consumer_batch_boundary"
         if "mysqldomaineventsconsumer" in path and (
@@ -976,6 +980,11 @@ class ReviewRunnerIssueValidationMixin:
         elif family == "course_creation_semantics":
             issue.normalized_issue_type = "course_creation_semantics"
             issue.title = self._canonical_issue_title_for_family(issue) or "绕过聚合工厂创建聚合根"
+        elif family == "event_consumer_batch_boundary":
+            issue.normalized_issue_type = "event_consumer_batch_boundary"
+            issue.title = self._canonical_issue_title_for_family(issue) or "事件消费查询边界被移除"
+            if not issue.summary.strip() or not self._issue_text_matches_family(family, issue.summary):
+                issue.summary = self._canonical_issue_summary_for_family(issue, family)
         elif family == "event_consumer_exception_swallowed":
             issue.normalized_issue_type = "event_consumer_exception_swallowed"
             issue.title = "事件消费失败被忽略"
@@ -1080,6 +1089,8 @@ class ReviewRunnerIssueValidationMixin:
             return f"{file_name}{line} 的异常处理没有向调用方暴露失败结果，容易把失败流程当成成功流程继续执行。"
         if family == "event_consumer_exception_swallowed":
             return f"{file_name}{line} 的事件消费异常被忽略，缺少日志、失败标记或补偿动作，下游会误以为事件已经处理成功。"
+        if family == "event_consumer_batch_boundary":
+            return f"{file_name}{line} 的事件消费查询缺少固定批次边界，事件堆积时可能一次拉取过多记录。"
         if family == "comment_contract_unimplemented":
             return f"{file_name}{line} 的注释或 TODO 已承诺要完成某个业务动作，但当前实现没有对应代码，调用方会误以为该能力已经落地。"
         if family == "lock_guard_removed":
@@ -2254,10 +2265,25 @@ class ReviewRunnerIssueValidationMixin:
                 conflicts.append("建议修改代码与异常处理修复动作不一致。")
 
         if issue_type in {"query_bound_removed", "query_boundary_missing", "unbounded_query", "unbounded_query_risk"}:
-            query_bound_tokens = {"pagerequest", "pageable", "limit", "searchpendingbycourselike", "全量", "分页"}
+            query_bound_tokens = {
+                "pagerequest",
+                "pageable",
+                "limit",
+                "setmaxresults",
+                "chunk",
+                "chunks",
+                "nativequery",
+                "createquery",
+                "searchpendingbycourselike",
+                "全量",
+                "分页",
+            }
             if current_code and not any(token in current_code for token in query_bound_tokens):
                 conflicts.append("当前代码与查询边界缺失问题的关键锚点不一致。")
-            if suggested_code and not any(token in suggested_code for token in {"pagerequest", "pageable", "limit", "findpendingbycourse"}):
+            if suggested_code and not any(
+                token in suggested_code
+                for token in {"pagerequest", "pageable", "limit", "setmaxresults", "chunk", "chunks", "findpendingbycourse"}
+            ):
                 conflicts.append("建议修改代码与查询边界修复动作不一致。")
 
         return conflicts

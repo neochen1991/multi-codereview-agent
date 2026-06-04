@@ -16,6 +16,17 @@
     "gitlab_access_token": null,
     "codehub_access_token": null
   },
+  "code_repo": {
+    "clone_url": "",
+    "local_path": "",
+    "default_branch": "main",
+    "auto_sync": false,
+    "auto_review_enabled": false,
+    "auto_review_repo_url": "",
+    "auto_review_poll_interval_seconds": 120
+  },
+  "code_repositories": [],
+  "default_repository_id": "",
   "projects": [
     {
       "project_id": "default",
@@ -45,6 +56,7 @@
     }
   ],
   "default_project_id": "default",
+  "database_sources": [],
   "runtime": {
     "default_target_branch": "main",
     "default_analysis_mode": "light",
@@ -60,7 +72,7 @@
     "llm_issue_judge_timeout_seconds": 45,
     "enable_llm_targeted_debate": false,
     "llm_targeted_debate_timeout_seconds": 60,
-    "enable_sast_prescan": false,
+    "enable_sast_prescan": true,
     "default_max_debate_rounds": 3,
     "standard_llm_timeout_seconds": 60,
     "standard_llm_retry_count": 3,

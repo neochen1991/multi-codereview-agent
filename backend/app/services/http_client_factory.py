@@ -18,6 +18,7 @@ class HttpClientFactory:
         timeout: httpx.Timeout,
         runtime_settings: RuntimeSettings | None = None,
         follow_redirects: bool = False,
+        trust_env: bool = True,
     ) -> httpx.Client:
         """根据运行时 SSL 配置创建 httpx Client。"""
 
@@ -25,6 +26,7 @@ class HttpClientFactory:
             timeout=timeout,
             follow_redirects=follow_redirects,
             verify=cls.build_verify(runtime_settings),
+            trust_env=trust_env,
         )
 
     @classmethod

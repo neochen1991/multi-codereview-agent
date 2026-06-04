@@ -121,7 +121,7 @@ class RuntimeSettings(BaseModel):
     llm_issue_judge_timeout_seconds: int = 45
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
-    enable_sast_prescan: bool = False
+    enable_sast_prescan: bool = True
     enable_review_workspace_realtime_graph: bool = False
     gitnexus_max_targets: int = Field(default=12, ge=1, le=50)
     gitnexus_max_context_queries: int = Field(default=8, ge=1, le=50)
@@ -130,7 +130,7 @@ class RuntimeSettings(BaseModel):
     rule_screening_mode: Literal["heuristic", "llm"] = "llm"
     rule_screening_batch_size: int = 12
     rule_screening_llm_timeout_seconds: int = 150
-    review_quality_mode: Literal["standard", "thorough_review"] = "thorough_review"
+    review_quality_mode: Literal["standard", "thorough_review"] = "standard"
     default_max_debate_rounds: int = 2
     standard_llm_timeout_seconds: int = 120
     standard_llm_retry_count: int = 3

@@ -10,6 +10,9 @@ cd "$ROOT_DIR"
   backend/tests/services/test_route_experts.py \
   backend/tests/services/test_slice_change.py \
   backend/tests/services/test_sast_prescan_service.py \
+  backend/tests/services/test_runtime_settings_service.py::test_runtime_settings_service_enables_sast_prescan_by_default \
+  backend/tests/services/test_runtime_settings_service.py::test_runtime_settings_service_persists_sast_prescan_toggle_in_sqlite \
+  backend/tests/api/test_governance_api.py::test_governance_endpoint_returns_quality_metrics \
   backend/tests/services/test_main_agent_service.py::test_main_agent_retains_change_understanding_experts_when_llm_misses_them \
   backend/tests/services/test_review_runner_minimax_prompting.py \
   backend/tests/services/test_review_runner_minimax_output.py \
@@ -27,6 +30,8 @@ cd "$ROOT_DIR"
   backend/tests/services/test_gitnexus_impact_service.py::test_gitnexus_impact_service_normalizes_mcp_fixture_payload
 
 PYTHONPATH=backend .venv/bin/python scripts/smoke_gitnexus_impact_demo.py
+
+npm --prefix frontend run typecheck
 
 .venv/bin/python scripts/eval_review_quality.py \
   --cases-dir backend/tests/fixtures/review_eval_cases \

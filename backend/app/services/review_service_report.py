@@ -149,7 +149,7 @@ class ReviewServiceReportMixin:
         return left.model_copy(
             update={
                 "finding_ids": self._dedupe_report_strings([*list(left.finding_ids or []), *list(right.finding_ids or [])]),
-                "participant_expert_ids": [item for item in merged_participants if item and item != str(left.primary_expert_id or "")],
+                "participant_expert_ids": [item for item in merged_participants if item],
                 "expert_views": merged_views,
                 "aggregated_titles": self._dedupe_report_strings(
                     [
@@ -537,6 +537,26 @@ class ReviewServiceReportMixin:
                 and any(token in ddd_evidence_text for token in (".create(", "factory", "工厂"))
             )
         )
+        event_consumer_batch_signal = (
+            "mysqldomaineventsconsumer" in file_path_lower
+            and any(
+                token in ddd_evidence_text
+                or token in compact
+                for token in (
+                    "chunk",
+                    "chunks",
+                    "chunkstmp",
+                    "limit",
+                    "setmaxresults",
+                    "query.list",
+                    "createquery",
+                    "固定批次",
+                    "事件消费",
+                    "查询边界",
+                    "边界",
+                )
+            )
+        )
         if "hibernatecriteriaconverter" in str(issue.file_path or "").lower() and any(
             token in compact
             for token in ("equal", "equals", "like", "精确匹配", "模糊匹配", "查询语义", "语义退化")
@@ -546,6 +566,32 @@ class ReviewServiceReportMixin:
                     **update_payload,
                     "normalized_issue_type": "query_semantics_regression",
                     "title": "查询语义从精确匹配退化为模糊匹配",
+                }
+            )
+        if event_consumer_batch_signal:
+            batch_summary = (
+                f"{display_file_name}{display_line} 的事件消费查询缺少固定批次边界，"
+                "事件堆积时可能一次拉取过多记录，影响数据库和消费者稳定性。"
+            )
+            batch_suggestion = "恢复固定批次窗口，例如保留 CHUNKS 常量并对查询设置 setMaxResults 或 SQL LIMIT。"
+            batch_evidence = [
+                "事件消费查询涉及 chunk/limit/setMaxResults 边界",
+                "当前代码需要保留固定批次窗口",
+            ]
+            return issue.model_copy(
+                update={
+                    **update_payload,
+                    "normalized_issue_type": "event_consumer_batch_boundary",
+                    "title": "事件消费查询边界被移除",
+                    "primary_expert_id": issue.primary_expert_id or "performance_reliability",
+                    "category_label": issue.category_label or "通用编码规范",
+                    "summary": batch_summary,
+                    "remediation_suggestion": batch_suggestion,
+                    "evidence": batch_evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, "事件消费查询边界被移除", batch_evidence),
+                    "aggregated_titles": ["事件消费查询边界被移除"],
+                    "aggregated_summaries": [batch_summary],
+                    "aggregated_remediation_suggestions": [batch_suggestion],
                 }
             )
         primary_issue_text = "\n".join(
@@ -597,30 +643,33 @@ class ReviewServiceReportMixin:
             and not exception_evidence_signal
             and ddd_creation_signal
         ):
-            course_summary = (
+            normalized_type = str(issue.normalized_issue_type or "").strip() or "course_creation_semantics"
+            title = str(issue.title or "").strip() or "聚合创建语义被绕过"
+            summary = sanitized_summary or (
                 f"{display_file_name}{display_line} 的聚合创建路径绕过了原有工厂/静态工厂语义，"
-                "或把领域事件发布放在持久化之前，可能丢失不变量校验、领域事件记录或发布顺序保证。"
+                "可能丢失不变量校验、默认值初始化或领域事件记录。"
             )
-            course_suggestion = "恢复原有聚合工厂/静态工厂创建入口，并保持先持久化聚合、再发布领域事件的顺序。"
-            course_evidence = [
+            suggestion = sanitized_remediation_suggestion or (
+                "恢复原有聚合工厂/静态工厂创建入口，并补充聚合创建语义的回归测试。"
+            )
+            evidence = list(update_payload.get("evidence") or []) or [
                 "当前代码出现直接构造聚合或创建入口变化",
-                "当前代码需要核对领域事件发布与持久化顺序",
             ]
             return issue.model_copy(
                 update={
                     **update_payload,
-                    "normalized_issue_type": "course_creation_semantics",
-                    "title": "领域事件发布顺序早于聚合持久化",
-                    "primary_expert_id": "ddd_architecture",
+                    "normalized_issue_type": normalized_type,
+                    "title": title,
+                    "primary_expert_id": issue.primary_expert_id or "ddd_architecture",
                     "category_label": "DDD 架构",
                     "line_start": update_payload.get("line_start", issue.line_start),
-                    "summary": course_summary,
-                    "remediation_suggestion": course_suggestion,
-                    "evidence": course_evidence,
-                    "evidence_chain": self._canonical_display_evidence_chain(issue, "领域事件发布顺序早于聚合持久化", course_evidence),
-                    "aggregated_titles": ["领域事件发布顺序早于聚合持久化"],
-                    "aggregated_summaries": [course_summary],
-                    "aggregated_remediation_suggestions": [course_suggestion],
+                    "summary": summary,
+                    "remediation_suggestion": suggestion,
+                    "evidence": evidence,
+                    "evidence_chain": self._canonical_display_evidence_chain(issue, title, evidence),
+                    "aggregated_titles": [title],
+                    "aggregated_summaries": [summary],
+                    "aggregated_remediation_suggestions": [suggestion],
                     "consistency_conflicts": [
                         item
                         for item in list(issue.consistency_conflicts or [])
@@ -1287,6 +1336,32 @@ class ReviewServiceReportMixin:
         issue_created_at = persisted_issue.created_at if persisted_issue else finding.created_at
         issue_updated_at = persisted_issue.updated_at if persisted_issue else finding.created_at
         finding_payload = finding.model_dump(mode="json")
+        finding_code_context = dict(getattr(finding, "code_context", {}) or {})
+        adopted_tool_observations = [
+            str(item).strip()
+            for item in list(finding_code_context.get("adopted_tool_observations") or [])
+            if str(item).strip()
+        ]
+        sast_prescan_matches = [
+            dict(item)
+            for item in list(finding_code_context.get("sast_prescan_matches") or [])
+            if isinstance(item, dict)
+        ]
+        finding_sast_cross_validated = bool(
+            finding_code_context.get("sast_cross_validated")
+            or finding_code_context.get("sast_fast_lane")
+            or adopted_tool_observations
+            or sast_prescan_matches
+        )
+        finding_tool_name = ""
+        if sast_prescan_matches:
+            finding_tool_name = str(sast_prescan_matches[0].get("tool") or "").strip()
+        elif adopted_tool_observations:
+            parts = adopted_tool_observations[0].split(":")
+            if parts and parts[0] == "sast" and len(parts) > 1:
+                finding_tool_name = parts[1]
+            elif parts:
+                finding_tool_name = parts[0]
         finding_family = self._report_display_finding_family(finding_payload)
         normalized_issue_type = {
             "comment": "comment_contract_unimplemented",
@@ -1294,7 +1369,6 @@ class ReviewServiceReportMixin:
             "loop": "n_plus_one",
             "exception": "exception_swallowed",
             "query_boundary": "query_bound_removed",
-            "course_creation": "course_creation_semantics",
         }.get(finding_family, str(getattr(finding, "normalized_issue_type", "") or ""))
         return DebateIssue(
             review_id=review_id,
@@ -1346,8 +1420,29 @@ class ReviewServiceReportMixin:
             verified=issue_verified,
             needs_debate=issue_needs_debate,
             verifier_name=str(persisted_issue.verifier_name or "").strip() if persisted_issue else "",
-            tool_name=str(persisted_issue.tool_name or "").strip() if persisted_issue else "",
-            tool_verified=bool(persisted_issue.tool_verified) if persisted_issue else False,
+            tool_name=(
+                str(persisted_issue.tool_name or "").strip()
+                if persisted_issue and str(persisted_issue.tool_name or "").strip()
+                else finding_tool_name
+            ),
+            tool_verified=(
+                bool(persisted_issue.tool_verified) or finding_sast_cross_validated
+                if persisted_issue
+                else finding_sast_cross_validated
+            ),
+            sast_cross_validated=(
+                bool(persisted_issue.sast_cross_validated) or finding_sast_cross_validated
+                if persisted_issue
+                else finding_sast_cross_validated
+            ),
+            sast_prescan_matches=(
+                [
+                    *list(persisted_issue.sast_prescan_matches or []),
+                    *sast_prescan_matches,
+                ]
+                if persisted_issue
+                else sast_prescan_matches
+            ),
             human_decision=issue_human_decision or "pending",
             resolution=issue_resolution,
             created_at=issue_created_at,
@@ -2347,7 +2442,6 @@ class ReviewServiceReportMixin:
             "lock": "lock_guard_removed",
             "query_boundary": "query_bound_removed",
             "loop": "n_plus_one",
-            "course_creation": "course_creation_semantics",
             "query_semantics": "query_semantics_regression",
         }.get(family)
         if canonical_type:

@@ -233,6 +233,33 @@ def test_main_agent_command_includes_sast_tool_status_snapshot(tmp_path: Path, m
     assert command["repository_context"]["sast_prescan"]["enabled"] is False
 
 
+def test_main_agent_collects_canonical_sast_tool_observations_from_findings_fallback():
+    agent = MainAgentService()
+
+    observations = agent._collect_tool_observations(
+        {
+            "sast_prescan": {
+                "enabled": True,
+                "findings": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 42,
+                        "message": "User input is concatenated into SQL.",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert observations[0]["id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["observation_id"] == "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+    assert observations[0]["legacy_observation_id"] == "semgrep:java.sql-injection:42"
+    assert observations[0]["is_issue"] is False
+    assert observations[0]["expert_must_decide"] is True
+
+
 def test_main_agent_command_includes_target_hunk_excerpt():
     agent = MainAgentService()
     subject = ReviewSubject(

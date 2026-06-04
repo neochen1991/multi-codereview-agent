@@ -231,6 +231,32 @@ def test_platform_adapter_fetch_remote_diff_falls_back_to_diff_when_patch_fails(
     assert "diff --git a/backend/app/api/orders.py" in diff
 
 
+def test_platform_adapter_disables_proxy_env_for_loopback_diff_urls(monkeypatch):
+    adapter = PlatformAdapter()
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url: str, headers: dict[str, str] | None = None):
+            raise RuntimeError("stop after factory capture")
+
+    def fake_create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr("app.services.platform_adapter.HttpClientFactory.create", fake_create)
+
+    diff = adapter._fetch_remote_diff("http://127.0.0.1:9010/platform/payments/-/merge_requests/128", "")
+
+    assert diff == ""
+    assert captured_kwargs["trust_env"] is False
+
+
 def test_platform_adapter_exposes_gitlab_provider_candidates():
     adapter = PlatformAdapter()
 
