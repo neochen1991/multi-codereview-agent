@@ -2895,8 +2895,9 @@ class ReviewRunner(
         review: ReviewTask,
         expert_jobs: list[dict[str, object]],
     ) -> None:
+        scan_summary = self._collect_sast_prescan_process_summary(expert_jobs)
         observations = self._collect_fast_tool_observations_from_expert_jobs(expert_jobs)
-        if not observations:
+        if not observations and not scan_summary.get("scan_count"):
             return
         by_tool: dict[str, int] = {}
         by_category: dict[str, int] = {}
@@ -2905,25 +2906,144 @@ class ReviewRunner(
             category = str(item.get("category") or "static_analysis").strip()
             by_tool[tool] = by_tool.get(tool, 0) + 1
             by_category[category] = by_category.get(category, 0) + 1
+        finding_count = int(scan_summary.get("finding_count") or 0)
+        limitation_count = len(list(scan_summary.get("limitations") or []))
+        if observations:
+            content = (
+                f"SAST/linter 预扫描已汇总 {len(observations)} 条与当前 diff 相关的工具候选，"
+                "系统会先生成高置信候选 finding，再交给专家审查和收敛层复核。"
+            )
+        elif finding_count:
+            content = (
+                f"SAST/linter 预扫描命中 {finding_count} 条原始信号，但没有匹配到当前 diff 行，"
+                "本轮不会直接采纳为候选 finding。"
+            )
+        elif not int(scan_summary.get("enabled_scan_count") or 0):
+            reason_suffix = f"，限制/跳过原因 {limitation_count} 条" if limitation_count else ""
+            content = f"SAST/linter 预扫描未执行或已跳过，未产生当前 diff 的工具候选{reason_suffix}。"
+        else:
+            reason_suffix = f"，限制/跳过原因 {limitation_count} 条" if limitation_count else ""
+            content = f"SAST/linter 预扫描已执行，未命中当前 diff 的工具候选{reason_suffix}。"
         self.message_repo.append(
             ConversationMessage(
                 review_id=review.review_id,
                 issue_id="review_orchestration",
                 expert_id=self.main_agent_service.agent_id,
                 message_type="sast_prescan_summary",
-                content=(
-                    f"SAST 预扫描已汇总 {len(observations)} 条与当前 diff 相关的工具候选，"
-                    "系统会先生成高置信候选 finding，再交给专家审查和收敛层复核。"
-                ),
+                content=content,
                 metadata={
                     "phase": "sast_prescan",
+                    "tool_name": "sast_prescan",
+                    "scan_count": scan_summary.get("scan_count", 0),
+                    "enabled_scan_count": scan_summary.get("enabled_scan_count", 0),
+                    "finding_count": finding_count,
                     "tool_observation_count": len(observations),
                     "by_tool": by_tool,
                     "by_category": by_category,
+                    "scan_by_tool": scan_summary.get("by_tool", {}),
+                    "scanned_files": scan_summary.get("scanned_files", []),
+                    "summaries": scan_summary.get("summaries", []),
+                    "limitations": scan_summary.get("limitations", []),
+                    "observations": [self._summarize_sast_observation_for_dialogue(item) for item in observations[:12]],
                     "observation_ids": [str(item.get("observation_id") or "") for item in observations[:20]],
                 },
             )
         )
+
+    def _collect_sast_prescan_process_summary(self, expert_jobs: list[dict[str, object]]) -> dict[str, object]:
+        scan_count = 0
+        enabled_scan_count = 0
+        finding_count = 0
+        by_tool: dict[str, int] = {}
+        scanned_files: list[str] = []
+        summaries: list[str] = []
+        limitations: list[str] = []
+        seen_contexts: set[tuple[str, str, str]] = set()
+
+        def collect_context(repository_context: dict[str, object]) -> None:
+            nonlocal scan_count, enabled_scan_count, finding_count
+            sast_prescan = repository_context.get("sast_prescan")
+            if not isinstance(sast_prescan, dict):
+                return
+            file_path = self._sast_prescan_context_file_path(repository_context, sast_prescan)
+            summary = str(sast_prescan.get("summary") or "").strip()
+            limitation_text = " | ".join(
+                str(item).strip()
+                for item in list(sast_prescan.get("limitations") or [])
+                if str(item).strip()
+            )
+            key = (file_path, summary, limitation_text)
+            if key in seen_contexts:
+                return
+            seen_contexts.add(key)
+            scan_count += 1
+            if bool(sast_prescan.get("enabled")):
+                enabled_scan_count += 1
+            if file_path and file_path not in scanned_files:
+                scanned_files.append(file_path)
+            if summary and summary not in summaries:
+                summaries.append(summary)
+            for limitation in list(sast_prescan.get("limitations") or []):
+                text = str(limitation or "").strip()
+                if text and text not in limitations:
+                    limitations.append(text)
+            for finding in list(sast_prescan.get("findings") or []):
+                if not isinstance(finding, dict):
+                    continue
+                finding_count += 1
+                tool = str(finding.get("tool") or "tool").strip()
+                by_tool[tool] = by_tool.get(tool, 0) + 1
+
+        for job in list(expert_jobs or []):
+            if not isinstance(job, dict):
+                continue
+            job_context = dict(job.get("repository_context") or {})
+            collect_context(job_context)
+            for item in list(job.get("batch_items") or []):
+                if isinstance(item, dict) and isinstance(item.get("repository_context"), dict):
+                    collect_context(dict(item.get("repository_context") or {}))
+
+        return {
+            "scan_count": scan_count,
+            "enabled_scan_count": enabled_scan_count,
+            "finding_count": finding_count,
+            "by_tool": by_tool,
+            "scanned_files": scanned_files[:20],
+            "summaries": summaries[:12],
+            "limitations": limitations[:12],
+        }
+
+    def _sast_prescan_context_file_path(
+        self,
+        repository_context: dict[str, object],
+        sast_prescan: dict[str, object],
+    ) -> str:
+        for finding in list(sast_prescan.get("findings") or []):
+            if isinstance(finding, dict):
+                file_path = str(finding.get("file_path") or finding.get("path") or "").strip().replace("\\", "/")
+                if file_path:
+                    return file_path
+        target_hunk = repository_context.get("target_hunk")
+        if isinstance(target_hunk, dict):
+            file_path = str(target_hunk.get("file_path") or "").strip().replace("\\", "/")
+            if file_path:
+                return file_path
+        for hunk in list(repository_context.get("target_hunks") or []):
+            if isinstance(hunk, dict):
+                file_path = str(hunk.get("file_path") or "").strip().replace("\\", "/")
+                if file_path:
+                    return file_path
+        return ""
+
+    def _summarize_sast_observation_for_dialogue(self, observation: dict[str, object]) -> dict[str, object]:
+        return {
+            "tool": str(observation.get("tool") or "").strip(),
+            "rule_id": str(observation.get("rule_id") or "").strip(),
+            "file_path": str(observation.get("file_path") or observation.get("path") or "").strip().replace("\\", "/"),
+            "line_start": self._normalize_optional_line_value(observation.get("line_start")) or 0,
+            "message": str(observation.get("message") or observation.get("summary") or "").strip(),
+            "observation_id": str(observation.get("observation_id") or observation.get("id") or "").strip(),
+        }
 
     def _append_fast_tool_observation_findings(
         self,

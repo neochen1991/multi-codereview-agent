@@ -174,6 +174,34 @@ const normalizeSingleValue = (value: unknown): string[] => {
   return [];
 };
 
+const normalizeRecordCountEntries = (value: unknown): string[] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value as Record<string, unknown>)
+    .map(([key, count]) => {
+      const label = sanitizeDialogueValue(key);
+      if (!label) return "";
+      return `${label}: ${String(count ?? 0)}`;
+    })
+    .filter(Boolean);
+};
+
+const normalizeSastObservationEntries = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const tool = sanitizeDialogueValue(payload.tool);
+      const ruleId = sanitizeDialogueValue(payload.rule_id);
+      const filePath = sanitizeDialogueValue(payload.file_path);
+      const lineStart = typeof payload.line_start === "number" && payload.line_start > 0 ? `L${payload.line_start}` : "";
+      const message = sanitizeDialogueValue(payload.message);
+      const observationId = sanitizeDialogueValue(payload.observation_id);
+      return [tool, ruleId, filePath, lineStart, message || observationId].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+};
+
 const normalizeKeywordSourceEntries = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -797,12 +825,14 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "code_graph_context_fallback" ||
     eventType === "keyword_context_ready" ||
     eventType === "impact_analysis_started" ||
-    eventType === "impact_report_generated"
+    eventType === "impact_report_generated" ||
+    eventType === "sast_prescan_summary"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
   if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
   const categorySet = new Set<ReviewDialogueViewMessage["categories"][number]>([messageKind]);
   if (activeSkills.length > 0) categorySet.add("skill");
+  if (eventType === "sast_prescan_summary") categorySet.add("status");
   const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
   const lineStart = typeof metadata.line_start === "number" ? metadata.line_start : 0;
   const targetExpertId = typeof metadata.target_expert_id === "string" ? metadata.target_expert_id : "";
@@ -836,6 +866,11 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     );
   } else if (eventType === "expert_tool_call") {
     summaryParts.push(`${messageExpertName} 正在调用工具 ${String(metadata.tool_name || "")}`);
+  } else if (eventType === "sast_prescan_summary") {
+    const observationCount = typeof metadata.tool_observation_count === "number" ? metadata.tool_observation_count : 0;
+    const findingCount = typeof metadata.finding_count === "number" ? metadata.finding_count : 0;
+    const scanCount = typeof metadata.scan_count === "number" ? metadata.scan_count : 0;
+    summaryParts.push(`静态工具预扫描完成：扫描 ${scanCount} 个文件，命中 ${findingCount} 条原始信号，进入候选 ${observationCount} 条`);
   } else if (eventType === "expert_skill_call") {
     summaryParts.push(`${messageExpertName} 正在调用运行时工具 ${String(metadata.tool_name || metadata.skill_name || "")}`);
   } else if (eventType === "debate_message") {
@@ -1004,6 +1039,30 @@ const buildStructuredGroups = (
     return {
       summaryText: row.summary,
       groups: [ruleScreeningBatchGroup],
+    };
+  }
+
+  if (row.eventType === "sast_prescan_summary") {
+    const sections = [
+      {
+        label: "扫描统计",
+        values: [
+          typeof metadata.scan_count === "number" ? `扫描文件 ${metadata.scan_count}` : "",
+          typeof metadata.enabled_scan_count === "number" ? `实际执行 ${metadata.enabled_scan_count}` : "",
+          typeof metadata.finding_count === "number" ? `原始信号 ${metadata.finding_count}` : "",
+          typeof metadata.tool_observation_count === "number" ? `进入候选 ${metadata.tool_observation_count}` : "",
+        ].filter(Boolean),
+      },
+      { label: "命中工具", values: normalizeRecordCountEntries(metadata.scan_by_tool).length ? normalizeRecordCountEntries(metadata.scan_by_tool) : normalizeRecordCountEntries(metadata.by_tool) },
+      { label: "扫描文件", values: limitValueList(normalizeValueList(metadata.scanned_files), 12) },
+      { label: "工具摘要", values: limitValueList(normalizeValueList(metadata.summaries), 8) },
+      { label: "候选观察", values: limitValueList(normalizeSastObservationEntries(metadata.observations), 8) },
+      { label: "Observation ID", values: limitValueList(normalizeValueList(metadata.observation_ids), 8) },
+      { label: "限制/跳过原因", values: limitValueList(normalizeValueList(metadata.limitations), 8) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: row.detail || row.summary,
+      groups: sections.length ? [{ title: "SAST/linter 预扫描过程与结果", sections }] : [],
     };
   }
 

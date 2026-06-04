@@ -47,30 +47,42 @@ const SettingsSectionCard: React.FC<SettingsSectionCardProps> = ({
   loading = false,
   extra,
   children,
-}) => (
-  <Card
-    className={className}
-    title={title}
-    style={style}
-    loading={expanded && loading}
-    styles={{ body: expanded ? undefined : { display: "none" } }}
-    extra={(
-      <Space wrap>
-        {extra}
-        <Button
-          size="small"
-          type="text"
-          icon={expanded ? <DownOutlined /> : <RightOutlined />}
-          onClick={onToggle}
-        >
-          {expanded ? "收起" : "展开"}
-        </Button>
-      </Space>
-    )}
-  >
-    {children}
-  </Card>
-);
+}) => {
+  const handleCardClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest(".ant-card-head") && !target.closest(".ant-card-extra")) {
+      onToggle();
+    }
+  };
+
+  return (
+    <Card
+      className={`${className} settings-section-card${expanded ? " is-expanded" : ""}`}
+      title={<span className="settings-section-card-title">{title}</span>}
+      style={style}
+      loading={expanded && loading}
+      onClick={handleCardClick}
+      styles={{ body: expanded ? undefined : { display: "none" } }}
+      extra={(
+        <div className="settings-section-card-extra" onClick={(event) => event.stopPropagation()}>
+          <Space wrap>
+            {extra}
+            <Button
+              size="small"
+              type="text"
+              icon={expanded ? <DownOutlined /> : <RightOutlined />}
+              onClick={onToggle}
+            >
+              {expanded ? "收起" : "展开"}
+            </Button>
+          </Space>
+        </div>
+      )}
+    >
+      {children}
+    </Card>
+  );
+};
 
 const stringifyList = (value?: string[]) => (Array.isArray(value) ? value.join(", ") : "");
 const parseList = (value: string) =>
@@ -121,6 +133,30 @@ const currentProjectRepositories = (runtime?: Pick<RuntimeSettings, "default_pro
   if (project?.repositories?.length) return project.repositories;
   return [];
 };
+
+const analysisModeDisplay = (mode?: string) =>
+  mode === "light"
+    ? {
+        title: "轻量模式",
+        detail: "少量角色串行执行，适合日常小 MR",
+      }
+    : {
+        title: "标准模式",
+        detail: "更多上下文和并发，适合常规 MR",
+      };
+
+const reviewQualityModeDisplay = (mode?: string) =>
+  mode === "thorough_review"
+    ? {
+        title: "深度检视",
+        detail: "固定补入核心质量角色，适合高风险 MR",
+        color: "gold",
+      }
+    : {
+        title: "普通模式",
+        detail: "只执行主 Agent 选中的角色，适合小变更",
+        color: "green",
+      };
 
 const buildRuntimeProjectsWithRepositories = (runtime: RuntimeSettings, repositories: CodeRepositorySettings[]): ProjectSettings[] => {
   const projects = runtime.projects || [];
@@ -391,6 +427,7 @@ const SettingsPage: React.FC = () => {
   const [runtimeSnapshot, setRuntimeSnapshot] = React.useState<RuntimeSettings | null>(null);
   const [sastToolsStatus, setSastToolsStatus] = React.useState<SastToolsStatus | null>(null);
   const [expandedSettingSections, setExpandedSettingSections] = React.useState<Record<string, boolean>>({});
+  const [runtimeActiveKeys, setRuntimeActiveKeys] = React.useState<string[]>(["basic"]);
 
   const isSettingSectionExpanded = React.useCallback(
     (sectionKey: string) => Boolean(expandedSettingSections[sectionKey]),
@@ -756,41 +793,140 @@ const SettingsPage: React.FC = () => {
     </Form.Item>
   );
 
+  function gitnexusCommandCheck(diagnostic?: GitNexusPreflightStatus | null) {
+    return (diagnostic?.checks || []).find((check) => check.name === "gitnexus_command") || null;
+  }
+
+  function gitnexusInstallDisplay(
+    status?: GitNexusIndexStatus | null,
+    diagnostic?: GitNexusPreflightStatus | null,
+  ) {
+    const commandCheck = gitnexusCommandCheck(diagnostic);
+    if (status?.gitnexus_installed === true) {
+      return { color: "success", label: "已预装", path: status.gitnexus_path || "已检测到 gitnexus 命令" };
+    }
+    if (commandCheck?.status === "passed") {
+      return { color: "success", label: "已预装", path: commandCheck.message || "GitNexus 命令可用" };
+    }
+    if (status?.gitnexus_installed === false) {
+      return { color: "error", label: "未安装", path: status.gitnexus_path || "当前机器未发现 gitnexus 可执行命令" };
+    }
+    if (commandCheck?.status === "failed") {
+      return { color: "error", label: "未安装", path: commandCheck.message || "当前机器未发现 gitnexus 可执行命令" };
+    }
+    return { color: "default", label: "未确认", path: status?.gitnexus_path || "刷新后显示 gitnexus 命令路径" };
+  }
+
   const runtimeOverview = (() => {
-    const mode = String(runtimeSnapshot?.default_analysis_mode || "standard");
+    const analysisMode = analysisModeDisplay(String(runtimeSnapshot?.default_analysis_mode || "standard"));
+    const qualityMode = reviewQualityModeDisplay(String(runtimeSnapshot?.review_quality_mode || "standard"));
     const targetBranch = String(runtimeSnapshot?.default_target_branch || "main");
     const repositories = currentProjectRepositories(runtimeSnapshot);
     const enabledRepositoryCount = repositories.filter((repo) => repo?.enabled !== false).length;
     const autoReviewEnabled = Boolean(runtimeSnapshot?.auto_review_enabled);
-    const priorityThreshold = String(runtimeSnapshot?.issue_min_priority_level || "P2");
+    const sastEnabled = Boolean(runtimeSnapshot?.enable_sast_prescan);
     const currentProjectId = String(runtimeSnapshot?.default_project_id || "").trim();
+    const modelName = String(runtimeSnapshot?.default_llm_model || "-");
+    const modelProvider = String(runtimeSnapshot?.default_llm_provider || "-");
+    const storageBackend = String(runtimeSnapshot?.storage_backend || "sqlite");
+    const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
     return (
       <div className="settings-summary-grid">
         <div className="settings-summary-card">
-          <span className="settings-summary-label">默认审核模式</span>
-          <strong>{mode === "light" ? "轻量模式" : "标准模式"}</strong>
-          <span className="settings-summary-meta">{`目标分支 ${targetBranch}`}</span>
-        </div>
-        <div className="settings-summary-card">
-          <span className="settings-summary-label">当前项目代码仓</span>
+          <span className="settings-summary-label">项目代码仓</span>
           <strong>{repositories.length ? `${enabledRepositoryCount}/${repositories.length} 个启用` : "未配置"}</strong>
           <span className="settings-summary-meta" title={repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || "当前项目尚未绑定代码仓"}>
             {repositories.map((repo) => repo.repository_id || repo.clone_url).join(", ") || `项目 ${currentProjectId || "-"} 尚未绑定代码仓`}
           </span>
+          <Tag color={autoReviewEnabled ? "processing" : "default"}>{autoReviewEnabled ? "自动拉取 MR" : "手动提交 MR"}</Tag>
         </div>
         <div className="settings-summary-card">
-          <span className="settings-summary-label">自动审核</span>
-          <strong>{autoReviewEnabled ? "已启用" : "未启用"}</strong>
-          <span className="settings-summary-meta">系统启动后自动拉取开放 MR</span>
+          <span className="settings-summary-label">默认模型</span>
+          <strong title={modelName}>{modelName}</strong>
+          <span className="settings-summary-meta" title={modelProvider}>{modelProvider}</span>
+          <Tag color={runtimeSnapshot?.default_llm_api_key_configured ? "green" : "warning"}>
+            {runtimeSnapshot?.default_llm_api_key_configured ? "API Key 已配置" : "API Key 未配置"}
+          </Tag>
         </div>
         <div className="settings-summary-card">
-          <span className="settings-summary-label">正式问题阈值</span>
-          <strong>{priorityThreshold}</strong>
-          <span className="settings-summary-meta">低于该级别只保留为检视发现</span>
+          <span className="settings-summary-label">默认检视配置</span>
+          <strong>{`${analysisMode.title} / ${qualityMode.title}`}</strong>
+          <span className="settings-summary-meta">{qualityMode.detail}</span>
+          <Tag color={qualityMode.color}>{`目标分支 ${targetBranch}`}</Tag>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">SAST/linter 预扫描</span>
+          <strong>{sastEnabled ? "已启用" : "未启用"}</strong>
+          <span className="settings-summary-meta">{sastEnabled ? "检视前尝试调用本机静态工具" : "不会主动调用本机静态工具"}</span>
+          <Tag color={sastEnabled ? "cyan" : "default"}>{sastEnabled ? "best-effort" : "关闭"}</Tag>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">GitNexus</span>
+          <strong>{installDisplay.label}</strong>
+          <span className="settings-summary-meta" title={installDisplay.path}>{installDisplay.path || "未发现安装路径"}</span>
+          <Tag color={installDisplay.color}>影响分析图谱</Tag>
+        </div>
+        <div className="settings-summary-card">
+          <span className="settings-summary-label">存储后端</span>
+          <strong>{storageBackend === "postgres" ? "PostgreSQL" : "SQLite"}</strong>
+          <span className="settings-summary-meta">{storageBackend === "postgres" ? "适合多人共享和长期留存" : "本地单机配置，开箱即用"}</span>
+          <Tag color={storageBackend === "postgres" ? "purple" : "default"}>{storageBackend}</Tag>
         </div>
       </div>
     );
   })();
+
+  const runtimeNavItems = [
+    {
+      key: "basic",
+      title: "项目与代码仓",
+      description: "仓库、自动拉取、数据源绑定",
+      tag: "最常用",
+      color: "blue",
+    },
+    {
+      key: "review-strategy",
+      title: "检视策略配置",
+      description: "默认模式、质量模式、SAST、人工确认",
+      tag: "影响 agent 数",
+      color: "green",
+    },
+    {
+      key: "runtime",
+      title: "存储与系统开关",
+      description: "SQLite / PostgreSQL 与基础运行参数",
+      tag: "系统级",
+      color: "default",
+    },
+    {
+      key: "credentials",
+      title: "凭据与密钥",
+      description: "平台 token、模型 API Key",
+      tag: "敏感配置",
+      color: "red",
+    },
+    {
+      key: "governance",
+      title: "问题治理与规则筛选",
+      description: "正式问题阈值、规则筛选、模型复核",
+      tag: "结果口径",
+      color: "gold",
+    },
+    {
+      key: "llm",
+      title: "模型与执行策略",
+      description: "超时、重试、并发、Prompt Profile",
+      tag: "性能",
+      color: "purple",
+    },
+    {
+      key: "advanced",
+      title: "高级网络与白名单",
+      description: "工具白名单、网络校验、证书",
+      tag: "高级",
+      color: "default",
+    },
+  ];
 
   const gitnexusStateColor = (state?: string) => {
     if (state === "ready") return "success";
@@ -830,29 +966,6 @@ const SettingsPage: React.FC = () => {
     const nodeCount = Number(status.graph_node_count || 0);
     const edgeCount = Number(status.graph_edge_count || 0);
     return `${fileCount} 个文件，${nodeCount} 个节点，${edgeCount} 条关系`;
-  };
-
-  const gitnexusCommandCheck = (diagnostic?: GitNexusPreflightStatus | null) =>
-    (diagnostic?.checks || []).find((check) => check.name === "gitnexus_command") || null;
-
-  const gitnexusInstallDisplay = (
-    status?: GitNexusIndexStatus | null,
-    diagnostic?: GitNexusPreflightStatus | null,
-  ) => {
-    const commandCheck = gitnexusCommandCheck(diagnostic);
-    if (status?.gitnexus_installed === true) {
-      return { color: "success", label: "已预装", path: status.gitnexus_path || "已检测到 gitnexus 命令" };
-    }
-    if (commandCheck?.status === "passed") {
-      return { color: "success", label: "已预装", path: commandCheck.message || "GitNexus 命令可用" };
-    }
-    if (status?.gitnexus_installed === false) {
-      return { color: "error", label: "未安装", path: status.gitnexus_path || "当前机器未发现 gitnexus 可执行命令" };
-    }
-    if (commandCheck?.status === "failed") {
-      return { color: "error", label: "未安装", path: commandCheck.message || "当前机器未发现 gitnexus 可执行命令" };
-    }
-    return { color: "default", label: "未确认", path: status?.gitnexus_path || "刷新后显示 gitnexus 命令路径" };
   };
 
   const sastStatusColor = (state?: string) => {
@@ -1083,30 +1196,13 @@ const SettingsPage: React.FC = () => {
             ，设置页治理项会持久化到当前存储后端，并在运行时与系统配置合并生效。
           </Paragraph>
           {runtimeSnapshot?.config_path ? (
-            <Alert
-              type="info"
-              showIcon
-              message={`当前统一配置文件：${String(runtimeSnapshot.config_path)}`}
-              description="默认模型、平台凭据、代码仓地址、自动审核开关与网络校验策略都以这份 config.json 为准。"
-            />
+            <div className="settings-config-strip">
+              <span>统一配置文件</span>
+              <code>{String(runtimeSnapshot.config_path)}</code>
+              <Text type="secondary">模型、凭据、仓库和网络校验策略以此为准。</Text>
+            </div>
           ) : null}
           {runtimeOverview}
-          {(() => {
-            const installDisplay = gitnexusInstallDisplay(gitnexusStatus, gitnexusPreflight);
-            return (
-              <Alert
-                type={installDisplay.label === "已预装" ? "success" : installDisplay.label === "未安装" ? "warning" : "info"}
-                showIcon
-                message={
-                  <Space wrap>
-                    <span>本机 GitNexus</span>
-                    <Tag color={installDisplay.color}>{installDisplay.label}</Tag>
-                  </Space>
-                }
-                description={installDisplay.path}
-              />
-            );
-          })()}
         </Space>
       </Card>
 
@@ -1376,7 +1472,7 @@ const SettingsPage: React.FC = () => {
         expanded={isSettingSectionExpanded("impact-template")}
         onToggle={() => toggleSettingSection("impact-template")}
         extra={
-          <Space>
+          <Space wrap>
             <Upload {...impactTemplateUploadProps}>
               <Button>上传 Markdown 模板</Button>
             </Upload>
@@ -1631,18 +1727,42 @@ const SettingsPage: React.FC = () => {
             }
           }}
         >
+          <div className="settings-runtime-nav">
+            {runtimeNavItems.map((item) => {
+              const active = runtimeActiveKeys.includes(item.key);
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`settings-runtime-nav-item${active ? " is-active" : ""}`}
+                  onClick={() => setRuntimeActiveKeys([item.key])}
+                >
+                  <span className="settings-runtime-nav-main">
+                    <strong>{item.title}</strong>
+                    <Tag color={item.color}>{item.tag}</Tag>
+                  </span>
+                  <span>{item.description}</span>
+                </button>
+              );
+            })}
+          </div>
           <Collapse
             className="settings-collapse"
             expandIconPosition={collapseExpandIconPosition}
+            activeKey={runtimeActiveKeys}
+            onChange={(keys) => {
+              const nextKeys = Array.isArray(keys) ? keys.map((item) => String(item)) : [String(keys)];
+              setRuntimeActiveKeys(nextKeys.filter(Boolean));
+            }}
             items={[
               {
                 key: "basic",
-                label: "当前项目代码仓设置",
+                label: "项目与代码仓",
                 extra: <Tag color="processing">最常用</Tag>,
                 children: (
                   <div className="settings-collapse-content">
                     <Paragraph className="settings-section-tip">
-                      这里维护当前项目下绑定的代码仓。不同团队、不同项目的仓库相互隔离，不再维护全局代码仓列表。
+                      维护当前项目绑定的代码仓、自动拉取和数据库上下文。不同项目的仓库配置相互隔离。
                     </Paragraph>
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={6}>
@@ -1807,30 +1927,92 @@ const SettingsPage: React.FC = () => {
                 ),
               },
               {
-                key: "runtime",
-                label: "系统运行设置",
-                extra: <Tag>按需配置</Tag>,
+                key: "review-strategy",
+                label: "检视策略配置",
+                extra: <Tag color="green">影响 agent 数</Tag>,
                 children: (
                   <div className="settings-collapse-content">
-                    <Paragraph className="settings-section-tip">
-                      这里配置默认审核模式、存储后端和人工确认开关；日常新增代码仓不需要改这里。
-                    </Paragraph>
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="这里控制一次检视的默认执行策略"
+                      description="这些配置会影响默认目标分支、检视模式、质量模式、静态工具预扫描和人工确认。普通模式不会固定补入核心角色；深度检视会提高召回但会调用更多检查角色。"
+                    />
                     <Row gutter={[16, 0]}>
-                      <Col xs={24} xl={12}>
+                      <Col xs={24} xl={8}>
                         <Form.Item name="default_target_branch" label="默认目标分支">
                           <Input placeholder="main" />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} xl={12}>
-                        <Form.Item name="default_analysis_mode" label="默认审核模式">
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="default_analysis_mode"
+                          label="默认审核模式"
+                          extra="轻量模式会减少并发和复核轮次，适合几十行以内的小 MR。"
+                        >
                           <Select
                             options={[
-                              { label: "标准模式", value: "standard" },
-                              { label: "轻量模式", value: "light" },
+                              { label: "轻量模式：少量角色串行，适合小 MR", value: "light" },
+                              { label: "标准模式：上下文更完整，适合常规 MR", value: "standard" },
                             ]}
                           />
                         </Form.Item>
                       </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="review_quality_mode"
+                          label="检视质量模式"
+                          extra="普通模式只执行主 Agent 选中的检查角色；深度检视会固定补入核心质量角色。"
+                        >
+                          <Select
+                            options={[
+                              { label: "普通模式：只运行主 Agent 选中的角色", value: "standard" },
+                              { label: "深度检视：补入核心质量角色，提高召回", value: "thorough_review" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_sast_prescan"
+                          label="启用 SAST/linter 预扫描"
+                          valuePropName="checked"
+                          extra="开启后，检视前会 best-effort 调用本机 semgrep、PMD、Checkstyle、eslint、bandit 等静态工具。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="enable_review_workspace_realtime_graph"
+                          label="启用 MR 快照实时图谱"
+                          valuePropName="checked"
+                          extra="默认关闭。只有需要基于本次 MR 快照临时建图时再开启。"
+                        >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24}>{renderSastToolStatus()}</Col>
+                    </Row>
+                  </div>
+                ),
+              },
+              {
+                key: "runtime",
+                label: "存储与系统开关",
+                extra: <Tag>按需配置</Tag>,
+                children: (
+                  <div className="settings-collapse-content">
+                    <Paragraph className="settings-section-tip">
+                      配置运行时存储后端和 PostgreSQL 连接。日常调整检视行为时，优先使用“检视策略配置”。
+                    </Paragraph>
+                    <Row gutter={[16, 0]}>
                       <Col xs={24} xl={12}>
                         <Form.Item name="storage_backend" label="底层存储后端">
                           <Select
@@ -1866,18 +2048,13 @@ const SettingsPage: React.FC = () => {
                           "未填写新密码时，系统会继续使用当前已保存的 PG 密码。",
                         )}
                       </Col>
-                      <Col xs={24} xl={8}>
-                        <Form.Item name="allow_human_gate" label="允许人工确认" valuePropName="checked">
-                          <Switch />
-                        </Form.Item>
-                      </Col>
                     </Row>
                   </div>
                 ),
               },
               {
                 key: "credentials",
-                label: "平台凭证",
+                label: "凭据与密钥",
                 extra: <Tag>按需配置</Tag>,
                 children: (
                   <div className="settings-collapse-content">
@@ -1938,7 +2115,7 @@ const SettingsPage: React.FC = () => {
               },
               {
                 key: "governance",
-                label: "审核治理",
+                label: "问题治理与规则筛选",
                 extra: <Tag color="gold">建议优先配置</Tag>,
                 children: (
                   <div className="settings-collapse-content">
@@ -1946,8 +2123,8 @@ const SettingsPage: React.FC = () => {
                       type="info"
                       showIcon
                       style={{ marginBottom: 16 }}
-                      message="问题升级治理说明"
-                      description="这组开关只影响检视发现是否升级为正式问题，不会丢掉原始发现。当前系统会把结果分成三层：审核发现、正式问题、保留观察。保留观察的常见原因包括 P 级不足、结论仍带条件前提，以及问题只命中了待删除代码。规则筛选也支持切换为模型语义筛选。"
+                      message="这里只控制发现如何升级为正式问题"
+                      description="这组开关不会丢掉原始检视发现，只决定哪些发现进入正式问题列表。检视用多少角色、是否启用静态工具，请到上方“检视策略”调整。"
                     />
                     <Row gutter={[16, 0]}>
                       <Col xs={24} xl={8}>
@@ -2097,20 +2274,6 @@ const SettingsPage: React.FC = () => {
                       </Col>
                       <Col xs={24} xl={8}>
                         <Form.Item
-                          name="review_quality_mode"
-                          label="检视质量模式"
-                          extra="普通模式只执行主 Agent 选中的检查角色；深度模式会补入核心质量角色以提高召回。"
-                        >
-                          <Select
-                            options={[
-                              { label: "普通模式", value: "standard" },
-                              { label: "深度检视", value: "thorough_review" },
-                            ]}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={8}>
-                        <Form.Item
                           name="enable_llm_targeted_debate"
                           label="启用模型定向复核"
                           valuePropName="checked"
@@ -2122,27 +2285,6 @@ const SettingsPage: React.FC = () => {
                       <Col xs={24} xl={8}>
                         <Form.Item name="llm_targeted_debate_timeout_seconds" label="模型定向复核超时（秒）">
                           <InputNumber min={15} max={300} style={{ width: "100%" }} />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} xl={8}>
-                        <Form.Item
-                          name="enable_sast_prescan"
-                          label="启用 SAST/linter 预扫描"
-                          valuePropName="checked"
-                          extra="默认开启且 best-effort：会尝试调用本机 semgrep、PMD、Checkstyle、eslint、bandit，并读取 SpotBugs/ArchUnit/JaCoCo 报告；未安装或无报告时只在诊断中提示，不阻断检视。"
-                        >
-                          <Switch />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24}>{renderSastToolStatus()}</Col>
-                      <Col xs={24} xl={8}>
-                        <Form.Item
-                          name="enable_review_workspace_realtime_graph"
-                          label="启用 MR 快照实时图谱"
-                          valuePropName="checked"
-                          extra="默认关闭。关闭时不创建 MR worktree，直接使用设置页配置代码仓的已有代码结构图谱和 GitNexus 图谱；开启后才基于本次 MR 快照实时建图。"
-                        >
-                          <Switch />
                         </Form.Item>
                       </Col>
                       <Col xs={24} xl={8}>

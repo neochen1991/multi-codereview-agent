@@ -38,3 +38,4 @@ output/project-intro-slides/pptxgenjs_helpers/
 scripts/generate_project_intro_ppt.py
 .playwright-cli
 output/playwright/
+backend/app/app.db

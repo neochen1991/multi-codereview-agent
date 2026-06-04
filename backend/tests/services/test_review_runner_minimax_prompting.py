@@ -1140,6 +1140,60 @@ def test_sast_prescan_summary_and_fast_lane_create_visible_tool_finding(storage_
     assert finding_payloads and finding_payloads[0]["code_context"]["sast_fast_lane"] is True
 
 
+def test_sast_prescan_summary_is_visible_when_tools_are_skipped(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_sast_skipped_visible",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/ui",
+            target_ref="main",
+            title="SAST skipped visibility",
+            changed_files=["src/web/adminPanel.ts"],
+            unified_diff="",
+        ),
+    )
+    expert_jobs = [
+        {
+            "expert": ExpertProfile(
+                expert_id="security_compliance",
+                name="Security",
+                name_zh="安全专家",
+                role="security",
+            ),
+            "repository_context": {
+                "target_hunk": {
+                    "file_path": "src/web/adminPanel.ts",
+                    "changed_lines": [18],
+                    "excerpt": "+ renderAdminPanel(userInput);\n",
+                },
+                "sast_prescan": {
+                    "enabled": False,
+                    "summary": "",
+                    "findings": [],
+                    "tool_observations": [],
+                    "limitations": ["未发现可用 SAST/linter 工具，跳过预扫描。"],
+                },
+            },
+        }
+    ]
+
+    runner._append_sast_prescan_summary_message(review, expert_jobs)
+
+    messages = runner.message_repo.list(review.review_id)
+    summary = next(message for message in messages if message.message_type == "sast_prescan_summary")
+
+    assert "SAST/linter 预扫描未执行或已跳过" in summary.content
+    assert summary.metadata["scan_count"] == 1
+    assert summary.metadata["tool_observation_count"] == 0
+    assert summary.metadata["scanned_files"] == ["src/web/adminPanel.ts"]
+    assert summary.metadata["limitations"] == ["未发现可用 SAST/linter 工具，跳过预扫描。"]
+
+
 def test_tool_observation_scan_fails_when_expert_omits_relevant_observation(storage_root: Path, monkeypatch) -> None:
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
