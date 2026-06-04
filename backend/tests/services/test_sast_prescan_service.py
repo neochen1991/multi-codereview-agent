@@ -290,3 +290,22 @@ def test_sast_tool_status_reports_command_and_report_availability(tmp_path: Path
     assert jacoco["status"] == "available"
     assert "target/site/jacoco/jacoco.xml" in jacoco["existing_report_paths"]
     assert "命令类工具可用" in payload["summary"]
+
+
+def test_sast_tool_status_finds_windows_common_install_path_when_backend_path_misses(tmp_path: Path, monkeypatch):
+    npm_dir = tmp_path / "npm"
+    npm_dir.mkdir()
+    eslint = npm_dir / "eslint.cmd"
+    eslint.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    with (
+        patch("app.services.sast_prescan_service.platform.system", return_value="Windows"),
+        patch("app.services.sast_prescan_service.shutil.which", return_value=None),
+    ):
+        payload = SastPreScanService().tool_status(enabled=True)
+
+    eslint_status = next(item for item in payload["command_tools"] if item["tool"] == "eslint")
+    assert eslint_status["status"] == "available"
+    assert eslint_status["executable"] == str(eslint)
+    assert eslint_status["detection_method"] == "windows_common_path"

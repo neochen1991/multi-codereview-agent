@@ -235,6 +235,7 @@ export interface FindingCodeContext {
   review_inputs?: FindingCodeContextReviewInputs;
   rule_attribution?: FindingRuleAttribution;
   candidate_verification?: Record<string, unknown>;
+  unpromoted_decision?: IssueFilterDecision;
 }
 
 export interface DebateIssue {
@@ -730,6 +731,7 @@ export interface SastToolStatusItem {
   purpose: string;
   status: "available" | "missing" | "requires_report" | string;
   executable?: string;
+  detection_method?: string;
   report_paths?: string[];
   verify_commands?: string[];
   install?: {

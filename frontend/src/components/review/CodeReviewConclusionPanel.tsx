@@ -162,6 +162,7 @@ const renderSuggestedCode = (code: string) => (
 const CodeReviewConclusionPanel: React.FC<Props> = ({
   finding,
   issue,
+  governanceDecision,
   ruleScreening,
   findingDetailsLoading = false,
   findingDetailsError = "",
@@ -213,6 +214,17 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
   const findingMatchesIssueType = !issue || issueTextMatchesIssueType(issueTextType, findingTextForAlignment);
   const alignedFinding = sameIssueAnchor && linkedToIssue && findingMatchesIssueType ? finding : null;
   const codeContext = alignedFinding?.code_context;
+  const unpromotedDecision = !issue
+    ? governanceDecision || codeContext?.unpromoted_decision || finding.code_context?.unpromoted_decision || null
+    : null;
+  const unpromotedLabel =
+    cleanUserFacingText(unpromotedDecision?.rule_label || "") ||
+    humanizeReviewText(unpromotedDecision?.rule_label || "") ||
+    "";
+  const unpromotedReason =
+    cleanUserFacingText(unpromotedDecision?.reason || "") ||
+    humanizeReviewText(unpromotedDecision?.reason || "") ||
+    "";
   const issueSummaryAligned = issueTextMatchesIssueType(issueTextType, issue?.summary);
   const findingSummaryAligned = issueTextMatchesIssueType(
     issueTextType,
@@ -371,11 +383,25 @@ const CodeReviewConclusionPanel: React.FC<Props> = ({
                   <>
                     <Tag color="default">仅保留发现</Tag>
                     <Tag>未升级为正式问题</Tag>
+                    {unpromotedLabel ? <Tag color="gold">{unpromotedLabel}</Tag> : null}
                   </>
                 )}
               </>
             ),
           },
+          ...(unpromotedReason
+            ? [
+                {
+                  key: "unpromoted_reason",
+                  label: "未升级原因",
+                  children: (
+                    <Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}>
+                      {unpromotedReason}
+                    </Paragraph>
+                  ),
+                },
+              ]
+            : []),
           {
             key: "finding_type",
             label: "问题类型",

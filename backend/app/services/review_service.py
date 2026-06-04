@@ -1254,7 +1254,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 ),
                 findings,
             )
-            return self._dedupe_display_issues(self._filter_user_visible_issues(hydrated))
+            return self._sync_pending_human_display_state(
+                review_id,
+                self._dedupe_display_issues(self._filter_user_visible_issues(hydrated)),
+            )
         display_issues = [
             self._realign_issue_location(issue, finding_by_id)
             for issue in issues
@@ -1266,7 +1269,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             ),
             findings,
         )
-        return self._dedupe_display_issues(self._filter_user_visible_issues(hydrated))
+        return self._sync_pending_human_display_state(
+            review_id,
+            self._dedupe_display_issues(self._filter_user_visible_issues(hydrated)),
+        )
 
     def list_display_issues(self, review_id: str) -> list[DebateIssue]:
         """返回面向前端展示的 issue 列表，统一清洗内部诊断文案。"""
@@ -1296,6 +1302,26 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             normalized = self._repair_user_visible_consistency_failure(normalized, family)
             visible.append(self._normalize_user_visible_issue_state(normalized))
         return visible
+
+    def _sync_pending_human_display_state(self, review_id: str, issues: list[DebateIssue]) -> list[DebateIssue]:
+        review = self.get_review(review_id)
+        if review is None:
+            return issues
+        pending_ids = {str(item or "").strip() for item in list(review.pending_human_issue_ids or []) if str(item or "").strip()}
+        if not pending_ids:
+            return issues
+        synced: list[DebateIssue] = []
+        for issue in issues:
+            issue_ids = {
+                str(issue.issue_id or "").strip(),
+                str(issue.canonical_issue_id or "").strip(),
+                *[str(item or "").strip() for item in list(issue.finding_ids or [])],
+            }
+            if issue_ids & pending_ids:
+                synced.append(issue.model_copy(update={"status": "needs_human", "needs_human": True}))
+                continue
+            synced.append(issue)
+        return synced
 
     @staticmethod
     def _repair_user_visible_consistency_failure(issue: DebateIssue, family: str) -> DebateIssue:
@@ -1499,6 +1525,8 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         }
         candidates: dict[tuple[str, str], ReviewFinding] = {}
         for finding in findings:
+            if self._display_finding_is_tool_observation_only(finding):
+                continue
             issue = self._normalize_report_issue_family(self._build_issue_from_finding(review_id, finding, None))
             family = self._display_issue_family(issue)
             if not self._display_issue_anchor_valid(issue, family):
@@ -1529,6 +1557,31 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             for finding in candidates.values()
         ]
         return [*issues, *additions]
+
+    @staticmethod
+    def _display_finding_is_tool_observation_only(finding: ReviewFinding) -> bool:
+        code_context = dict(getattr(finding, "code_context", {}) or {})
+        if bool(code_context.get("sast_fast_lane")):
+            return True
+        title = str(getattr(finding, "title", "") or "").strip()
+        if not title.startswith("静态工具候选需复核"):
+            return False
+        evidence_source = str(code_context.get("evidence_source") or "").strip().lower()
+        adopted_tool_observations = [
+            str(item).strip()
+            for item in list(code_context.get("adopted_tool_observations") or [])
+            if str(item).strip()
+        ]
+        sast_prescan_matches = [
+            item for item in list(code_context.get("sast_prescan_matches") or []) if isinstance(item, dict)
+        ]
+        normalized_issue_type = str(getattr(finding, "normalized_issue_type", "") or "").strip().lower()
+        return bool(
+            evidence_source in {"tool_observation", "sast_prescan"}
+            or adopted_tool_observations
+            or sast_prescan_matches
+            or "tool_observation" in normalized_issue_type
+        )
 
     def _display_issue_candidate_meets_threshold(self, finding: ReviewFinding) -> bool:
         """展示层补漏不能绕过设置页的 issue 升级阈值。"""
@@ -1588,11 +1641,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             ]
         ).lower()
         if family == "exception_swallowed":
-            if not current_code:
-                return any(token in text for token in ("catch", "runtimeexception", "exception", "ignored", "异常", "返回成功"))
-            return any(token in current_code for token in ("catch", "runtimeexception", "exception", "ignored", "异常")) and any(
-                token in current_code for token in ("success", "返回成功", "吞", "ignored")
+            has_exception_signal = any(
+                token in text for token in ("catch", "runtimeexception", "exception", "ignored", "异常", "吞掉")
             )
+            has_success_signal = any(token in text for token in ("success", "返回成功", "成功结果"))
+            return has_exception_signal and has_success_signal
         if family == "comment_contract_unimplemented":
             if not current_code:
                 return any(token in text for token in ("todo", "//", "/*", "承诺", "未实现", "应该", "需要"))

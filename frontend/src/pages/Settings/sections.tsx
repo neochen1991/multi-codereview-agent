@@ -654,7 +654,6 @@ export const RuntimeSettingsCard: React.FC<{
     <Form form={form} layout="vertical" onFinish={onSubmit}>
       <Collapse
         className="settings-collapse"
-        defaultActiveKey={["basic", "governance"]}
         expandIconPosition={collapseExpandIconPosition}
         items={buildRuntimeItems(form)}
       />

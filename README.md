@@ -1,93 +1,483 @@
 # multi-codereview-agent
 
-多专家协同代码审核工具，后端基于 FastAPI，前端基于 React / Ant Design。
+多专家协同代码检视工具。后端基于 FastAPI，前端基于 React / Vite / Ant Design；支持本地仓库、MR/分支检视、Tree-sitter 代码图谱、GitNexus 影响分析、SAST/linter 预扫描和检视质量治理。
 
-本文只说明本工具运行所需的前置条件、安装步骤、配置入口和启动方式。系统能力、专家边界、GitNexus 影响分析和质量治理说明见文末文档链接。
+本文是运行手册，重点说明从零安装、配置和启动本工具的完整步骤，覆盖 macOS/Linux 与 Windows 两类环境。
 
-## 运行前置条件
+## 快速路径
 
-请先在运行机器上准备：
-
-- Python `>= 3.11`
-- Node.js `>= 18` + npm
-- Git，可在命令行执行 `git --version`
-- 可访问模型服务的网络与 API Key，例如通义千问、OpenAI 兼容网关或公司内部模型网关
-- 可访问待审核代码仓的 Git Token，或者已经克隆好的本地代码仓路径
-- macOS / Linux：需要 `bash`、`curl`
-- Windows：需要 PowerShell，建议安装 Python Launcher `py`
-- 可选：GitNexus，用于生成 MR 关联影响分析报告
-- 推荐：Tree-sitter Python 依赖，用于 Java 代码图谱和更准确的关联上下文
-- 可选：SAST/linter 工具，用于为专家 Agent 提供确定性候选信号，详见“可选：开启 SAST/linter 预扫描”
-
-Python 依赖会通过 `pip install -e ".[code-graph]"` 安装，前端依赖会通过 `npm install` 安装。GitNexus 属于可选增强能力；Tree-sitter 不需要单独安装系统命令，本工具通过 Python 包 `tree-sitter` 和 `tree-sitter-language-pack` 使用它。
-
-后端启动会用到 `uvicorn`。如果是全新环境，请按下面安装步骤安装。
-
-## 首次安装
+已经准备好 Python、Node.js、Git 和模型 API Key 时，可以直接按下面跑。
 
 macOS / Linux：
 
 ```bash
+git clone <this-repo-url>
+cd multi-codereview-agent
+
 python3 -m venv .venv
-.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -U pip setuptools wheel
 .venv/bin/python -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
 npm --prefix frontend install
+
+export MINIMAX_API_KEY="your-api-key"
+# 按需编辑 config.json，至少配置 llm、projects[*].repositories[*] 或 code_repo。
+
+bash scripts/start-all.sh
 ```
 
-Windows：
+Windows PowerShell：
 
-```bat
+```powershell
+git clone <this-repo-url>
+cd multi-codereview-agent
+
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -U pip setuptools wheel
 .venv\Scripts\python.exe -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
 cd frontend
 npm install
+cd ..
+
+$env:MINIMAX_API_KEY="your-api-key"
+# 按需编辑 config.json，至少配置 llm、projects[*].repositories[*] 或 code_repo。
+
+scripts\start-all.bat
 ```
 
-安装后可以先检查：
+启动成功后访问：
+
+- 前端工作台：`http://127.0.0.1:5174`
+- 后端健康检查：`http://127.0.0.1:8011/health`
+- 设置页：`http://127.0.0.1:5174/settings`
+
+## 目录结构
+
+```text
+backend/                  FastAPI 后端、检视编排、存储、SAST 和 GitNexus 集成
+frontend/                 React/Vite 前端
+scripts/start-all.sh      macOS/Linux 一键启动
+scripts/start-all.bat     Windows 一键启动
+scripts/stop-all.sh       macOS/Linux 停止服务
+scripts/stop-all.bat      Windows 停止服务
+config.json               默认运行配置；前端设置页也会读写它
+logs/                     启动后生成的后端/前端日志
+backend/app/storage/      默认 SQLite 数据和运行时存储
+```
+
+## 运行前置条件
+
+必需：
+
+| 依赖 | 推荐版本 | 用途 | 验证命令 |
+| --- | --- | --- | --- |
+| Python | `3.11` 或更高 | 后端、检视编排、SAST Python 工具 | `python3 --version` 或 `py -3.11 --version` |
+| Node.js + npm | Node `18` 或更高 | 前端、GitNexus 可选 CLI、ESLint 可选工具 | `node --version`、`npm --version` |
+| Git | 任意现代版本 | 克隆本工具和目标代码仓、生成 MR 快照 | `git --version` |
+| 模型 API Key | 取决于模型供应商 | 专家 Agent 调用 LLM | 见“模型配置” |
+| 目标代码仓访问能力 | 本地路径或 Git Token | 拉取/检视代码 | `git clone` 或本地仓存在 |
+
+推荐：
+
+| 依赖 | 用途 |
+| --- | --- |
+| Tree-sitter Python 包 | Java 代码图谱、调用链、最小上下文检索 |
+| Semgrep / PMD / Checkstyle / ESLint / Bandit | SAST/linter 预扫描候选信号 |
+| GitNexus CLI | MR 关联影响分析 |
+| Java / Maven / Gradle | 为 Java 项目生成 SpotBugs、ArchUnit、JaCoCo 等报告 |
+| PostgreSQL | 需要持久化到 Postgres 时使用；默认 SQLite 不需要 |
+
+## macOS / Linux 安装
+
+1. 安装系统工具。
+
+macOS 可使用 Homebrew：
 
 ```bash
-python --version
-node --version
-npm --version
-git --version
+brew install python@3.11 node git
 ```
 
-Windows 如果使用 `py`：
+Linux 可使用系统包管理器，例如 Ubuntu：
 
-```bat
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip nodejs npm git curl
+```
+
+2. 创建虚拟环境并安装后端依赖。
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -U pip setuptools wheel
+.venv/bin/python -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
+```
+
+`.[code-graph]` 会安装 Tree-sitter 代码图谱依赖：
+
+- `tree-sitter`
+- `tree-sitter-language-pack`
+- `networkx`
+- `watchdog`
+
+验证 Tree-sitter Java grammar：
+
+```bash
+.venv/bin/python -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
+```
+
+3. 安装前端依赖。
+
+```bash
+npm --prefix frontend install
+```
+
+4. 可选安装 SAST/linter 工具。
+
+```bash
+python3 -m pip install semgrep bandit
+brew install pmd checkstyle
+npm install -g eslint
+
+semgrep --version
+bandit --version
+pmd --version
+checkstyle --version
+eslint --version
+```
+
+5. 可选安装 GitNexus。
+
+```bash
+npm install -g gitnexus
+gitnexus --version
+```
+
+## Windows 安装
+
+建议使用 PowerShell 或 cmd，路径尽量避免中文和过深目录。目标代码仓路径可以包含空格，但配置 GitNexus 或外部工具命令时要使用 JSON array 写法，见“GitNexus 配置”。
+
+1. 安装必需工具。
+
+- Python 3.11：安装时勾选 “Add python.exe to PATH”，并确认 `py` 可用。
+- Node.js LTS：建议 Node 18 或更高。
+- Git for Windows：安装后确认 PowerShell/cmd 能执行 `git`。
+- 可选 Chocolatey：便于安装 PMD、Checkstyle。
+
+验证：
+
+```powershell
 py -3.11 --version
 node --version
 npm --version
 git --version
 ```
 
-## 基础配置
+2. 创建虚拟环境并安装后端依赖。
 
-项目根目录的 `config.json` 是默认配置入口，前端设置页 `/settings` 读写的也是这份文件。
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]" "uvicorn[standard]>=0.30"
+```
 
-至少需要确认：
+验证 Tree-sitter Java grammar：
 
-- `server.backend_port`：默认 `8011`
-- `server.frontend_port`：默认 `5174`
-- `llm.default_base_url`
-- `llm.default_model`
-- `llm.default_api_key_env` 或 `llm.default_api_key`
-- `git.repo_access_token`
-- `code_repo.local_path` 或 `code_repositories[*].local_path`
-- `code_repo.default_branch` 或 `code_repositories[*].default_branch`
-- `network.verify_ssl` / `network.use_system_trust_store` / `network.ca_bundle_path`
+```powershell
+.venv\Scripts\python.exe -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
+```
 
-如果使用环境变量放模型 Key，例如：
+如果公司内网 PyPI 镜像缺少 wheel，可先设置镜像，再重装：
+
+```powershell
+$env:PIP_INDEX_URL="https://your-internal-pypi/simple"
+.venv\Scripts\python.exe -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
+```
+
+3. 安装前端依赖。
+
+```powershell
+cd frontend
+npm install
+cd ..
+```
+
+4. 可选安装 SAST/linter 工具。
+
+```powershell
+py -m pip install semgrep bandit
+npm install -g eslint
+
+where semgrep
+where bandit
+where eslint
+semgrep --version
+bandit --version
+eslint --version
+```
+
+PMD / Checkstyle 可通过 Chocolatey 安装，也可以下载发行包并把 `bin` 加入 PATH：
+
+```powershell
+choco install pmd
+choco install checkstyle
+where pmd
+where checkstyle
+```
+
+5. 可选安装 GitNexus。
+
+```powershell
+npm install -g gitnexus
+gitnexus --version
+```
+
+## 配置入口
+
+本工具主要配置文件是项目根目录的 `config.json`。前端设置页 `/settings` 也会读写同一份配置。
+
+后端还支持这些环境变量覆盖运行路径：
+
+| 环境变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `CONFIG_PATH` | 指定配置文件路径 | `<project>/config.json` |
+| `STORAGE_ROOT` | 指定后端存储目录 | `<project>/backend/app/storage` |
+| `SQLITE_DB_PATH` | 指定 SQLite DB 文件 | `<storage_root>/app.db` |
+| `CODE_REVIEW_CONSOLE_LOG` | Windows 调试时打开控制台日志 | 空，默认写入日志文件 |
+
+示例：
+
+macOS / Linux：
 
 ```bash
-export DASHSCOPE_API_KEY="your-api-key"
+export CONFIG_PATH="/path/to/config.json"
+export STORAGE_ROOT="/path/to/storage"
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:DASHSCOPE_API_KEY="your-api-key"
+$env:CONFIG_PATH="D:\workspace\multi-codereview-agent\config.json"
+$env:STORAGE_ROOT="D:\workspace\multi-codereview-agent\storage"
+```
+
+## 模型配置
+
+模型调用采用 OpenAI-compatible Chat Completions 协议。后端会把：
+
+```text
+llm.default_base_url + /chat/completions
+```
+
+拼成最终请求地址。因此 `default_base_url` 应填到 OpenAI-compatible API 根路径，例如 `/v1` 或供应商给出的兼容根路径，不要把 `/chat/completions` 一起填进去。
+
+推荐使用环境变量保存 API Key，不推荐把密钥写进 `config.json`。
+
+安全配置示例：
+
+```json
+{
+  "llm": {
+    "default_provider": "openai-compatible",
+    "default_base_url": "https://your-provider.example.com/v1",
+    "default_model": "your-model-name",
+    "default_api_key_env": "MINIMAX_API_KEY",
+    "default_api_key": null
+  }
+}
+```
+
+macOS / Linux：
+
+```bash
+export MINIMAX_API_KEY="your-api-key"
+```
+
+Windows PowerShell：
+
+```powershell
+$env:MINIMAX_API_KEY="your-api-key"
+```
+
+如果使用 MiniMax 2.7 / 火山方舟一类 OpenAI-compatible 端点，配置形态通常类似：
+
+```json
+{
+  "llm": {
+    "default_provider": "openai-compatible",
+    "default_base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "default_model": "MiniMax-M2.7",
+    "default_api_key_env": "MINIMAX_API_KEY",
+    "default_api_key": null
+  }
+}
+```
+
+如果 API Key 有效但工具调不通，优先检查：
+
+- 启动后端的同一个终端里是否设置了 `MINIMAX_API_KEY`。
+- `default_api_key_env` 是否和环境变量名完全一致。
+- `default_base_url` 是否多填了 `/chat/completions`。
+- 模型名是否是供应商要求的精确名称。
+- 公司代理或证书是否影响后端访问模型服务。
+- Windows `.bat` 启动时是否继承了 PowerShell/cmd 当前环境变量。
+
+可用 curl 或 PowerShell 先直连模型端点。
+
+macOS / Linux：
+
+```bash
+export LLM_BASE_URL="https://ark.cn-beijing.volces.com/api/coding/v3"
+export MINIMAX_API_KEY="your-api-key"
+
+curl -sS "$LLM_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $MINIMAX_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MiniMax-M2.7","messages":[{"role":"user","content":"ping"}],"temperature":0.1}'
+```
+
+Windows PowerShell：
+
+```powershell
+$env:LLM_BASE_URL="https://ark.cn-beijing.volces.com/api/coding/v3"
+$env:MINIMAX_API_KEY="your-api-key"
+
+$body = @{
+  model = "MiniMax-M2.7"
+  messages = @(@{ role = "user"; content = "ping" })
+  temperature = 0.1
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod `
+  -Uri "$env:LLM_BASE_URL/chat/completions" `
+  -Headers @{ Authorization = "Bearer $env:MINIMAX_API_KEY" } `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+## 代码仓配置
+
+至少配置一个目标仓库。推荐使用 `projects[*].repositories[*]`，旧版 `code_repo` 字段仍可兼容。
+
+示例：
+
+```json
+{
+  "projects": [
+    {
+      "project_id": "default",
+      "name": "默认项目",
+      "status": "active",
+      "repositories": [
+        {
+          "repository_id": "demo-service",
+          "name": "demo-service",
+          "provider": "github",
+          "clone_url": "https://github.com/your-org/demo-service.git",
+          "web_url_prefixes": ["https://github.com/your-org/demo-service"],
+          "local_path": "/path/to/demo-service",
+          "default_branch": "main",
+          "enabled": true,
+          "auto_review_enabled": false,
+          "auto_sync": false,
+          "gitnexus_enabled": true
+        }
+      ]
+    }
+  ],
+  "default_project_id": "default"
+}
+```
+
+Windows 路径示例：
+
+```json
+{
+  "local_path": "D:\\workspace\\demo-service",
+  "default_branch": "main"
+}
+```
+
+Git Token 配置：
+
+```json
+{
+  "git": {
+    "repo_access_token": null,
+    "github_access_token": null,
+    "gitlab_access_token": null,
+    "codehub_access_token": null
+  }
+}
+```
+
+说明：
+
+- 本地仓库存在时，优先使用 `local_path`。
+- 需要拉取远端 MR/分支时，配置 `clone_url` 和对应平台 token。
+- `repo_access_token` 是通用兜底 token；平台专用 token 优先级更高。
+- Windows 路径在 JSON 中要使用双反斜杠。
+
+## 运行时配置
+
+常用字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `runtime.default_analysis_mode` | 默认检视模式，`light` 更快，`standard` 更完整 |
+| `runtime.storage_backend` | `sqlite` 或 `postgres`；默认 `sqlite` |
+| `runtime.enable_sast_prescan` | 是否启用 SAST/linter 预扫描 |
+| `runtime.enable_llm_issue_judge` | 是否启用 LLM issue 二次裁决 |
+| `runtime.enable_llm_targeted_debate` | 是否启用定向辩论 |
+| `runtime.allow_human_gate` | 是否允许需要人工确认的问题进入人工门禁 |
+| `runtime.light_llm_timeout_seconds` | light 模式单次 LLM 超时 |
+| `runtime.standard_llm_timeout_seconds` | standard 模式单次 LLM 超时 |
+| `runtime.standard_max_parallel_experts` | standard 模式专家并发数 |
+
+默认 SQLite 不需要额外数据库。切换 Postgres 时需要配置：
+
+```json
+{
+  "runtime": {
+    "storage_backend": "postgres",
+    "storage_pg_url": "postgresql://host:5432/database",
+    "storage_pg_schema": "public",
+    "storage_pg_user": "user",
+    "storage_pg_password": "password"
+  }
+}
+```
+
+## 网络与证书配置
+
+`network` 控制后端访问模型服务、代码平台等外部服务时的 HTTPS 校验：
+
+```json
+{
+  "network": {
+    "verify_ssl": true,
+    "use_system_trust_store": true,
+    "ca_bundle_path": ""
+  }
+}
+```
+
+建议：
+
+- 正常环境保持 `verify_ssl=true`。
+- 公司内网证书优先配置系统信任或 `ca_bundle_path`。
+- 只有排障时临时关闭 `verify_ssl`。
+- 如果设置了代理，确保本地服务不走代理。
+
+macOS / Linux：
+
+```bash
+export NO_PROXY="127.0.0.1,localhost"
+```
+
+Windows PowerShell：
+
+```powershell
+$env:NO_PROXY="127.0.0.1,localhost"
 ```
 
 ## 启动工具
@@ -104,34 +494,49 @@ Windows：
 scripts\start-all.bat
 ```
 
-Windows 一键启动脚本会自动检查并补装：
+启动脚本会启动：
 
-- 后端基础依赖
-- Tree-sitter 代码图谱依赖：`tree-sitter`、`tree-sitter-language-pack`、`networkx`
-- 前端 `node_modules`
-
-Windows 下后端日志默认写入 `logs/backend.log`，不再默认持续写控制台，避免 cmd/PowerShell 控制台输出阻塞导致页面假死。确实需要控制台日志调试时，可先设置：
-
-```bat
-set CODE_REVIEW_CONSOLE_LOG=true
-```
-
-启动后进入设置页，在“Tree-sitter 代码图谱”区块中为目标代码仓点击“建立/刷新图谱”。图谱生成后会写入目标仓库：
-
-```text
-<repo>/.code-review-graph/graph.db
-```
-
-启动成功后访问：
-
+- 后端：`http://127.0.0.1:8011`
 - 前端：`http://127.0.0.1:5174`
-- 后端健康检查：`http://127.0.0.1:8011/health`
 
-日志位置：
+日志：
 
 ```text
 logs/backend.log
 logs/frontend.log
+```
+
+PID 文件：
+
+| 环境 | PID 目录 |
+| --- | --- |
+| macOS / Linux | `${TMPDIR:-/tmp}/multi-codereview-agent` |
+| Windows | `<project>\run` |
+
+Windows 一键启动脚本会检查并尝试补装：
+
+- 后端基础依赖
+- Tree-sitter 代码图谱依赖
+- 前端 `node_modules`
+
+如果要单独启动后端：
+
+macOS / Linux：
+
+```bash
+.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8011 --reload
+```
+
+Windows：
+
+```bat
+.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8011 --reload
+```
+
+如果要单独启动前端：
+
+```bash
+npm --prefix frontend run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
 
 ## 停止工具
@@ -148,117 +553,179 @@ Windows：
 scripts\stop-all.bat
 ```
 
-## 单独启动
+如果端口被旧进程占用：
 
-后端：
-
-```bash
-.venv/bin/python -m uvicorn app.main:app --app-dir backend --reload --port 8011
-```
-
-Windows 后端：
-
-```bat
-.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload --port 8011
-```
-
-前端：
+macOS / Linux：
 
 ```bash
-npm --prefix frontend run dev -- --host 127.0.0.1 --port 5174 --strictPort
+lsof -i :8011
+lsof -i :5174
+kill <pid>
 ```
 
-## 可选：开启 SAST/linter 预扫描
-
-SAST/linter 预扫描用于提升检视召回率。它不会直接生成正式问题，而是把工具命中的风险统一转换为 `tool_observations`，再交给专家 Agent 结合 diff、关联上下文、代码语言通用规范和专家绑定规范判断。未安装工具时检视不会失败，但会少一类确定性候选信号。
-
-在设置页 `/settings` 的“检视质量治理”区域可以打开“启用 SAST/linter 预扫描”，并查看“静态分析工具”状态。状态含义如下：
-
-- `available`：后端进程的 PATH 能找到该命令，会在检视时尝试调用。
-- `missing`：当前机器未发现该命令，需要安装并加入后端进程 PATH。
-- `requires_report`：该工具由 Maven/Gradle/测试流程生成 XML 报告，本工具只读取报告，不直接启动该工具。
-- `disabled`：总开关未启用，不会调用命令或读取报告。
-
-当前支持的命令类工具：
-
-| 工具 | 主要用途 | Windows 安装示例 | 校验命令 |
-| --- | --- | --- | --- |
-| Semgrep | Java/SQL/通用安全规则、项目自定义规则 | `py -m pip install semgrep` | `where semgrep`、`semgrep --version` |
-| PMD | Java 空 catch、复杂度、低效循环、坏味道 | `choco install pmd`，或下载 PMD 后把 `bin` 加入 PATH | `where pmd`、`pmd --version` |
-| Checkstyle | Java 编码规范、命名、导入、格式 | `choco install checkstyle`，或配置 checkstyle jar 包装命令 | `where checkstyle`、`checkstyle --version` |
-| ESLint | JavaScript/TypeScript linter 候选信号 | `npm install -g eslint` | `where eslint`、`eslint --version` |
-| Bandit | Python 安全候选信号 | `py -m pip install bandit` | `where bandit`、`bandit --version` |
-
-macOS / Linux 可参考：
-
-```bash
-python3 -m pip install semgrep bandit
-brew install pmd checkstyle
-npm install -g eslint
-which semgrep
-semgrep --version
-```
-
-Windows PowerShell 可参考：
+Windows：
 
 ```powershell
-py -m pip install semgrep bandit
-npm install -g eslint
-where semgrep
-where bandit
-where eslint
-semgrep --version
+netstat -ano | findstr :8011
+netstat -ano | findstr :5174
+taskkill /PID <pid> /T /F
 ```
 
-Java 报告类工具需要项目构建先生成 XML：
+## 首次运行指引
 
-| 工具 | 读取的常见报告路径 | 作用 |
+1. 打开前端：`http://127.0.0.1:5174`
+2. 进入设置页 `/settings`。
+3. 检查模型配置是否正确。
+4. 检查目标项目和代码仓配置。
+5. 如果目标是 Java 项目，进入“Tree-sitter 代码图谱”区域，点击“建立/刷新图谱”。
+6. 如果开启 SAST/linter，检查“静态分析工具”状态。
+7. 进入检视工作台 `/review`。
+8. 新建检视任务，选择项目、仓库、source/target 分支或提交。
+9. 启动检视。
+10. 在结果页查看正式问题、保留观察清单、未升级原因、证据链和影响分析。
+
+也可以用 API 创建一条检视任务：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8011/api/reviews \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject_type": "mr",
+    "analysis_mode": "light",
+    "project_id": "default",
+    "repo_id": "demo-service",
+    "source_ref": "feature/demo",
+    "target_ref": "main",
+    "title": "manual smoke review"
+  }'
+```
+
+返回 `review_id` 后启动：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8011/api/reviews/<review_id>/start
+curl -sS http://127.0.0.1:8011/api/reviews/<review_id>/report
+```
+
+## SAST/linter 预扫描
+
+SAST/linter 预扫描用于提升检视召回率。工具输出不会直接升级为正式问题，而是进入 `tool_observations`，再交给专家 Agent 结合 diff、上下文、通用规范和项目规则判断。
+
+开关：
+
+```json
+{
+  "runtime": {
+    "enable_sast_prescan": true
+  }
+}
+```
+
+命令类工具：
+
+| 工具 | 适用 | 安装示例 macOS/Linux | 安装示例 Windows | 校验 |
+| --- | --- | --- | --- | --- |
+| Semgrep | 通用安全、Java/SQL/Python/JS/TS 规则 | `python3 -m pip install semgrep` | `py -m pip install semgrep` | `semgrep --version` |
+| PMD | Java 复杂度、坏味道、空 catch 等 | `brew install pmd` | `choco install pmd` | `pmd --version` |
+| Checkstyle | Java 规范、命名、导入、格式 | `brew install checkstyle` | `choco install checkstyle` | `checkstyle --version` |
+| ESLint | JavaScript/TypeScript | `npm install -g eslint` | `npm install -g eslint` | `eslint --version` |
+| Bandit | Python 安全 | `python3 -m pip install bandit` | `py -m pip install bandit` | `bandit --version` |
+
+报告类工具不由本工具直接启动，而是读取目标项目已有 XML 报告：
+
+| 工具 | 常见报告路径 | 作用 |
 | --- | --- | --- |
 | SpotBugs | `target/spotbugsXml.xml`、`target/spotbugs.xml`、`build/reports/spotbugs/main.xml` | 空指针、资源泄漏、并发、安全 bug pattern |
-| ArchUnit | `target/surefire-reports/*.xml`、`target/failsafe-reports/*.xml`、`build/test-results/**/*.xml` | 分层依赖、包依赖方向、DDD 边界测试失败信号 |
-| JaCoCo | `target/site/jacoco/jacoco.xml`、`build/reports/jacoco/test/jacocoTestReport.xml` | 测试覆盖率缺口候选信号 |
+| ArchUnit | `target/surefire-reports/*.xml`、`target/failsafe-reports/*.xml`、`build/test-results/**/*.xml` | 分层依赖、DDD 边界、架构规则失败 |
+| JaCoCo | `target/site/jacoco/jacoco.xml`、`build/reports/jacoco/test/jacocoTestReport.xml` | 覆盖率缺口候选信号 |
 
-后端调用命令时使用参数数组和仓库根目录 `cwd`，避免 Windows 路径空格、中文目录和盘符路径被 shell 拼接破坏。典型调用方式：
-
-```text
-semgrep --json --quiet [--config .semgrep.yml] <changed-file>
-pmd check -d <changed-file> -f json [-R pmd-ruleset.xml]
-checkstyle -c checkstyle.xml -f xml <changed-file>
-eslint --format json [--config eslint.config.js] <changed-file>
-bandit -q -f json <changed-file>
-```
-
-检视链路中，工具结果只作为候选源之一。最终候选来自：
-
-```text
-工具候选信号 ∪ 专家通用规范扫描 ∪ 专家绑定规范分批扫描
-```
-
-因此，即使自定义规范未命中，也应继续按代码语言通用规范和专家画像进行全量扫描。
-
-## 可选：开启 GitNexus
-
-如果需要 MR 关联影响分析，先安装 GitNexus CLI。GitNexus 依赖 Node.js，建议先确认 `node --version` 为 `18` 或更高。
-
-推荐安装为全局命令：
+目标 Java 项目可以先运行：
 
 ```bash
-npm install -g gitnexus
+mvn test
+mvn spotbugs:spotbugs
+mvn jacoco:report
 ```
 
-Windows PowerShell 同样使用：
+或 Gradle：
+
+```bash
+./gradlew test spotbugsMain jacocoTestReport
+```
+
+Windows：
 
 ```powershell
+mvn test
+mvn spotbugs:spotbugs
+mvn jacoco:report
+```
+
+工具状态含义：
+
+| 状态 | 含义 |
+| --- | --- |
+| `available` | 后端进程 PATH 中能找到命令，或报告文件已存在 |
+| `missing` | 命令类工具未安装或未加入后端进程 PATH |
+| `requires_report` | 需要目标项目先生成 XML 报告 |
+| `disabled` | 总开关关闭 |
+
+## Tree-sitter 代码图谱
+
+Tree-sitter 图谱用于 Java 检视的调用方、被调方、领域模型、测试影响和最小上下文检索。
+
+安装依赖：
+
+macOS / Linux：
+
+```bash
+.venv/bin/python -m pip install -e ".[code-graph]"
+```
+
+Windows：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
+```
+
+验证：
+
+```bash
+.venv/bin/python -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
+```
+
+Windows：
+
+```powershell
+.venv\Scripts\python.exe -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
+```
+
+刷新图谱：
+
+1. 启动前后端。
+2. 打开 `/settings`。
+3. 在“Tree-sitter 代码图谱”区域选择目标仓库。
+4. 点击“建立/刷新图谱”。
+
+图谱文件会写入目标仓：
+
+```text
+<repo>/.code-review-graph/graph.db
+```
+
+## GitNexus 影响分析
+
+GitNexus 是可选增强能力。未安装时检视仍可运行，只是不会生成 GitNexus 关联影响分析。
+
+安装：
+
+```bash
 npm install -g gitnexus
 ```
 
-如果不想全局安装，也可以使用 `npx` 临时运行：
+目标仓预建图：
 
-```bash
-npx -y gitnexus@latest analyze
-```
-
-安装后进入目标代码仓根目录，执行一次建图并确认仓库已注册：
+macOS / Linux：
 
 ```bash
 cd /path/to/your/repo
@@ -276,7 +743,9 @@ gitnexus list
 gitnexus status
 ```
 
-本工具默认调用全局命令：
+常用环境变量：
+
+macOS / Linux：
 
 ```bash
 export GITNEXUS_INDEX_ENABLED=true
@@ -286,7 +755,7 @@ export GITNEXUS_ANALYZE_COMMAND="gitnexus analyze"
 export GITNEXUS_MCP_COMMAND="gitnexus mcp"
 ```
 
-Windows 或安装目录包含空格时，推荐：
+Windows PowerShell，安装路径含空格时推荐 JSON array：
 
 ```powershell
 $env:GITNEXUS_ANALYZE_COMMAND='["C:\\Program Files\\GitNexus\\gitnexus.exe", "analyze"]'
@@ -294,7 +763,7 @@ $env:GITNEXUS_MCP_COMMAND='["C:\\Program Files\\GitNexus\\gitnexus.exe", "mcp"]'
 $env:GITNEXUS_BIN="C:\Program Files\GitNexus\gitnexus.exe"
 ```
 
-如果使用 `npx` 而不是全局安装，推荐显式配置：
+使用 `npx`：
 
 ```bash
 export GITNEXUS_ANALYZE_COMMAND='["npx", "-y", "gitnexus@latest", "analyze"]'
@@ -308,9 +777,7 @@ $env:GITNEXUS_ANALYZE_COMMAND='["npx", "-y", "gitnexus@latest", "analyze"]'
 $env:GITNEXUS_MCP_COMMAND='["npx", "-y", "gitnexus@latest", "mcp"]'
 ```
 
-如果遇到 GitNexus 原生依赖加载错误，通常先检查 Node.js 版本，然后重新执行 `npm install -g gitnexus`。
-
-大仓库或 Windows 机器较慢时，可以适当调大 MR 快照和 worktree 建图时间：
+大仓库或 Windows 机器较慢时，可调大超时：
 
 ```powershell
 $env:REVIEW_WORKSPACE_FETCH_TIMEOUT_SECONDS="600"
@@ -321,136 +788,152 @@ $env:GITNEXUS_INDEX_TIMEOUT_SECONDS="1800"
 $env:GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS="1800"
 ```
 
-其中 `GITNEXUS_INDEX_TIMEOUT_SECONDS` 控制设置页/后台建图最长等待时间，`GITNEXUS_REVIEW_WORKSPACE_INDEX_TIMEOUT_SECONDS` 控制检视任务中针对 MR 快照 worktree 自动执行 `gitnexus analyze` 的最长等待时间，默认都是 `1800` 秒。
-
-详细说明见 [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)。
-
-## 可选：安装 Tree-sitter 依赖
-
-本项目参考 `code-review-graph` 引入了 Tree-sitter 本地代码图谱，用于给 Java 检视提供更准确的调用方、被调方、接口实现、测试影响和最小上下文。安装后会优先使用 Tree-sitter 图谱检索关联上下文，没有命中或不可用时会自动退化为关键词搜索。
-
-注意：本工具使用的是 Python 包，不需要在 Windows 上安装 `tree-sitter.exe`，也不需要执行 `npm install -g tree-sitter-cli`。
-
-Windows 推荐安装方式：
-
-```bat
-py -3.11 -m venv .venv
-.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
-.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
-.venv\Scripts\python.exe -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
-```
-
-也可以直接运行一键启动脚本，它会自动做同样的依赖检查和安装：
-
-```bat
-scripts\start-all.bat
-```
-
-安装完成后，进入前端设置页 `/settings`，在“Tree-sitter 代码图谱”区块中点击目标仓库的“建立/刷新图谱”。成功后页面会展示：
-
-- 图谱数据库路径：`<repo>/.code-review-graph/graph.db`
-- 图谱规模：已索引文件数、节点数、关系数
-- 最近更新时间
-- 本次索引、跳过和失败文件数量
-
-macOS / Linux 安装方式：
-
-```bash
-.venv/bin/python -m pip install -e ".[code-graph]"
-.venv/bin/python -c "import tree_sitter, tree_sitter_language_pack; from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke { void ok() {} }'); print('tree-sitter java ok')"
-```
-
-如果 Windows 使用公司内网 PyPI 镜像，确认镜像里有以下包：
-
-- `tree-sitter`
-- `tree-sitter-language-pack`，建议 `0.13` 或更高版本
-- `networkx`
-
-如果设置页提示 `Java grammar 不可用：LanguageNotFoundError`，通常表示 `tree-sitter-language-pack` 已安装但当前 wheel 没有 Java grammar，或公司内网镜像提供的是过旧版本。请在项目根目录重新安装并验证：
-
-```bat
-.venv\Scripts\python.exe -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
-.venv\Scripts\python.exe -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
-```
-
-例如需要临时指定镜像：
-
-```bat
-set PIP_INDEX_URL=https://your-internal-pypi/simple
-.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
-```
-
-PowerShell：
-
-```powershell
-$env:PIP_INDEX_URL="https://your-internal-pypi/simple"
-.venv\Scripts\python.exe -m pip install -e ".[code-graph]"
-```
-
-如果 pip 尝试从源码编译并失败，优先升级 pip / wheel：
-
-```bat
-.venv\Scripts\python.exe -m pip install -U pip setuptools wheel
-```
-
-说明：
-
-- 不需要单独安装 Tree-sitter CLI。
-- `tree-sitter-language-pack` 提供常用语言 grammar，减少 Windows 下本地编译成本。
-- 这些依赖已放在 `pyproject.toml` 的 `code-graph` 可选依赖组中。
-
-方案说明见 [借鉴 code-review-graph 的关联上下文优化方案](docs/plans/2026-05-05-code-review-graph-context-optimization.md)。
+更多说明见 [GitNexus 关联影响分析说明](docs/architecture/2026-05-01-gitnexus-impact-analysis.md)。
 
 ## 常用验证
 
-后端聚焦测试：
+后端测试：
 
 ```bash
-.venv/bin/python -m pytest backend/tests/services/test_gitnexus_impact_service.py
+.venv/bin/python -m pytest backend/tests
 ```
 
-质量门禁：
+聚焦 smoke：
 
 ```bash
-bash scripts/check_review_quality.sh
+.venv/bin/python scripts/smoke_review.py
 ```
 
-采样真实 GitNexus MCP fixture：
-
-```bash
-PYTHONPATH=backend .venv/bin/python scripts/capture_gitnexus_mcp_fixture.py --repo-path /path/to/repo --preflight-only
-```
-
-前端：
+前端类型检查：
 
 ```bash
 npm --prefix frontend run typecheck
+```
+
+前端生产构建：
+
+```bash
 npm --prefix frontend run build
+```
+
+服务健康：
+
+```bash
+curl -sS http://127.0.0.1:8011/health
+curl -I http://127.0.0.1:5174
+```
+
+Windows PowerShell：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8011/health -UseBasicParsing
+Invoke-WebRequest http://127.0.0.1:5174 -UseBasicParsing
 ```
 
 ## 常见问题
 
-如果后端启动失败，先看：
+### 后端启动失败
+
+先看日志：
 
 ```text
 logs/backend.log
 ```
 
-如果前端启动失败，先看：
+常见原因：
+
+- `.venv` 未创建。
+- 未安装 `uvicorn[standard]`。
+- 8011 端口被占用。
+- `config.json` JSON 格式错误。
+- Windows 环境变量未在启动脚本所在终端设置。
+
+### 前端启动失败
+
+先看日志：
 
 ```text
 logs/frontend.log
 ```
 
-Windows 下 HTTPS 证书校验失败时，优先检查 `config.json`：
+常见原因：
 
-- `network.verify_ssl`
-- `network.use_system_trust_store`
-- `network.ca_bundle_path`
+- 未安装 Node.js/npm。
+- `frontend/node_modules` 缺失，重新执行 `npm --prefix frontend install`。
+- 5174 端口被占用。
 
-推荐先保持 `verify_ssl=true`，再配置系统证书或企业 CA。只有排障时才临时关闭证书校验。
+### 模型 API Key 有效但工具调不通
 
-## 说明文档
+按顺序检查：
+
+1. 后端进程是否继承了 API Key 环境变量。
+2. `config.json` 中 `llm.default_api_key_env` 是否等于真实环境变量名。
+3. `llm.default_base_url` 是否是兼容根路径，不含 `/chat/completions`。
+4. `llm.default_model` 是否和供应商模型名一致。
+5. 是否需要公司代理、系统证书或 CA bundle。
+6. 日志里是否出现 `missing_api_key:<env>`、连接超时或 401/403。
+
+### Windows 下静态工具显示 missing
+
+原因通常是后端启动进程的 PATH 看不到该工具。处理方式：
+
+1. 在同一个 PowerShell/cmd 中执行 `where semgrep`、`where eslint`。
+2. 确认命令可执行后重启 `scripts\stop-all.bat` 和 `scripts\start-all.bat`。
+3. 如果工具安装到用户目录，确认用户级 PATH 已刷新。
+4. 如果工具在特殊目录，可配置额外扫描路径后重启后端：
+
+```powershell
+$env:CODE_REVIEW_SAST_TOOL_PATHS="C:\Tools\semgrep;C:\Tools\pmd\bin;C:\Users\<you>\AppData\Roaming\npm"
+scripts\stop-all.bat
+scripts\start-all.bat
+```
+
+5. PowerShell 临时 PATH 可用：
+
+```powershell
+$env:PATH="$env:USERPROFILE\AppData\Roaming\Python\Python311\Scripts;$env:PATH"
+```
+
+### Tree-sitter Java grammar 不可用
+
+重新安装并验证：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
+.venv\Scripts\python.exe -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
+```
+
+macOS / Linux：
+
+```bash
+.venv/bin/python -m pip install -U "tree-sitter>=0.23,<1" "tree-sitter-language-pack>=0.13,<1" "networkx>=3.2,<4"
+.venv/bin/python -c "from tree_sitter_language_pack import get_parser; p=get_parser('java'); p.parse(b'class Smoke {}'); print('tree-sitter java ok')"
+```
+
+### HTTPS 证书失败
+
+优先配置系统证书或 `network.ca_bundle_path`。只在排障时临时关闭：
+
+```json
+{
+  "network": {
+    "verify_ssl": false,
+    "use_system_trust_store": false,
+    "ca_bundle_path": ""
+  }
+}
+```
+
+### Windows 控制台输出卡住
+
+Windows 启动脚本默认把后端日志写入 `logs/backend.log`，避免控制台输出阻塞。需要调试时再开启：
+
+```bat
+set CODE_REVIEW_CONSOLE_LOG=true
+scripts\start-all.bat
+```
+
+## 相关文档
 
 - [开发同学使用培训 Wiki](docs/wiki/developer-training-guide.md)
 - [系统能力说明](docs/architecture/2026-05-01-system-capabilities.md)

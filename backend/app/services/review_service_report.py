@@ -27,10 +27,12 @@ class ReviewServiceReportMixin:
         findings = self.list_findings(review_id)
         raw_issues = self.issue_repo.list(review_id)
         issues = self._dedupe_report_issues_by_anchor(self.list_issues(review_id))
+        issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         display_findings = self._ensure_display_findings_cover_issues(
             self._build_display_report_findings(findings),
             issues,
         )
+        display_findings = self._attach_unpromoted_decisions_to_findings(display_findings, issue_filter_decisions)
         findings_total_count = len(display_findings)
         paged_findings = self._slice_items(display_findings, offset=findings_offset, limit=findings_limit)
         light_findings = self._make_display_findings_texts_distinct(
@@ -41,7 +43,6 @@ class ReviewServiceReportMixin:
         light_issues = self._make_display_issue_texts_distinct(
             [self._build_light_report_issue(item) for item in paged_issues]
         )
-        issue_filter_decisions = self._build_issue_filter_decisions(review_id)
         impact_report = _attach_issue_impact_links(self._build_impact_report_for_review(review), issues)
         issue_count = issues_total_count
         summary = (
@@ -1623,7 +1624,31 @@ class ReviewServiceReportMixin:
         }
         if issue_type in type_map:
             return type_map[issue_type]
-        for family in ("exception", "loop", "query", "comment", "lock", "ddd_creation", "query_semantics"):
+        if issue_type in {
+            "security_guard_removed",
+            "secret_leak_risk",
+            "sensitive_data_leak",
+            "credential_leak_risk",
+            "authorization_boundary_risk",
+            "auth_bypass_risk",
+            "access_control_risk",
+        }:
+            if cls._text_has_display_family(compact, "authorization_boundary"):
+                return "authorization_boundary"
+            if cls._text_has_display_family(compact, "secret_leak"):
+                return "secret_leak"
+            return "security_guard"
+        for family in (
+            "exception",
+            "loop",
+            "query",
+            "comment",
+            "lock",
+            "ddd_creation",
+            "query_semantics",
+            "authorization_boundary",
+            "secret_leak",
+        ):
             if cls._text_has_display_family(compact, family):
                 return family
         return ""
@@ -1639,6 +1664,8 @@ class ReviewServiceReportMixin:
             "lock": ("lock_guard_removed", "synchronized", "并发保护", "锁保护", "状态竞争"),
             "ddd_creation": ("course.create", "newcourse", "聚合工厂", "领域事件", "eventbus.publish", "聚合持久化"),
             "query_semantics": ("query_semantics", "精确匹配", "模糊匹配", "like", "equal"),
+            "secret_leak": ("authorization", "token", "secret", "password", "credential", "凭证", "敏感", "日志"),
+            "authorization_boundary": ("对象级授权", "资源归属", "owner", "tenant", "role", "accesscontrol", "授权校验", "权限边界", "越权"),
         }
         return any(marker in compact for marker in markers.get(family, ()))
 
@@ -1646,7 +1673,17 @@ class ReviewServiceReportMixin:
     def _text_has_other_display_family(cls, text: str, current_family: str) -> bool:
         return any(
             family != current_family and cls._text_has_display_family(text, family)
-            for family in ("exception", "loop", "query", "comment", "lock", "ddd_creation", "query_semantics")
+            for family in (
+                "exception",
+                "loop",
+                "query",
+                "comment",
+                "lock",
+                "ddd_creation",
+                "query_semantics",
+                "secret_leak",
+                "authorization_boundary",
+            )
         )
 
     @staticmethod
@@ -2386,10 +2423,54 @@ class ReviewServiceReportMixin:
         )
         payload["evidence_chain"] = self._sanitize_report_dict_list(list(payload.get("evidence_chain") or []), limit=8)
         payload["code_excerpt"] = self._clip_text(payload.get("code_excerpt"), max_chars=600)
-        payload["code_context"] = {}
+        code_context = dict(payload.get("code_context") or {})
+        payload["code_context"] = {
+            "unpromoted_decision": code_context["unpromoted_decision"],
+        } if isinstance(code_context.get("unpromoted_decision"), dict) else {}
         payload["suggested_code"] = self._clip_text(payload.get("suggested_code"), max_chars=800)
         payload = self._apply_display_quality_gate(payload, family, item_kind="finding")
         return ReviewFinding.model_validate(payload)
+
+    def _attach_unpromoted_decisions_to_findings(
+        self,
+        findings: list[ReviewFinding],
+        issue_filter_decisions: list[dict[str, object]],
+    ) -> list[ReviewFinding]:
+        """把 finding 未升级为 issue 的治理原因挂到结果页轻量 finding 上。"""
+
+        decisions_by_finding_id: dict[str, dict[str, object]] = {}
+        for decision in issue_filter_decisions:
+            finding_ids = decision.get("finding_ids")
+            if not isinstance(finding_ids, list):
+                continue
+            normalized_decision = {
+                "topic": str(decision.get("topic") or ""),
+                "rule_code": str(decision.get("rule_code") or ""),
+                "rule_label": str(decision.get("rule_label") or ""),
+                "reason": self._sanitize_user_facing_issue_text(decision.get("reason")) or str(decision.get("reason") or "").strip(),
+                "severity": str(decision.get("severity") or ""),
+                "finding_ids": [str(item) for item in finding_ids if str(item).strip()],
+                "finding_titles": [
+                    str(item) for item in list(decision.get("finding_titles") or []) if str(item).strip()
+                ],
+                "expert_ids": [str(item) for item in list(decision.get("expert_ids") or []) if str(item).strip()],
+            }
+            for finding_id in normalized_decision["finding_ids"]:
+                decisions_by_finding_id.setdefault(str(finding_id), normalized_decision)
+
+        if not decisions_by_finding_id:
+            return findings
+
+        enriched: list[ReviewFinding] = []
+        for finding in findings:
+            decision = decisions_by_finding_id.get(str(finding.finding_id or ""))
+            if not decision:
+                enriched.append(finding)
+                continue
+            code_context = dict(finding.code_context or {})
+            code_context["unpromoted_decision"] = decision
+            enriched.append(finding.model_copy(update={"code_context": code_context}))
+        return enriched
 
     def _build_light_report_issue(self, issue: DebateIssue) -> DebateIssue:
         payload = issue.model_dump(mode="json")

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -130,12 +132,13 @@ class SastPreScanService:
         root = Path(str(repo_root or "")).expanduser() if repo_root else None
         command_statuses = []
         for item in self.COMMAND_TOOLS:
-            executable = shutil.which(str(item["tool"]))
+            executable, detection_method = self._resolve_command_tool(str(item["tool"]))
             command_statuses.append(
                 {
                     **item,
                     "status": "available" if executable else "missing",
                     "executable": executable or "",
+                    "detection_method": detection_method,
                 }
             )
         report_statuses = []
@@ -215,11 +218,11 @@ class SastPreScanService:
     def _candidate_scanners(self, root: Path, file_path: str):
         suffix = Path(file_path).suffix.lower()
         scanners = []
-        if shutil.which("semgrep"):
+        if self._command_available("semgrep"):
             scanners.append(self._scan_semgrep)
-        if suffix == ".java" and shutil.which("pmd"):
+        if suffix == ".java" and self._command_available("pmd"):
             scanners.append(self._scan_pmd)
-        if suffix == ".java" and shutil.which("checkstyle"):
+        if suffix == ".java" and self._command_available("checkstyle"):
             scanners.append(self._scan_checkstyle)
         if suffix == ".java" and self._has_any_report(
             root,
@@ -250,18 +253,100 @@ class SastPreScanService:
             ],
         ):
             scanners.append(self._scan_jacoco_reports)
-        if suffix in {".js", ".jsx", ".ts", ".tsx"} and shutil.which("eslint"):
+        if suffix in {".js", ".jsx", ".ts", ".tsx"} and self._command_available("eslint"):
             scanners.append(self._scan_eslint)
-        if suffix == ".py" and shutil.which("bandit"):
+        if suffix == ".py" and self._command_available("bandit"):
             scanners.append(self._scan_bandit)
         return scanners
+
+    def _command_available(self, tool: str) -> bool:
+        executable, _ = self._resolve_command_tool(tool)
+        return bool(executable)
+
+    def _command_executable(self, tool: str) -> str:
+        executable, detection_method = self._resolve_command_tool(tool)
+        if detection_method == "path":
+            return tool
+        return executable or tool
+
+    def _resolve_command_tool(self, tool: str) -> tuple[str, str]:
+        """Resolve command tools beyond the backend process PATH on Windows."""
+
+        normalized_tool = str(tool or "").strip()
+        if not normalized_tool:
+            return "", ""
+        executable = shutil.which(normalized_tool)
+        if executable:
+            return executable, "path"
+
+        extra_path_executable = self._resolve_from_extra_tool_paths(normalized_tool)
+        if extra_path_executable:
+            return extra_path_executable, "configured_extra_path"
+
+        if platform.system().lower() == "windows":
+            windows_executable = self._resolve_from_windows_common_paths(normalized_tool)
+            if windows_executable:
+                return windows_executable, "windows_common_path"
+        return "", ""
+
+    def _resolve_from_extra_tool_paths(self, tool: str) -> str:
+        raw_paths = os.getenv("CODE_REVIEW_SAST_TOOL_PATHS") or os.getenv("SAST_TOOL_PATHS") or ""
+        for raw_path in str(raw_paths or "").split(os.pathsep):
+            executable = self._first_existing_command_candidate(Path(raw_path).expanduser(), tool)
+            if executable:
+                return executable
+        return ""
+
+    def _resolve_from_windows_common_paths(self, tool: str) -> str:
+        candidates: list[Path] = []
+        for env_name, suffixes in {
+            "APPDATA": ["npm", f"Python/Python{sys.version_info.major}{sys.version_info.minor}/Scripts"],
+            "LOCALAPPDATA": [
+                f"Programs/Python/Python{sys.version_info.major}{sys.version_info.minor}/Scripts",
+                "Programs/nodejs",
+            ],
+            "ProgramData": ["chocolatey/bin"],
+            "USERPROFILE": [
+                f"AppData/Roaming/Python/Python{sys.version_info.major}{sys.version_info.minor}/Scripts",
+                "AppData/Roaming/npm",
+            ],
+        }.items():
+            base = os.getenv(env_name)
+            if not base:
+                continue
+            for suffix in suffixes:
+                candidates.append(Path(base) / Path(suffix))
+        candidates.append(Path(sys.executable).resolve().parent / "Scripts")
+        candidates.append(Path(sys.executable).resolve().parent)
+
+        seen: set[str] = set()
+        for directory in candidates:
+            key = str(directory).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            executable = self._first_existing_command_candidate(directory, tool)
+            if executable:
+                return executable
+        return ""
+
+    @staticmethod
+    def _first_existing_command_candidate(directory: Path, tool: str) -> str:
+        if not str(directory or "").strip():
+            return ""
+        suffixes = ("", ".exe", ".cmd", ".bat", ".ps1")
+        for suffix in suffixes:
+            candidate = directory / f"{tool}{suffix}"
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+        return ""
 
     def _scan_semgrep(self, root: Path, file_path: str) -> list[dict[str, object]]:
         config = self._first_existing(
             root,
             [".semgrep.yml", ".semgrep.yaml", "semgrep.yml", "semgrep.yaml"],
         )
-        command = ["semgrep", "--json", "--quiet"]
+        command = [self._command_executable("semgrep"), "--json", "--quiet"]
         if config:
             command.extend(["--config", str(config)])
         command.append(file_path)
@@ -301,7 +386,7 @@ class SastPreScanService:
         return findings
 
     def _scan_pmd(self, root: Path, file_path: str) -> list[dict[str, object]]:
-        command = ["pmd", "check", "-d", file_path, "-f", "json"]
+        command = [self._command_executable("pmd"), "check", "-d", file_path, "-f", "json"]
         config = self._first_existing(root, ["pmd-ruleset.xml", ".pmd.xml", "ruleset.xml"])
         if config:
             command.extend(["-R", str(config)])
@@ -350,7 +435,7 @@ class SastPreScanService:
         if not config:
             return []
         completed = subprocess.run(
-            ["checkstyle", "-c", str(config), "-f", "xml", file_path],
+            [self._command_executable("checkstyle"), "-c", str(config), "-f", "xml", file_path],
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -526,7 +611,7 @@ class SastPreScanService:
                 ".eslintrc.yaml",
             ],
         )
-        command = ["eslint", "--format", "json"]
+        command = [self._command_executable("eslint"), "--format", "json"]
         if config:
             command.extend(["--config", str(config)])
         command.append(file_path)
@@ -567,7 +652,7 @@ class SastPreScanService:
 
     def _scan_bandit(self, root: Path, file_path: str) -> list[dict[str, object]]:
         config = self._first_existing(root, [".bandit", "bandit.yml", "bandit.yaml", "pyproject.toml"])
-        command = ["bandit", "-q", "-f", "json"]
+        command = [self._command_executable("bandit"), "-q", "-f", "json"]
         if config:
             command.extend(["-c", str(config)])
         command.append(file_path)

@@ -1,7 +1,7 @@
 import React from "react";
 import { Alert, Button, Card, Col, Collapse, Descriptions, Form, Input, InputNumber, Row, Select, Space, Switch, Tabs, Tag, Typography, Upload, message } from "antd";
 import type { UploadProps } from "antd";
-import { CopyOutlined, FileSearchOutlined, ReloadOutlined, ToolOutlined } from "@ant-design/icons";
+import { CopyOutlined, DownOutlined, FileSearchOutlined, ReloadOutlined, RightOutlined, ToolOutlined } from "@ant-design/icons";
 
 import {
   expertApi,
@@ -26,6 +26,51 @@ import {
 import { humanizeExpertId, humanizeReviewText } from "@/utils/displayText";
 
 const { Paragraph, Text, Title } = Typography;
+
+type SettingsSectionCardProps = {
+  title: React.ReactNode;
+  expanded: boolean;
+  onToggle: () => void;
+  className?: string;
+  style?: React.CSSProperties;
+  loading?: boolean;
+  extra?: React.ReactNode;
+  children: React.ReactNode;
+};
+
+const SettingsSectionCard: React.FC<SettingsSectionCardProps> = ({
+  title,
+  expanded,
+  onToggle,
+  className = "module-card",
+  style,
+  loading = false,
+  extra,
+  children,
+}) => (
+  <Card
+    className={className}
+    title={title}
+    style={style}
+    loading={expanded && loading}
+    styles={{ body: expanded ? undefined : { display: "none" } }}
+    extra={(
+      <Space wrap>
+        {extra}
+        <Button
+          size="small"
+          type="text"
+          icon={expanded ? <DownOutlined /> : <RightOutlined />}
+          onClick={onToggle}
+        >
+          {expanded ? "收起" : "展开"}
+        </Button>
+      </Space>
+    )}
+  >
+    {children}
+  </Card>
+);
 
 const stringifyList = (value?: string[]) => (Array.isArray(value) ? value.join(", ") : "");
 const parseList = (value: string) =>
@@ -345,6 +390,19 @@ const SettingsPage: React.FC = () => {
   const [reviewWorkspaceCleanupResult, setReviewWorkspaceCleanupResult] = React.useState<ReviewWorkspaceCleanupResult | null>(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = React.useState<RuntimeSettings | null>(null);
   const [sastToolsStatus, setSastToolsStatus] = React.useState<SastToolsStatus | null>(null);
+  const [expandedSettingSections, setExpandedSettingSections] = React.useState<Record<string, boolean>>({});
+
+  const isSettingSectionExpanded = React.useCallback(
+    (sectionKey: string) => Boolean(expandedSettingSections[sectionKey]),
+    [expandedSettingSections],
+  );
+
+  const toggleSettingSection = React.useCallback((sectionKey: string) => {
+    setExpandedSettingSections((current) => ({
+      ...current,
+      [sectionKey]: !current[sectionKey],
+    }));
+  }, []);
 
   const refreshRepositoryGitNexusStatuses = React.useCallback(async (repositories?: CodeRepositorySettings[]) => {
     const repoList = (repositories || normalizeCodeRepositories(form.getFieldValue("code_repositories"))).filter((repo) =>
@@ -861,6 +919,11 @@ const SettingsPage: React.FC = () => {
                 <Paragraph code copyable style={{ marginBottom: 0 }}>
                   {tool.executable}
                 </Paragraph>
+                {tool.detection_method ? (
+                  <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                    {`检测方式：${tool.detection_method}`}
+                  </Paragraph>
+                ) : null}
               </div>
             ) : null}
             {verifyCommands.length ? (
@@ -1047,7 +1110,12 @@ const SettingsPage: React.FC = () => {
         </Space>
       </Card>
 
-      <Card className="module-card" title="当前实现状态" style={{ marginTop: 16 }}>
+      <SettingsSectionCard
+        title="当前实现状态"
+        style={{ marginTop: 16 }}
+        expanded={isSettingSectionExpanded("implementation")}
+        onToggle={() => toggleSettingSection("implementation")}
+      >
         <Descriptions column={1}>
           <Descriptions.Item label="日志落盘">前后端日志统一输出到项目根目录 logs/</Descriptions.Item>
           <Descriptions.Item label="知识检索">按检查角色绑定 Markdown 文档，并通过 glob / rg 命中片段</Descriptions.Item>
@@ -1055,12 +1123,13 @@ const SettingsPage: React.FC = () => {
           <Descriptions.Item label="代码仓上下文">所有检查角色可基于配置好的目标代码仓检索目标分支源码上下文</Descriptions.Item>
           <Descriptions.Item label="问题治理">低风险、提示性、常见建议类问题可只保留为检视发现，不升级为正式问题</Descriptions.Item>
         </Descriptions>
-      </Card>
+      </SettingsSectionCard>
 
-      <Card
-        className="module-card"
+      <SettingsSectionCard
         title="代码结构图谱"
         style={{ marginTop: 16 }}
+        expanded={isSettingSectionExpanded("code-graph")}
+        onToggle={() => toggleSettingSection("code-graph")}
         extra={
           <Button onClick={() => void refreshRepositoryCodeGraphStatuses()}>刷新当前项目仓库状态</Button>
         }
@@ -1145,12 +1214,13 @@ const SettingsPage: React.FC = () => {
               </div>
             );
           })()}
-      </Card>
+      </SettingsSectionCard>
 
-      <Card
-        className="module-card"
+      <SettingsSectionCard
         title="GitNexus 代码图谱"
         style={{ marginTop: 16 }}
+        expanded={isSettingSectionExpanded("gitnexus")}
+        onToggle={() => toggleSettingSection("gitnexus")}
         extra={
           <Button onClick={() => void refreshRepositoryGitNexusStatuses()}>刷新当前项目仓库状态</Button>
         }
@@ -1252,12 +1322,13 @@ const SettingsPage: React.FC = () => {
               </div>
             );
           })()}
-      </Card>
+      </SettingsSectionCard>
 
-      <Card
-        className="module-card"
+      <SettingsSectionCard
         title="临时检视工作区"
         style={{ marginTop: 16 }}
+        expanded={isSettingSectionExpanded("review-workspace")}
+        onToggle={() => toggleSettingSection("review-workspace")}
         extra={
           <Button danger loading={reviewWorkspaceCleanupRunning} onClick={() => void handleCleanupReviewWorkspaces()}>
             清理 7 天前目录
@@ -1297,12 +1368,13 @@ const SettingsPage: React.FC = () => {
             </Descriptions.Item>
           ) : null}
         </Descriptions>
-      </Card>
+      </SettingsSectionCard>
 
-      <Card
-        className="module-card"
+      <SettingsSectionCard
         title="关联影响分析报告模板"
         style={{ marginTop: 16 }}
+        expanded={isSettingSectionExpanded("impact-template")}
+        onToggle={() => toggleSettingSection("impact-template")}
         extra={
           <Space>
             <Upload {...impactTemplateUploadProps}>
@@ -1445,9 +1517,15 @@ const SettingsPage: React.FC = () => {
             },
           ]}
         />
-      </Card>
+      </SettingsSectionCard>
 
-      <Card className="module-card" title="运行时设置" style={{ marginTop: 16 }} loading={loading}>
+      <SettingsSectionCard
+        title="运行时设置"
+        style={{ marginTop: 16 }}
+        loading={loading}
+        expanded={isSettingSectionExpanded("runtime")}
+        onToggle={() => toggleSettingSection("runtime")}
+      >
         <Form
           form={form}
           layout="vertical"
@@ -1562,7 +1640,6 @@ const SettingsPage: React.FC = () => {
         >
           <Collapse
             className="settings-collapse"
-            defaultActiveKey={["basic", "governance"]}
             expandIconPosition={collapseExpandIconPosition}
             items={[
               {
@@ -2287,9 +2364,15 @@ const SettingsPage: React.FC = () => {
             </Button>
           </div>
         </Form>
-      </Card>
+      </SettingsSectionCard>
 
-      <Card className="module-card" title="检查角色、工具与知识源配置" style={{ marginTop: 16 }} loading={loading}>
+      <SettingsSectionCard
+        title="检查角色、工具与知识源配置"
+        style={{ marginTop: 16 }}
+        loading={loading}
+        expanded={isSettingSectionExpanded("expert-bindings")}
+        onToggle={() => toggleSettingSection("expert-bindings")}
+      >
         <Paragraph className="settings-section-tip">
           每个专家的知识源、工具绑定和运行时工具绑定收拢到单独折叠项里，避免整页展开时信息过载。
         </Paragraph>
@@ -2361,9 +2444,15 @@ const SettingsPage: React.FC = () => {
             ),
           }))}
         />
-      </Card>
+      </SettingsSectionCard>
 
-      <Card className="module-card" title="扩展能力与扩展工具编辑" style={{ marginTop: 16 }} loading={loading}>
+      <SettingsSectionCard
+        title="扩展能力与扩展工具编辑"
+        style={{ marginTop: 16 }}
+        loading={loading}
+        expanded={isSettingSectionExpanded("extensions")}
+        onToggle={() => toggleSettingSection("extensions")}
+      >
         <Paragraph className="settings-section-tip">
           扩展编辑保留页签结构，但只聚焦扩展能力和扩展工具本身，和上面的运行时设置、角色绑定分层展示。
         </Paragraph>
@@ -2570,7 +2659,7 @@ const SettingsPage: React.FC = () => {
             },
           ]}
         />
-      </Card>
+      </SettingsSectionCard>
     </div>
   );
 };

@@ -35,13 +35,33 @@ type IssueThresholdFilteredPanelProps = {
   onSelectFinding?: (findingId: string) => void;
 };
 
-const FILTER_RULE_CODES = new Set([
-  "below_issue_priority_threshold",
-  "below_priority_confidence_threshold",
-  "conditional_conclusion",
-  "removed_line_only",
-  "repo_policy_comment_budget",
-]);
+const decisionTagColor = (ruleCode: string): string => {
+  if (ruleCode === "removed_line_only" || ruleCode === "evidence_anchor_failed") return "red";
+  if (ruleCode === "conditional_conclusion" || ruleCode === "llm_judge_rejected") return "gold";
+  if (ruleCode === "repo_policy_comment_budget" || ruleCode === "review_learning_false_positive_case") return "purple";
+  if (ruleCode === "below_issue_priority_threshold" || ruleCode === "below_priority_confidence_threshold") return "default";
+  return "blue";
+};
+
+const buildFilteredRow = (finding: ReviewFinding, decision: Partial<IssueFilterDecision>): ThresholdFilteredRow => {
+  const fallbackReason = "该发现未满足本轮有效问题升级条件，保留为检视发现。";
+  return {
+    finding_id: finding.finding_id,
+    file_path: finding.file_path,
+    line_start: finding.line_start,
+    title: finding.title,
+    summary: finding.summary,
+    finding_type: finding.finding_type,
+    normalized_issue_type: finding.normalized_issue_type,
+    category_label: finding.category_label,
+    severity: finding.severity,
+    confidence: finding.confidence,
+    expert_id: finding.expert_id,
+    threshold_label: cleanUserFacingText(decision.rule_label || "") || humanizeReviewText(decision.rule_label || "") || "未升级为有效问题",
+    threshold_reason: cleanUserFacingText(decision.reason || "") || humanizeReviewText(decision.reason || "") || fallbackReason,
+    rule_code: decision.rule_code || "unpromoted_finding",
+  };
+};
 
 const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = ({
   findings,
@@ -58,31 +78,24 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
 
   const rows = useMemo<ThresholdFilteredRow[]>(() => {
     const result: ThresholdFilteredRow[] = [];
+    const seenFindingIds = new Set<string>();
     for (const decision of issueFilterDecisions) {
-      if (!FILTER_RULE_CODES.has(decision.rule_code)) continue;
       for (const findingId of decision.finding_ids || []) {
         const finding = findingById.get(findingId);
-        if (!finding) continue;
-        result.push({
-          finding_id: finding.finding_id,
-          file_path: finding.file_path,
-          line_start: finding.line_start,
-          title: finding.title,
-          summary: finding.summary,
-          finding_type: finding.finding_type,
-          normalized_issue_type: finding.normalized_issue_type,
-          category_label: finding.category_label,
-          severity: finding.severity,
-          confidence: finding.confidence,
-          expert_id: finding.expert_id,
-          threshold_label: decision.rule_label,
-          threshold_reason: decision.reason,
-          rule_code: decision.rule_code,
-        });
+        if (!finding || seenFindingIds.has(finding.finding_id)) continue;
+        result.push(buildFilteredRow(finding, decision));
+        seenFindingIds.add(finding.finding_id);
       }
     }
+    for (const finding of findings) {
+      if (seenFindingIds.has(finding.finding_id)) continue;
+      const decision = finding.code_context?.unpromoted_decision;
+      if (!decision) continue;
+      result.push(buildFilteredRow(finding, decision));
+      seenFindingIds.add(finding.finding_id);
+    }
     return result;
-  }, [findingById, issueFilterDecisions]);
+  }, [findingById, findings, issueFilterDecisions]);
 
   if (rows.length === 0) return null;
 
@@ -90,7 +103,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
     <Card
       className="module-card review-threshold-filter-card"
       title={`保留观察清单 (${rows.length})`}
-      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为正式问题，常见原因包括级别不足、结论仍需验证、仅命中删除代码或超出本次问题提交上限。</Text>}
+      extra={<Text type="secondary">这些发现会保留在结果中，但不会升级为正式问题；每条都展示对应治理或裁决原因。</Text>}
     >
       <Table<ThresholdFilteredRow>
         rowKey="finding_id"
@@ -144,7 +157,7 @@ const IssueThresholdFilteredPanel: React.FC<IssueThresholdFilteredPanelProps> = 
             key: "threshold_label",
             width: 220,
             render: (value: string, row: ThresholdFilteredRow) => (
-              <Tag color={row.rule_code === "removed_line_only" ? "red" : row.rule_code === "conditional_conclusion" ? "gold" : row.rule_code === "repo_policy_comment_budget" ? "purple" : "default"}>
+              <Tag color={decisionTagColor(row.rule_code)}>
                 {humanizeReviewText(value)}
               </Tag>
             ),
