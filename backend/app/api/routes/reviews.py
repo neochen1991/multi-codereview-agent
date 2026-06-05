@@ -64,10 +64,18 @@ def create_review(payload: CreateReviewRequest) -> dict[str, object]:
 
 
 @router.get("/reviews")
-def list_reviews(project_id: str = Query(default="")) -> list[dict[str, object]]:
+def list_reviews(
+    project_id: str = Query(default=""),
+    limit: int = Query(default=0, ge=0, le=500),
+    include_counts: bool = Query(default=True),
+) -> list[dict[str, object]]:
     """返回历史审核记录列表。"""
 
-    return review_service_module.review_service.list_review_summaries(project_id=project_id)
+    return review_service_module.review_service.list_review_summaries(
+        project_id=project_id,
+        limit=limit,
+        include_counts=include_counts,
+    )
 
 
 @router.get("/reviews/queue")

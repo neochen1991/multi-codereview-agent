@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_reviews_updated_at ON reviews(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reviews_status_updated_at ON reviews(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_events_review_id_created_at ON review_events(review_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_review_id_type ON messages(review_id, message_type);
+CREATE INDEX IF NOT EXISTS idx_findings_review_id ON findings(review_id);
+CREATE INDEX IF NOT EXISTS idx_issues_review_id ON issues(review_id);
+
 CREATE TABLE IF NOT EXISTS knowledge_documents (
     doc_id TEXT PRIMARY KEY,
     expert_id TEXT NOT NULL,

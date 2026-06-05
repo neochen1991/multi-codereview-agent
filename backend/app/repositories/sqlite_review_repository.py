@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 from app.db.sqlite import SqliteDatabase
@@ -89,87 +90,33 @@ class SqliteReviewRepository:
             ).fetchall()
         return [self._deserialize_row(row) for row in rows]
 
-    def list_light(self) -> list[dict[str, object]]:
+    def list_light(
+        self,
+        *,
+        project_id: str = "",
+        limit: int = 0,
+        statuses: list[str] | None = None,
+        include_counts: bool = True,
+    ) -> list[dict[str, object]]:
         """List lightweight review summaries without loading full subject payloads."""
 
+        filters: list[str] = []
+        params: list[object] = []
+        current_project_id = str(project_id or "").strip()
+        if current_project_id:
+            filters.append("json_extract(subject_json, '$.project_id') = ?")
+            params.append(current_project_id)
+        normalized_statuses = [str(item or "").strip() for item in list(statuses or []) if str(item or "").strip()]
+        if normalized_statuses:
+            filters.append(f"status IN ({','.join('?' for _ in normalized_statuses)})")
+            params.extend(normalized_statuses)
+        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+        limit_clause = ""
+        safe_limit = max(0, int(limit or 0))
+        if safe_limit:
+            limit_clause = "LIMIT ?"
+            params.append(safe_limit)
         query = """
-            WITH issue_counts AS (
-                SELECT
-                    review_id,
-                    SUM(
-                        CASE
-                            WHEN COALESCE(LOWER(json_extract(payload_json, '$.human_decision')), '') != 'rejected'
-                                AND COALESCE(LOWER(json_extract(payload_json, '$.status')), '') NOT IN (
-                                    'needs_verification',
-                                    'comment',
-                                    'abstain',
-                                    'rejected_after_debate'
-                                )
-                                AND COALESCE(LOWER(json_extract(payload_json, '$.resolution')), '') NOT IN (
-                                    'human_rejected',
-                                    'needs_verification',
-                                    'llm_judge_needs_verification',
-                                    'targeted_debate_needs_verification',
-                                    'feedback_profile_requires_more_evidence',
-                                    'comment',
-                                    'abstain'
-                                )
-                            THEN 1
-                            ELSE 0
-                        END
-                    ) AS issue_count,
-                    SUM(
-                        CASE
-                            WHEN COALESCE(LOWER(json_extract(payload_json, '$.human_decision')), '') != 'rejected'
-                                AND COALESCE(LOWER(json_extract(payload_json, '$.status')), '') NOT IN (
-                                    'needs_verification',
-                                    'comment',
-                                    'abstain',
-                                    'rejected_after_debate'
-                                )
-                                AND COALESCE(LOWER(json_extract(payload_json, '$.resolution')), '') NOT IN (
-                                    'human_rejected',
-                                    'needs_verification',
-                                    'llm_judge_needs_verification',
-                                    'targeted_debate_needs_verification',
-                                    'feedback_profile_requires_more_evidence',
-                                    'comment',
-                                    'abstain'
-                                )
-                                AND COALESCE(json_array_length(json_extract(payload_json, '$.evidence_chain')), 0) > 0
-                            THEN 1
-                            ELSE 0
-                        END
-                    ) AS evidence_chain_issue_count
-                FROM issues
-                GROUP BY review_id
-            ),
-            issue_filter_counts AS (
-                SELECT
-                    m.review_id,
-                    SUM(
-                        CASE
-                            WHEN json_extract(decision.value, '$.rule_code') IN (
-                                'llm_judge_rejected',
-                                'conditional_conclusion',
-                                'removed_line_only',
-                                'below_priority_confidence_threshold',
-                                'below_issue_priority_threshold',
-                                'low_confidence_noise'
-                            ) THEN 1
-                            ELSE 0
-                        END
-                    ) AS quality_filtered_issue_count,
-                    SUM(
-                        CASE
-                            WHEN json_extract(decision.value, '$.rule_code') = 'repo_policy_comment_budget' THEN 1
-                            ELSE 0
-                        END
-                    ) AS policy_comment_budget_filtered_count
-                FROM messages m, json_each(json_extract(m.metadata_json, '$.issue_filter_decisions')) decision
-                WHERE m.message_type = 'issue_filter_applied'
-                GROUP BY m.review_id
-            )
             SELECT
                 reviews.review_id,
                 reviews.status,
@@ -200,18 +147,234 @@ class SqliteReviewRepository:
                 json_array_length(json_extract(subject_json, '$.metadata.impact_report.recommended_test_scope')) AS recommended_test_scope_count,
                 json_array_length(json_extract(subject_json, '$.metadata.impact_report.successful_context_targets')) AS successful_context_target_count,
                 json_array_length(json_extract(subject_json, '$.metadata.impact_report.successful_impact_targets')) AS successful_impact_target_count,
-                COALESCE(issue_counts.evidence_chain_issue_count, 0) AS evidence_chain_issue_count,
-                COALESCE(issue_filter_counts.quality_filtered_issue_count, 0) AS quality_filtered_issue_count,
-                COALESCE(issue_filter_counts.policy_comment_budget_filtered_count, 0) AS policy_comment_budget_filtered_count,
-                COALESCE(issue_counts.issue_count, 0) AS issue_count
+                0 AS evidence_chain_issue_count,
+                0 AS quality_filtered_issue_count,
+                0 AS policy_comment_budget_filtered_count,
+                0 AS issue_count,
+                0 AS finding_count
             FROM reviews
-            LEFT JOIN issue_counts ON issue_counts.review_id = reviews.review_id
-            LEFT JOIN issue_filter_counts ON issue_filter_counts.review_id = reviews.review_id
+            {where_clause}
             ORDER BY reviews.updated_at DESC
-        """
+            {limit_clause}
+        """.format(where_clause=where_clause, limit_clause=limit_clause)
         with self._db.connect() as connection:
-            rows = connection.execute(query).fetchall()
-        return [self._deserialize_light_row(row) for row in rows]
+            rows = connection.execute(query, tuple(params)).fetchall()
+            review_ids = [str(row["review_id"] or "") for row in rows]
+            counts = self._load_light_counts(connection, review_ids) if include_counts else {}
+        summaries = [self._deserialize_light_row(row) for row in rows]
+        for item in summaries:
+            item_counts = counts.get(str(item.get("review_id") or ""), {})
+            item["finding_count"] = int(item_counts.get("finding_count") or 0)
+            item["issue_count"] = int(item_counts.get("issue_count") or 0)
+            item["quality_summary"] = {
+                **dict(item.get("quality_summary") or {}),
+                "evidence_chain_issue_count": int(item_counts.get("evidence_chain_issue_count") or 0),
+                "quality_filtered_issue_count": int(item_counts.get("quality_filtered_issue_count") or 0),
+                "policy_comment_budget_filtered_count": int(item_counts.get("policy_comment_budget_filtered_count") or 0),
+            }
+        return summaries
+
+    def _load_light_counts(self, connection: object, review_ids: list[str]) -> dict[str, dict[str, int]]:
+        if not review_ids:
+            return {}
+        placeholders = ",".join("?" for _ in review_ids)
+        counts: dict[str, dict[str, int]] = {
+            review_id: {
+                "finding_count": 0,
+                "issue_count": 0,
+                "evidence_chain_issue_count": 0,
+                "quality_filtered_issue_count": 0,
+                "policy_comment_budget_filtered_count": 0,
+            }
+            for review_id in review_ids
+        }
+        filtered_finding_ids: dict[str, set[str]] = defaultdict(set)
+        for row in connection.execute(
+            f"""
+            SELECT review_id, metadata_json
+            FROM messages
+            WHERE message_type = 'issue_filter_applied'
+              AND review_id IN ({placeholders})
+            """,
+            tuple(review_ids),
+        ).fetchall():
+            review_id = str(row["review_id"] or "")
+            try:
+                metadata = json.loads(str(row["metadata_json"] or "{}"))
+            except Exception:
+                metadata = {}
+            for decision in list(metadata.get("issue_filter_decisions") or []):
+                if not isinstance(decision, dict):
+                    continue
+                rule_code = str(decision.get("rule_code") or "").strip()
+                if rule_code in {
+                    "llm_judge_rejected",
+                    "conditional_conclusion",
+                    "removed_line_only",
+                    "below_priority_confidence_threshold",
+                    "below_issue_priority_threshold",
+                    "low_confidence_noise",
+                }:
+                    counts.setdefault(review_id, {})["quality_filtered_issue_count"] = (
+                        int(counts.get(review_id, {}).get("quality_filtered_issue_count") or 0) + 1
+                    )
+                if rule_code == "repo_policy_comment_budget":
+                    counts.setdefault(review_id, {})["policy_comment_budget_filtered_count"] = (
+                        int(counts.get(review_id, {}).get("policy_comment_budget_filtered_count") or 0) + 1
+                    )
+                for finding_id in list(decision.get("finding_ids") or []):
+                    normalized = str(finding_id or "").strip()
+                    if normalized:
+                        filtered_finding_ids[review_id].add(normalized)
+
+        issue_keys: dict[str, set[str]] = defaultdict(set)
+        evidence_issue_keys: dict[str, set[str]] = defaultdict(set)
+        for row in connection.execute(
+            f"""
+            SELECT review_id, payload_json
+            FROM issues
+            WHERE review_id IN ({placeholders})
+            """,
+            tuple(review_ids),
+        ).fetchall():
+            review_id = str(row["review_id"] or "")
+            payload = self._loads_dict(row["payload_json"])
+            if not self._is_formal_issue_payload(payload):
+                continue
+            display_key = self._display_key_from_payload(payload)
+            issue_keys[review_id].add(display_key)
+            if isinstance(payload.get("evidence_chain"), list) and payload.get("evidence_chain"):
+                evidence_issue_keys[review_id].add(display_key)
+
+        finding_rows = connection.execute(
+            f"""
+            SELECT review_id, finding_id, title, severity, confidence, payload_json
+            FROM findings
+            WHERE review_id IN ({placeholders})
+            """,
+            tuple(review_ids),
+        ).fetchall()
+        for row in finding_rows:
+            review_id = str(row["review_id"] or "")
+            counts.setdefault(review_id, {})["finding_count"] = int(counts.get(review_id, {}).get("finding_count") or 0) + 1
+            finding_id = str(row["finding_id"] or "").strip()
+            if finding_id and finding_id in filtered_finding_ids.get(review_id, set()):
+                continue
+            title = str(row["title"] or "").strip()
+            if title.startswith("静态工具候选需复核"):
+                continue
+            payload = self._loads_dict(row["payload_json"])
+            code_context = payload.get("code_context")
+            if isinstance(code_context, dict) and bool(code_context.get("sast_fast_lane")):
+                continue
+            family = self._display_family(str(payload.get("normalized_issue_type") or ""))
+            if family not in self._RECOVERABLE_DISPLAY_FAMILIES:
+                continue
+            if not self._finding_meets_default_threshold(str(row["severity"] or "medium"), row["confidence"]):
+                continue
+            issue_keys[review_id].add(self._display_key_from_payload(payload))
+
+        for review_id in review_ids:
+            counts[review_id]["issue_count"] = len(issue_keys.get(review_id, set()))
+            counts[review_id]["evidence_chain_issue_count"] = len(evidence_issue_keys.get(review_id, set()))
+        return counts
+
+    @staticmethod
+    def _loads_dict(raw: object) -> dict[str, object]:
+        try:
+            value = json.loads(str(raw or "{}"))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _is_formal_issue_payload(payload: dict[str, object]) -> bool:
+        status = str(payload.get("status") or "").strip().lower()
+        resolution = str(payload.get("resolution") or "").strip().lower()
+        human_decision = str(payload.get("human_decision") or "").strip().lower()
+        if human_decision == "rejected" or resolution == "human_rejected":
+            return False
+        if status in {"needs_verification", "comment", "abstain", "rejected_after_debate"}:
+            return False
+        if resolution in {
+            "needs_verification",
+            "llm_judge_needs_verification",
+            "targeted_debate_needs_verification",
+            "feedback_profile_requires_more_evidence",
+            "comment",
+            "abstain",
+        }:
+            return False
+        return True
+
+    _FAMILY_ALIASES = {
+        "comment_contract_unimplemented": "comment_contract_unimplemented",
+        "declared_intent_without_implementation": "comment_contract_unimplemented",
+        "comment_promise_unimplemented": "comment_contract_unimplemented",
+        "lock_guard_removed": "lock_guard_removed",
+        "concurrency_guard_removed": "lock_guard_removed",
+        "lock_scope_risk": "lock_guard_removed",
+        "exception_swallowed": "exception_swallowed",
+        "exception_semantics_weakened": "exception_swallowed",
+        "query_bound_removed": "query_bound_removed",
+        "query_boundary_missing": "query_bound_removed",
+        "unbounded_query": "query_bound_removed",
+        "unbounded_query_risk": "query_bound_removed",
+        "n_plus_one": "n_plus_one",
+        "loop_call_amplification": "n_plus_one",
+        "bulk_processing_boundary_missing": "n_plus_one",
+        "sql_injection_risk": "sql_injection_risk",
+        "sql_injection": "sql_injection_risk",
+        "command_injection_risk": "sql_injection_risk",
+        "code_injection_risk": "code_injection_risk",
+        "eval_injection_risk": "code_injection_risk",
+        "xss_risk": "code_injection_risk",
+        "secret_leak_risk": "secret_leak_risk",
+        "sensitive_data_leak": "secret_leak_risk",
+        "credential_leak_risk": "secret_leak_risk",
+        "authorization_boundary_risk": "authorization_boundary_risk",
+        "auth_bypass_risk": "authorization_boundary_risk",
+        "access_control_risk": "authorization_boundary_risk",
+        "course_creation_semantics": "course_creation_semantics",
+        "aggregate_factory_bypass": "course_creation_semantics",
+        "aggregate_factory_bypassed": "course_creation_semantics",
+    }
+    _RECOVERABLE_DISPLAY_FAMILIES = {
+        "exception_swallowed",
+        "comment_contract_unimplemented",
+        "lock_guard_removed",
+        "query_bound_removed",
+        "n_plus_one",
+        "sql_injection_risk",
+        "code_injection_risk",
+        "secret_leak_risk",
+        "authorization_boundary_risk",
+    }
+
+    @classmethod
+    def _display_family(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        return cls._FAMILY_ALIASES.get(normalized, normalized)
+
+    @classmethod
+    def _display_key_from_payload(cls, payload: dict[str, object]) -> str:
+        family = cls._display_family(payload.get("normalized_issue_type"))
+        line = 0 if family == "course_creation_semantics" else int(payload.get("line_start") or 1)
+        path = str(payload.get("file_path") or "").replace("\\", "/").strip().lower()
+        return f"{path}::{family}::{line}"
+
+    @staticmethod
+    def _finding_meets_default_threshold(severity: str, confidence: object) -> bool:
+        value = str(severity or "").strip().lower()
+        threshold = 0.7
+        if value in {"blocker", "critical", "high"}:
+            threshold = 0.85
+        elif value == "medium":
+            threshold = 0.8
+        try:
+            return float(confidence or 0.0) >= threshold
+        except (TypeError, ValueError):
+            return False
 
     def delete(self, review_id: str) -> None:
         """Delete a single review task row."""
@@ -277,6 +440,7 @@ class SqliteReviewRepository:
             "completed_at": row["completed_at"],
             "duration_seconds": row["duration_seconds"],
             "updated_at": row["updated_at"],
+            "finding_count": int(row["finding_count"] or 0),
             "issue_count": int(row["issue_count"] or 0),
             "quality_summary": quality_summary,
             "impact_summary": impact_summary,

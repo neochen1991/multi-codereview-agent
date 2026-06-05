@@ -53,7 +53,7 @@ const HomePage: React.FC = () => {
       const projectId = projectPayload.default_project_id || projectPayload.projects?.[0]?.project_id || "";
       setCurrentProjectId(projectId);
       const [allReviews, queueRows, gitnexus] = await Promise.all([
-        reviewApi.list(projectId),
+        reviewApi.list({ projectId, includeCounts: false }),
         reviewApi.listQueue(projectId),
         settingsApi.getGitNexusIndexStatus().catch(() => null),
       ]);

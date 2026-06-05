@@ -103,14 +103,205 @@ class PostgresReviewRepository:
                 rows = cursor.fetchall()
         return [self._deserialize_row(row) for row in rows]
 
-    def list_light(self) -> list[dict[str, object]]:
+    def list_light(
+        self,
+        *,
+        project_id: str = "",
+        limit: int = 0,
+        statuses: list[str] | None = None,
+        include_counts: bool = True,
+    ) -> list[dict[str, object]]:
+        filters: list[str] = []
+        params: list[object] = []
+        current_project_id = str(project_id or "").strip()
+        if current_project_id:
+            filters.append("subject_json::jsonb ->> 'project_id' = %s")
+            params.append(current_project_id)
+        normalized_statuses = [str(item or "").strip() for item in list(statuses or []) if str(item or "").strip()]
+        if normalized_statuses:
+            filters.append(f"status IN ({','.join('%s' for _ in normalized_statuses)})")
+            params.extend(normalized_statuses)
+        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+        limit_clause = ""
+        safe_limit = max(0, int(limit or 0))
+        if safe_limit:
+            limit_clause = "LIMIT %s"
+            params.append(safe_limit)
+        if not include_counts:
+            return self._list_light_without_counts(where_clause=where_clause, limit_clause=limit_clause, params=tuple(params))
         with self._db.connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""
-                    WITH issue_counts AS (
+                    WITH selected_reviews AS (
+                        SELECT *
+                        FROM {self._table}
+                        {where_clause}
+                        ORDER BY updated_at DESC
+                        {limit_clause}
+                    ),
+                    selected_review_ids AS (
+                        SELECT review_id
+                        FROM selected_reviews
+                    ),
+                    filtered_finding_ids AS (
+                        SELECT
+                            m.review_id,
+                            finding_id.value #>> '{{}}' AS finding_id
+                        FROM "{self._db.schema}".messages m
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = m.review_id
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            COALESCE(m.metadata_json::jsonb -> 'issue_filter_decisions', '[]'::jsonb)
+                        ) decision
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            COALESCE(decision -> 'finding_ids', '[]'::jsonb)
+                        ) finding_id(value)
+                        WHERE m.message_type = 'issue_filter_applied'
+                    ),
+                    finding_counts AS (
+                        SELECT
+                            findings.review_id,
+                            COUNT(*) AS finding_count
+                        FROM "{self._db.schema}".findings
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = findings.review_id
+                        GROUP BY findings.review_id
+                    ),
+                    formal_issue_keys AS (
+                        SELECT
+                            issues.review_id,
+                            LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'file_path', ''))) || '::' ||
+                            CASE
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('comment_contract_unimplemented', 'declared_intent_without_implementation', 'comment_promise_unimplemented')
+                                    THEN 'comment_contract_unimplemented'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('lock_guard_removed', 'concurrency_guard_removed', 'lock_scope_risk')
+                                    THEN 'lock_guard_removed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('exception_swallowed', 'exception_semantics_weakened')
+                                    THEN 'exception_swallowed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('query_bound_removed', 'query_boundary_missing', 'unbounded_query', 'unbounded_query_risk')
+                                    THEN 'query_bound_removed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('n_plus_one', 'loop_call_amplification', 'bulk_processing_boundary_missing')
+                                    THEN 'n_plus_one'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('sql_injection_risk', 'sql_injection', 'command_injection_risk')
+                                    THEN 'sql_injection_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('code_injection_risk', 'eval_injection_risk', 'xss_risk')
+                                    THEN 'code_injection_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('secret_leak_risk', 'sensitive_data_leak', 'credential_leak_risk')
+                                    THEN 'secret_leak_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('authorization_boundary_risk', 'auth_bypass_risk', 'access_control_risk')
+                                    THEN 'authorization_boundary_risk'
+                                ELSE LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', '')))
+                            END || '::' ||
+                            CASE
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('course_creation_semantics', 'aggregate_factory_bypass', 'aggregate_factory_bypassed')
+                                    THEN '0'
+                                ELSE COALESCE(payload_json::jsonb ->> 'line_start', '1')
+                            END AS display_key,
+                            CASE
+                                WHEN jsonb_array_length(COALESCE(payload_json::jsonb -> 'evidence_chain', '[]'::jsonb)) > 0 THEN 1
+                                ELSE 0
+                            END AS has_evidence_chain
+                        FROM "{self._db.schema}".issues
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = issues.review_id
+                        WHERE COALESCE(LOWER(payload_json::jsonb ->> 'human_decision'), '') <> 'rejected'
+                            AND COALESCE(LOWER(payload_json::jsonb ->> 'status'), '') NOT IN (
+                                'needs_verification',
+                                'comment',
+                                'abstain',
+                                'rejected_after_debate'
+                            )
+                            AND COALESCE(LOWER(payload_json::jsonb ->> 'resolution'), '') NOT IN (
+                                'human_rejected',
+                                'needs_verification',
+                                'llm_judge_needs_verification',
+                                'targeted_debate_needs_verification',
+                                'feedback_profile_requires_more_evidence',
+                                'comment',
+                                'abstain'
+                            )
+                    ),
+                    recovered_finding_keys AS (
+                        SELECT
+                            findings.review_id,
+                            LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'file_path', ''))) || '::' ||
+                            CASE
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('comment_contract_unimplemented', 'declared_intent_without_implementation', 'comment_promise_unimplemented')
+                                    THEN 'comment_contract_unimplemented'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('lock_guard_removed', 'concurrency_guard_removed', 'lock_scope_risk')
+                                    THEN 'lock_guard_removed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('exception_swallowed', 'exception_semantics_weakened')
+                                    THEN 'exception_swallowed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('query_bound_removed', 'query_boundary_missing', 'unbounded_query', 'unbounded_query_risk')
+                                    THEN 'query_bound_removed'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('n_plus_one', 'loop_call_amplification', 'bulk_processing_boundary_missing')
+                                    THEN 'n_plus_one'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('sql_injection_risk', 'sql_injection', 'command_injection_risk')
+                                    THEN 'sql_injection_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('code_injection_risk', 'eval_injection_risk', 'xss_risk')
+                                    THEN 'code_injection_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('secret_leak_risk', 'sensitive_data_leak', 'credential_leak_risk')
+                                    THEN 'secret_leak_risk'
+                                WHEN LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN ('authorization_boundary_risk', 'auth_bypass_risk', 'access_control_risk')
+                                    THEN 'authorization_boundary_risk'
+                                ELSE LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', '')))
+                            END || '::' ||
+                            COALESCE(payload_json::jsonb ->> 'line_start', '1') AS display_key
+                        FROM "{self._db.schema}".findings
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = findings.review_id
+                        LEFT JOIN filtered_finding_ids ON filtered_finding_ids.review_id = findings.review_id
+                            AND filtered_finding_ids.finding_id = findings.finding_id
+                        WHERE filtered_finding_ids.finding_id IS NULL
+                            AND LOWER(COALESCE(payload_json::jsonb -> 'code_context' ->> 'sast_fast_lane', '')) <> 'true'
+                            AND title NOT LIKE '静态工具候选需复核%'
+                            AND LOWER(TRIM(COALESCE(payload_json::jsonb ->> 'normalized_issue_type', ''))) IN (
+                                'comment_contract_unimplemented',
+                                'declared_intent_without_implementation',
+                                'comment_promise_unimplemented',
+                                'lock_guard_removed',
+                                'concurrency_guard_removed',
+                                'lock_scope_risk',
+                                'exception_swallowed',
+                                'exception_semantics_weakened',
+                                'query_bound_removed',
+                                'query_boundary_missing',
+                                'unbounded_query',
+                                'unbounded_query_risk',
+                                'n_plus_one',
+                                'loop_call_amplification',
+                                'bulk_processing_boundary_missing',
+                                'sql_injection_risk',
+                                'sql_injection',
+                                'command_injection_risk',
+                                'code_injection_risk',
+                                'eval_injection_risk',
+                                'xss_risk',
+                                'secret_leak_risk',
+                                'sensitive_data_leak',
+                                'credential_leak_risk',
+                                'authorization_boundary_risk',
+                                'auth_bypass_risk',
+                                'access_control_risk'
+                            )
+                            AND confidence >= CASE
+                                WHEN LOWER(TRIM(COALESCE(severity, 'medium'))) IN ('blocker', 'critical', 'high') THEN 0.85
+                                WHEN LOWER(TRIM(COALESCE(severity, 'medium'))) = 'medium' THEN 0.8
+                                ELSE 0.7
+                            END
+                    ),
+                    display_issue_counts AS (
                         SELECT
                             review_id,
+                            COUNT(DISTINCT display_key) AS issue_count,
+                            COUNT(DISTINCT CASE WHEN has_evidence_chain > 0 THEN display_key END) AS evidence_chain_issue_count
+                        FROM (
+                            SELECT review_id, display_key, has_evidence_chain FROM formal_issue_keys
+                            UNION ALL
+                            SELECT review_id, display_key, 0 AS has_evidence_chain FROM recovered_finding_keys
+                        ) display_keys
+                        GROUP BY review_id
+                    ),
+                    issue_counts AS (
+                        SELECT
+                            issues.review_id,
                             SUM(
                                 CASE
                                     WHEN COALESCE(LOWER(payload_json::jsonb ->> 'human_decision'), '') <> 'rejected'
@@ -157,7 +348,8 @@ class PostgresReviewRepository:
                                 END
                             ) AS evidence_chain_issue_count
                         FROM "{self._db.schema}".issues
-                        GROUP BY review_id
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = issues.review_id
+                        GROUP BY issues.review_id
                     ),
                     issue_filter_counts AS (
                         SELECT
@@ -184,12 +376,73 @@ class PostgresReviewRepository:
                                 END
                             ) AS policy_comment_budget_filtered_count
                         FROM "{self._db.schema}".messages m
+                        INNER JOIN selected_review_ids ON selected_review_ids.review_id = m.review_id
                         CROSS JOIN LATERAL jsonb_array_elements(
                             COALESCE(m.metadata_json::jsonb -> 'issue_filter_decisions', '[]'::jsonb)
                         ) decision
                         WHERE m.message_type = 'issue_filter_applied'
                         GROUP BY m.review_id
                     )
+                    SELECT
+                        r.review_id,
+                        status,
+                        phase,
+                        analysis_mode,
+                        selected_experts_json,
+                        human_review_status,
+                        pending_human_issue_ids_json,
+                        report_summary,
+                        failure_reason,
+                        created_at,
+                        started_at,
+                        completed_at,
+                        duration_seconds,
+                        updated_at,
+                        subject_json::jsonb ->> 'subject_type' AS subject_type,
+                        subject_json::jsonb ->> 'repo_id' AS repo_id,
+                        subject_json::jsonb ->> 'project_id' AS project_id,
+                        subject_json::jsonb ->> 'source_ref' AS source_ref,
+                        subject_json::jsonb ->> 'target_ref' AS target_ref,
+                        subject_json::jsonb ->> 'title' AS title,
+                        subject_json::jsonb ->> 'mr_url' AS mr_url,
+                        (subject_json::jsonb -> 'changed_files')::text AS changed_files_json,
+                        subject_json::jsonb -> 'metadata' ->> 'trigger_source' AS trigger_source,
+                        subject_json::jsonb -> 'metadata' -> 'impact_report' ->> 'graph_status' AS impact_graph_status,
+                        subject_json::jsonb -> 'metadata' -> 'impact_report' ->> 'risk_level' AS impact_risk_level,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'impacted_files', '[]'::jsonb)
+                        ) AS impacted_file_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'recommended_test_scope', '[]'::jsonb)
+                        ) AS recommended_test_scope_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'successful_context_targets', '[]'::jsonb)
+                        ) AS successful_context_target_count,
+                        jsonb_array_length(
+                            COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'successful_impact_targets', '[]'::jsonb)
+                        ) AS successful_impact_target_count,
+                        COALESCE(display_issue_counts.evidence_chain_issue_count, issue_counts.evidence_chain_issue_count, 0) AS evidence_chain_issue_count,
+                        COALESCE(issue_filter_counts.quality_filtered_issue_count, 0) AS quality_filtered_issue_count,
+                        COALESCE(issue_filter_counts.policy_comment_budget_filtered_count, 0) AS policy_comment_budget_filtered_count,
+                        COALESCE(display_issue_counts.issue_count, issue_counts.issue_count, 0) AS issue_count,
+                        COALESCE(finding_counts.finding_count, 0) AS finding_count
+                    FROM selected_reviews r
+                    LEFT JOIN issue_counts ON issue_counts.review_id = r.review_id
+                    LEFT JOIN display_issue_counts ON display_issue_counts.review_id = r.review_id
+                    LEFT JOIN finding_counts ON finding_counts.review_id = r.review_id
+                    LEFT JOIN issue_filter_counts ON issue_filter_counts.review_id = r.review_id
+                    ORDER BY r.updated_at DESC
+                    """,
+                    tuple(params),
+                )
+                rows = cursor.fetchall()
+        return [self._deserialize_light_row(row) for row in rows]
+
+    def _list_light_without_counts(self, *, where_clause: str, limit_clause: str, params: tuple[object, ...]) -> list[dict[str, object]]:
+        with self._db.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
                     SELECT
                         review_id,
                         status,
@@ -228,15 +481,17 @@ class PostgresReviewRepository:
                         jsonb_array_length(
                             COALESCE(subject_json::jsonb -> 'metadata' -> 'impact_report' -> 'successful_impact_targets', '[]'::jsonb)
                         ) AS successful_impact_target_count,
-                        COALESCE(issue_counts.evidence_chain_issue_count, 0) AS evidence_chain_issue_count,
-                        COALESCE(issue_filter_counts.quality_filtered_issue_count, 0) AS quality_filtered_issue_count,
-                        COALESCE(issue_filter_counts.policy_comment_budget_filtered_count, 0) AS policy_comment_budget_filtered_count,
-                        COALESCE(issue_counts.issue_count, 0) AS issue_count
-                    FROM {self._table} r
-                    LEFT JOIN issue_counts ON issue_counts.review_id = r.review_id
-                    LEFT JOIN issue_filter_counts ON issue_filter_counts.review_id = r.review_id
-                    ORDER BY r.updated_at DESC
-                    """
+                        0 AS evidence_chain_issue_count,
+                        0 AS quality_filtered_issue_count,
+                        0 AS policy_comment_budget_filtered_count,
+                        0 AS issue_count,
+                        0 AS finding_count
+                    FROM {self._table}
+                    {where_clause}
+                    ORDER BY updated_at DESC
+                    {limit_clause}
+                    """,
+                    params,
                 )
                 rows = cursor.fetchall()
         return [self._deserialize_light_row(row) for row in rows]
@@ -302,6 +557,7 @@ class PostgresReviewRepository:
             "completed_at": row["completed_at"],
             "duration_seconds": row["duration_seconds"],
             "updated_at": row["updated_at"],
+            "finding_count": int(row.get("finding_count") or 0),
             "issue_count": int(row.get("issue_count") or 0),
             "quality_summary": quality_summary,
             "impact_summary": impact_summary,

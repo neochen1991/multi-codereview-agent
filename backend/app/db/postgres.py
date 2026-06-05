@@ -146,6 +146,18 @@ class PostgresDatabase:
                     )
                     """
                 )
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_reviews_updated_at ON {schema_ident}.reviews(updated_at DESC)")
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_reviews_status_updated_at ON {schema_ident}.reviews(status, updated_at DESC)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_review_events_review_id_created_at ON {schema_ident}.review_events(review_id, created_at)"
+                )
+                cursor.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_messages_review_id_type ON {schema_ident}.messages(review_id, message_type)"
+                )
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_findings_review_id ON {schema_ident}.findings(review_id)")
+                cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_issues_review_id ON {schema_ident}.issues(review_id)")
                 cursor.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {schema_ident}.feedback (

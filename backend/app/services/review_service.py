@@ -505,18 +505,16 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
     def list_reviews(self) -> list[ReviewTask]:
         return [self._ensure_waiting_human_analysis_duration(review) for review in self.review_repo.list()]
 
-    def list_review_summaries(self, project_id: str = "") -> list[dict[str, object]]:
+    def list_review_summaries(self, project_id: str = "", *, limit: int = 0, include_counts: bool = True) -> list[dict[str, object]]:
         current_project_id = str(project_id or "").strip()
-        rows = self.review_repo.list_light()
-        if current_project_id:
-            rows = [
-                item
-                for item in rows
-                if str(item.get("project_id") or item.get("subject", {}).get("project_id") or "") == current_project_id
-            ]
+        rows = self.review_repo.list_light(
+            project_id=current_project_id,
+            limit=max(0, int(limit or 0)),
+            include_counts=include_counts,
+        )
         rows = [self._ensure_waiting_human_summary_duration(item) for item in rows]
         rows = [self._sanitize_light_review_summary(item) for item in rows]
-        return [self._apply_display_review_summary(item) for item in rows]
+        return [self._apply_light_review_summary_counts(item) for item in rows]
 
     def _sanitize_light_review_summary(self, review: dict[str, object]) -> dict[str, object]:
         """轻量历史列表也要避免暴露内部/旧口径文案。"""
@@ -536,6 +534,26 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         cleaned = cleaned.replace("议题", "问题")
         cleaned = re.sub(r"条\s+检视发现", "条检视发现", cleaned)
         next_review["report_summary"] = cleaned
+        return next_review
+
+    def _apply_light_review_summary_counts(self, review: dict[str, object]) -> dict[str, object]:
+        """Use pre-aggregated list counts without falling back to per-review detail queries."""
+
+        if str(review.get("status") or "").lower() in {"failed", "closed", "cancelled"}:
+            return review
+        issue_count = int(review.get("issue_count") or 0)
+        finding_count = int(review.get("finding_count") or 0)
+        report_summary = str(review.get("report_summary") or "").strip()
+        if not finding_count and not issue_count:
+            return review
+        next_review = dict(review)
+        pending_human_count = len(list(next_review.get("pending_human_issue_ids") or []))
+        next_review["finding_count"] = finding_count
+        next_review["issue_count"] = issue_count
+        next_review["report_summary"] = (
+            f"审核报告已生成，共收敛 {finding_count} 条检视发现，"
+            f"形成 {issue_count} 个有效问题，其中 {pending_human_count} 个待人工确认。"
+        )
         return next_review
 
     def _apply_display_review_summary(self, review: dict[str, object]) -> dict[str, object]:
@@ -772,12 +790,15 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         """返回首页用轻量队列视图，避免加载完整 review subject。"""
 
         current_project_id = str(project_id or "").strip()
-        reviews = self.review_repo.list_light()
+        reviews = self.review_repo.list_light(
+            project_id=current_project_id,
+            statuses=["pending", "running"],
+            include_counts=False,
+        )
         pending = [
             item
             for item in reviews
             if item.get("status") == "pending"
-            and (not current_project_id or str(item.get("project_id") or "") == current_project_id)
         ]
         pending.sort(key=self._pending_sort_key_from_payload)
         running = sorted(
@@ -785,7 +806,6 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 item
                 for item in reviews
                 if item.get("status") == "running"
-                and (not current_project_id or str(item.get("project_id") or "") == current_project_id)
             ],
             key=self._started_at_or_created_at,
         )
@@ -1099,7 +1119,10 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         return True
 
     def _has_running_reviews(self) -> bool:
-        return any(str(item.get("status") or "").strip().lower() == "running" for item in self.review_repo.list_light())
+        return any(
+            str(item.get("status") or "").strip().lower() == "running"
+            for item in self.review_repo.list_light(statuses=["running"], include_counts=False)
+        )
 
     def _try_schedule_deferred_compaction(self) -> None:
         if os.getenv("PYTEST_CURRENT_TEST"):

@@ -1149,9 +1149,20 @@ export const reviewApi = {
     const { data } = await api.post("/reviews", payload);
     return data;
   },
-  async list(projectId = ""): Promise<ReviewSummary[]> {
+  async list(projectIdOrOptions: string | { projectId?: string; limit?: number; includeCounts?: boolean } = ""): Promise<ReviewSummary[]> {
+    const options =
+      typeof projectIdOrOptions === "string"
+        ? { projectId: projectIdOrOptions }
+        : projectIdOrOptions || {};
+    const projectId = String(options.projectId || "").trim();
+    const limit = Number.isFinite(options.limit) ? Math.max(0, Math.floor(Number(options.limit))) : 0;
+    const includeCounts = options.includeCounts;
     const { data } = await api.get("/reviews", {
-      params: projectId ? { project_id: projectId } : undefined,
+      params: {
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(limit ? { limit } : {}),
+        ...(includeCounts === false ? { include_counts: false } : {}),
+      },
     });
     return data;
   },
