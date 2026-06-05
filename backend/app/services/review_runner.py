@@ -57,6 +57,7 @@ from app.services.review_runner_expert_output import ReviewRunnerExpertOutputMix
 from app.services.review_runner_issue_validation import ReviewRunnerIssueValidationMixin
 from app.services.review_runner_prompting import ReviewRunnerPromptingMixin
 from app.services.review_runner_rendering import ReviewRunnerRenderingMixin
+from app.services.review_execution_strategy_service import ReviewExecutionStrategyService
 from app.services.runtime_settings_service import RuntimeSettingsService
 from app.services.sast_signal_utils import (
     canonical_tool_observation_id,
@@ -114,6 +115,7 @@ class ReviewRunner(
         self.finding_repo = repository_factory.create_finding_repository()
         self.issue_repo = repository_factory.create_issue_repository()
         self.message_repo = repository_factory.create_message_repository()
+        self.review_cache_repo = repository_factory.create_review_cache_repository()
         self.registry = ExpertRegistry(self.storage_root / "experts")
         self.runtime_settings_service = RuntimeSettingsService(self.storage_root)
         self.repository_resolver = RepositoryConfigResolver()
@@ -123,6 +125,7 @@ class ReviewRunner(
         self.diff_excerpt_service = DiffExcerptService()
         self.capability_service = ExpertCapabilityService()
         self.main_agent_service = MainAgentService()
+        self.execution_strategy_service = ReviewExecutionStrategyService()
         self.llm_chat_service = LLMChatService()
         self.java_quality_signal_extractor = CodeObservationExtractor()
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
@@ -294,6 +297,58 @@ class ReviewRunner(
                 review_policy,
                 enabled_expert_ids=[expert.expert_id for expert in enabled_experts],
             )
+        metadata = dict(review.subject.metadata or {})
+        if "diff_profile" not in metadata or "risk_profile" not in metadata:
+            execution_cache_metadata: dict[str, object] = {
+                "enabled": bool(getattr(effective_runtime_settings, "enable_review_cache", False)),
+                "scope": "execution_strategy",
+                "hit": False,
+            }
+            execution_payload: dict[str, object] | None = None
+            if bool(getattr(effective_runtime_settings, "enable_review_cache", False)):
+                execution_cache_key = self.review_cache_repo.build_execution_strategy_key(
+                    subject=review.subject,
+                    runtime_settings=effective_runtime_settings,
+                    enabled_experts=enabled_experts,
+                )
+                execution_cache_metadata["cache_key"] = execution_cache_key
+                cached_execution = self.review_cache_repo.get(execution_cache_key)
+                if isinstance(cached_execution, dict) and cached_execution.get("diff_profile") and cached_execution.get("risk_profile"):
+                    execution_payload = dict(cached_execution)
+                    execution_cache_metadata["hit"] = True
+                else:
+                    execution_cache_metadata["miss_reason"] = "cache_empty"
+            if execution_payload is None:
+                execution_decision = self.execution_strategy_service.build_decision(
+                    review.subject,
+                    effective_runtime_settings,
+                    tool_observations=[
+                        dict(item)
+                        for item in list((review.subject.metadata or {}).get("tool_observations") or [])
+                        if isinstance(item, dict)
+                    ],
+                )
+                execution_payload = {
+                    "diff_profile": execution_decision.diff_profile,
+                    "risk_profile": execution_decision.risk_profile,
+                    "review_execution_strategy": execution_decision.execution_strategy,
+                }
+                if bool(getattr(effective_runtime_settings, "enable_review_cache", False)):
+                    self.review_cache_repo.set(str(execution_cache_metadata.get("cache_key") or ""), execution_payload)
+            metadata = {
+                **metadata,
+                "diff_profile": dict(execution_payload.get("diff_profile") or {}),
+                "risk_profile": dict(execution_payload.get("risk_profile") or {}),
+                "review_execution_strategy": str(execution_payload.get("review_execution_strategy") or ""),
+                "review_cache": execution_cache_metadata,
+            }
+            review.subject.metadata = metadata
+        selection_plan = self.execution_strategy_service.apply_to_selection_plan(
+            subject=review.subject,
+            selection_plan=selection_plan,
+            enabled_experts=enabled_experts,
+            runtime_settings=effective_runtime_settings,
+        )
         selection_plan = self._ensure_thorough_review_core_experts(
             subject=review.subject,
             selection_plan=selection_plan,
@@ -325,9 +380,14 @@ class ReviewRunner(
                 "skipped_experts": list(selection_plan.get("skipped_experts", []) or []),
                 "llm": dict(selection_plan.get("llm") or {}),
                 "review_policy": dict(selection_plan.get("review_policy") or {}),
+                "diff_profile": dict(selection_plan.get("diff_profile") or review.subject.metadata.get("diff_profile") or {}),
+                "risk_profile": dict(selection_plan.get("risk_profile") or review.subject.metadata.get("risk_profile") or {}),
+                "execution_strategy": str(selection_plan.get("execution_strategy") or review.subject.metadata.get("review_execution_strategy") or ""),
+                "routing_optimized": bool(selection_plan.get("routing_optimized")),
             },
             "review_policy": review_policy,
         }
+        review_cache_metadata = dict(review.subject.metadata.get("review_cache") or {})
         review.updated_at = datetime.now(UTC)
         self.review_repo.save(review)
         self._abort_if_closed(review_id)
@@ -346,6 +406,11 @@ class ReviewRunner(
                     "candidate_expert_ids": list(selection_plan.get("candidate_expert_ids", []) or []),
                     "selected_experts": list(selection_plan.get("selected_experts", []) or []),
                     "skipped_experts": list(selection_plan.get("skipped_experts", []) or []),
+                    "diff_profile": dict(selection_plan.get("diff_profile") or {}),
+                    "risk_profile": dict(selection_plan.get("risk_profile") or {}),
+                    "execution_strategy": str(selection_plan.get("execution_strategy") or ""),
+                    "routing_optimized": bool(selection_plan.get("routing_optimized")),
+                    "review_cache": review_cache_metadata,
                     **dict(selection_plan.get("llm") or {}),
                 },
             )
@@ -364,6 +429,9 @@ class ReviewRunner(
                     "selection_elapsed_ms": selection_elapsed_ms,
                     "selected_expert_ids": selected_ids,
                     "requested_expert_ids": list(selection_plan.get("requested_expert_ids", []) or []),
+                    "execution_strategy": str(selection_plan.get("execution_strategy") or ""),
+                    "routing_optimized": bool(selection_plan.get("routing_optimized")),
+                    "review_cache": review_cache_metadata,
                 },
             )
         )
@@ -4235,6 +4303,15 @@ class ReviewRunner(
         ]
         if not selected:
             return "大模型未返回有效专家集合，本次审核将使用兜底专家集合继续执行。"
+        execution_strategy = str(selection_plan.get("execution_strategy") or "").strip()
+        risk_profile = dict(selection_plan.get("risk_profile") or {})
+        strategy_prefix = ""
+        if execution_strategy:
+            risk_level = str(risk_profile.get("risk_level") or "").strip() or "unknown"
+            reason = str(risk_profile.get("reason") or "").strip()
+            strategy_prefix = f"本次检视策略为 {execution_strategy}（风险等级 {risk_level}）。"
+            if reason:
+                strategy_prefix += f"{reason}"
         selected_text = "；".join(
             [
                 f"{str(item.get('expert_name') or item.get('expert_id') or '').strip()}：{str(item.get('reason') or '与当前 MR 相关').strip()}"
@@ -4248,8 +4325,8 @@ class ReviewRunner(
             ]
         )
         if skipped_text:
-            return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。未纳入本轮的专家包括：{skipped_text}。"
-        return f"大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。"
+            return f"{strategy_prefix}大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。未纳入本轮的专家包括：{skipped_text}。"
+        return f"{strategy_prefix}大模型已完成专家参与判定。本次参与审核的专家为：{selected_text}。"
 
     def _build_manual_expert_selection_plan(
         self,

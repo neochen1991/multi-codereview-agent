@@ -32,6 +32,7 @@ def test_targeted_debate_accepts_multi_expert_direct_evidence():
 
     issue = result["issues"][0]
     assert issue["needs_debate"] is True
+    assert issue["debate_trigger_reason"] == "多个专家参与同一候选问题，需要收敛观点。"
     assert issue["debate_result"]["final_verdict"] == "accept"
     assert issue["status"] == "debating"
     assert issue["confidence"] > 0.86
@@ -67,6 +68,63 @@ def test_targeted_debate_rejects_speculative_low_evidence_issue_before_judge():
     assert issue["debate_result"]["final_verdict"] == "reject"
     assert issue["status"] == "rejected_after_debate"
     assert judged["issues"] == []
+
+
+def test_targeted_debate_skips_single_high_confidence_low_risk_issue():
+    state = {
+        "runtime_settings": RuntimeSettings(enable_debate_only_on_conflict=True),
+        "conflicts": [
+            {
+                "issue_id": "iss_clean_single",
+                "title": "局部空指针保护缺失",
+                "summary": "新增代码直接读取对象字段。",
+                "finding_type": "direct_defect",
+                "severity": "medium",
+                "confidence": 0.91,
+                "direct_evidence": True,
+                "participant_expert_ids": ["correctness_business"],
+                "evidence": ["return command.user().id();"],
+                "assumptions": [],
+            }
+        ],
+    }
+
+    result = run_targeted_debate(state)
+
+    issue = result["issues"][0]
+    assert issue["needs_debate"] is False
+    assert issue["status"] == "open"
+    assert issue["debate_result"]["final_verdict"] == "accept"
+    assert issue["debate_trigger_reason"] == "单一高置信且非高风险候选问题，跳过辩论以减少 LLM 调用。"
+
+
+def test_targeted_debate_forces_high_risk_single_expert_issue():
+    state = {
+        "runtime_settings": RuntimeSettings(enable_debate_only_on_conflict=True),
+        "conflicts": [
+            {
+                "issue_id": "iss_auth_single",
+                "title": "接口鉴权缺失",
+                "summary": "新增导出接口没有 permission 校验。",
+                "finding_type": "direct_defect",
+                "normalized_issue_type": "missing_auth_check",
+                "risk_domain": "security",
+                "severity": "high",
+                "confidence": 0.9,
+                "direct_evidence": True,
+                "participant_expert_ids": ["security_compliance"],
+                "evidence": ["@GetMapping(\"/export\")"],
+                "assumptions": [],
+            }
+        ],
+    }
+
+    result = run_targeted_debate(state)
+
+    issue = result["issues"][0]
+    assert issue["needs_debate"] is True
+    assert issue["debate_trigger_reason"] == "高风险安全、数据一致性、并发或生产影响问题需要辩论预裁决。"
+    assert issue["debate_result"]["final_verdict"] == "needs_verification"
 
 
 def test_targeted_debate_uses_llm_judge_when_enabled(monkeypatch):

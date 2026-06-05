@@ -38,10 +38,12 @@ from app.services.gitnexus_impact_service import GitNexusImpactService
 from app.services.platform_adapter import OpenMergeRequest, PlatformAdapter
 from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.repository_context_service import RepositoryContextService
+from app.services.review_execution_strategy_service import ReviewExecutionStrategyService
 from app.services.review_service_projection import ReviewServiceProjectionMixin
 from app.services.review_service_report import ReviewServiceReportMixin
 from app.services.review_runner import ReviewClosedError, ReviewRunner
 from app.services.runtime_settings_service import RuntimeSettingsService
+from app.services.sast_prescan_service import SastPreScanService
 
 logger = logging.getLogger(__name__)
 DEFAULT_MR_EXPERTS = ("change_impact_analysis",)
@@ -111,6 +113,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.finding_repo = None
         self.issue_repo = None
         self.message_repo = None
+        self.review_cache_repo = None
         self.runner = None
         self.artifact_service = ArtifactService(self.storage_root)
         self.expert_registry = ExpertRegistry(self.storage_root / "experts")
@@ -121,6 +124,8 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.gitnexus_impact_service = GitNexusImpactService(self.storage_root)
         self.platform_adapter = PlatformAdapter()
         self.repository_resolver = RepositoryConfigResolver()
+        self.execution_strategy_service = ReviewExecutionStrategyService()
+        self.sast_prescan_service = SastPreScanService()
         self.extension_editor_service = ExtensionEditorService(Path(__file__).resolve().parents[3])
         self._active_reviews: set[str] = set()
         self._active_reviews_lock = threading.Lock()
@@ -139,6 +144,7 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
         self.finding_repo = repository_factory.create_finding_repository()
         self.issue_repo = repository_factory.create_issue_repository()
         self.message_repo = repository_factory.create_message_repository()
+        self.review_cache_repo = repository_factory.create_review_cache_repository()
         self.runner = ReviewRunner(self.storage_root)
         self.feedback_learner_service = FeedbackLearnerService(self.storage_root)
         self.review_learning_service = ReviewLearningService(self.storage_root)
@@ -220,6 +226,73 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                     for item in design_docs
                 ],
             }
+        static_tool_prefilter = self._collect_static_tool_prefilter_observations(
+            subject,
+            runtime_settings,
+            repo_root=resolved_repository.local_path,
+        )
+        if static_tool_prefilter:
+            merged_tool_observations = [
+                dict(item)
+                for item in list((subject.metadata or {}).get("tool_observations") or [])
+                if isinstance(item, dict)
+            ]
+            merged_tool_observations.extend(
+                dict(item)
+                for item in list(static_tool_prefilter.get("tool_observations") or [])
+                if isinstance(item, dict)
+            )
+            subject.metadata = {
+                **subject.metadata,
+                "tool_observations": merged_tool_observations[:20],
+                "static_tool_prefilter": static_tool_prefilter,
+            }
+        execution_cache_metadata: dict[str, object] = {
+            "enabled": bool(runtime_settings.enable_review_cache),
+            "scope": "execution_strategy",
+            "hit": False,
+        }
+        execution_decision_payload: dict[str, object] | None = None
+        if bool(runtime_settings.enable_review_cache) and self.review_cache_repo is not None:
+            execution_cache_key = self.review_cache_repo.build_execution_strategy_key(
+                subject=subject,
+                runtime_settings=runtime_settings,
+                enabled_experts=self.expert_registry.list_enabled(),
+            )
+            execution_cache_metadata["cache_key"] = execution_cache_key
+            cached_execution = self.review_cache_repo.get(execution_cache_key)
+            if isinstance(cached_execution, dict) and cached_execution.get("diff_profile") and cached_execution.get("risk_profile"):
+                execution_decision_payload = dict(cached_execution)
+                execution_cache_metadata["hit"] = True
+            else:
+                execution_cache_metadata["miss_reason"] = "cache_empty"
+        if execution_decision_payload is None:
+            execution_decision = self.execution_strategy_service.build_decision(
+                subject,
+                runtime_settings,
+                tool_observations=[
+                    dict(item)
+                    for item in list((subject.metadata or {}).get("tool_observations") or [])
+                    if isinstance(item, dict)
+                ],
+            )
+            execution_decision_payload = {
+                "diff_profile": execution_decision.diff_profile,
+                "risk_profile": execution_decision.risk_profile,
+                "review_execution_strategy": execution_decision.execution_strategy,
+            }
+            if bool(runtime_settings.enable_review_cache) and self.review_cache_repo is not None:
+                self.review_cache_repo.set(
+                    str(execution_cache_metadata.get("cache_key") or ""),
+                    execution_decision_payload,
+                )
+        subject.metadata = {
+            **subject.metadata,
+            "diff_profile": dict(execution_decision_payload.get("diff_profile") or {}),
+            "risk_profile": dict(execution_decision_payload.get("risk_profile") or {}),
+            "review_execution_strategy": str(execution_decision_payload.get("review_execution_strategy") or ""),
+            "review_cache": execution_cache_metadata,
+        }
         task = ReviewTask(
             review_id=review_id,
             subject=subject,
@@ -243,9 +316,96 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
                 event_type="review_created",
                 phase="pending",
                 message="审核任务已创建",
+                payload={
+                    "static_tool_prefilter": dict(subject.metadata.get("static_tool_prefilter") or {}),
+                    "review_cache": dict(subject.metadata.get("review_cache") or {}),
+                    "execution_strategy": subject.metadata.get("review_execution_strategy"),
+                },
             )
         )
         return task
+
+    def _collect_static_tool_prefilter_observations(
+        self,
+        subject: ReviewSubject,
+        runtime_settings: RuntimeSettings,
+        *,
+        repo_root: str,
+    ) -> dict[str, object]:
+        if not bool(getattr(runtime_settings, "enable_static_tool_prefilter", True)):
+            return {}
+        if not bool(getattr(runtime_settings, "enable_sast_prescan", True)):
+            return {
+                "enabled": False,
+                "reason": "sast_prescan_disabled",
+                "tool_observations": [],
+                "observation_count": 0,
+            }
+        if not str(repo_root or "").strip():
+            return {
+                "enabled": False,
+                "reason": "repo_root_unavailable",
+                "tool_observations": [],
+                "observation_count": 0,
+            }
+        root = Path(str(repo_root or ""))
+        if not root.exists():
+            return {
+                "enabled": False,
+                "reason": "repo_root_unavailable",
+                "tool_observations": [],
+                "observation_count": 0,
+            }
+        observations: list[dict[str, object]] = []
+        scan_summaries: list[dict[str, object]] = []
+        for file_path in [str(item).strip() for item in list(subject.changed_files or []) if str(item).strip()][:8]:
+            scan = self.sast_prescan_service.scan_file(
+                root,
+                file_path,
+                enabled=True,
+            )
+            if not isinstance(scan, dict):
+                continue
+            file_observations = [
+                dict(item)
+                for item in list(scan.get("tool_observations") or [])
+                if isinstance(item, dict)
+            ]
+            observations.extend(file_observations)
+            scan_summaries.append(
+                {
+                    "file_path": file_path,
+                    "enabled": bool(scan.get("enabled")),
+                    "finding_count": len(list(scan.get("findings") or [])),
+                    "observation_count": len(file_observations),
+                    "limitations": [
+                        str(item)
+                        for item in list(scan.get("limitations") or [])
+                        if str(item).strip()
+                    ][:4],
+                }
+            )
+        deduped: dict[str, dict[str, object]] = {}
+        for observation in observations:
+            observation_id = str(observation.get("observation_id") or observation.get("id") or "").strip()
+            if not observation_id:
+                observation_id = "|".join(
+                    [
+                        str(observation.get("tool") or ""),
+                        str(observation.get("rule_id") or ""),
+                        str(observation.get("file_path") or ""),
+                        str(observation.get("line_start") or ""),
+                    ]
+                )
+            if observation_id and observation_id not in deduped:
+                deduped[observation_id] = observation
+        return {
+            "enabled": True,
+            "scanned_file_count": len(scan_summaries),
+            "observation_count": len(deduped),
+            "tool_observations": list(deduped.values())[:20],
+            "scan_summaries": scan_summaries,
+        }
 
     def start_review(self, review_id: str) -> ReviewTask:
         """同步执行一次审核。

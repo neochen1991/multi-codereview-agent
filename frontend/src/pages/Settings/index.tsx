@@ -1675,6 +1675,19 @@ const SettingsPage: React.FC = () => {
                 enable_llm_targeted_debate: Boolean(values.enable_llm_targeted_debate),
                 llm_targeted_debate_timeout_seconds: Number(values.llm_targeted_debate_timeout_seconds || 60),
                 enable_sast_prescan: Boolean(values.enable_sast_prescan),
+                review_execution_strategy: values.review_execution_strategy || "auto",
+                small_mr_changed_lines: Number(values.small_mr_changed_lines || 80),
+                medium_mr_changed_lines: Number(values.medium_mr_changed_lines || 400),
+                max_agents_for_small_mr: Number(values.max_agents_for_small_mr || 2),
+                max_agents_for_medium_mr: Number(values.max_agents_for_medium_mr || 3),
+                enable_static_tool_prefilter: Boolean(values.enable_static_tool_prefilter),
+                enable_agent_routing: Boolean(values.enable_agent_routing),
+                enable_judge_batching: Boolean(values.enable_judge_batching),
+                enable_debate_only_on_conflict: Boolean(values.enable_debate_only_on_conflict),
+                enable_review_cache: Boolean(values.enable_review_cache),
+                force_deep_review_for_security: Boolean(values.force_deep_review_for_security),
+                force_deep_review_for_auth: Boolean(values.force_deep_review_for_auth),
+                force_deep_review_for_data_consistency: Boolean(values.force_deep_review_for_data_consistency),
                 enable_review_workspace_realtime_graph: Boolean(values.enable_review_workspace_realtime_graph),
                 gitnexus_max_targets: Number(values.gitnexus_max_targets || 12),
                 gitnexus_max_context_queries: Number(values.gitnexus_max_context_queries || 8),
@@ -1980,6 +1993,83 @@ const SettingsPage: React.FC = () => {
                           valuePropName="checked"
                           extra="开启后，检视前会 best-effort 调用本机 semgrep、PMD、Checkstyle、eslint、bandit 等静态工具。"
                         >
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item
+                          name="review_execution_strategy"
+                          label="检视执行策略"
+                          extra="Auto 会按 MR 风险画像自动选择 no_llm、light、targeted 或 deep，减少低价值 LLM 调用。"
+                        >
+                          <Select
+                            options={[
+                              { label: "Auto：按风险自动选择", value: "auto" },
+                              { label: "No LLM：仅确定性检查", value: "no_llm" },
+                              { label: "Light：小 MR 轻量检视", value: "light_review" },
+                              { label: "Targeted：按风险定向检视", value: "targeted_review" },
+                              { label: "Deep：强制深度检视", value: "deep_review" },
+                            ]}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="enable_agent_routing" label="启用风险路由收敛" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="enable_static_tool_prefilter" label="静态工具优先预筛" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="enable_debate_only_on_conflict" label="仅冲突/高风险复核讨论" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="enable_judge_batching" label="批量问题复核" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="enable_review_cache" label="启用检视缓存" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="small_mr_changed_lines" label="小 MR 行数阈值">
+                          <InputNumber min={1} max={5000} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="medium_mr_changed_lines" label="中 MR 行数阈值">
+                          <InputNumber min={1} max={20000} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="max_agents_for_small_mr" label="小 MR 最多角色">
+                          <InputNumber min={1} max={20} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={6}>
+                        <Form.Item name="max_agents_for_medium_mr" label="中 MR 最多角色">
+                          <InputNumber min={1} max={20} style={{ width: "100%" }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="force_deep_review_for_security" label="安全风险强制深检" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="force_deep_review_for_auth" label="权限风险强制深检" valuePropName="checked">
+                          <Switch />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={24} xl={8}>
+                        <Form.Item name="force_deep_review_for_data_consistency" label="数据一致性强制深检" valuePropName="checked">
                           <Switch />
                         </Form.Item>
                       </Col>

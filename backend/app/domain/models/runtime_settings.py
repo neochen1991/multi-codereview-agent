@@ -122,6 +122,19 @@ class RuntimeSettings(BaseModel):
     enable_llm_targeted_debate: bool = False
     llm_targeted_debate_timeout_seconds: int = 60
     enable_sast_prescan: bool = True
+    review_execution_strategy: Literal["auto", "no_llm", "light_review", "targeted_review", "deep_review"] = "auto"
+    small_mr_changed_lines: int = Field(default=80, ge=1, le=5000)
+    medium_mr_changed_lines: int = Field(default=400, ge=1, le=20000)
+    max_agents_for_small_mr: int = Field(default=2, ge=1, le=20)
+    max_agents_for_medium_mr: int = Field(default=3, ge=1, le=20)
+    enable_static_tool_prefilter: bool = True
+    enable_agent_routing: bool = True
+    enable_judge_batching: bool = True
+    enable_debate_only_on_conflict: bool = True
+    enable_review_cache: bool = False
+    force_deep_review_for_security: bool = True
+    force_deep_review_for_auth: bool = True
+    force_deep_review_for_data_consistency: bool = True
     enable_review_workspace_realtime_graph: bool = False
     gitnexus_max_targets: int = Field(default=12, ge=1, le=50)
     gitnexus_max_context_queries: int = Field(default=8, ge=1, le=50)

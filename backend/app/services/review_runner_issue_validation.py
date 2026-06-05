@@ -1455,7 +1455,14 @@ class ReviewRunnerIssueValidationMixin:
         llm_call_count = 0
         validated_issues: list[DebateIssue] = []
         resolution = self.llm_chat_service.resolve_main_agent(runtime_settings)
-        validation_batches = self._build_issue_consistency_batches(issues, findings_by_id)
+        validation_batches = self._build_issue_consistency_batches(
+            issues,
+            findings_by_id,
+            max_batch_size=self._issue_consistency_batch_size(
+                issues,
+                runtime_settings=runtime_settings,
+            ),
+        )
         for batch_index, batch in enumerate(validation_batches, start=1):
             self._abort_if_closed(review.review_id)
             llm_batch: list[dict[str, object]] = []
@@ -1673,7 +1680,7 @@ class ReviewRunnerIssueValidationMixin:
                 if finding_id in findings_by_id
             ]
             baseline = self._build_issue_consistency_baseline(issue, related_findings)
-            group_key = str(baseline.get("file_path") or issue.file_path or "__cross_file__").strip() or "__cross_file__"
+            group_key = self._issue_consistency_group_key(issue, baseline)
             grouped.setdefault(group_key, []).append(
                 {
                     "issue": issue,
@@ -1689,6 +1696,28 @@ class ReviewRunnerIssueValidationMixin:
             for start in range(0, len(items), safe_batch_size):
                 batches.append(items[start : start + safe_batch_size])
         return batches
+
+    @staticmethod
+    def _issue_consistency_group_key(issue: DebateIssue, baseline: dict[str, object]) -> str:
+        file_path = str(baseline.get("file_path") or issue.file_path or "__cross_file__").strip() or "__cross_file__"
+        issue_type = str(issue.normalized_issue_type or issue.category_label or issue.finding_type or "__unknown_type__").strip()
+        risk_domain = str(issue.risk_domain or "__unknown_domain__").strip()
+        return "::".join([file_path, issue_type or "__unknown_type__", risk_domain or "__unknown_domain__"])
+
+    @staticmethod
+    def _issue_consistency_batch_size(
+        issues: list[DebateIssue],
+        *,
+        runtime_settings,
+    ) -> int:
+        if not bool(getattr(runtime_settings, "enable_judge_batching", True)):
+            return 1
+        severities = {str(issue.severity or "").strip().lower() for issue in issues}
+        if severities & {"blocker", "critical", "high"}:
+            return 5
+        if severities <= {"low"}:
+            return 12
+        return 8
 
     def _build_issue_consistency_baseline(
         self,

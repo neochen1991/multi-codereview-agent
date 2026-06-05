@@ -135,6 +135,113 @@ def test_create_review_defaults_to_change_impact_expert_for_mr(tmp_path: Path):
     assert dict(review.subject.metadata or {}).get("manual_expert_selection") is False
 
 
+def test_create_review_stores_diff_and_risk_profiles(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_strategy",
+            "project_id": "proj_strategy",
+            "source_ref": "feature/query",
+            "target_ref": "main",
+            "title": "query strategy",
+            "changed_files": ["src/main/java/demo/UserRepository.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/demo/UserRepository.java b/src/main/java/demo/UserRepository.java\n"
+                "@@ -1 +1 @@\n"
+                "- PageRequest page = PageRequest.of(0, 20);\n"
+                "+ List<User> users = repository.findAll();\n"
+            ),
+        }
+    )
+
+    metadata = dict(review.subject.metadata or {})
+    assert metadata["diff_profile"]["changed_file_count"] == 1
+    assert "java" in metadata["diff_profile"]["languages"]
+    assert "database" in metadata["risk_profile"]["risk_domains"]
+    assert metadata["review_execution_strategy"] in {"targeted_review", "deep_review"}
+
+
+def test_create_review_reuses_execution_strategy_cache_when_enabled(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    service.update_runtime_settings({"enable_review_cache": True})
+    payload = {
+        "subject_type": "mr",
+        "repo_id": "repo_strategy_cache",
+        "project_id": "proj_strategy_cache",
+        "source_ref": "feature/query-cache",
+        "target_ref": "main",
+        "title": "query strategy cache",
+        "changed_files": ["src/main/java/demo/UserRepository.java"],
+        "unified_diff": (
+            "diff --git a/src/main/java/demo/UserRepository.java b/src/main/java/demo/UserRepository.java\n"
+            "@@ -1 +1 @@\n"
+            "- PageRequest page = PageRequest.of(0, 20);\n"
+            "+ List<User> users = repository.findAll();\n"
+        ),
+    }
+
+    first = service.create_review(dict(payload))
+    second = service.create_review(dict(payload))
+
+    first_cache = dict(first.subject.metadata.get("review_cache") or {})
+    second_cache = dict(second.subject.metadata.get("review_cache") or {})
+    assert first_cache["enabled"] is True
+    assert first_cache["hit"] is False
+    assert second_cache["hit"] is True
+    assert first.subject.metadata["diff_profile"] == second.subject.metadata["diff_profile"]
+    assert first.subject.metadata["risk_profile"] == second.subject.metadata["risk_profile"]
+    metrics = service.build_quality_metrics()
+    assert metrics["review_cache_enabled_count"] == 2
+    assert metrics["review_cache_hit_count"] == 1
+    assert metrics["review_cache_hit_rate"] == 0.5
+    assert any(item["strategy"] == "deep_review" for item in metrics["execution_strategy_breakdown"])
+
+
+def test_create_review_uses_tool_observations_as_routing_evidence(tmp_path: Path):
+    service = ReviewService(tmp_path / "storage")
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_tool_routing",
+            "project_id": "proj_tool_routing",
+            "source_ref": "feature/tool-routing",
+            "target_ref": "main",
+            "title": "tool routing",
+            "changed_files": ["src/main/java/demo/UserService.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/demo/UserService.java b/src/main/java/demo/UserService.java\n"
+                "@@ -1 +1 @@\n"
+                "- return oldValue;\n"
+                "+ return newValue;\n"
+            ),
+            "metadata": {
+                "tool_observations": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "file_path": "src/main/java/demo/UserService.java",
+                        "line_start": 12,
+                        "severity": "high",
+                        "confidence": 0.88,
+                        "message": "User input flows into SQL query construction.",
+                        "diff_related": True,
+                        "observation_id": "sast:semgrep:java.sql-injection:src/main/java/demo/UserService.java:12",
+                    }
+                ]
+            },
+        }
+    )
+
+    metadata = dict(review.subject.metadata or {})
+    risk_profile = dict(metadata["risk_profile"])
+    assert "security" in risk_profile["risk_domains"]
+    assert "database" in risk_profile["risk_domains"]
+    assert "security_compliance" in risk_profile["must_review_agents"]
+    assert "database_analysis" in risk_profile["must_review_agents"]
+    assert metadata["review_execution_strategy"] == "deep_review"
+
+
 def test_create_review_uses_repository_default_branch_when_target_ref_missing(tmp_path: Path):
     service = ReviewService(tmp_path / "storage")
     service.update_runtime_settings(

@@ -42,6 +42,11 @@ class ReviewServiceProjectionMixin:
         tool_breakdown: dict[str, dict[str, object]] = {}
         rule_breakdown: dict[str, dict[str, object]] = {}
         expert_breakdown: dict[str, dict[str, object]] = {}
+        execution_strategy_breakdown: dict[str, int] = {}
+        routing_optimized_count = 0
+        review_cache_enabled_count = 0
+        review_cache_hit_count = 0
+        static_prefilter_observation_count = 0
 
         def normalize_key(value: object, fallback: str = "unknown") -> str:
             text = str(value or "").strip()
@@ -129,6 +134,23 @@ class ReviewServiceProjectionMixin:
             return rows[:20]
 
         for review in metric_reviews:
+            review_metadata = dict(review.subject.metadata or {})
+            execution_strategy = normalize_key(
+                review_metadata.get("review_execution_strategy")
+                or dict(review_metadata.get("expert_selection") or {}).get("execution_strategy"),
+                "unknown",
+            )
+            execution_strategy_breakdown[execution_strategy] = int(execution_strategy_breakdown.get(execution_strategy) or 0) + 1
+            expert_selection = dict(review_metadata.get("expert_selection") or {})
+            if bool(expert_selection.get("routing_optimized")):
+                routing_optimized_count += 1
+            review_cache = dict(review_metadata.get("review_cache") or {})
+            if bool(review_cache.get("enabled")):
+                review_cache_enabled_count += 1
+                if bool(review_cache.get("hit")):
+                    review_cache_hit_count += 1
+            static_prefilter = dict(review_metadata.get("static_tool_prefilter") or {})
+            static_prefilter_observation_count += int(static_prefilter.get("observation_count") or 0)
             issues = [issue for issue in self.issue_repo.list(review.review_id) if is_formal_metric_issue(issue)]
             feedback_labels = self.list_feedback_labels(review.review_id)
             false_positive_issue_ids = {item.issue_id for item in feedback_labels if item.label == "false_positive"}
@@ -247,6 +269,15 @@ class ReviewServiceProjectionMixin:
                 "expert_adopted_count": tool_adopted_count,
                 "formal_issue_count": tool_formal_issue_count,
             },
+            "execution_strategy_breakdown": [
+                {"strategy": strategy, "count": count}
+                for strategy, count in sorted(execution_strategy_breakdown.items(), key=lambda item: item[1], reverse=True)
+            ],
+            "routing_optimized_count": routing_optimized_count,
+            "review_cache_enabled_count": review_cache_enabled_count,
+            "review_cache_hit_count": review_cache_hit_count,
+            "review_cache_hit_rate": round(review_cache_hit_count / (review_cache_enabled_count or 1), 2),
+            "static_prefilter_observation_count": static_prefilter_observation_count,
             "tool_breakdown": finalize_breakdown_rows(tool_breakdown, "tool"),
             "rule_breakdown": finalize_breakdown_rows(rule_breakdown, "rule_key"),
             "expert_tool_breakdown": finalize_breakdown_rows(expert_breakdown, "expert_id"),

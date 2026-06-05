@@ -10328,6 +10328,63 @@ def test_review_runner_batches_issue_consistency_validation_by_file(storage_root
     assert len(validated) == 2
 
 
+def test_review_runner_groups_judge_batches_by_file_issue_type_and_risk_domain(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issues = [
+        DebateIssue(
+            review_id="rev_demo",
+            issue_id="iss_query",
+            title="查询边界移除",
+            summary="分页查询边界被移除。",
+            file_path="src/main/java/com/example/UserRepository.java",
+            line_start=12,
+            normalized_issue_type="query_boundary_missing",
+            risk_domain="database",
+        ),
+        DebateIssue(
+            review_id="rev_demo",
+            issue_id="iss_auth",
+            title="鉴权缺失",
+            summary="接口缺少鉴权检查。",
+            file_path="src/main/java/com/example/UserRepository.java",
+            line_start=18,
+            normalized_issue_type="missing_auth_check",
+            risk_domain="security",
+        ),
+    ]
+
+    batches = runner._build_issue_consistency_batches(issues, {}, max_batch_size=8)
+
+    assert len(batches) == 2
+    assert {batch[0]["issue"].issue_id for batch in batches} == {"iss_query", "iss_auth"}
+
+
+def test_review_runner_disables_judge_batching_when_runtime_setting_is_off(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    issues = [
+        DebateIssue(
+            review_id="rev_demo",
+            issue_id=f"iss_{index}",
+            title="查询边界移除",
+            summary="分页查询边界被移除。",
+            file_path="src/main/java/com/example/UserRepository.java",
+            line_start=10 + index,
+            normalized_issue_type="query_boundary_missing",
+            risk_domain="database",
+        )
+        for index in range(2)
+    ]
+
+    batch_size = runner._issue_consistency_batch_size(
+        issues,
+        runtime_settings=runner.runtime_settings_service.get().model_copy(update={"enable_judge_batching": False}),
+    )
+    batches = runner._build_issue_consistency_batches(issues, {}, max_batch_size=batch_size)
+
+    assert batch_size == 1
+    assert [len(batch) for batch in batches] == [1, 1]
+
+
 def test_review_runner_judge_does_not_repair_empty_issue_suggested_code(storage_root: Path, monkeypatch):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(

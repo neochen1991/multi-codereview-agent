@@ -18,6 +18,7 @@ from app.repositories.postgres_knowledge_rule_repository import PostgresKnowledg
 from app.repositories.postgres_message_repository import PostgresMessageRepository
 from app.repositories.postgres_review_repository import PostgresReviewRepository
 from app.repositories.postgres_runtime_settings_repository import PostgresRuntimeSettingsRepository
+from app.repositories.review_cache_repository import ReviewCacheRepository
 from app.repositories.sqlite_event_repository import SqliteEventRepository
 from app.repositories.sqlite_feedback_repository import SqliteFeedbackRepository
 from app.repositories.sqlite_finding_repository import SqliteFindingRepository
@@ -129,6 +130,9 @@ class StorageRepositoryFactory:
                 repo_name="runtime_settings",
             )
         return SqliteRuntimeSettingsRepository(self.backend.sqlite_db_path)
+
+    def create_review_cache_repository(self):
+        return ReviewCacheRepository(self.storage_root / "review_cache.json")
 
     def create_knowledge_repository(self):
         if self.backend.kind == "postgres" and self.backend.postgres_config is not None:

@@ -17,16 +17,15 @@ def run_targeted_debate(state: ReviewState) -> ReviewState:
     issues: list[dict[str, object]] = []
     for conflict in next_state.get("conflicts", []):
         issue = dict(conflict)
-        participant_count = len(issue.get("participant_expert_ids", []))
         confidence = float(issue.get("confidence", 0.0))
-        assumptions = [str(item).strip() for item in list(issue.get("assumptions") or []) if str(item).strip()]
-        needs_debate = participant_count > 1 or confidence < 0.8 or bool(assumptions)
+        needs_debate, debate_reason = _resolve_debate_trigger(issue, runtime_settings)
         debate_result = _build_llm_targeted_debate_verdict(
             issue,
             runtime_settings=runtime_settings,
             needs_debate=needs_debate,
         ) or _build_targeted_debate_verdict(issue, needs_debate=needs_debate)
         issue["needs_debate"] = needs_debate
+        issue["debate_trigger_reason"] = debate_reason
         issue["debate_result"] = debate_result
         refined_views = [
             dict(item)
@@ -58,6 +57,7 @@ def run_targeted_debate(state: ReviewState) -> ReviewState:
         )
         issue["debate_precheck"] = {
             "reason": str(debate_result.get("reason") or "证据已完成预评估").strip(),
+            "trigger_reason": debate_reason,
             "confidence_adjustment": debate_result.get("confidence_adjustment"),
         }
         issues.append(issue)
@@ -71,6 +71,67 @@ def _coerce_runtime_settings(raw_runtime_settings: object) -> RuntimeSettings:
     if isinstance(raw_runtime_settings, dict):
         return RuntimeSettings.model_validate(raw_runtime_settings)
     return RuntimeSettings()
+
+
+def _resolve_debate_trigger(issue: dict[str, object], runtime_settings: RuntimeSettings) -> tuple[bool, str]:
+    participant_count = len([item for item in list(issue.get("participant_expert_ids") or []) if str(item).strip()])
+    confidence = float(issue.get("confidence", 0.0))
+    assumptions = [str(item).strip() for item in list(issue.get("assumptions") or []) if str(item).strip()]
+    severity = str(issue.get("severity") or "").strip().lower()
+    risk_domain = str(issue.get("risk_domain") or "").strip().lower()
+    normalized_issue_type = str(issue.get("normalized_issue_type") or "").strip().lower()
+    issue_text = "\n".join(
+        [
+            str(issue.get("title") or ""),
+            str(issue.get("summary") or ""),
+            normalized_issue_type,
+            risk_domain,
+            *[str(item) for item in list(issue.get("evidence") or [])],
+            *assumptions,
+        ]
+    ).lower()
+    high_risk_tokens = {
+        "auth",
+        "authorization",
+        "permission",
+        "security",
+        "sql",
+        "injection",
+        "payment",
+        "transaction",
+        "concurrency",
+        "lock",
+        "secret",
+        "token",
+        "越权",
+        "鉴权",
+        "注入",
+        "支付",
+        "事务",
+        "并发",
+        "锁",
+    }
+    high_risk_domains = {"security", "auth", "database", "payment", "data_consistency", "concurrency"}
+    tool_matches = [dict(item) for item in list(issue.get("sast_prescan_matches") or []) if isinstance(item, dict)]
+    high_risk_tool_rejected = any(
+        str(item.get("severity") or "").strip().lower() in {"critical", "high"}
+        for item in tool_matches
+    ) and not (bool(issue.get("tool_verified")) or bool(issue.get("sast_cross_validated")))
+    if not bool(getattr(runtime_settings, "enable_debate_only_on_conflict", True)):
+        return True, "运行时设置要求所有候选问题进入辩论预裁决。"
+    if participant_count > 1:
+        return True, "多个专家参与同一候选问题，需要收敛观点。"
+    if confidence < 0.8:
+        return True, "候选问题置信度低于 0.8，需要辩论预裁决。"
+    if assumptions:
+        return True, "候选问题包含待验证假设，需要辩论预裁决。"
+    if severity in {"blocker", "critical", "high"} and (
+        risk_domain in high_risk_domains or any(token in issue_text for token in high_risk_tokens)
+    ):
+        return True, "高风险安全、数据一致性、并发或生产影响问题需要辩论预裁决。"
+    if high_risk_tool_rejected:
+        return True, "静态工具高风险观察未被直接采纳，需要辩论预裁决。"
+    return False, "单一高置信且非高风险候选问题，跳过辩论以减少 LLM 调用。"
 
 
 def _build_llm_targeted_debate_verdict(

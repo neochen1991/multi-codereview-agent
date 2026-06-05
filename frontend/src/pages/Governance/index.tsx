@@ -97,6 +97,21 @@ const GovernancePage: React.FC = () => {
     return "default";
   };
   const rateText = (value?: number) => `${Math.round((value || 0) * 100)}%`;
+  const strategyLabel = (strategy: string) => {
+    if (strategy === "no_llm") {
+      return "无模型";
+    }
+    if (strategy === "light_review") {
+      return "轻量检视";
+    }
+    if (strategy === "targeted_review") {
+      return "定向检视";
+    }
+    if (strategy === "deep_review") {
+      return "深度检视";
+    }
+    return strategy || "未知";
+  };
   const toolBreakdownColumns = [
     {
       title: "工具",
@@ -230,6 +245,34 @@ const GovernancePage: React.FC = () => {
             <Col xs={24} md={6}>
               <Statistic title="正式问题" value={metrics?.tool_funnel?.formal_issue_count ?? metrics?.tool_formal_issue_count ?? 0} />
               <Text type="secondary">进入最终有效问题清单</Text>
+            </Col>
+          </Row>
+        </Card>
+        <Card className="module-card" title="检视加速策略" style={{ marginTop: 16 }}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={6}>
+              <Statistic title="路由优化" value={metrics?.routing_optimized_count || 0} />
+              <Text type="secondary">按风险画像裁剪参与专家</Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Statistic title="缓存命中率" value={((metrics?.review_cache_hit_rate || 0) * 100).toFixed(0)} suffix="%" />
+              <Text type="secondary">
+                命中 {metrics?.review_cache_hit_count || 0} / 开启 {metrics?.review_cache_enabled_count || 0}
+              </Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Statistic title="静态预过滤观察" value={metrics?.static_prefilter_observation_count || 0} />
+              <Text type="secondary">进入路由画像的工具观察</Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Space wrap size={[8, 8]}>
+                {(metrics?.execution_strategy_breakdown || []).slice(0, 6).map((item) => (
+                  <Tag key={item.strategy} color={item.strategy === "deep_review" ? "red" : item.strategy === "no_llm" ? "default" : "blue"}>
+                    {strategyLabel(item.strategy)} {item.count}
+                  </Tag>
+                ))}
+                {metrics?.execution_strategy_breakdown?.length ? null : <Tag>暂无策略数据</Tag>}
+              </Space>
             </Col>
           </Row>
         </Card>
