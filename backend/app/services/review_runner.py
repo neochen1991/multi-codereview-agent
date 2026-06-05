@@ -901,6 +901,12 @@ class ReviewRunner(
             )
         )
 
+        self._append_review_strategy_summary_message(
+            review=review,
+            selection_plan=selection_plan,
+            expert_jobs=expert_jobs,
+            routing_summary=routing_summary,
+        )
         self._append_sast_prescan_summary_message(review, expert_jobs)
         self._append_fast_tool_observation_findings(review, expert_jobs, finding_payloads)
         self._abort_if_closed(review_id)
@@ -1468,7 +1474,16 @@ class ReviewRunner(
                 },
             )
         )
-        if not self._has_live_llm_call(review_id):
+        latest_review_for_summary = self.review_repo.get(review.review_id) or review
+        llm_call_summary = self._append_llm_call_summary_message(
+            review=review,
+            estimated_llm_call_count=int(
+                dict((latest_review_for_summary.subject.metadata or {}).get("review_strategy_transparency") or {}).get("estimated_llm_call_count")
+                or 0
+            ),
+        )
+        review = self._merge_review_metadata(review, {"llm_call_summary": llm_call_summary})
+        if self._requires_live_llm_call(review) and not self._has_live_llm_call(review_id):
             reason = "无法完成审核：本次检视任务未产生任何真实 LLM 调用，请先配置可用模型后重试。"
             review.status = "failed"
             review.phase = "failed"
@@ -1529,6 +1544,152 @@ class ReviewRunner(
             issue_count=len(issues),
         )
         return review
+
+    def _append_review_strategy_summary_message(
+        self,
+        *,
+        review: ReviewTask,
+        selection_plan: dict[str, object],
+        expert_jobs: list[dict[str, object]],
+        routing_summary: dict[str, object],
+    ) -> None:
+        metadata = dict(review.subject.metadata or {})
+        diff_profile = dict(selection_plan.get("diff_profile") or metadata.get("diff_profile") or {})
+        risk_profile = dict(selection_plan.get("risk_profile") or metadata.get("risk_profile") or {})
+        review_cache = dict(metadata.get("review_cache") or {})
+        static_prefilter = dict(metadata.get("static_tool_prefilter") or {})
+        execution_strategy = str(selection_plan.get("execution_strategy") or metadata.get("review_execution_strategy") or "targeted_review")
+        selected_ids = [
+            str(item).strip()
+            for item in list(selection_plan.get("selected_expert_ids") or [])
+            if str(item).strip()
+        ]
+        skipped_experts = [
+            dict(item)
+            for item in list(selection_plan.get("skipped_experts") or [])
+            if isinstance(item, dict)
+        ]
+        estimated_llm_call_count = 0 if execution_strategy == "no_llm" else len(expert_jobs)
+        if execution_strategy in {"targeted_review", "deep_review"}:
+            estimated_llm_call_count += 1
+        if bool(risk_profile.get("debate_required")):
+            estimated_llm_call_count += 1
+        cache_text = "缓存未启用"
+        if bool(review_cache.get("enabled")):
+            cache_text = "缓存命中" if bool(review_cache.get("hit")) else "缓存未命中"
+        observation_count = int(static_prefilter.get("observation_count") or len(list(metadata.get("tool_observations") or [])))
+        content = (
+            f"检视加速策略：{execution_strategy}。"
+            f"风险等级 {risk_profile.get('risk_level') or 'unknown'}，预计 LLM 调用约 {estimated_llm_call_count} 次。"
+            f"本轮选择 {len(selected_ids)} 个专家，跳过 {len(skipped_experts)} 个专家；"
+            f"静态工具预筛产生 {observation_count} 条观察；{cache_text}。"
+        )
+        transparency = {
+            "execution_strategy": execution_strategy,
+            "estimated_llm_call_count": estimated_llm_call_count,
+            "selected_expert_ids": selected_ids,
+            "skipped_expert_count": len(skipped_experts),
+            "diff_profile": diff_profile,
+            "risk_profile": risk_profile,
+            "review_cache": review_cache,
+            "static_tool_prefilter": static_prefilter,
+            "routing_optimized": bool(selection_plan.get("routing_optimized")),
+            "routing_summary": routing_summary,
+        }
+        self._merge_review_metadata(review, {"review_strategy_transparency": transparency})
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="review_strategy_summary",
+                content=content,
+                metadata={
+                    "phase": "coordination",
+                    **transparency,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="review_strategy_summary",
+                phase="coordination",
+                message=content,
+                payload=transparency,
+            )
+        )
+
+    def _append_llm_call_summary_message(
+        self,
+        *,
+        review: ReviewTask,
+        estimated_llm_call_count: int,
+    ) -> dict[str, object]:
+        calls_by_id: dict[str, dict[str, object]] = {}
+        calls_by_agent: dict[str, int] = {}
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+        for message in self.message_repo.list(review.review_id):
+            metadata = dict(message.metadata or {})
+            call_id = str(metadata.get("llm_call_id") or "").strip()
+            if not call_id or call_id in calls_by_id:
+                continue
+            mode = str(metadata.get("mode") or "").strip().lower()
+            calls_by_id[call_id] = {
+                "llm_call_id": call_id,
+                "expert_id": message.expert_id,
+                "message_type": message.message_type,
+                "mode": mode,
+                "provider": metadata.get("provider"),
+                "model": metadata.get("model"),
+                "prompt_tokens": int(metadata.get("prompt_tokens") or 0),
+                "completion_tokens": int(metadata.get("completion_tokens") or 0),
+                "total_tokens": int(metadata.get("total_tokens") or 0),
+            }
+            calls_by_agent[message.expert_id] = int(calls_by_agent.get(message.expert_id) or 0) + 1
+            total_prompt_tokens += int(metadata.get("prompt_tokens") or 0)
+            total_completion_tokens += int(metadata.get("completion_tokens") or 0)
+            total_tokens += int(metadata.get("total_tokens") or 0)
+        actual_llm_call_count = len(calls_by_id)
+        live_llm_call_count = len([item for item in calls_by_id.values() if str(item.get("mode") or "") == "live"])
+        summary = {
+            "estimated_llm_call_count": max(0, int(estimated_llm_call_count or 0)),
+            "actual_llm_call_count": actual_llm_call_count,
+            "live_llm_call_count": live_llm_call_count,
+            "llm_calls_by_agent": calls_by_agent,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_tokens,
+            "llm_calls": list(calls_by_id.values())[:40],
+        }
+        self.message_repo.append(
+            ConversationMessage(
+                review_id=review.review_id,
+                issue_id="review_orchestration",
+                expert_id=self.main_agent_service.agent_id,
+                message_type="llm_call_summary",
+                content=(
+                    f"模型调用摘要：预计 {summary['estimated_llm_call_count']} 次，"
+                    f"实际 {actual_llm_call_count} 次，其中真实调用 {live_llm_call_count} 次。"
+                ),
+                metadata={
+                    "phase": "completed",
+                    **summary,
+                },
+            )
+        )
+        self.event_repo.append(
+            ReviewEvent(
+                review_id=review.review_id,
+                event_type="llm_call_summary",
+                phase="completed",
+                message="模型调用摘要已生成",
+                payload=summary,
+            )
+        )
+        return summary
 
     def _apply_review_learning_case_judgement(
         self,
@@ -9808,6 +9969,16 @@ class ReviewRunner(
             ):
                 return True
         return False
+
+    @staticmethod
+    def _requires_live_llm_call(review: ReviewTask) -> bool:
+        metadata = dict(review.subject.metadata or {})
+        execution_strategy = str(
+            metadata.get("review_execution_strategy")
+            or dict(metadata.get("expert_selection") or {}).get("execution_strategy")
+            or ""
+        ).strip()
+        return execution_strategy != "no_llm"
 
     def _score_finding(self, subject: ReviewSubject, expert_id: str) -> tuple[str, float]:
         file_blob = " ".join(subject.changed_files).lower()

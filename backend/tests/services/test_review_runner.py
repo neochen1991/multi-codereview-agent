@@ -7125,6 +7125,116 @@ def test_review_runner_builds_routing_summary_with_system_fallback(storage_root:
     assert "自动补入" in runner._build_routing_summary_message(summary)
 
 
+def test_review_runner_emits_review_strategy_transparency_message(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_strategy_transparency",
+        status="running",
+        phase="coordination",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/docs",
+            target_ref="main",
+            changed_files=["docs/readme.md"],
+            metadata={
+                "diff_profile": {"changed_file_count": 1, "changed_line_count": 2, "size_bucket": "small"},
+                "risk_profile": {"risk_level": "none", "reason": "Only docs changed."},
+                "review_execution_strategy": "no_llm",
+                "review_cache": {"enabled": True, "hit": True},
+                "static_tool_prefilter": {"observation_count": 0},
+            },
+        ),
+    )
+    runner.review_repo.save(review)
+
+    runner._append_review_strategy_summary_message(
+        review=review,
+        selection_plan={
+            "selected_expert_ids": ["change_impact_analysis"],
+            "skipped_experts": [{"expert_id": "correctness_business", "reason": "docs only"}],
+            "execution_strategy": "no_llm",
+            "routing_optimized": True,
+            "diff_profile": {"changed_file_count": 1, "changed_line_count": 2, "size_bucket": "small"},
+            "risk_profile": {"risk_level": "none", "reason": "Only docs changed."},
+        },
+        expert_jobs=[],
+        routing_summary={"fallback_expert_added": False},
+    )
+
+    messages = runner.message_repo.list(review.review_id)
+    summary = next(item for item in messages if item.message_type == "review_strategy_summary")
+    assert "预计 LLM 调用约 0 次" in summary.content
+    assert summary.metadata["execution_strategy"] == "no_llm"
+    assert summary.metadata["estimated_llm_call_count"] == 0
+    assert summary.metadata["review_cache"]["hit"] is True
+    saved = runner.review_repo.get(review.review_id)
+    assert dict(saved.subject.metadata["review_strategy_transparency"])["estimated_llm_call_count"] == 0
+
+
+def test_review_runner_emits_actual_llm_call_summary(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_llm_call_summary",
+        status="running",
+        phase="completed",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/demo",
+            target_ref="main",
+        ),
+    )
+    runner.review_repo.save(review)
+    runner.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="correctness_business",
+            message_type="expert_analysis",
+            content="done",
+            metadata={
+                "llm_call_id": "call_1",
+                "mode": "live",
+                "provider": "test",
+                "model": "test-model",
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+            },
+        )
+    )
+
+    summary = runner._append_llm_call_summary_message(review=review, estimated_llm_call_count=2)
+
+    assert summary["estimated_llm_call_count"] == 2
+    assert summary["actual_llm_call_count"] == 1
+    assert summary["live_llm_call_count"] == 1
+    assert summary["llm_calls_by_agent"]["correctness_business"] == 1
+    message = next(item for item in runner.message_repo.list(review.review_id) if item.message_type == "llm_call_summary")
+    assert "实际 1 次" in message.content
+
+
+def test_review_runner_does_not_require_live_llm_for_no_llm_strategy() -> None:
+    review = ReviewTask(
+        review_id="rev_no_llm_required",
+        status="completed",
+        phase="completed",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo_demo",
+            project_id="proj_demo",
+            source_ref="feature/docs",
+            target_ref="main",
+            metadata={"review_execution_strategy": "no_llm"},
+        ),
+    )
+
+    assert ReviewRunner._requires_live_llm_call(review) is False
+
+
 def test_review_runner_adds_architecture_fallback_job_when_all_selected_experts_skipped(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     review = ReviewTask(
