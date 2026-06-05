@@ -536,12 +536,45 @@ export interface ReviewReport {
   impact_report?: ImpactReport | null;
 }
 
+export interface StaticToolQualityBreakdown {
+  tool?: string;
+  rule_key?: string;
+  rule_id?: string;
+  expert_id?: string;
+  raw_signal_count: number;
+  diff_candidate_count: number;
+  deterministic_candidate_count?: number;
+  expert_adopted_count: number;
+  formal_issue_count: number;
+  false_positive_count: number;
+  adoption_rate: number;
+  formalization_rate: number;
+  false_positive_rate: number;
+  diff_match_rate: number;
+}
+
 export interface GovernanceMetrics {
   review_count: number;
+  metrics_review_sample_count?: number;
+  metrics_review_total_count?: number;
+  metrics_limited?: boolean;
   issue_count: number;
   tool_confirmation_rate: number;
   tool_observation_count: number;
   tool_adoption_rate: number;
+  tool_raw_signal_count?: number;
+  tool_diff_candidate_count?: number;
+  tool_expert_adopted_count?: number;
+  tool_formal_issue_count?: number;
+  tool_funnel?: {
+    raw_signal_count: number;
+    diff_candidate_count: number;
+    expert_adopted_count: number;
+    formal_issue_count: number;
+  };
+  tool_breakdown?: StaticToolQualityBreakdown[];
+  rule_breakdown?: StaticToolQualityBreakdown[];
+  expert_tool_breakdown?: StaticToolQualityBreakdown[];
   sast_cross_validated_issue_count: number;
   tool_false_positive_rate: number;
   debate_survival_rate: number;

@@ -1133,11 +1133,42 @@ def test_sast_prescan_summary_and_fast_lane_create_visible_tool_finding(storage_
     findings = runner.finding_repo.list(review.review_id)
 
     assert any(message.message_type == "sast_prescan_summary" for message in messages)
+    candidate_report = next(message for message in messages if message.message_type == "sast_candidate_report")
+    assert "未经过专家确认" in candidate_report.content
+    assert candidate_report.metadata["candidate_count"] == 1
+    assert candidate_report.metadata["expert_confirmed"] is False
+    assert candidate_report.metadata["counts_as_formal_issue"] is False
     assert [finding.title for finding in findings] == ["静态工具候选需复核：java.sql-injection"]
     assert findings[0].code_context["adopted_tool_observations"] == [
         "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
     ]
     assert finding_payloads and finding_payloads[0]["code_context"]["sast_fast_lane"] is True
+
+
+def test_tool_only_fast_lane_finding_does_not_fallback_to_formal_issue(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    tool_finding = {
+        "finding_type": "direct_defect",
+        "title": "静态工具候选需复核：java.sql-injection",
+        "summary": "User input is concatenated into SQL.",
+        "confidence": 0.9,
+        "file_path": "src/main/java/demo/UserDao.java",
+        "line_start": 42,
+        "code_excerpt": '+ statement.executeQuery("select * from user where id=" + userId);',
+        "evidence": ["semgrep java.sql-injection 命中当前 diff。"],
+        "code_context": {
+            "sast_fast_lane": True,
+            "sast_cross_validated": True,
+            "adopted_tool_observations": [
+                "sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"
+            ],
+        },
+    }
+
+    assert not runner._finding_can_fallback_to_issue(
+        tool_finding,
+        changed_files=["src/main/java/demo/UserDao.java"],
+    )
 
 
 def test_sast_prescan_summary_is_visible_when_tools_are_skipped(storage_root: Path) -> None:
@@ -1192,6 +1223,79 @@ def test_sast_prescan_summary_is_visible_when_tools_are_skipped(storage_root: Pa
     assert summary.metadata["tool_observation_count"] == 0
     assert summary.metadata["scanned_files"] == ["src/web/adminPanel.ts"]
     assert summary.metadata["limitations"] == ["未发现可用 SAST/linter 工具，跳过预扫描。"]
+
+
+def test_sast_prescan_summary_includes_scanner_run_details(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_sast_scanner_runs_visible",
+        status="running",
+        phase="expert_review",
+        subject=ReviewSubject(subject_type="mr", repo_id="repo", project_id="proj", source_ref="feature", target_ref="main"),
+    )
+    expert_jobs = [
+        {
+            "expert": ExpertProfile(expert_id="security_compliance", name="Security", name_zh="安全专家", role="security"),
+            "repository_context": {
+                "target_hunk": {"file_path": "src/app.py", "changed_lines": [1]},
+                "sast_prescan": {
+                    "enabled": True,
+                    "summary": "SAST/linter 预扫描命中 1 条候选信号。",
+                    "findings": [{"tool": "semgrep", "rule_id": "python.eval", "file_path": "src/app.py", "line_start": 1}],
+                    "tool_observations": [],
+                    "scanner_runs": [
+                        {
+                            "tool": "semgrep",
+                            "scanner": "_scan_semgrep",
+                            "status": "completed",
+                            "finding_count": 1,
+                            "duration_ms": 12,
+                            "used_project_config": True,
+                            "config_path": "/repo/.semgrep.yml",
+                        }
+                    ],
+                },
+            },
+        }
+    ]
+
+    runner._append_sast_prescan_summary_message(review, expert_jobs)
+
+    summary = next(message for message in runner.message_repo.list(review.review_id) if message.message_type == "sast_prescan_summary")
+    assert summary.metadata["scanner_runs"] == [
+        {
+            "tool": "semgrep",
+            "status": "completed",
+            "finding_count": 1,
+            "duration_ms": 12,
+            "used_project_config": True,
+            "config_path": "/repo/.semgrep.yml",
+            "error": "",
+        }
+    ]
+    assert summary.metadata["scanner_status_counts"] == {"completed": 1}
+    assert summary.metadata["config_files"] == ["/repo/.semgrep.yml"]
+
+
+def test_tool_observation_contract_accepts_legacy_short_rule_id(storage_root: Path) -> None:
+    runner = ReviewRunner(storage_root=storage_root)
+    text = (
+        '{"rule_check_results":[{"rule_id":"semgrep:java.sql-injection",'
+        '"status":"violated","evidence":["sql concat"],"missing_context":[],'
+        '"reason":"sql concat"}],"candidate_findings":[{"rule_id":"semgrep:java.sql-injection:42",'
+        '"title":"SQL 注入","file_path":"src/main/java/demo/UserDao.java",'
+        '"line":42,"evidence":"sql concat","adopted_tool_observations":["semgrep:java.sql-injection"]}],'
+        '"context_requests":[],"self_check":{"checked_all_rules":true}}'
+    )
+
+    valid, errors = runner._validate_rule_guided_llm_response_contract(
+        text,
+        required_rule_ids=["sast:semgrep:java.sql-injection:src/main/java/demo/UserDao.java:42"],
+        allow_general_candidate_rule_id=False,
+    )
+
+    assert valid is True
+    assert errors == []
 
 
 def test_tool_observation_scan_fails_when_expert_omits_relevant_observation(storage_root: Path, monkeypatch) -> None:

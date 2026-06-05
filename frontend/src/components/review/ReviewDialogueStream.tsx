@@ -202,6 +202,23 @@ const normalizeSastObservationEntries = (value: unknown): string[] => {
     .filter(Boolean);
 };
 
+const normalizeScannerRunEntries = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const tool = sanitizeDialogueValue(payload.tool || payload.scanner || "tool");
+      const status = sanitizeDialogueValue(payload.status || "unknown");
+      const findingCount = typeof payload.finding_count === "number" ? `命中 ${payload.finding_count}` : "";
+      const duration = typeof payload.duration_ms === "number" && payload.duration_ms > 0 ? `${payload.duration_ms}ms` : "";
+      const config = payload.used_project_config ? "使用项目配置" : "";
+      const error = sanitizeDialogueValue(payload.error);
+      return [tool, status, findingCount, duration, config, error].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+};
+
 const normalizeKeywordSourceEntries = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -826,13 +843,22 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     eventType === "keyword_context_ready" ||
     eventType === "impact_analysis_started" ||
     eventType === "impact_report_generated" ||
-    eventType === "sast_prescan_summary"
+    eventType === "sast_prescan_summary" ||
+    eventType === "sast_candidate_report"
   ) messageKind = "status";
   if (eventType === "expert_skill_call") messageKind = "skill";
-  if (eventType === "expert_tool_call" || (String(metadata.tool_name || "") && eventType !== "expert_skill_call")) messageKind = "tool";
+  if (
+    eventType === "expert_tool_call" ||
+    (
+      String(metadata.tool_name || "") &&
+      eventType !== "expert_skill_call" &&
+      eventType !== "sast_prescan_summary" &&
+      eventType !== "sast_candidate_report"
+    )
+  ) messageKind = "tool";
   const categorySet = new Set<ReviewDialogueViewMessage["categories"][number]>([messageKind]);
   if (activeSkills.length > 0) categorySet.add("skill");
-  if (eventType === "sast_prescan_summary") categorySet.add("status");
+  if (eventType === "sast_prescan_summary" || eventType === "sast_candidate_report") categorySet.add("status");
   const filePath = typeof metadata.file_path === "string" ? metadata.file_path : "";
   const lineStart = typeof metadata.line_start === "number" ? metadata.line_start : 0;
   const targetExpertId = typeof metadata.target_expert_id === "string" ? metadata.target_expert_id : "";
@@ -871,6 +897,11 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
     const findingCount = typeof metadata.finding_count === "number" ? metadata.finding_count : 0;
     const scanCount = typeof metadata.scan_count === "number" ? metadata.scan_count : 0;
     summaryParts.push(`静态工具预扫描完成：扫描 ${scanCount} 个文件，命中 ${findingCount} 条原始信号，进入候选 ${observationCount} 条`);
+  } else if (eventType === "sast_candidate_report") {
+    const candidateCount = typeof metadata.candidate_count === "number" ? metadata.candidate_count : 0;
+    const expertConfirmed = metadata.expert_confirmed === true ? "已专家确认" : "未专家确认";
+    const countsAsFormalIssue = metadata.counts_as_formal_issue === true ? "计入正式问题" : "不计入正式问题";
+    summaryParts.push(`静态工具候选报告：${candidateCount} 条，${expertConfirmed}，${countsAsFormalIssue}`);
   } else if (eventType === "expert_skill_call") {
     summaryParts.push(`${messageExpertName} 正在调用运行时工具 ${String(metadata.tool_name || metadata.skill_name || "")}`);
   } else if (eventType === "debate_message") {
@@ -1054,6 +1085,9 @@ const buildStructuredGroups = (
         ].filter(Boolean),
       },
       { label: "命中工具", values: normalizeRecordCountEntries(metadata.scan_by_tool).length ? normalizeRecordCountEntries(metadata.scan_by_tool) : normalizeRecordCountEntries(metadata.by_tool) },
+      { label: "工具执行", values: limitValueList(normalizeScannerRunEntries(metadata.scanner_runs), 8) },
+      { label: "执行状态", values: normalizeRecordCountEntries(metadata.scanner_status_counts) },
+      { label: "项目配置", values: limitValueList(normalizeValueList(metadata.config_files), 6) },
       { label: "扫描文件", values: limitValueList(normalizeValueList(metadata.scanned_files), 12) },
       { label: "工具摘要", values: limitValueList(normalizeValueList(metadata.summaries), 8) },
       { label: "候选观察", values: limitValueList(normalizeSastObservationEntries(metadata.observations), 8) },
@@ -1063,6 +1097,26 @@ const buildStructuredGroups = (
     return {
       summaryText: row.detail || row.summary,
       groups: sections.length ? [{ title: "SAST/linter 预扫描过程与结果", sections }] : [],
+    };
+  }
+
+  if (row.eventType === "sast_candidate_report") {
+    const sections = [
+      {
+        label: "候选状态",
+        values: [
+          typeof metadata.candidate_count === "number" ? `候选 finding ${metadata.candidate_count}` : "",
+          metadata.expert_confirmed === true ? "已专家确认" : "未专家确认",
+          metadata.counts_as_formal_issue === true ? "计入正式问题" : "不计入正式问题",
+        ].filter(Boolean),
+      },
+      { label: "来源工具", values: normalizeRecordCountEntries(metadata.by_tool) },
+      { label: "Finding ID", values: limitValueList(normalizeValueList(metadata.finding_ids), 8) },
+      { label: "Observation ID", values: limitValueList(normalizeValueList(metadata.observation_ids), 8) },
+    ].filter((section) => section.values.length > 0);
+    return {
+      summaryText: row.detail || row.summary,
+      groups: sections.length ? [{ title: "静态工具 deterministic 候选报告", sections }] : [],
     };
   }
 

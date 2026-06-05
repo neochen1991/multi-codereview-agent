@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from app.services.orchestrator.state import ReviewState
+from app.services.sast_signal_utils import sast_match_semantically_aligns, sast_semantic_categories
 
 
 LOW_RISK_HINT_TOKENS = {
@@ -1497,51 +1498,11 @@ def _collect_sast_prescan_matches(items: list[dict[str, object]]) -> list[dict[s
 
 
 def _is_semantically_related_sast_match(item: dict[str, object], match: dict[str, object]) -> bool:
-    issue_text = "\n".join(
-        [
-            str(item.get("normalized_issue_type") or ""),
-            str(item.get("title") or ""),
-            str(item.get("summary") or ""),
-            *[str(value) for value in list(item.get("evidence") or [])],
-            *[str(value) for value in list(item.get("matched_rules") or [])],
-        ]
-    ).lower()
-    sast_text = "\n".join(
-        [
-            str(match.get("rule_id") or ""),
-            str(match.get("message") or ""),
-            str(match.get("cwe") or ""),
-            str(match.get("tool") or ""),
-        ]
-    ).lower()
-    issue_categories = _semantic_sast_categories(issue_text)
-    sast_categories = _semantic_sast_categories(sast_text)
-    if issue_categories and sast_categories:
-        return bool(issue_categories & sast_categories)
-    if sast_categories and not issue_categories:
-        return any(token in issue_text for token in ("安全", "漏洞", "注入", "鉴权", "权限", "泄露", "校验", "输入"))
-    if issue_categories and not sast_categories:
-        return any(token in sast_text for token in issue_categories)
-    return True
+    return sast_match_semantically_aligns(item, match)
 
 
 def _semantic_sast_categories(text: str) -> set[str]:
-    categories: set[str] = set()
-    lowered = str(text or "").lower()
-    category_tokens = {
-        "injection": ("injection", "eval", "sql", "xss", "command", "ldap", "注入", "cwe-79", "cwe-89", "cwe-78"),
-        "auth": ("auth", "authorization", "permission", "unauthorized", "越权", "鉴权", "权限", "cwe-862", "cwe-863"),
-        "secret": ("secret", "password", "token", "credential", "key leak", "泄露", "凭证", "cwe-798"),
-        "validation": ("validation", "sanitize", "校验", "输入", "cwe-20"),
-        "null": ("null", "空指针", "npe", "cwe-476"),
-        "query": ("query", "limit", "pagination", "分页", "无界查询", "全量查询"),
-        "concurrency": ("race", "deadlock", "lock", "并发", "竞态", "死锁", "cwe-362"),
-        "exception": ("exception", "catch", "吞异常", "printstacktrace"),
-    }
-    for category, tokens in category_tokens.items():
-        if any(token in lowered for token in tokens):
-            categories.add(category)
-    return categories
+    return sast_semantic_categories(text)
 
 
 def _has_observation_signal(items: list[dict[str, object]]) -> bool:

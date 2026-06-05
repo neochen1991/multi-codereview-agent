@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "sast-java-sql-injection",
+      "category": "security",
+      "scenario": "SQL query concatenates user controlled input",
+      "language": "java",
+      "changed_files": ["src/main/java/demo/UserDao.java"],
+      "tool_rules_any_of": ["java.sql-injection", "sql-injection"],
+      "expected_issue_keywords": ["SQL", "injection", "executeQuery", "user input"],
+      "expected_experts": ["security_compliance"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-java-sensitive-log",
+      "category": "security",
+      "scenario": "Authorization token is written to application logs",
+      "language": "java",
+      "changed_files": ["src/main/java/demo/UserController.java"],
+      "tool_rules_any_of": ["java.logging.authorization-token", "sensitive-log"],
+      "expected_issue_keywords": ["Authorization", "token", "log"],
+      "expected_experts": ["security_compliance"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-frontend-xss-dangerous-html",
+      "category": "frontend",
+      "scenario": "React component renders untrusted HTML",
+      "language": "typescript",
+      "changed_files": ["src/components/RichTextPreview.tsx"],
+      "tool_rules_any_of": ["react-dangerouslysetinnerhtml", "xss", "jsx-no-danger"],
+      "expected_issue_keywords": ["dangerouslySetInnerHTML", "XSS", "sanitize"],
+      "expected_experts": ["frontend_quality", "security_compliance"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-java-empty-catch",
+      "category": "reliability",
+      "scenario": "Exception is swallowed by an empty catch block",
+      "language": "java",
+      "changed_files": ["src/main/java/demo/PaymentSyncService.java"],
+      "tool_rules_any_of": ["empty-catch", "java.lang.empty-catch"],
+      "expected_issue_keywords": ["catch", "exception", "swallow"],
+      "expected_experts": ["correctness_business", "performance_reliability"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-java-transaction-exception-swallowed",
+      "category": "correctness",
+      "scenario": "Transactional method catches and hides persistence failure",
+      "language": "java",
+      "changed_files": ["src/main/java/demo/OrderService.java"],
+      "tool_rules_any_of": ["transaction-exception-swallowed", "catch-and-ignore"],
+      "expected_issue_keywords": ["transaction", "exception", "rollback"],
+      "expected_experts": ["correctness_business"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-java-architecture-layer-bypass",
+      "category": "architecture",
+      "scenario": "Controller bypasses application service and writes repository directly",
+      "language": "java",
+      "changed_files": ["src/main/java/demo/AdminController.java"],
+      "tool_rules_any_of": ["archunit-layer-bypass", "layered-architecture"],
+      "expected_issue_keywords": ["controller", "repository", "layer"],
+      "expected_experts": ["ddd_architecture"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    },
+    {
+      "case_id": "sast-frontend-dangerous-html-small-diff",
+      "category": "frontend",
+      "scenario": "Small frontend diff introduces unsafe HTML sink",
+      "language": "typescript",
+      "changed_files": ["src/pages/AdminNotice.tsx"],
+      "tool_rules_any_of": ["dangerous-html", "xss", "jsx-no-danger"],
+      "expected_issue_keywords": ["HTML", "sanitize", "XSS"],
+      "expected_experts": ["frontend_quality", "security_compliance"],
+      "min_tool_candidates": 1,
+      "min_final_issues": 1
+    }
+  ]
+}

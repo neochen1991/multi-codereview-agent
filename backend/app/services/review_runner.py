@@ -58,6 +58,14 @@ from app.services.review_runner_issue_validation import ReviewRunnerIssueValidat
 from app.services.review_runner_prompting import ReviewRunnerPromptingMixin
 from app.services.review_runner_rendering import ReviewRunnerRenderingMixin
 from app.services.runtime_settings_service import RuntimeSettingsService
+from app.services.sast_signal_utils import (
+    canonical_tool_observation_id,
+    is_tool_reference,
+    sast_issue_type_categories,
+    sast_match_semantically_aligns,
+    sast_semantic_categories,
+    tool_references_match,
+)
 from app.services.tool_gateway import ReviewToolGateway
 
 logger = logging.getLogger(__name__)
@@ -911,7 +919,7 @@ class ReviewRunner(
             expert_execution_elapsed_ms,
         )
         self._append_deterministic_query_bound_findings(review, finding_payloads)
-        self._append_deterministic_java_quality_findings(review, finding_payloads)
+        self._append_deterministic_java_quality_findings(review, finding_payloads, expert_jobs=expert_jobs)
         self._append_deterministic_observation_findings(review, expert_jobs, finding_payloads)
         self._append_empty_diff_fallback_finding(
             review,
@@ -1289,6 +1297,7 @@ class ReviewRunner(
                     payload={"issue_ids": auto_confirmed_issue_ids},
                 )
             )
+        self._enrich_issues_with_finding_evidence_chains(issues, finding_payloads)
         self.issue_repo.save_all(review_id, issues)
         for issue in issues:
             self._abort_if_closed(review_id)
@@ -2239,6 +2248,7 @@ class ReviewRunner(
             for item in finding_payloads
             if str(item.get("finding_id") or "").strip()
         }
+        sast_observations = self._collect_sast_observations_from_dialogue(issues[0].review_id)
         for issue in issues:
             existing = [
                 dict(item)
@@ -2247,10 +2257,12 @@ class ReviewRunner(
             ]
             graph_steps: list[dict[str, object]] = []
             context_sources: set[str] = set()
+            linked_findings: list[dict[str, object]] = []
             for finding_id in list(issue.finding_ids or []):
                 finding = by_id.get(str(finding_id))
                 if not finding:
                     continue
+                linked_findings.append(finding)
                 context_source = str(finding.get("context_source") or "").strip()
                 if context_source:
                     context_sources.add(context_source)
@@ -2267,6 +2279,44 @@ class ReviewRunner(
                         "sast_prescan",
                     }:
                         graph_steps.append(dict(step))
+            if sast_observations and not issue.sast_cross_validated:
+                sast_matches = self._match_sast_observations_for_issue(issue, linked_findings, sast_observations)
+                if sast_matches:
+                    issue.sast_cross_validated = True
+                    issue.sast_prescan_matches = sast_matches
+                    issue.tool_name = "sast_prescan"
+                    issue.tool_verified = True
+                    issue.evidence = self._dedupe_texts(
+                        [
+                            *list(issue.evidence or []),
+                            *[
+                                formatted
+                                for formatted in (self._format_sast_prescan_evidence(item) for item in sast_matches)
+                                if formatted
+                            ],
+                        ]
+                    )
+                    issue.matched_rules = self._dedupe_texts(
+                        [
+                            *list(issue.matched_rules or []),
+                            *[
+                                str(item.get("rule_id") or "").strip()
+                                for item in sast_matches
+                                if str(item.get("rule_id") or "").strip()
+                            ],
+                        ]
+                    )
+                    breakdown = dict(issue.confidence_breakdown or {})
+                    breakdown["sast_cross_validated"] = True
+                    breakdown["sast_match_count"] = len(sast_matches)
+                    issue.confidence_breakdown = breakdown
+                    graph_steps.append(
+                        {
+                            "step": "sast_prescan",
+                            "status": "matched",
+                            "matches": sast_matches[:5],
+                        }
+                    )
             issue.evidence_chain = self._dedupe_evidence_chain(existing + graph_steps)
             if any(source == "tree_sitter" for source in context_sources):
                 breakdown = dict(issue.confidence_breakdown or {})
@@ -2274,6 +2324,90 @@ class ReviewRunner(
                 issue.confidence_breakdown = breakdown
                 issue.tool_name = issue.tool_name or "tree_sitter_code_graph"
                 issue.tool_verified = issue.tool_verified or bool(graph_steps)
+
+    def _collect_sast_observations_from_dialogue(self, review_id: str) -> list[dict[str, object]]:
+        observations: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for message in self.message_repo.list(review_id):
+            if message.message_type != "sast_prescan_summary":
+                continue
+            metadata = dict(message.metadata or {})
+            for raw in list(metadata.get("observations") or []):
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                observation_id = str(item.get("observation_id") or "").strip() or self._canonical_tool_observation_id(item)
+                item["observation_id"] = observation_id
+                item["id"] = observation_id
+                if observation_id in seen:
+                    continue
+                seen.add(observation_id)
+                observations.append(item)
+            for raw_id in list(metadata.get("observation_ids") or []):
+                observation_id = str(raw_id or "").strip()
+                if not observation_id or observation_id in seen:
+                    continue
+                parts = observation_id.split(":")
+                if len(parts) < 5 or parts[0] != "sast":
+                    continue
+                line_text = parts[-1]
+                file_path = ":".join(parts[3:-1])
+                item = {
+                    "tool": parts[1],
+                    "rule_id": parts[2],
+                    "file_path": file_path,
+                    "line_start": self._safe_int(line_text, 1),
+                    "observation_id": observation_id,
+                    "id": observation_id,
+                }
+                seen.add(observation_id)
+                observations.append(item)
+        return observations[:40]
+
+    def _match_sast_observations_for_issue(
+        self,
+        issue: DebateIssue,
+        linked_findings: list[dict[str, object]],
+        observations: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        candidates = linked_findings or [
+            {
+                "title": issue.title,
+                "claim": issue.summary,
+                "summary": issue.summary,
+                "normalized_issue_type": issue.normalized_issue_type,
+                "evidence": issue.evidence,
+                "matched_rules": issue.matched_rules,
+                "file_path": issue.file_path,
+                "line_start": issue.line_start,
+            }
+        ]
+        matches: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            parsed = {
+                "title": str(candidate.get("title") or issue.title),
+                "claim": str(candidate.get("claim") or candidate.get("summary") or issue.summary),
+                "summary": str(candidate.get("summary") or issue.summary),
+                "normalized_issue_type": str(candidate.get("normalized_issue_type") or issue.normalized_issue_type),
+                "evidence": list(candidate.get("evidence") or issue.evidence or []),
+                "matched_rules": list(candidate.get("matched_rules") or issue.matched_rules or []),
+            }
+            file_path = str(candidate.get("file_path") or issue.file_path or "").strip()
+            line_start = int(self._normalize_optional_line_value(candidate.get("line_start") or issue.line_start) or 1)
+            for match in self._match_sast_tool_observations(
+                parsed=parsed,
+                file_path=file_path,
+                line_start=line_start,
+                observations=observations,
+            ):
+                observation_id = str(match.get("observation_id") or "").strip()
+                key = observation_id or json.dumps(match, ensure_ascii=False, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(match)
+        return matches[:6]
 
     def _dedupe_evidence_chain(self, chain: list[dict[str, object]]) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -2384,11 +2518,18 @@ class ReviewRunner(
         self,
         review: ReviewTask,
         finding_payloads: list[dict[str, object]],
+        *,
+        expert_jobs: list[dict[str, object]] | None = None,
     ) -> None:
         """把 Java diff 中可直接确认的锁删除和循环调用放大补成 finding。"""
 
         if not str(review.subject.unified_diff or "").strip():
             return
+        sast_observations = (
+            self._collect_fast_tool_observations_from_expert_jobs(expert_jobs or [])
+            if expert_jobs
+            else []
+        )
 
         existing_keys = {
             (
@@ -2595,6 +2736,52 @@ class ReviewRunner(
                         suggested_code_language="java",
                         verification_needed=False,
                     )
+                    sast_matches = self._match_sast_tool_observations(
+                        parsed={
+                            "title": finding.title,
+                            "claim": finding.summary,
+                            "summary": finding.summary,
+                            "normalized_issue_type": finding.normalized_issue_type,
+                            "evidence": finding.evidence,
+                            "matched_rules": finding.matched_rules,
+                        },
+                        file_path=normalized_file_path,
+                        line_start=line_start,
+                        observations=sast_observations,
+                    )
+                    if sast_matches:
+                        observation_ids = [
+                            str(item.get("observation_id") or "").strip()
+                            for item in sast_matches
+                            if str(item.get("observation_id") or "").strip()
+                        ]
+                        code_context = dict(finding.code_context or {})
+                        code_context["sast_prescan_matches"] = sast_matches
+                        code_context["sast_cross_validated"] = True
+                        code_context["adopted_tool_observations"] = observation_ids
+                        finding.code_context = code_context
+                        finding.evidence = self._dedupe_texts(
+                            [
+                                *finding.evidence,
+                                *[
+                                    formatted
+                                    for formatted in (self._format_sast_prescan_evidence(item) for item in sast_matches)
+                                    if formatted
+                                ],
+                            ]
+                        )
+                        finding.matched_rules = self._dedupe_texts(
+                            [
+                                *finding.matched_rules,
+                                *[
+                                    str(item.get("rule_id") or "").strip()
+                                    for item in sast_matches
+                                    if str(item.get("rule_id") or "").strip()
+                                ],
+                            ]
+                        )
+                        finding.context_source = self._finding_context_source(finding.code_context)
+                        finding.evidence_chain = self._build_finding_evidence_chain(finding)
                     self.finding_repo.save(review.review_id, finding)
                     finding_payloads.append(finding.model_dump(mode="json"))
                     existing_keys.add(key)
@@ -2941,6 +3128,9 @@ class ReviewRunner(
                     "by_tool": by_tool,
                     "by_category": by_category,
                     "scan_by_tool": scan_summary.get("by_tool", {}),
+                    "scanner_runs": scan_summary.get("scanner_runs", []),
+                    "scanner_status_counts": scan_summary.get("scanner_status_counts", {}),
+                    "config_files": scan_summary.get("config_files", []),
                     "scanned_files": scan_summary.get("scanned_files", []),
                     "summaries": scan_summary.get("summaries", []),
                     "limitations": scan_summary.get("limitations", []),
@@ -2949,16 +3139,43 @@ class ReviewRunner(
                 },
             )
         )
+        if observations:
+            self.message_repo.append(
+                ConversationMessage(
+                    review_id=review.review_id,
+                    issue_id="review_orchestration",
+                    expert_id=self.main_agent_service.agent_id,
+                    message_type="sast_candidate_report",
+                    content=(
+                        f"静态工具生成 {len(observations)} 条 deterministic 候选报告，"
+                        "当前未经过专家确认，不计入正式问题；需要后续专家审查或人工复核后才可升级。"
+                    ),
+                    metadata={
+                        "phase": "sast_prescan",
+                        "tool_name": "sast_prescan",
+                        "candidate_count": len(observations),
+                        "expert_confirmed": False,
+                        "counts_as_formal_issue": False,
+                        "by_tool": by_tool,
+                        "by_category": by_category,
+                        "observation_ids": [str(item.get("observation_id") or "") for item in observations[:20]],
+                    },
+                )
+            )
 
     def _collect_sast_prescan_process_summary(self, expert_jobs: list[dict[str, object]]) -> dict[str, object]:
         scan_count = 0
         enabled_scan_count = 0
         finding_count = 0
         by_tool: dict[str, int] = {}
+        scanner_status_counts: dict[str, int] = {}
         scanned_files: list[str] = []
         summaries: list[str] = []
         limitations: list[str] = []
+        scanner_runs: list[dict[str, object]] = []
+        config_files: list[str] = []
         seen_contexts: set[tuple[str, str, str]] = set()
+        seen_scanner_runs: set[str] = set()
 
         def collect_context(repository_context: dict[str, object]) -> None:
             nonlocal scan_count, enabled_scan_count, finding_count
@@ -2993,6 +3210,28 @@ class ReviewRunner(
                 finding_count += 1
                 tool = str(finding.get("tool") or "tool").strip()
                 by_tool[tool] = by_tool.get(tool, 0) + 1
+            for run in list(sast_prescan.get("scanner_runs") or []):
+                if not isinstance(run, dict):
+                    continue
+                status = str(run.get("status") or "unknown").strip() or "unknown"
+                scanner_status_counts[status] = scanner_status_counts.get(status, 0) + 1
+                tool = str(run.get("tool") or run.get("scanner") or "tool").strip()
+                detail = {
+                    "tool": tool,
+                    "status": status,
+                    "finding_count": int(run.get("finding_count") or 0),
+                    "duration_ms": int(run.get("duration_ms") or 0),
+                    "used_project_config": bool(run.get("used_project_config")),
+                    "config_path": str(run.get("config_path") or "").strip(),
+                    "error": str(run.get("error") or "").strip(),
+                }
+                key_text = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+                if key_text not in seen_scanner_runs:
+                    seen_scanner_runs.add(key_text)
+                    scanner_runs.append(detail)
+                config_path = str(run.get("config_path") or "").strip()
+                if config_path and config_path not in config_files:
+                    config_files.append(config_path)
 
         for job in list(expert_jobs or []):
             if not isinstance(job, dict):
@@ -3008,6 +3247,9 @@ class ReviewRunner(
             "enabled_scan_count": enabled_scan_count,
             "finding_count": finding_count,
             "by_tool": by_tool,
+            "scanner_runs": scanner_runs[:20],
+            "scanner_status_counts": scanner_status_counts,
+            "config_files": config_files[:12],
             "scanned_files": scanned_files[:20],
             "summaries": summaries[:12],
             "limitations": limitations[:12],
@@ -8485,14 +8727,15 @@ class ReviewRunner(
 
     def _canonical_tool_observation_id(self, item: dict[str, object]) -> str:
         existing = str(item.get("id") or item.get("observation_id") or "").strip()
-        if existing.startswith("sast:"):
-            return existing
-        tool = str(item.get("tool") or "tool").strip()
-        rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
-        file_path = str(item.get("file_path") or item.get("path") or "unknown").strip().replace("\\", "/")
-        line = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
-        item["legacy_observation_id"] = existing or f"{tool}:{rule_id}:{line}"
-        return f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line}"
+        canonical = canonical_tool_observation_id(item)
+        if existing and existing != canonical:
+            item["legacy_observation_id"] = existing
+        elif not str(item.get("legacy_observation_id") or "").strip():
+            tool = str(item.get("tool") or "tool").strip()
+            rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+            line = int(self._normalize_optional_line_value(item.get("line_start") or item.get("line")) or 1)
+            item["legacy_observation_id"] = f"{tool}:{rule_id}:{line}"
+        return canonical
 
     def _filter_tool_observations_for_expert(
         self,
@@ -8533,7 +8776,14 @@ class ReviewRunner(
                 if category == "test_coverage" or any(token in text for token in ["jacoco", "coverage", "uncovered", "测试", "覆盖"]):
                     filtered.append(dict(item))
                 continue
-            if category in {"java_quality", "frontend_quality", "static_analysis"}:
+            if expert == "frontend_accessibility":
+                if category == "frontend_quality" or any(
+                    token in text
+                    for token in ["eslint", "jsx", "tsx", "react", "vue", "dom", "innerhtml", "dangerouslysetinnerhtml", "aria", "frontend"]
+                ):
+                    filtered.append(dict(item))
+                continue
+            if category in {"java_quality", "static_analysis"}:
                 filtered.append(dict(item))
         return filtered[:12]
 
@@ -8886,7 +9136,7 @@ class ReviewRunner(
             if status not in {"violated", "passed", "not_applicable", "insufficient_context"}:
                 errors.append(f"rule_check_results_{index}_status_invalid")
         for rule_id in list(required_rule_ids or []):
-            if rule_id and rule_id not in checked_rule_ids:
+            if rule_id and not any(tool_references_match(rule_id, checked_id) for checked_id in checked_rule_ids):
                 errors.append(f"rule_coverage_missing:{rule_id}")
         allowed_candidate_rule_ids = {
             str(rule_id).strip()
@@ -8904,7 +9154,7 @@ class ReviewRunner(
             if (
                 allowed_candidate_rule_ids
                 and candidate_rule_id
-                and candidate_rule_id not in allowed_candidate_rule_ids
+                and not any(tool_references_match(candidate_rule_id, rule_id) for rule_id in allowed_candidate_rule_ids)
                 and not (allow_general_candidate_rule_id and candidate_rule_id == "GENERAL-EXPERT-CHECKS")
             ):
                 errors.append(f"candidate_findings_{index}_rule_id_not_in_required_rules:{candidate_rule_id}")
@@ -9818,82 +10068,72 @@ class ReviewRunner(
                 )
         return matches[:4]
 
-    def _sast_match_semantically_aligns(self, parsed: dict[str, object], item: dict[str, object]) -> bool:
-        issue_text = " ".join(
+    def _match_sast_tool_observations(
+        self,
+        *,
+        parsed: dict[str, object],
+        file_path: str,
+        line_start: int,
+        observations: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        if not observations:
+            return []
+        target_path = self._normalize_path_for_match(file_path)
+        text_blob = " ".join(
             [
-                str(parsed.get("normalized_issue_type") or ""),
-                str(parsed.get("finding_type") or ""),
                 str(parsed.get("title") or ""),
                 str(parsed.get("claim") or ""),
                 str(parsed.get("summary") or ""),
-                *[str(value) for value in list(parsed.get("evidence") or [])],
-                *[str(value) for value in list(parsed.get("matched_rules") or [])],
+                str(parsed.get("normalized_issue_type") or ""),
+                *[str(item) for item in list(parsed.get("evidence") or [])],
+                *[str(item) for item in list(parsed.get("matched_rules") or [])],
             ]
-        )
-        sast_text = " ".join(
-            [
-                str(item.get("tool") or ""),
-                str(item.get("rule_id") or ""),
-                str(item.get("message") or ""),
-                str(item.get("category") or ""),
-                str(item.get("cwe") or ""),
-                str(item.get("why_it_matters") or ""),
-            ]
-        )
-        issue_type_categories = self._sast_issue_type_categories(str(parsed.get("normalized_issue_type") or ""))
-        issue_categories = issue_type_categories or self._sast_semantic_categories(issue_text)
-        sast_categories = self._sast_semantic_categories(sast_text)
-        if issue_categories and sast_categories:
-            return bool(issue_categories & sast_categories)
-        if sast_categories and not issue_categories:
-            issue_blob = issue_text.lower()
-            return any(token in issue_blob for token in ("安全", "漏洞", "注入", "鉴权", "权限", "泄露", "校验", "输入"))
-        if issue_categories and not sast_categories:
-            sast_blob = sast_text.lower()
-            return any(token in sast_blob for token in issue_categories)
-        return True
+        ).lower()
+        matches: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for observation in observations:
+            item = dict(observation or {})
+            item_path = self._normalize_path_for_match(str(item.get("file_path") or item.get("path") or ""))
+            if item_path and target_path and item_path != target_path and not item_path.endswith("/" + target_path):
+                continue
+            item_line = self._safe_int(item.get("line_start") or item.get("line") or 0, 0)
+            line_matches = item_line <= 0 or abs(item_line - int(line_start or 1)) <= 3
+            rule_id = str(item.get("rule_id") or item.get("check_id") or "").strip()
+            message = str(item.get("message") or "").strip()
+            text_matches = (
+                bool(rule_id and rule_id.lower() in text_blob)
+                or self._has_sast_text_overlap(text_blob, message)
+                or bool(self._sast_semantic_categories(text_blob) & self._sast_semantic_categories(f"{rule_id} {message} {item.get('category') or ''}"))
+            )
+            if not (line_matches and text_matches and self._sast_match_semantically_aligns(parsed, item)):
+                continue
+            observation_id = self._canonical_tool_observation_id(item)
+            if observation_id in seen:
+                continue
+            seen.add(observation_id)
+            matches.append(
+                {
+                    "tool": str(item.get("tool") or "sast").strip(),
+                    "rule_id": rule_id,
+                    "message": message,
+                    "severity": str(item.get("severity") or "").strip(),
+                    "cwe": str(item.get("cwe") or "").strip(),
+                    "why_it_matters": str(item.get("why_it_matters") or "").strip(),
+                    "file_path": str(item.get("file_path") or file_path).strip(),
+                    "line_start": item_line or int(line_start or 1),
+                    "observation_id": observation_id,
+                }
+            )
+        return matches[:4]
+
+    def _sast_match_semantically_aligns(self, parsed: dict[str, object], item: dict[str, object]) -> bool:
+        return sast_match_semantically_aligns(parsed, item)
 
     def _sast_issue_type_categories(self, issue_type: str) -> set[str]:
-        normalized = str(issue_type or "").strip().lower()
-        if not normalized:
-            return set()
-        mappings = {
-            "injection": ("injection", "xss", "eval", "command_execution", "code_execution"),
-            "auth": ("auth", "authorization", "permission", "access_control", "tenant", "scope"),
-            "secret": ("secret", "credential", "password", "token", "sensitive_data"),
-            "validation": ("validation", "sanitize", "input"),
-            "null": ("null", "npe", "none"),
-            "query": ("query", "pagination", "unbounded", "bound"),
-            "concurrency": ("race", "lock", "deadlock", "concurrency"),
-            "exception": ("exception", "catch", "error_handling"),
-            "architecture": ("architecture", "ddd", "aggregate", "domain_event", "layer"),
-            "coverage": ("coverage", "test_gap", "missing_test"),
-        }
-        return {
-            category
-            for category, tokens in mappings.items()
-            if any(token in normalized for token in tokens)
-        }
+        return sast_issue_type_categories(issue_type)
 
     def _sast_semantic_categories(self, text: str) -> set[str]:
-        lowered = str(text or "").lower()
-        category_tokens = {
-            "injection": ("injection", "eval", "sql", "xss", "command", "ldap", "注入", "cwe-79", "cwe-89", "cwe-78", "cwe-95"),
-            "auth": ("auth", "authorization", "permission", "unauthorized", "越权", "鉴权", "权限", "cwe-862", "cwe-863"),
-            "secret": ("secret", "password", "token", "credential", "key leak", "泄露", "凭证", "cwe-798"),
-            "validation": ("validation", "sanitize", "校验", "输入", "cwe-20"),
-            "null": ("null", "none", "空指针", "npe", "dereference", "cwe-476"),
-            "query": ("query", "limit", "pagination", "分页", "无界查询", "全量查询"),
-            "concurrency": ("race", "deadlock", "lock", "并发", "竞态", "死锁", "cwe-362"),
-            "exception": ("exception", "catch", "吞异常", "printstacktrace"),
-            "architecture": ("archunit", "architecture", "layer", "ddd", "依赖", "架构", "aggregate"),
-            "coverage": ("jacoco", "coverage", "uncovered", "测试", "覆盖"),
-        }
-        categories: set[str] = set()
-        for category, tokens in category_tokens.items():
-            if any(token in lowered for token in tokens):
-                categories.add(category)
-        return categories
+        return sast_semantic_categories(text)
 
     def _has_sast_text_overlap(self, text_blob: str, message: str) -> bool:
         tokens = [
@@ -11678,22 +11918,9 @@ class ReviewRunner(
         }
         if text in adopted or text in observation_ids:
             return True
-        if ":" not in text:
-            return False
-        tool_prefix = text.split(":", 1)[0].strip().lower()
-        return tool_prefix in {
-            "semgrep",
-            "pmd",
-            "checkstyle",
-            "spotbugs",
-            "archunit",
-            "jacoco",
-            "eslint",
-            "bandit",
-            "sast",
-            "sast_prescan",
-            "tool",
-        }
+        if any(tool_references_match(text, reference) for reference in [*adopted, *observation_ids]):
+            return True
+        return is_tool_reference(text)
 
     def _extract_additive_rule_ids(self, text: str) -> list[str]:
         raw = str(text or "")

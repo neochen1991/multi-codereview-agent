@@ -13,7 +13,7 @@ class ReviewLearningCaseStatusRequest(BaseModel):
 
 
 @router.get("/governance/quality-metrics")
-def quality_metrics() -> dict[str, float | int]:
+def quality_metrics() -> dict[str, object]:
     """返回平台层质量指标，供治理页概览展示。"""
 
     return review_service_module.review_service.build_quality_metrics()

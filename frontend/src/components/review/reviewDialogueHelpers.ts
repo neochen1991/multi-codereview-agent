@@ -182,6 +182,23 @@ const normalizeSastObservationEntries = (value: unknown): string[] => {
     .filter(Boolean);
 };
 
+const normalizeScannerRunEntries = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const payload = item as Record<string, unknown>;
+      const tool = sanitizeDialogueValue(payload.tool || payload.scanner || "tool");
+      const status = sanitizeDialogueValue(payload.status || "unknown");
+      const findingCount = typeof payload.finding_count === "number" ? `命中 ${payload.finding_count}` : "";
+      const duration = typeof payload.duration_ms === "number" && payload.duration_ms > 0 ? `${payload.duration_ms}ms` : "";
+      const config = payload.used_project_config ? "使用项目配置" : "";
+      const error = sanitizeDialogueValue(payload.error);
+      return [tool, status, findingCount, duration, config, error].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+};
+
 const normalizeKeywordSourceEntries = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
   return value
@@ -1008,6 +1025,9 @@ export const buildStructuredGroups = (
         ].filter(Boolean),
       },
       { label: "命中工具", values: normalizeRecordCountEntries(metadata.scan_by_tool).length ? normalizeRecordCountEntries(metadata.scan_by_tool) : normalizeRecordCountEntries(metadata.by_tool) },
+      { label: "工具执行", values: limitValueList(normalizeScannerRunEntries(metadata.scanner_runs), 8) },
+      { label: "执行状态", values: normalizeRecordCountEntries(metadata.scanner_status_counts) },
+      { label: "项目配置", values: limitValueList(normalizeValueList(metadata.config_files), 6) },
       { label: "扫描文件", values: limitValueList(normalizeValueList(metadata.scanned_files), 12) },
       { label: "工具摘要", values: limitValueList(normalizeValueList(metadata.summaries), 8) },
       { label: "候选观察", values: limitValueList(normalizeSastObservationEntries(metadata.observations), 8) },

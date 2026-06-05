@@ -7342,6 +7342,196 @@ def test_review_runner_deterministic_loop_finding_keeps_call_symbol_in_summary(s
     assert "paymentRepository.save" in findings[0].remediation_suggestion
 
 
+def test_deterministic_java_finding_cross_validates_sast_observation(storage_root: Path, monkeypatch):
+    runner = ReviewRunner(storage_root=storage_root)
+    review = ReviewTask(
+        review_id="rev_sast_deterministic_cross_validation",
+        subject=ReviewSubject(
+            subject_type="mr",
+            repo_id="repo",
+            project_id="proj",
+            source_ref="feature/empty-catch",
+            target_ref="main",
+            changed_files=["src/main/java/demo/UserDao.java"],
+            unified_diff=(
+                "diff --git a/src/main/java/demo/UserDao.java b/src/main/java/demo/UserDao.java\n"
+                "--- a/src/main/java/demo/UserDao.java\n"
+                "+++ b/src/main/java/demo/UserDao.java\n"
+                "@@ -4,4 +4,7 @@\n"
+                "+    void sync() {\n"
+                "+        try {\n"
+                "+            risky();\n"
+                "+        } catch (Exception ex) {\n"
+                "+        }\n"
+                "+    }\n"
+            ),
+        ),
+        status="running",
+        phase="expert_review",
+    )
+    monkeypatch.setattr(
+        runner.diff_excerpt_service,
+        "list_hunks",
+        lambda *_args, **_kwargs: [
+            {
+                "start_line": 4,
+                "excerpt": (
+                    "+    void sync() {\n"
+                    "+        try {\n"
+                    "+            risky();\n"
+                    "+        } catch (Exception ex) {\n"
+                    "+        }\n"
+                    "+    }"
+                ),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        runner.java_quality_signal_extractor,
+        "extract",
+        lambda **_kwargs: {
+            "signals": ["exception_swallowed"],
+            "signal_terms": {"exception_swallowed": ["catch", "throw"]},
+        },
+    )
+    expert_jobs = [
+        {
+            "repository_context": {
+                "target_hunks": [
+                    {
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "changed_lines": [4, 5, 6, 7, 8, 9],
+                        "excerpt": "+        } catch (Exception ex) {\n+        }",
+                    }
+                ],
+                "tool_observations": [
+                    {
+                        "tool": "pmd",
+                        "rule_id": "EmptyCatchBlock",
+                        "category": "java_quality",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 7,
+                        "message": "Avoid empty catch blocks",
+                        "confidence": 0.7,
+                    }
+                ],
+            }
+        }
+    ]
+
+    finding_payloads: list[dict[str, object]] = []
+    runner._append_deterministic_java_quality_findings(review, finding_payloads, expert_jobs=expert_jobs)
+
+    findings = runner.finding_repo.list(review.review_id)
+    assert len(findings) == 1
+    assert findings[0].code_context["sast_cross_validated"] is True
+    assert findings[0].code_context["adopted_tool_observations"] == [
+        "sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7"
+    ]
+    assert findings[0].code_context["sast_prescan_matches"][0]["rule_id"] == "EmptyCatchBlock"
+    assert "EmptyCatchBlock" in findings[0].matched_rules
+    assert any("pmd:EmptyCatchBlock" in item for item in findings[0].evidence)
+    assert finding_payloads[0]["code_context"]["sast_cross_validated"] is True
+
+
+def test_issue_enrichment_recovers_sast_match_from_dialogue_when_finding_context_is_lost(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    review_id = "rev_sast_issue_enrichment_from_dialogue"
+    runner.message_repo.append(
+        ConversationMessage(
+            review_id=review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="sast_prescan_summary",
+            content="SAST summary",
+            metadata={
+                "observations": [
+                    {
+                        "tool": "pmd",
+                        "rule_id": "EmptyCatchBlock",
+                        "category": "java_quality",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 7,
+                        "message": "Avoid empty catch blocks",
+                        "observation_id": "sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7",
+                    }
+                ],
+                "observation_ids": ["sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7"],
+            },
+        )
+    )
+    issue = DebateIssue(
+        review_id=review_id,
+        issue_id="iss_empty_catch",
+        title="失败被当成成功返回",
+        summary="catch 分支吞掉异常，调用方无法感知失败。",
+        normalized_issue_type="exception_swallowed",
+        file_path="src/main/java/demo/UserDao.java",
+        line_start=7,
+        finding_ids=["fdg_empty_catch"],
+        evidence=["catch", "throw", "静态分析命中: exception_swallowed"],
+        tool_name="static_diff",
+        tool_verified=True,
+    )
+    finding_payloads = [
+        {
+            "finding_id": "fdg_empty_catch",
+            "title": "异常被忽略后仍继续成功路径",
+            "summary": "UserDao.java 第 7 行的 catch 分支忽略异常。",
+            "normalized_issue_type": "exception_swallowed",
+            "file_path": "src/main/java/demo/UserDao.java",
+            "line_start": 7,
+            "evidence": ["catch", "throw", "pmd:EmptyCatchBlock"],
+            "matched_rules": ["CODE-JAVA-002", "pmd:EmptyCatchBlock"],
+            "code_context": {},
+        }
+    ]
+
+    runner._enrich_issues_with_finding_evidence_chains([issue], finding_payloads)
+
+    assert issue.sast_cross_validated is True
+    assert issue.tool_name == "sast_prescan"
+    assert issue.tool_verified is True
+    assert issue.sast_prescan_matches[0]["rule_id"] == "EmptyCatchBlock"
+    assert issue.confidence_breakdown["sast_match_count"] == 1
+    assert any("pmd:EmptyCatchBlock" in item for item in issue.evidence)
+
+
+def test_tool_observation_filter_routes_static_signals_by_risk_domain(storage_root: Path):
+    runner = ReviewRunner(storage_root=storage_root)
+    observations = [
+        {
+            "tool": "eslint",
+            "rule_id": "react/no-danger",
+            "category": "frontend_quality",
+            "message": "dangerouslySetInnerHTML is used in JSX",
+        },
+        {
+            "tool": "semgrep",
+            "rule_id": "java.sql-injection",
+            "category": "security",
+            "message": "SQL query concatenates request input",
+        },
+    ]
+
+    frontend_items = runner._filter_tool_observations_for_expert(
+        expert_id="frontend_accessibility",
+        tool_observations=observations,
+    )
+    correctness_items = runner._filter_tool_observations_for_expert(
+        expert_id="correctness_business",
+        tool_observations=observations,
+    )
+    security_items = runner._filter_tool_observations_for_expert(
+        expert_id="security_compliance",
+        tool_observations=observations,
+    )
+
+    assert [item["rule_id"] for item in frontend_items] == ["react/no-danger"]
+    assert correctness_items == []
+    assert [item["rule_id"] for item in security_items] == ["java.sql-injection"]
+
+
 def test_review_runner_system_prompt_prefers_matched_sections_over_full_document(storage_root: Path):
     runner = ReviewRunner(storage_root=storage_root)
     expert = ExpertProfile(

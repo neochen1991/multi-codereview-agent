@@ -21,21 +21,117 @@ class ReviewServiceProjectionMixin:
         "schema_repair",
     }
 
-    def build_quality_metrics(self) -> dict[str, float | int]:
+    def build_quality_metrics(self) -> dict[str, object]:
         reviews = self.list_reviews()
+        review_total_count = len(reviews)
+        max_reviews = max(10, min(500, int(os.environ.get("GOVERNANCE_METRICS_REVIEW_LIMIT") or 30)))
+        metric_reviews = reviews[:max_reviews]
         total_issues = 0
         tool_verified = 0
         tool_observation_count = 0
         tool_adopted_count = 0
+        tool_raw_signal_count = 0
+        tool_diff_candidate_count = 0
+        tool_formal_issue_count = 0
         sast_cross_validated_issue_count = 0
         tool_false_positive_count = 0
         debated = 0
         surviving = 0
         needs_human = 0
         false_positive = 0
-        for review in reviews:
-            issues = self.list_issues(review.review_id)
+        tool_breakdown: dict[str, dict[str, object]] = {}
+        rule_breakdown: dict[str, dict[str, object]] = {}
+        expert_breakdown: dict[str, dict[str, object]] = {}
+
+        def normalize_key(value: object, fallback: str = "unknown") -> str:
+            text = str(value or "").strip()
+            return text or fallback
+
+        def increment(bucket: dict[str, dict[str, object]], key: str, field: str, count: int = 1) -> dict[str, object]:
+            item = bucket.setdefault(
+                key,
+                {
+                    "raw_signal_count": 0,
+                    "diff_candidate_count": 0,
+                    "expert_adopted_count": 0,
+                    "formal_issue_count": 0,
+                    "false_positive_count": 0,
+                    "deterministic_candidate_count": 0,
+                },
+            )
+            item[field] = int(item.get(field) or 0) + count
+            return item
+
+        def add_rule_signal(tool: object, rule_id: object, field: str, count: int = 1) -> None:
+            normalized_tool = normalize_key(tool, "unknown_tool")
+            normalized_rule = normalize_key(rule_id, "unknown_rule")
+            item = increment(rule_breakdown, f"{normalized_tool}:{normalized_rule}", field, count)
+            item["tool"] = normalized_tool
+            item["rule_id"] = normalized_rule
+
+        def issue_tool_matches(issue: object) -> list[dict[str, object]]:
+            matches = [dict(item) for item in list(issue.sast_prescan_matches or []) if isinstance(item, dict)]
+            if matches:
+                return matches
+            tool = normalize_key(issue.tool_name, "unknown_tool")
+            rules = [rule for rule in list(issue.matched_rules or []) if str(rule or "").strip()]
+            if rules:
+                return [{"tool": tool, "rule_id": str(rule)} for rule in rules]
+            return [{"tool": tool, "rule_id": normalize_key(issue.normalized_issue_type, "unknown_rule")}]
+
+        def is_formal_metric_issue(issue: object) -> bool:
+            status = str(issue.status or "").strip().lower()
+            resolution = str(issue.resolution or "").strip().lower()
+            human_decision = str(issue.human_decision or "").strip().lower()
+            if human_decision == "rejected" or resolution == "human_rejected":
+                return False
+            if status in {"needs_verification", "comment", "abstain", "rejected_after_debate"}:
+                return False
+            if resolution in {
+                "needs_verification",
+                "llm_judge_needs_verification",
+                "targeted_debate_needs_verification",
+                "feedback_profile_requires_more_evidence",
+                "comment",
+                "abstain",
+            }:
+                return False
+            return True
+
+        def finalize_breakdown_rows(bucket: dict[str, dict[str, object]], key_name: str) -> list[dict[str, object]]:
+            rows: list[dict[str, object]] = []
+            for key, item in bucket.items():
+                raw = int(item.get("raw_signal_count") or 0)
+                candidates = int(item.get("diff_candidate_count") or 0)
+                adopted = int(item.get("expert_adopted_count") or 0)
+                formal = int(item.get("formal_issue_count") or 0)
+                false_positives = int(item.get("false_positive_count") or 0)
+                row = {
+                    key_name: key,
+                    **item,
+                    "adoption_rate": round(adopted / candidates, 2) if candidates else 0.0,
+                    "formalization_rate": round(formal / candidates, 2) if candidates else 0.0,
+                    "false_positive_rate": round(false_positives / formal, 2) if formal else 0.0,
+                }
+                if raw and candidates:
+                    row["diff_match_rate"] = round(candidates / raw, 2)
+                else:
+                    row["diff_match_rate"] = 0.0
+                rows.append(row)
+            rows.sort(
+                key=lambda item: (
+                    int(item.get("formal_issue_count") or 0),
+                    int(item.get("expert_adopted_count") or 0),
+                    int(item.get("diff_candidate_count") or 0),
+                ),
+                reverse=True,
+            )
+            return rows[:20]
+
+        for review in metric_reviews:
+            issues = [issue for issue in self.issue_repo.list(review.review_id) if is_formal_metric_issue(issue)]
             feedback_labels = self.list_feedback_labels(review.review_id)
+            false_positive_issue_ids = {item.issue_id for item in feedback_labels if item.label == "false_positive"}
             tool_issue_ids = {
                 item.issue_id
                 for item in issues
@@ -44,6 +140,35 @@ class ReviewServiceProjectionMixin:
             total_issues += len(issues)
             tool_verified += len([item for item in issues if item.tool_verified])
             sast_cross_validated_issue_count += len([item for item in issues if item.sast_cross_validated])
+            tool_formal_issue_count += len(
+                [
+                    item
+                    for item in issues
+                    if item.tool_verified or item.sast_cross_validated or item.tool_name or item.sast_prescan_matches
+                ]
+            )
+            for issue in issues:
+                if issue.issue_id not in tool_issue_ids:
+                    continue
+                seen_tool_rule_pairs: set[tuple[str, str]] = set()
+                issue_is_false_positive = issue.issue_id in false_positive_issue_ids
+                expert_id = normalize_key(issue.primary_expert_id or (issue.participant_expert_ids[0] if issue.participant_expert_ids else ""), "unknown_expert")
+                increment(expert_breakdown, expert_id, "formal_issue_count")
+                if issue_is_false_positive:
+                    increment(expert_breakdown, expert_id, "false_positive_count")
+                for match in issue_tool_matches(issue):
+                    tool = normalize_key(match.get("tool") or issue.tool_name, "unknown_tool")
+                    rule_id = normalize_key(match.get("rule_id") or issue.normalized_issue_type, "unknown_rule")
+                    pair = (tool, rule_id)
+                    if pair in seen_tool_rule_pairs:
+                        continue
+                    seen_tool_rule_pairs.add(pair)
+                    tool_item = increment(tool_breakdown, tool, "formal_issue_count")
+                    tool_item["tool"] = tool
+                    add_rule_signal(tool, rule_id, "formal_issue_count")
+                    if issue_is_false_positive:
+                        increment(tool_breakdown, tool, "false_positive_count")
+                        add_rule_signal(tool, rule_id, "false_positive_count")
             debated += len([item for item in issues if item.needs_debate])
             surviving += len(
                 [
@@ -63,20 +188,68 @@ class ReviewServiceProjectionMixin:
             )
             for message in self.list_all_messages(review.review_id):
                 metadata = dict(message.metadata or {})
+                if message.message_type == "sast_prescan_summary":
+                    tool_raw_signal_count += int(metadata.get("finding_count") or 0)
+                    tool_diff_candidate_count += int(metadata.get("tool_observation_count") or 0)
+                    for scanner in list(metadata.get("scanner_runs") or []):
+                        if not isinstance(scanner, dict):
+                            continue
+                        tool = normalize_key(scanner.get("tool"), "unknown_tool")
+                        count = int(scanner.get("finding_count") or 0)
+                        if count <= 0:
+                            continue
+                        tool_item = increment(tool_breakdown, tool, "raw_signal_count", count)
+                        tool_item["tool"] = tool
+                    for observation in list(metadata.get("observations") or []):
+                        if not isinstance(observation, dict):
+                            continue
+                        tool = normalize_key(observation.get("tool"), "unknown_tool")
+                        rule_id = normalize_key(observation.get("rule_id"), "unknown_rule")
+                        tool_item = increment(tool_breakdown, tool, "diff_candidate_count")
+                        tool_item["tool"] = tool
+                        add_rule_signal(tool, rule_id, "diff_candidate_count")
+                if message.message_type == "sast_candidate_report":
+                    by_tool = metadata.get("by_tool") if isinstance(metadata.get("by_tool"), dict) else {}
+                    for tool, count_value in by_tool.items():
+                        count = int(count_value or 0)
+                        if count <= 0:
+                            continue
+                        normalized_tool = normalize_key(tool, "unknown_tool")
+                        tool_item = increment(tool_breakdown, normalized_tool, "deterministic_candidate_count", count)
+                        tool_item["tool"] = normalized_tool
                 scan = metadata.get("tool_observation_scan")
                 if not isinstance(scan, dict):
                     continue
                 tool_observation_count += int(scan.get("tool_observation_count") or 0)
                 tool_adopted_count += int(scan.get("candidate_count") or 0)
+                expert_id = normalize_key(message.expert_id, "unknown_expert")
+                increment(expert_breakdown, expert_id, "diff_candidate_count", int(scan.get("tool_observation_count") or 0))
+                increment(expert_breakdown, expert_id, "expert_adopted_count", int(scan.get("candidate_count") or 0))
         denominator = total_issues or 1
         debated_denominator = debated or 1
         observation_denominator = tool_observation_count or 1
         return {
-            "review_count": len(reviews),
+            "review_count": review_total_count,
+            "metrics_review_sample_count": len(metric_reviews),
+            "metrics_review_total_count": review_total_count,
+            "metrics_limited": len(metric_reviews) < review_total_count,
             "issue_count": total_issues,
             "tool_confirmation_rate": round(tool_verified / denominator, 2),
             "tool_observation_count": tool_observation_count,
             "tool_adoption_rate": round(tool_adopted_count / observation_denominator, 2),
+            "tool_raw_signal_count": tool_raw_signal_count,
+            "tool_diff_candidate_count": tool_diff_candidate_count,
+            "tool_expert_adopted_count": tool_adopted_count,
+            "tool_formal_issue_count": tool_formal_issue_count,
+            "tool_funnel": {
+                "raw_signal_count": tool_raw_signal_count,
+                "diff_candidate_count": tool_diff_candidate_count,
+                "expert_adopted_count": tool_adopted_count,
+                "formal_issue_count": tool_formal_issue_count,
+            },
+            "tool_breakdown": finalize_breakdown_rows(tool_breakdown, "tool"),
+            "rule_breakdown": finalize_breakdown_rows(rule_breakdown, "rule_key"),
+            "expert_tool_breakdown": finalize_breakdown_rows(expert_breakdown, "expert_id"),
             "sast_cross_validated_issue_count": sast_cross_validated_issue_count,
             "tool_false_positive_rate": round(tool_false_positive_count / observation_denominator, 2),
             "debate_survival_rate": round(surviving / debated_denominator, 2),
@@ -352,6 +525,25 @@ class ReviewServiceProjectionMixin:
             "code_graph_db_exists": metadata.get("code_graph_db_exists"),
             "tree_sitter_graph_result": metadata.get("tree_sitter_graph_result"),
             "gitnexus_graph_result": metadata.get("gitnexus_graph_result"),
+            "scan_count": metadata.get("scan_count"),
+            "enabled_scan_count": metadata.get("enabled_scan_count"),
+            "finding_count": metadata.get("finding_count"),
+            "tool_observation_count": metadata.get("tool_observation_count"),
+            "candidate_count": metadata.get("candidate_count"),
+            "expert_confirmed": metadata.get("expert_confirmed"),
+            "counts_as_formal_issue": metadata.get("counts_as_formal_issue"),
+            "by_tool": metadata.get("by_tool"),
+            "by_category": metadata.get("by_category"),
+            "scan_by_tool": metadata.get("scan_by_tool"),
+            "scanner_runs": metadata.get("scanner_runs"),
+            "scanner_status_counts": metadata.get("scanner_status_counts"),
+            "config_files": metadata.get("config_files"),
+            "scanned_files": metadata.get("scanned_files"),
+            "summaries": metadata.get("summaries"),
+            "limitations": metadata.get("limitations"),
+            "observations": metadata.get("observations"),
+            "observation_ids": metadata.get("observation_ids"),
+            "finding_ids": metadata.get("finding_ids"),
             "llm_call_id": metadata.get("llm_call_id"),
             "mode": metadata.get("mode"),
             "provider": metadata.get("provider"),
@@ -403,6 +595,9 @@ class ReviewServiceProjectionMixin:
             "analysis_mode",
             "bound_documents",
             "business_changed_files",
+            "by_category",
+            "by_tool",
+            "candidate_count",
             "changed_file_count",
             "changed_files",
             "changed_ranges",
@@ -413,12 +608,18 @@ class ReviewServiceProjectionMixin:
             "context_count",
             "context_gaps",
             "context_source",
+            "config_files",
+            "counts_as_formal_issue",
+            "enabled_scan_count",
             "expert_execution_elapsed_ms",
+            "expert_confirmed",
             "expert_job_count",
             "fallback_reason",
             "fallback_source",
             "environment_status",
             "degraded_context_reasons",
+            "finding_count",
+            "finding_ids",
             "impact_analysis",
             "input_completeness",
             "issue_filter_decisions",
@@ -450,18 +651,28 @@ class ReviewServiceProjectionMixin:
             "rule_screening",
             "rule_screening_batch",
             "rule_screening_total_elapsed_ms",
+            "scan_by_tool",
+            "scan_count",
+            "scanned_files",
+            "scanner_runs",
+            "scanner_status_counts",
             "selected_expert_ids",
             "selected_experts",
             "selection_elapsed_ms",
             "skill_result",
             "skipped_experts",
             "source_ref",
+            "summaries",
             "target_hunk",
             "target_ref",
             "title",
+            "tool_observation_count",
             "tool_result",
             "tree_sitter_graph_result",
             "gitnexus_graph_result",
+            "observations",
+            "observation_ids",
+            "limitations",
             "violated_guidelines",
         }
         metadata = dict(message.metadata or {})

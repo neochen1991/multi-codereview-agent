@@ -91,6 +91,10 @@ def test_sast_prescan_parses_semgrep_json(tmp_path: Path):
     assert payload["tool_observations"][0]["evidence_required"]
     assert payload["tool_observations"][0]["is_issue"] is False
     assert payload["tool_observations"][0]["expert_must_decide"] is True
+    assert payload["scanner_runs"][0]["tool"] == "semgrep"
+    assert payload["scanner_runs"][0]["status"] == "completed"
+    assert payload["scanner_runs"][0]["finding_count"] == 1
+    assert payload["scanner_runs"][0]["used_project_config"] is False
     assert "Use of eval" in payload["summary"] or payload["findings"][0]["message"] == "Use of eval"
 
 
@@ -111,6 +115,8 @@ def test_sast_prescan_uses_project_semgrep_config(tmp_path: Path):
             payload = SastPreScanService().scan_file(repo, "src/app.py", enabled=True)
 
     assert payload["enabled"] is True
+    assert payload["scanner_runs"][0]["used_project_config"] is True
+    assert payload["scanner_runs"][0]["config_path"].endswith(".semgrep.yml")
 
 
 def test_sast_prescan_parses_pmd_json_for_java(tmp_path: Path):

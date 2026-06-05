@@ -6,9 +6,12 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+from app.services.sast_signal_utils import canonical_tool_observation_id, normalize_optional_line_value, normalize_sast_path
 
 
 class SastPreScanService:
@@ -201,11 +204,33 @@ class SastPreScanService:
 
         findings: list[dict[str, object]] = []
         limitations: list[str] = []
+        scanner_runs: list[dict[str, object]] = []
         for scanner in scanners[:6]:
+            run_metadata = self._scanner_run_metadata(scanner, root)
+            started = time.perf_counter()
             try:
-                findings.extend(scanner(root, normalized_file)[:12])
+                scanner_findings = scanner(root, normalized_file)[:12]
+                findings.extend(scanner_findings)
+                scanner_runs.append(
+                    {
+                        **run_metadata,
+                        "status": "completed",
+                        "finding_count": len(scanner_findings),
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    }
+                )
             except Exception as error:
-                limitations.append(f"{getattr(scanner, '__name__', 'scanner')} 执行失败：{error}")
+                scanner_name = getattr(scanner, "__name__", "scanner")
+                limitations.append(f"{scanner_name} 执行失败：{error}")
+                scanner_runs.append(
+                    {
+                        **run_metadata,
+                        "status": "failed",
+                        "finding_count": 0,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "error": str(error)[:300],
+                    }
+                )
         summary = f"SAST/linter 预扫描命中 {len(findings)} 条候选信号。" if findings else "SAST/linter 预扫描未命中候选信号。"
         return {
             "enabled": True,
@@ -213,6 +238,7 @@ class SastPreScanService:
             "findings": findings[:12],
             "tool_observations": self._as_tool_observations(findings[:12]),
             "limitations": limitations[:4],
+            "scanner_runs": scanner_runs[:8],
         }
 
     def _candidate_scanners(self, root: Path, file_path: str):
@@ -262,6 +288,23 @@ class SastPreScanService:
     def _command_available(self, tool: str) -> bool:
         executable, _ = self._resolve_command_tool(tool)
         return bool(executable)
+
+    def _scanner_run_metadata(self, scanner: object, root: Path) -> dict[str, object]:
+        scanner_name = str(getattr(scanner, "__name__", "scanner"))
+        tool = scanner_name.removeprefix("_scan_").removesuffix("_reports")
+        config = ""
+        if tool == "semgrep":
+            config = str(self._first_existing(root, [".semgrep.yml", ".semgrep.yaml", "semgrep.yml", "semgrep.yaml"]) or "")
+        elif tool == "pmd":
+            config = str(self._first_existing(root, ["pmd-ruleset.xml", ".pmd.xml", "ruleset.xml"]) or "")
+        elif tool == "checkstyle":
+            config = str(self._first_existing(root, ["checkstyle.xml", "config/checkstyle/checkstyle.xml", "google_checks.xml", "sun_checks.xml"]) or "")
+        return {
+            "tool": tool,
+            "scanner": scanner_name,
+            "config_path": config,
+            "used_project_config": bool(config),
+        }
 
     def _command_executable(self, tool: str) -> str:
         executable, detection_method = self._resolve_command_tool(tool)
@@ -771,10 +814,10 @@ class SastPreScanService:
             observation = dict(item)
             tool = str(observation.get("tool") or "tool").strip()
             rule_id = str(observation.get("rule_id") or "unknown").strip()
-            file_path = str(observation.get("file_path") or observation.get("path") or "").strip().replace("\\", "/")
-            line_start = int(observation.get("line_start") or 1)
+            file_path = normalize_sast_path(observation.get("file_path") or observation.get("path") or "")
+            line_start = normalize_optional_line_value(observation.get("line_start") or observation.get("line")) or 1
             legacy_observation_id = f"{tool}:{rule_id}:{line_start}"
-            observation_id = f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line_start}"
+            observation_id = canonical_tool_observation_id({**observation, "file_path": file_path, "line_start": line_start})
             observation["id"] = observation_id
             observation["observation_id"] = observation_id
             observation["legacy_observation_id"] = legacy_observation_id

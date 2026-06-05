@@ -1348,6 +1348,8 @@ class ReviewServiceReportMixin:
             for item in list(finding_code_context.get("sast_prescan_matches") or [])
             if isinstance(item, dict)
         ]
+        if not sast_prescan_matches:
+            sast_prescan_matches = self._match_report_sast_prescan_matches(finding)
         finding_sast_cross_validated = bool(
             finding_code_context.get("sast_cross_validated")
             or finding_code_context.get("sast_fast_lane")
@@ -1449,6 +1451,154 @@ class ReviewServiceReportMixin:
             created_at=issue_created_at,
             updated_at=issue_updated_at,
         )
+
+    def _match_report_sast_prescan_matches(self, finding: ReviewFinding) -> list[dict[str, object]]:
+        observations = self._collect_report_sast_observations(finding.review_id)
+        if not observations:
+            return []
+        target_path = self._report_normalize_path(finding.file_path)
+        target_line = int(finding.line_start or 1)
+        finding_text = "\n".join(
+            [
+                str(finding.title or ""),
+                str(finding.summary or ""),
+                str(finding.normalized_issue_type or ""),
+                *[str(item) for item in list(finding.evidence or [])],
+                *[str(item) for item in list(finding.matched_rules or [])],
+            ]
+        )
+        normalized_text = self._report_compact_token(finding_text)
+        matches: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str, int]] = set()
+        for observation in observations:
+            item_path = self._report_normalize_path(str(observation.get("file_path") or ""))
+            if item_path and target_path and item_path != target_path and not item_path.endswith("/" + target_path):
+                continue
+            item_line = self._report_safe_int(observation.get("line_start"), 0)
+            line_distance = abs(item_line - target_line) if item_line > 0 else 0
+            if item_line > 0 and line_distance > 12:
+                continue
+            rule_id = str(observation.get("rule_id") or "").strip()
+            message = str(observation.get("message") or "").strip()
+            rule_token = self._report_compact_token(rule_id)
+            message_token = self._report_compact_token(message)
+            has_text_match = bool(
+                (rule_token and (rule_token in normalized_text or normalized_text in rule_token))
+                or (message_token and self._report_has_token_overlap(normalized_text, message))
+            )
+            has_semantic_match = self._report_sast_semantically_aligns(finding, rule_id, message)
+            if line_distance > 3 and not has_semantic_match:
+                continue
+            if not (has_text_match or has_semantic_match):
+                continue
+            match = {
+                "tool": str(observation.get("tool") or "sast").strip(),
+                "rule_id": rule_id,
+                "message": message,
+                "severity": str(observation.get("severity") or "").strip(),
+                "cwe": str(observation.get("cwe") or "").strip(),
+                "why_it_matters": str(observation.get("why_it_matters") or "").strip(),
+                "file_path": str(observation.get("file_path") or finding.file_path).strip(),
+                "line_start": item_line or target_line,
+            }
+            key = (
+                str(match["tool"]).lower(),
+                str(match["rule_id"]).lower(),
+                str(match["file_path"]).lower(),
+                int(match["line_start"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(match)
+        return matches[:6]
+
+    def _collect_report_sast_observations(self, review_id: str) -> list[dict[str, object]]:
+        observations: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for message in self.message_repo.list(review_id):
+            if message.message_type != "sast_prescan_summary":
+                continue
+            metadata = dict(message.metadata or {})
+            for raw in list(metadata.get("observations") or []):
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                observation_id = str(item.get("observation_id") or "").strip()
+                if not observation_id:
+                    observation_id = self._report_observation_id(item)
+                    item["observation_id"] = observation_id
+                if observation_id in seen:
+                    continue
+                seen.add(observation_id)
+                observations.append(item)
+            for raw_id in list(metadata.get("observation_ids") or []):
+                observation_id = str(raw_id or "").strip()
+                if not observation_id or observation_id in seen:
+                    continue
+                parsed = self._parse_report_observation_id(observation_id)
+                if not parsed:
+                    continue
+                seen.add(observation_id)
+                observations.append(parsed)
+        return observations[:40]
+
+    @staticmethod
+    def _parse_report_observation_id(observation_id: str) -> dict[str, object]:
+        parts = str(observation_id or "").split(":")
+        if len(parts) < 5 or parts[0] != "sast":
+            return {}
+        return {
+            "tool": parts[1],
+            "rule_id": parts[2],
+            "file_path": ":".join(parts[3:-1]),
+            "line_start": ReviewServiceReportMixin._report_safe_int(parts[-1], 1),
+            "observation_id": observation_id,
+        }
+
+    @staticmethod
+    def _report_observation_id(item: dict[str, object]) -> str:
+        tool = str(item.get("tool") or "sast").strip()
+        rule_id = str(item.get("rule_id") or item.get("check_id") or "rule").strip()
+        file_path = str(item.get("file_path") or item.get("path") or "unknown").strip().replace("\\", "/")
+        line = ReviewServiceReportMixin._report_safe_int(item.get("line_start") or item.get("line"), 1)
+        return f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line}"
+
+    @staticmethod
+    def _report_sast_semantically_aligns(finding: ReviewFinding, rule_id: str, message: str) -> bool:
+        issue_type = str(finding.normalized_issue_type or "").lower()
+        text = "\n".join([issue_type, str(finding.title or ""), str(finding.summary or "")]).lower()
+        rule_text = f"{rule_id} {message}".lower()
+        if "exception" in issue_type or "catch" in text or "异常" in text:
+            return any(token in rule_text for token in ("catch", "exception", "emptycatch", "empty catch"))
+        if any(token in issue_type for token in ("sql", "injection", "xss")):
+            return any(token in rule_text for token in ("sql", "injection", "xss", "danger"))
+        if "architecture" in issue_type or "layer" in issue_type:
+            return any(token in rule_text for token in ("arch", "layer", "dependency"))
+        return False
+
+    @staticmethod
+    def _report_has_token_overlap(normalized_text: str, message: str) -> bool:
+        for token in re.split(r"[^a-zA-Z0-9_\u4e00-\u9fff]+", str(message or "").lower()):
+            compact = ReviewServiceReportMixin._report_compact_token(token)
+            if len(compact) >= 4 and compact in normalized_text:
+                return True
+        return False
+
+    @staticmethod
+    def _report_compact_token(value: str) -> str:
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+    @staticmethod
+    def _report_normalize_path(value: str) -> str:
+        return str(value or "").strip().replace("\\", "/").lstrip("./")
+
+    @staticmethod
+    def _report_safe_int(value: object, default: int) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
 
     def _build_issue_summary_from_finding(self, finding: ReviewFinding) -> str:
         summary_text = self._sanitize_user_facing_issue_text(str(finding.summary or "").strip())

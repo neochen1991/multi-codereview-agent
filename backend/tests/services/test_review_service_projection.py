@@ -48,6 +48,49 @@ def test_build_quality_metrics_calculates_static_tool_adoption_rates(storage_roo
             review_id=review.review_id,
             issue_id="review_orchestration",
             expert_id="security_compliance",
+            message_type="sast_prescan_summary",
+            content="sast summary",
+            metadata={
+                "finding_count": 6,
+                "tool_observation_count": 4,
+                "scanner_runs": [
+                    {"tool": "semgrep", "finding_count": 5},
+                    {"tool": "pmd", "finding_count": 1},
+                ],
+                "observations": [
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "java.sql-injection",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 42,
+                    },
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "token-log",
+                        "file_path": "src/main/java/demo/UserController.java",
+                        "line_start": 20,
+                    },
+                    {
+                        "tool": "pmd",
+                        "rule_id": "EmptyCatchBlock",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 51,
+                    },
+                    {
+                        "tool": "semgrep",
+                        "rule_id": "unused-dangerous-html",
+                        "file_path": "frontend/src/App.tsx",
+                        "line_start": 12,
+                    },
+                ],
+            },
+        )
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="security_compliance",
             message_type="expert_tool_observation_scan",
             content="tool scan",
             metadata={
@@ -71,9 +114,30 @@ def test_build_quality_metrics_calculates_static_tool_adoption_rates(storage_roo
 
     assert metrics["tool_observation_count"] == 4
     assert metrics["tool_adoption_rate"] == 0.75
+    assert metrics["tool_raw_signal_count"] == 6
+    assert metrics["tool_diff_candidate_count"] == 4
+    assert metrics["tool_expert_adopted_count"] == 3
+    assert metrics["tool_formal_issue_count"] == 2
+    assert metrics["tool_funnel"] == {
+        "raw_signal_count": 6,
+        "diff_candidate_count": 4,
+        "expert_adopted_count": 3,
+        "formal_issue_count": 2,
+    }
     assert metrics["tool_confirmation_rate"] == 0.5
     assert metrics["sast_cross_validated_issue_count"] == 2
     assert metrics["tool_false_positive_rate"] == 0.25
+    semgrep_row = next(item for item in metrics["tool_breakdown"] if item["tool"] == "semgrep")
+    assert semgrep_row["raw_signal_count"] == 5
+    assert semgrep_row["diff_candidate_count"] == 3
+    assert semgrep_row["formal_issue_count"] == 2
+    assert semgrep_row["false_positive_count"] == 1
+    token_rule_row = next(item for item in metrics["rule_breakdown"] if item["rule_key"] == "semgrep:token-log")
+    assert token_rule_row["formal_issue_count"] == 1
+    assert token_rule_row["false_positive_rate"] == 1.0
+    expert_row = next(item for item in metrics["expert_tool_breakdown"] if item["expert_id"] == "security_compliance")
+    assert expert_row["diff_candidate_count"] == 4
+    assert expert_row["expert_adopted_count"] == 3
 
 
 def test_list_issues_keeps_fast_lane_tool_findings_out_of_display_issues(storage_root):
@@ -116,6 +180,180 @@ def test_list_issues_keeps_fast_lane_tool_findings_out_of_display_issues(storage
     issues = service.list_issues(review.review_id)
 
     assert issues == []
+
+
+def test_report_issue_recovers_sast_match_from_dialogue_when_finding_context_is_lost(storage_root):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_report_sast_recovery",
+            "project_id": "proj",
+            "source_ref": "feature/empty-catch",
+            "target_ref": "main",
+            "title": "report sast recovery",
+            "changed_files": ["src/main/java/demo/UserDao.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/demo/UserDao.java b/src/main/java/demo/UserDao.java\n"
+                "--- a/src/main/java/demo/UserDao.java\n"
+                "+++ b/src/main/java/demo/UserDao.java\n"
+                "@@ -4,4 +4,7 @@\n"
+                "+    void sync() {\n"
+                "+        try {\n"
+                "+            risky();\n"
+                "+        } catch (Exception ex) {\n"
+                "+        }\n"
+                "+    }\n"
+            ),
+        }
+    )
+    review.status = "completed"
+    review.phase = "completed"
+    service.review_repo.save(review)
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            expert_id="correctness_business",
+            title="异常被忽略后仍继续成功路径",
+            summary="UserDao.java 第 7 行的 catch 分支忽略异常。",
+            finding_type="direct_defect",
+            normalized_issue_type="exception_swallowed",
+            severity="high",
+            confidence=0.9,
+            file_path="src/main/java/demo/UserDao.java",
+            line_start=7,
+            evidence=["catch", "throw", "pmd:EmptyCatchBlock"],
+            matched_rules=["CODE-JAVA-002", "pmd:EmptyCatchBlock"],
+            remediation_suggestion="不要保留空 catch。",
+            code_excerpt=(
+                "# src/main/java/demo/UserDao.java\n"
+                "   5 | +        try {\n"
+                "   6 | +            risky();\n"
+                "   7 | +        } catch (Exception ex) {\n"
+                "   8 | +        }"
+            ),
+            code_context={},
+        ),
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="sast_prescan_summary",
+            content="SAST summary",
+            metadata={
+                "observations": [
+                    {
+                        "tool": "pmd",
+                        "rule_id": "EmptyCatchBlock",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 7,
+                        "message": "Avoid empty catch blocks",
+                        "observation_id": "sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7",
+                    }
+                ]
+            },
+        )
+    )
+
+    finding = service.finding_repo.list(review.review_id)[0]
+    issue = service._build_issue_from_finding(review.review_id, finding, None)
+
+    assert issue.sast_cross_validated is True
+    assert issue.tool_name == "pmd"
+    assert issue.tool_verified is True
+    assert issue.sast_prescan_matches[0]["rule_id"] == "EmptyCatchBlock"
+
+
+def test_process_and_replay_messages_preserve_sast_metadata(storage_root):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_sast_projection",
+            "project_id": "proj",
+            "source_ref": "feature/sast",
+            "target_ref": "main",
+            "title": "sast projection",
+        }
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="sast_prescan_summary",
+            content="SAST summary",
+            metadata={
+                "phase": "sast_prescan",
+                "tool_name": "sast_prescan",
+                "scan_count": 1,
+                "enabled_scan_count": 1,
+                "finding_count": 2,
+                "tool_observation_count": 1,
+                "scanner_runs": [
+                    {
+                        "tool": "pmd",
+                        "status": "completed",
+                        "finding_count": 1,
+                        "duration_ms": 120,
+                        "used_project_config": True,
+                        "config_path": "/repo/pmd-ruleset.xml",
+                    }
+                ],
+                "scanner_status_counts": {"completed": 1},
+                "config_files": ["/repo/pmd-ruleset.xml"],
+                "observations": [
+                    {
+                        "tool": "pmd",
+                        "rule_id": "EmptyCatchBlock",
+                        "file_path": "src/main/java/demo/UserDao.java",
+                        "line_start": 7,
+                    }
+                ],
+                "observation_ids": [
+                    "sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7"
+                ],
+            },
+        )
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="sast_candidate_report",
+            content="candidate report",
+            metadata={
+                "phase": "sast_prescan",
+                "tool_name": "sast_prescan",
+                "candidate_count": 1,
+                "expert_confirmed": False,
+                "counts_as_formal_issue": False,
+                "by_tool": {"pmd": 1},
+                "observation_ids": [
+                    "sast:pmd:EmptyCatchBlock:src/main/java/demo/UserDao.java:7"
+                ],
+            },
+        )
+    )
+
+    process_messages = service.build_process_messages(review.review_id)
+    replay_messages = service.build_replay_bundle(review.review_id)["messages"]
+
+    process_summary = next(item for item in process_messages if item["message_type"] == "sast_prescan_summary")
+    process_candidate = next(item for item in process_messages if item["message_type"] == "sast_candidate_report")
+    replay_summary = next(item for item in replay_messages if item["message_type"] == "sast_prescan_summary")
+    replay_candidate = next(item for item in replay_messages if item["message_type"] == "sast_candidate_report")
+
+    assert process_summary["metadata"]["scanner_runs"][0]["tool"] == "pmd"
+    assert process_summary["metadata"]["tool_observation_count"] == 1
+    assert process_candidate["metadata"]["candidate_count"] == 1
+    assert process_candidate["metadata"]["counts_as_formal_issue"] is False
+    assert replay_summary["metadata"]["scanner_status_counts"] == {"completed": 1}
+    assert replay_candidate["metadata"]["by_tool"] == {"pmd": 1}
 
 
 def test_build_report_attaches_unpromoted_reason_to_each_filtered_finding(storage_root):

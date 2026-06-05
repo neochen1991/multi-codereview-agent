@@ -21,6 +21,7 @@ from app.services.repository_context_service import RepositoryContextService
 from app.services.repository_config_resolver import RepositoryConfigResolver
 from app.services.risk_candidate_service import RiskCandidateService
 from app.services.sast_prescan_service import SastPreScanService
+from app.services.sast_signal_utils import canonical_tool_observation_id, normalize_optional_line_value, normalize_sast_path
 
 
 class MainAgentService(MainAgentPromptingMixin):
@@ -1060,12 +1061,10 @@ class MainAgentService(MainAgentPromptingMixin):
                     observation = dict(item)
                     tool = str(observation.get("tool") or "tool").strip()
                     rule_id = str(observation.get("rule_id") or observation.get("check_id") or "rule").strip()
-                    file_path = str(observation.get("file_path") or observation.get("path") or "unknown").strip().replace("\\", "/")
-                    line_start = int(observation.get("line_start") or observation.get("line") or 1)
+                    file_path = normalize_sast_path(observation.get("file_path") or observation.get("path") or "unknown")
+                    line_start = normalize_optional_line_value(observation.get("line_start") or observation.get("line")) or 1
                     legacy_observation_id = str(observation.get("observation_id") or "").strip() or f"{tool}:{rule_id}:{line_start}"
-                    observation_id = str(observation.get("id") or observation.get("observation_id") or "").strip()
-                    if not observation_id.startswith("sast:"):
-                        observation_id = f"sast:{tool}:{rule_id}:{file_path or 'unknown'}:{line_start}"
+                    observation_id = canonical_tool_observation_id({**observation, "file_path": file_path, "line_start": line_start})
                     observation["id"] = observation_id
                     observation["observation_id"] = observation_id
                     observation["legacy_observation_id"] = legacy_observation_id
@@ -1256,6 +1255,5 @@ class MainAgentService(MainAgentPromptingMixin):
                     }
                 )
         return candidates
-
 
 

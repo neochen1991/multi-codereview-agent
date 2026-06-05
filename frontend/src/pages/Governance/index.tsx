@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Button, Card, Col, Empty, Input, Row, Select, Space, Statistic, Tag, Typography } from "antd";
+import { Button, Card, Col, Empty, Input, Row, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 
 import {
   governanceApi,
@@ -7,6 +7,7 @@ import {
   type LlmTimeoutMetrics,
   type ReviewLearningCase,
   type RuntimeThresholdRecommendations,
+  type StaticToolQualityBreakdown,
 } from "@/services/api";
 
 const { Paragraph, Text } = Typography;
@@ -95,13 +96,71 @@ const GovernancePage: React.FC = () => {
     }
     return "default";
   };
+  const rateText = (value?: number) => `${Math.round((value || 0) * 100)}%`;
+  const toolBreakdownColumns = [
+    {
+      title: "工具",
+      key: "tool",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => <Tag color="cyan">{row.tool || "unknown"}</Tag>,
+    },
+    { title: "原始", dataIndex: "raw_signal_count", key: "raw_signal_count" },
+    { title: "候选", dataIndex: "diff_candidate_count", key: "diff_candidate_count" },
+    { title: "工具报告", dataIndex: "deterministic_candidate_count", key: "deterministic_candidate_count" },
+    { title: "正式", dataIndex: "formal_issue_count", key: "formal_issue_count" },
+    {
+      title: "误报率",
+      key: "false_positive_rate",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => rateText(row.false_positive_rate),
+    },
+  ];
+  const ruleBreakdownColumns = [
+    {
+      title: "规则",
+      key: "rule",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => (
+        <Space size={4} wrap>
+          <Tag>{row.tool || "tool"}</Tag>
+          <Text>{row.rule_id || row.rule_key || "unknown"}</Text>
+        </Space>
+      ),
+    },
+    { title: "候选", dataIndex: "diff_candidate_count", key: "diff_candidate_count" },
+    { title: "正式", dataIndex: "formal_issue_count", key: "formal_issue_count" },
+    { title: "误报", dataIndex: "false_positive_count", key: "false_positive_count" },
+    {
+      title: "正式率",
+      key: "formalization_rate",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => rateText(row.formalization_rate),
+    },
+  ];
+  const expertBreakdownColumns = [
+    {
+      title: "专家",
+      key: "expert_id",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => <Text>{row.expert_id || "unknown"}</Text>,
+    },
+    { title: "收到候选", dataIndex: "diff_candidate_count", key: "diff_candidate_count" },
+    { title: "采纳候选", dataIndex: "expert_adopted_count", key: "expert_adopted_count" },
+    { title: "正式问题", dataIndex: "formal_issue_count", key: "formal_issue_count" },
+    {
+      title: "采纳率",
+      key: "adoption_rate",
+      render: (_: unknown, row: StaticToolQualityBreakdown) => rateText(row.adoption_rate),
+    },
+  ];
 
   return (
     <div className="page-container">
       <Card className="module-card" title="治理中心" loading={loading}>
         <Paragraph>
-          这一页对齐设计文档里的治理层，先提供最关键的质量指标：工具确认率、复核保留率、人工确认量和误报反馈。
+          这一页对齐设计文档里的治理层，展示工具信号从原始命中到正式问题的采纳漏斗，以及确认率、复核保留率和误报反馈。
         </Paragraph>
+        {metrics?.metrics_limited ? (
+          <Paragraph type="secondary">
+            当前治理指标聚合最近 {metrics.metrics_review_sample_count || 0} 条检视记录；系统共有{" "}
+            {metrics.metrics_review_total_count || metrics.review_count || 0} 条历史记录。
+          </Paragraph>
+        ) : null}
         <Row gutter={[16, 16]}>
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
@@ -151,6 +210,61 @@ const GovernancePage: React.FC = () => {
           <Col xs={24} md={8} xl={4}>
             <Card className="module-card">
               <Statistic title="误报标签" value={metrics?.false_positive_count || 0} suffix={<Tag color="warning">人工反馈</Tag>} />
+            </Card>
+          </Col>
+        </Row>
+        <Card className="module-card" title="静态工具采纳漏斗" style={{ marginTop: 16 }}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={6}>
+              <Statistic title="原始信号" value={metrics?.tool_funnel?.raw_signal_count ?? metrics?.tool_raw_signal_count ?? 0} />
+              <Text type="secondary">SAST/linter/report 原始命中</Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Statistic title="进入候选" value={metrics?.tool_funnel?.diff_candidate_count ?? metrics?.tool_diff_candidate_count ?? 0} />
+              <Text type="secondary">匹配当前 diff 后的工具候选</Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Statistic title="专家采纳" value={metrics?.tool_funnel?.expert_adopted_count ?? metrics?.tool_expert_adopted_count ?? 0} />
+              <Text type="secondary">专家工具信号解释后形成候选</Text>
+            </Col>
+            <Col xs={24} md={6}>
+              <Statistic title="正式问题" value={metrics?.tool_funnel?.formal_issue_count ?? metrics?.tool_formal_issue_count ?? 0} />
+              <Text type="secondary">进入最终有效问题清单</Text>
+            </Col>
+          </Row>
+        </Card>
+        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+          <Col xs={24} xl={8}>
+            <Card className="module-card" title="工具价值 Top">
+              <Table<StaticToolQualityBreakdown>
+                size="small"
+                pagination={false}
+                rowKey={(row) => row.tool || "unknown_tool"}
+                columns={toolBreakdownColumns}
+                dataSource={(metrics?.tool_breakdown || []).slice(0, 6)}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Card className="module-card" title="规则质量 Top">
+              <Table<StaticToolQualityBreakdown>
+                size="small"
+                pagination={false}
+                rowKey={(row) => row.rule_key || `${row.tool}:${row.rule_id}`}
+                columns={ruleBreakdownColumns}
+                dataSource={(metrics?.rule_breakdown || []).slice(0, 6)}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} xl={8}>
+            <Card className="module-card" title="专家采纳工具信号">
+              <Table<StaticToolQualityBreakdown>
+                size="small"
+                pagination={false}
+                rowKey={(row) => row.expert_id || "unknown_expert"}
+                columns={expertBreakdownColumns}
+                dataSource={(metrics?.expert_tool_breakdown || []).slice(0, 6)}
+              />
             </Card>
           </Col>
         </Row>

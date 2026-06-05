@@ -776,6 +776,8 @@ class ReviewRunnerIssueValidationMixin:
 
         if not isinstance(finding, dict):
             return False
+        if self._finding_is_tool_observation_only_candidate(finding):
+            return False
         finding_type = str(finding.get("finding_type") or "").strip().lower()
         confidence = self._safe_float(finding.get("confidence"), default=0.0)
         direct_evidence = bool(
@@ -818,6 +820,47 @@ class ReviewRunnerIssueValidationMixin:
         if not title or not summary:
             return False
         return True
+
+    @staticmethod
+    def _finding_is_tool_observation_only_candidate(finding: dict[str, object]) -> bool:
+        code_context = finding.get("code_context")
+        if not isinstance(code_context, dict):
+            code_context = {}
+        if bool(code_context.get("sast_fast_lane")):
+            return True
+        evidence_source = str(
+            code_context.get("evidence_source")
+            or finding.get("evidence_source")
+            or ""
+        ).strip().lower()
+        if evidence_source in {"tool_observation", "sast_prescan"}:
+            return True
+        adopted_tool_observations = [
+            str(item).strip()
+            for item in list(
+                code_context.get("adopted_tool_observations")
+                or finding.get("adopted_tool_observations")
+                or []
+            )
+            if str(item).strip()
+        ]
+        sast_prescan_matches = [
+            item
+            for item in list(
+                code_context.get("sast_prescan_matches")
+                or finding.get("sast_prescan_matches")
+                or []
+            )
+            if isinstance(item, dict)
+        ]
+        title = str(finding.get("title") or "").strip()
+        normalized_issue_type = str(finding.get("normalized_issue_type") or "").strip().lower()
+        return bool(
+            adopted_tool_observations
+            or sast_prescan_matches
+            or normalized_issue_type == "tool_observation_candidate"
+            or title.startswith("静态工具候选需复核")
+        )
 
     @staticmethod
     def _path_matches_changed_files(file_path: str, changed_files: list[str]) -> bool:
