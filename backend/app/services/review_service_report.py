@@ -3219,12 +3219,12 @@ class ReviewServiceReportMixin:
     def _normalize_issue_filter_label(rule_code: str, label: str) -> str:
         code = str(rule_code or "").strip()
         if code == "conditional_conclusion":
-            return "证据未闭环，保留为观察项"
+            return "证据未闭环，未升级为有效问题"
         return str(label or "").strip()
 
     @staticmethod
     def _normalize_issue_filter_reason(rule_code: str, reason: str) -> str:
         code = str(rule_code or "").strip()
         if code == "conditional_conclusion":
-            return "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。"
+            return "这条发现已有代码线索，但证据还不足以作为有效问题提交；系统会保留在审核发现清单中，供人工复核时参考。"
         return ReviewServiceReportMixin._sanitize_user_facing_issue_text(str(reason or "")) or str(reason or "").strip()

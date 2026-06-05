@@ -108,9 +108,9 @@ export const buildCompactDetail = (value: string): { text: string; truncated: bo
   return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
 };
 
-const CONDITIONAL_FILTER_LABEL = "证据未闭环，保留为观察项";
+const CONDITIONAL_FILTER_LABEL = "证据未闭环，未升级为有效问题";
 const CONDITIONAL_FILTER_REASON =
-  "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。";
+  "这条发现已有代码线索，但证据还不足以作为有效问题提交；系统会保留在审核发现清单中，供人工复核时参考。";
 
 const sanitizeDialogueValue = (value: unknown): string => {
   const raw = typeof value === "string" ? value.trim() : String(value ?? "").trim();

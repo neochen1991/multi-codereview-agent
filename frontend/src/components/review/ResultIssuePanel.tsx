@@ -401,7 +401,7 @@ const ResultIssuePanel: React.FC<ResultIssuePanelProps> = ({
         emptyText={
           detailsMissing
             ? "产物快照显示本次审核有有效问题，但问题详情没有恢复出来。请重新生成结果或恢复明细文件后再查看。"
-            : "当前没有有效问题。若发现项未达到升级条件，会保留在审核发现清单或保留观察清单中。"
+            : "当前没有有效问题。未达到升级条件的条目会在审核发现清单中展示，并标明未升级原因。"
         }
         disableHorizontalScroll
       />

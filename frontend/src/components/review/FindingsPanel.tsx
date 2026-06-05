@@ -22,7 +22,7 @@ const getPriority = (finding: ReviewFinding): string => {
 };
 
 const getMergeImpact = (issue: DebateIssue | undefined, finding: ReviewFinding): string => {
-  if (!issue) return "仅保留为审核发现";
+  if (!issue) return "未升级为有效问题";
   if (issue.needs_human && issue.status !== "resolved") return "阻塞合并，等待人工确认";
   if (["blocker", "critical", "high"].includes(finding.severity)) return "建议合并前修复";
   return "不阻塞合并";
@@ -31,8 +31,8 @@ const getMergeImpact = (issue: DebateIssue | undefined, finding: ReviewFinding):
 const buildRecommendedAction = (issue: DebateIssue | undefined, finding: ReviewFinding): string => {
   if (!issue) {
     return finding.severity === "high" || finding.severity === "blocker"
-      ? "补充证据并优先修复"
-      : "继续观察并补上下文";
+      ? "补充证据后重新评估"
+      : "作为审核发现跟进";
   }
   if (issue.needs_human && issue.status !== "resolved") return "提交人工复核";
   if (issue.resolution === "human_approved" || issue.resolution === "judge_accepted") return "进入修复清单";
@@ -167,7 +167,7 @@ const FindingsPanel: React.FC<FindingsPanelProps> = ({
     <ReviewResultListTable
       cardClassName="review-findings-card"
       title="审核发现清单"
-      extra={<Tag color="default">这里展示本次审核产出的全部检视发现，包含已升级为正式问题和保留观察的证据项</Tag>}
+      extra={<Tag color="default">展示全部审核发现，并标明是否已升级为有效问题</Tag>}
       rows={rows}
       selectedRowId={selectedFindingId}
       onSelectRow={onSelectFinding}

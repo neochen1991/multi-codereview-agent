@@ -119,7 +119,7 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
               <Statistic title="证据链覆盖" value={evidenceCoverage} suffix="%" />
             </Col>
             <Col xs={12} xl={6}>
-              <Statistic title="保留观察" value={qualityFilteredCount} />
+              <Statistic title="未升级发现" value={qualityFilteredCount} />
             </Col>
             <Col xs={12} xl={6}>
               <Statistic title="提交上限保留" value={budgetFilteredCount} />
@@ -188,7 +188,7 @@ const QualityGovernancePanel: React.FC<QualityGovernancePanelProps> = ({
           {visibleDecisions.length ? (
             <List
               size="small"
-              header={<Text strong>保留观察记录</Text>}
+              header={<Text strong>未升级发现记录</Text>}
               dataSource={visibleDecisions}
               renderItem={(item) => (
                 <List.Item>

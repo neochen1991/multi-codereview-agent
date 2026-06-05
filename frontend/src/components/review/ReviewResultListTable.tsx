@@ -196,6 +196,33 @@ const getSeverityColor = (value: string): string => {
   return "blue";
 };
 
+const getDecisionTagColor = (ruleCode?: string): string => {
+  const code = String(ruleCode || "").trim();
+  if (code === "removed_line_only" || code === "evidence_anchor_failed") return "red";
+  if (code === "conditional_conclusion" || code === "llm_judge_rejected") return "gold";
+  if (code === "repo_policy_comment_budget" || code === "review_learning_false_positive_case") return "purple";
+  if (code === "below_issue_priority_threshold" || code === "below_priority_confidence_threshold") return "default";
+  return "blue";
+};
+
+const getUnpromotedDecisionText = (row: ReviewResultListRow) => {
+  if (row.hasIssue) return null;
+  const decision = row.governanceDecision;
+  const label =
+    cleanUserFacingText(decision?.rule_label || "") ||
+    humanizeReviewText(decision?.rule_label || "") ||
+    "未升级为有效问题";
+  const reason =
+    cleanUserFacingText(decision?.reason || "") ||
+    humanizeReviewText(decision?.reason || "") ||
+    "该审核发现未满足本轮有效问题升级条件。";
+  return {
+    label,
+    reason,
+    ruleCode: decision?.rule_code || "unpromoted_finding",
+  };
+};
+
 const hasDesignMisalignment = (row: ReviewResultListRow): boolean =>
   row.hasDesignEvidence &&
   (["misaligned", "partially_aligned", "design_misaligned"].includes(String(row.designAlignmentStatus || "").trim()) ||
@@ -360,6 +387,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
           });
           const summaryText = cleanUserFacingText(value) || humanizeReviewText(value || item.title || "");
           const fixText = cleanUserFacingText(item.fixSummary || "");
+          const unpromotedDecision = getUnpromotedDecisionText(item);
           return (
             <Tooltip
               placement="topLeft"
@@ -367,6 +395,7 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                 <div style={{ maxWidth: 720, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
                   <div style={{ fontWeight: 600, marginBottom: 8 }}>问题：{titleText}</div>
                   <div>说明：{summaryText}</div>
+                  {unpromotedDecision ? <div style={{ marginTop: 8 }}>未升级原因：{unpromotedDecision.reason}</div> : null}
                   <div style={{ marginTop: 8, color: "rgba(255,255,255,0.85)" }}>建议：{fixText}</div>
                 </div>
               }
@@ -389,6 +418,15 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                     </button>
                   ) : null}
                 </div>
+                <Space wrap size={4} style={{ marginTop: 6, marginBottom: 2 }}>
+                  {item.hasIssue ? (
+                    <Tag color="processing">已升级为有效问题</Tag>
+                  ) : (
+                    <Tag color={getDecisionTagColor(unpromotedDecision?.ruleCode)}>
+                      {unpromotedDecision?.label || "未升级为有效问题"}
+                    </Tag>
+                  )}
+                </Space>
                 <div
                   className="review-summary-text"
                   style={{
@@ -401,6 +439,22 @@ const ReviewResultListTable: React.FC<ReviewResultListTableProps> = ({
                 >
                   {summaryText}
                 </div>
+                {unpromotedDecision ? (
+                  <div
+                    className="review-summary-text"
+                    style={{
+                      marginTop: 6,
+                      color: "var(--text-muted)",
+                      lineHeight: 1.5,
+                      overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                    }}
+                  >
+                    未升级原因：{humanizeReviewText(unpromotedDecision.reason)}
+                  </div>
+                ) : null}
                 {fixText ? (
                   <div
                     className="review-summary-text"

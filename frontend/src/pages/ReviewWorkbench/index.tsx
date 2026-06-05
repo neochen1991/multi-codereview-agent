@@ -45,7 +45,6 @@ const HumanGatePanel = lazy(() => import("@/components/review/HumanGatePanel"));
 const ImpactAnalysisProcessPanel = lazy(() => import("@/components/review/ImpactAnalysisProcessPanel"));
 const ImpactReportMarkdownPanel = lazy(() => import("@/components/review/ImpactReportMarkdownPanel"));
 const IssueDetailPanel = lazy(() => import("@/components/review/IssueDetailPanel"));
-const IssueThresholdFilteredPanel = lazy(() => import("@/components/review/IssueThresholdFilteredPanel"));
 const IssueThreadList = lazy(() => import("@/components/review/IssueThreadList"));
 const KnowledgeRefPanel = lazy(() => import("@/components/review/KnowledgeRefPanel"));
 const QualityGovernancePanel = lazy(() => import("@/components/review/QualityGovernancePanel"));
@@ -1870,18 +1869,6 @@ const ReviewWorkbenchPage: React.FC = () => {
                               setSelectedFindingId(findingId);
                               setFindingModalOpen(true);
                             }
-                          }}
-                        />
-                      </Suspense>
-                      <Suspense fallback={<WorkbenchPanelFallback description="保留观察清单加载中..." />}>
-                        <IssueThresholdFilteredPanel
-                          findings={findings}
-                          issueFilterDecisions={issueFilterDecisions}
-                          onSelectFinding={(findingId) => {
-                            setSelectedFindingId(findingId);
-                            const issue = issueByFindingId.get(findingId);
-                            if (issue) setSelectedIssueId(issue.issue_id);
-                            setFindingModalOpen(true);
                           }}
                         />
                       </Suspense>

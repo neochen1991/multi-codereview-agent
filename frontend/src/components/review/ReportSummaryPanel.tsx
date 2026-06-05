@@ -174,7 +174,7 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[],
     `- 级别: ${humanizeSeverity(finding.severity)}`,
     `- 优先级: ${getPriority(finding)}`,
     `- 合并影响: ${getFindingMergeImpact(finding, issueByFindingId.get(finding.finding_id))}`,
-    `- 有效问题归属: ${issueByFindingId.get(finding.finding_id)?.title || "未升级为有效问题，保留为检视发现/观察"}`,
+    `- 有效问题归属: ${issueByFindingId.get(finding.finding_id)?.title || "未升级为有效问题，保留为审核发现"}`,
     `- 检查角色: ${humanizeExpertId(finding.expert_id)}`,
     `- 问题分类: ${finding.category_label || finding.normalized_issue_type || finding.finding_type || "未分类"}`,
     `- 置信度: ${(finding.confidence * 100).toFixed(0)}%`,
@@ -215,7 +215,7 @@ const downloadMarkdownReport = (report: ReviewReport, findings: ReviewFinding[],
     ...(shouldFixFindings.length
       ? shouldFixFindings.flatMap((finding, index) => renderFindingBlock(finding, index))
       : ["- 无", ""]),
-    "### 不阻塞合并/保留观察",
+    "### 不阻塞合并/未升级发现",
     ...(nonBlockingFindings.length
       ? nonBlockingFindings.flatMap((finding, index) => renderFindingBlock(finding, index))
       : ["- 无", ""]),
@@ -384,7 +384,7 @@ const ReportSummaryPanel: React.FC<ReportSummaryPanelProps> = ({
         <Tag color="default">{`发现总数 ${totalCount}`}</Tag>
         <Tag color={formalIssueCount > 0 ? "processing" : "default"}>{`有效问题 ${formalIssueCount}`}</Tag>
         <Tag color={promotedFindingCount > 0 ? "blue" : "default"}>{`关联发现 ${promotedFindingCount}`}</Tag>
-        <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`保留观察 ${thresholdFilteredCount}`}</Tag>
+        <Tag color={thresholdFilteredCount > 0 ? "warning" : "default"}>{`未升级发现 ${thresholdFilteredCount}`}</Tag>
         <Tag color={blockingCount > 0 ? "error" : "default"}>{`阻塞合并 ${blockingCount}`}</Tag>
         <Tag color={shouldFixCount > 0 ? "warning" : "default"}>{`建议先修 ${shouldFixCount}`}</Tag>
         <Tag color="success">{`非阻塞 ${nonBlockingCount}`}</Tag>

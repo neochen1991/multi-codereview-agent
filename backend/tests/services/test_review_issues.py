@@ -2648,8 +2648,8 @@ def test_build_report_humanizes_conditional_filter_decision(storage_root: Path):
 
     decision = service.build_report(review.review_id).issue_filter_decisions[0]
 
-    assert decision.rule_label == "证据未闭环，保留为观察项"
-    assert decision.reason == "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。"
+    assert decision.rule_label == "证据未闭环，未升级为有效问题"
+    assert decision.reason == "这条发现已有代码线索，但证据还不足以作为有效问题提交；系统会保留在审核发现清单中，供人工复核时参考。"
     assert "额外条件" not in decision.reason
     assert "待验证结论" not in decision.rule_label
 

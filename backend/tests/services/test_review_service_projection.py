@@ -417,6 +417,132 @@ def test_build_report_attaches_unpromoted_reason_to_each_filtered_finding(storag
     assert "置信度 0.61" in str(decision["reason"])
 
 
+def test_review_summary_issue_count_matches_report_when_finding_is_filtered(storage_root):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_filtered_count",
+            "project_id": "proj",
+            "source_ref": "feature/filtered-count",
+            "target_ref": "main",
+            "title": "filtered finding count",
+            "changed_files": ["src/main/java/demo/UserDao.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/demo/UserDao.java b/src/main/java/demo/UserDao.java\n"
+                "--- a/src/main/java/demo/UserDao.java\n"
+                "+++ b/src/main/java/demo/UserDao.java\n"
+                "@@ -40,0 +40,2 @@\n"
+                "+String sql = \"select * from users where name = '\" + name + \"'\";\n"
+            ),
+        }
+    )
+    review.status = "completed"
+    review.phase = "completed"
+    service.review_repo.save(review)
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_filtered_sql",
+            expert_id="security_compliance",
+            title="SQL 拼接存在注入风险",
+            summary="新增 SQL 字符串拼接直接使用 name。",
+            finding_type="direct_defect",
+            normalized_issue_type="sql_injection_risk",
+            severity="high",
+            confidence=0.94,
+            file_path="src/main/java/demo/UserDao.java",
+            line_start=40,
+            evidence=["SQL 拼接"],
+            code_excerpt='40 | +String sql = "select * from users where name = \'" + name + "\'";',
+        ),
+    )
+    service.message_repo.append(
+        ConversationMessage(
+            review_id=review.review_id,
+            issue_id="review_orchestration",
+            expert_id="main_agent",
+            message_type="issue_filter_applied",
+            content="finding filtered",
+            metadata={
+                "issue_filter_decisions": [
+                    {
+                        "topic": "src/main/java/demo/UserDao.java::40::fdg_filtered_sql",
+                        "rule_code": "llm_judge_rejected",
+                        "rule_label": "模型复核未采纳",
+                        "reason": "LLM Judge 判定该 finding 证据不足，未进入有效问题清单。",
+                        "severity": "high",
+                        "finding_ids": ["fdg_filtered_sql"],
+                        "finding_titles": ["SQL 拼接存在注入风险"],
+                        "expert_ids": ["security_compliance"],
+                    }
+                ]
+            },
+        )
+    )
+
+    report = service.build_report(review.review_id)
+    summary = next(item for item in service.list_review_summaries() if item["review_id"] == review.review_id)
+
+    assert report.issue_count == 0
+    assert len(report.issues) == 0
+    assert summary["issue_count"] == report.issue_count
+    decision = report.findings[0].code_context.get("unpromoted_decision")
+    assert isinstance(decision, dict)
+    assert decision["rule_code"] == "llm_judge_rejected"
+    assert "未进入有效问题清单" in str(decision["reason"])
+
+
+def test_review_summary_issue_count_includes_display_recovered_issue(storage_root):
+    service = ReviewService(storage_root=storage_root)
+    review = service.create_review(
+        {
+            "subject_type": "mr",
+            "repo_id": "repo_recovered_count",
+            "project_id": "proj",
+            "source_ref": "feature/recovered-count",
+            "target_ref": "main",
+            "title": "recovered finding count",
+            "changed_files": ["src/main/java/demo/UserDao.java"],
+            "unified_diff": (
+                "diff --git a/src/main/java/demo/UserDao.java b/src/main/java/demo/UserDao.java\n"
+                "--- a/src/main/java/demo/UserDao.java\n"
+                "+++ b/src/main/java/demo/UserDao.java\n"
+                "@@ -40,0 +40,2 @@\n"
+                "+String sql = \"select * from users where name = '\" + name + \"'\";\n"
+            ),
+        }
+    )
+    review.status = "completed"
+    review.phase = "completed"
+    service.review_repo.save(review)
+    service.finding_repo.save(
+        review.review_id,
+        ReviewFinding(
+            review_id=review.review_id,
+            finding_id="fdg_recovered_sql",
+            expert_id="security_compliance",
+            title="SQL 拼接存在注入风险",
+            summary="新增 SQL 字符串拼接直接使用 name。",
+            finding_type="direct_defect",
+            normalized_issue_type="sql_injection_risk",
+            severity="high",
+            confidence=0.94,
+            file_path="src/main/java/demo/UserDao.java",
+            line_start=40,
+            evidence=["SQL 拼接"],
+            code_excerpt='40 | +String sql = "select * from users where name = \'" + name + "\'";',
+        ),
+    )
+
+    report = service.build_report(review.review_id)
+    summary = next(item for item in service.list_review_summaries() if item["review_id"] == review.review_id)
+
+    assert report.issue_count == 1
+    assert summary["issue_count"] == report.issue_count
+
+
 def test_pending_human_exception_issue_survives_when_code_excerpt_is_truncated(storage_root):
     service = ReviewService(storage_root=storage_root)
     review = service.create_review(

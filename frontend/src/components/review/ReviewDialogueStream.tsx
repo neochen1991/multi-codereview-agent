@@ -128,9 +128,9 @@ const buildCompactDetail = (value: string): { text: string; truncated: boolean }
   return { text: lines.length > 3 ? `${compact}\n...` : compact, truncated: lines.length > 3 };
 };
 
-const CONDITIONAL_FILTER_LABEL = "证据未闭环，保留为观察项";
+const CONDITIONAL_FILTER_LABEL = "证据未闭环，未升级为有效问题";
 const CONDITIONAL_FILTER_REASON =
-  "这条发现已有代码线索，但证据还不足以作为正式问题提交；系统先保留在观察清单中，供人工复核时参考。";
+  "这条发现已有代码线索，但证据还不足以作为有效问题提交；系统会保留在审核发现清单中，供人工复核时参考。";
 
 const sanitizeDialogueValue = (value: unknown): string => {
   const raw = typeof value === "string" ? value.trim() : String(value ?? "").trim();
@@ -949,7 +949,7 @@ const mapMessage = (message: ConversationMessage): ReviewDialogueViewMessage => 
   } else if (eventType === "main_agent_expert_execution_completed") {
     summaryParts.push("专项检视执行阶段已完成");
   } else if (eventType === "issue_filter_applied") {
-    summaryParts.push("审核调度已按治理规则筛出仅保留观察的提示性问题");
+    summaryParts.push("审核调度已按治理规则筛出未升级为有效问题的提示性发现");
   } else if (eventType === "impact_analysis_started") {
     summaryParts.push("系统已启动关联影响分析");
   } else if (eventType === "impact_report_generated") {

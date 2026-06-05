@@ -1523,8 +1523,11 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             (str(issue.file_path or "").strip(), self._display_issue_family(issue))
             for issue in issues
         }
+        filtered_finding_ids = self._display_filtered_finding_ids(review_id)
         candidates: dict[tuple[str, str], ReviewFinding] = {}
         for finding in findings:
+            if str(finding.finding_id or "").strip() in filtered_finding_ids:
+                continue
             if self._display_finding_is_tool_observation_only(finding):
                 continue
             issue = self._normalize_report_issue_family(self._build_issue_from_finding(review_id, finding, None))
@@ -1557,6 +1560,25 @@ class ReviewService(ReviewServiceProjectionMixin, ReviewServiceReportMixin):
             for finding in candidates.values()
         ]
         return [*issues, *additions]
+
+    def _display_filtered_finding_ids(self, review_id: str) -> set[str]:
+        """Return finding ids that governance explicitly kept below effective issue level."""
+
+        filtered: set[str] = set()
+        for message in self.list_all_messages(review_id):
+            if message.message_type != "issue_filter_applied":
+                continue
+            raw_decisions = message.metadata.get("issue_filter_decisions")
+            if not isinstance(raw_decisions, list):
+                continue
+            for decision in raw_decisions:
+                if not isinstance(decision, dict):
+                    continue
+                for finding_id in list(decision.get("finding_ids") or []):
+                    normalized = str(finding_id or "").strip()
+                    if normalized:
+                        filtered.add(normalized)
+        return filtered
 
     @staticmethod
     def _display_finding_is_tool_observation_only(finding: ReviewFinding) -> bool:

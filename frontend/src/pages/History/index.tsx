@@ -288,7 +288,7 @@ const HistoryPage: React.FC = () => {
             </div>
             <Space size={4} wrap>
               <Tag color={evidenceCoverage >= 80 ? "green" : issueCount > 0 ? "gold" : "default"}>{`证据链 ${evidenceCoverage}%`}</Tag>
-              {quality.qualityFilteredIssueCount ? <Tag color="blue">{`保留观察 ${quality.qualityFilteredIssueCount}`}</Tag> : null}
+              {quality.qualityFilteredIssueCount ? <Tag color="blue">{`未升级发现 ${quality.qualityFilteredIssueCount}`}</Tag> : null}
               {hasImpact ? (
                 <>
                   <Tag color={impactGraphColor(impact.graphStatus)}>{impactGraphLabel(impact.graphStatus)}</Tag>
@@ -367,7 +367,7 @@ const HistoryPage: React.FC = () => {
         return (
           <Space size={4} wrap>
             <Tag color={coverage >= 80 ? "green" : issueCount > 0 ? "gold" : "default"}>{`证据链 ${coverage}%`}</Tag>
-            <Tag color={summary.qualityFilteredIssueCount ? "blue" : "default"}>{`保留观察 ${summary.qualityFilteredIssueCount}`}</Tag>
+            <Tag color={summary.qualityFilteredIssueCount ? "blue" : "default"}>{`未升级发现 ${summary.qualityFilteredIssueCount}`}</Tag>
             <Tag color={summary.budgetFilteredIssueCount ? "gold" : "default"}>{`提交上限 ${summary.budgetFilteredIssueCount}`}</Tag>
           </Space>
         );
